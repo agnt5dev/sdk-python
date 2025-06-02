@@ -1,7 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "agnt5"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python SDK for building durable, resilient agent-first applications with the AGNT5 platform"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agnt5"]
