@@ -1,0 +1,23 @@
+[package]
+name = "agnt5-sdk-python"
+version = "0.1.0"
+edition = "2021"
+authors = ["AGNT5 Team"]
+
+[lib]
+name = "agnt5_sdk_python"
+crate-type = ["cdylib"]
+path = "rust-src/lib.rs"
+
+[dependencies]
+# PyO3 for Python bindings
+pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py39"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Local dependencies
+agnt5-sdk-core = { path = "../sdk-core" }
+
+[build-dependencies]
+pyo3-build-config = "0.25.0"
