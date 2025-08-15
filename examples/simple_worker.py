@@ -28,9 +28,9 @@ def main():
         print(f"🌐 Endpoint: {worker.get_endpoint()}")
         
         # Start the worker
-        print("🚀 Starting worker...")
+        print("🚀 Starting worker and registering with coordinator...")
         worker.start()
-        print("✅ Worker started! Registration will happen automatically.")
+        print("✅ Worker connected! Registration completed successfully.")
         print(f"📡 Running: {worker.is_running()}")
         
         try:

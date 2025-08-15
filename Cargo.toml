@@ -19,5 +19,8 @@ tokio = { version = "1.0", features = ["full"] }
 # Local dependencies
 agnt5-sdk-core = { path = "../sdk-core" }
 
+# Base64 decoding
+base64 = "0.22"
+
 [build-dependencies]
 pyo3-build-config = "0.25.0"
