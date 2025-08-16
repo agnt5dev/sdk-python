@@ -57,6 +57,16 @@ class Worker:
         """Get the worker ID."""
         return self._rust_worker.worker_id()
     
+    @property 
+    def tenant_id(self) -> Optional[str]:
+        """Get the tenant ID."""
+        return self._rust_worker.tenant_id()
+    
+    @property
+    def deployment_id(self) -> Optional[str]:
+        """Get the deployment ID."""
+        return self._rust_worker.deployment_id()
+    
     def start(self):
         """
         Start the worker and register all decorated functions.

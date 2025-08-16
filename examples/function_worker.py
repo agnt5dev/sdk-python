@@ -51,6 +51,8 @@ def main():
         
         print(f"✅ Worker created successfully!")
         print(f"🆔 Worker ID: {worker.worker_id}")
+        print(f"🏢 Tenant ID: {worker.tenant_id}")
+        print(f"🚀 Deployment ID: {worker.deployment_id}")
         
         # Start the worker - this will register all @function handlers
         print("🚀 Starting worker and registering with coordinator...")

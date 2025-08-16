@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
 """
-Simple AGNT5 worker example - creates a worker and shows basic functionality.
+AGNT5 worker example with tenant and deployment isolation.
 
-This demonstrates the minimal SDK functionality using the simplified PyWorker.
+This demonstrates the enhanced SDK functionality with multi-tenancy.
 """
 
 import os
 import sys
 
 def main():
-    print("🚀 Starting simple AGNT5 worker...")
+    print("🚀 Starting tenant-aware AGNT5 worker...")
     
     # Configuration
     coordinator_endpoint = os.getenv("AGNT5_COORDINATOR_ENDPOINT", "http://localhost:9091")
-    tenant_id = os.getenv("AGNT5_TENANT_ID")  # Optional - will default to "default"
-    deployment_id = os.getenv("AGNT5_DEPLOYMENT_ID")  # Optional - will default to "default"
+    tenant_id = os.getenv("AGNT5_TENANT_ID", "customer-123")
+    deployment_id = os.getenv("AGNT5_DEPLOYMENT_ID", "prod-west")
     
     print(f"🌐 Coordinator: {coordinator_endpoint}")
-    if tenant_id:
-        print(f"🏢 Tenant ID: {tenant_id}")
-    if deployment_id:
-        print(f"🚀 Deployment ID: {deployment_id}")
+    print(f"🏢 Tenant ID: {tenant_id}")
+    print(f"🚀 Deployment ID: {deployment_id}")
     
     try:
         # Import PyWorker from our Rust extension
         from agnt5 import PyWorker
         
-        # Create worker (will read AGNT5_TENANT_ID and AGNT5_DEPLOYMENT_ID from environment)
-        worker = PyWorker(coordinator_endpoint, "simple-python-service", "1.0.0", "python")
+        # Create worker with explicit tenant and deployment
+        worker = PyWorker(
+            coordinator_endpoint, 
+            "tenant-python-service", 
+            "1.0.0", 
+            "python",
+            tenant_id=tenant_id,
+            deployment_id=deployment_id
+        )
         
-        print(f"✅ Worker created successfully!")
+        print(f"✅ Tenant-aware worker created successfully!")
         print(f"🆔 Worker ID: {worker.worker_id()}")
-        print(f"🏢 Tenant ID: {worker.tenant_id()}")
-        print(f"🚀 Deployment ID: {worker.deployment_id()}")
         print(f"🌐 Endpoint: {worker.get_endpoint()}")
         
         # Start the worker
         print("🚀 Starting worker and registering with coordinator...")
-        print("   💡 Using environment variables AGNT5_TENANT_ID and AGNT5_DEPLOYMENT_ID (defaults to 'default')")
+        print(f"   💡 Worker will register with tenant '{tenant_id}' and deployment '{deployment_id}'")
         print("   💓 Heartbeat will be sent every 30 seconds (configurable via AGNT5_HEARTBEAT_INTERVAL_SECS)")
         
         worker.start()
@@ -51,7 +54,7 @@ def main():
             while worker.is_running():
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\n🛑 Stopping worker...")
+            print("\n🛑 Stopping worker gracefully...")
             worker.stop()
             print("✅ Worker stopped!")
         
@@ -59,10 +62,11 @@ def main():
         
     except ImportError as e:
         print(f"❌ Import error: {e}")
-        print("💡 Make sure to build the Rust extension first with: cargo build")
+        print("💡 Make sure the AGNT5 Python SDK is built and installed")
         return 1
+        
     except Exception as e:
-        print(f"❌ Worker error: {e}")
+        print(f"❌ Error: {e}")
         return 1
 
 if __name__ == "__main__":

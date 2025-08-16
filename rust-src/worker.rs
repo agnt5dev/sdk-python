@@ -13,6 +13,8 @@ pub struct PyWorker {
     service_name: String,
     service_version: String,
     service_type: String,
+    tenant_id: Option<String>,
+    deployment_id: Option<String>,
     runtime: Arc<Mutex<Option<tokio::runtime::Runtime>>>,
     shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
@@ -21,17 +23,22 @@ pub struct PyWorker {
 impl PyWorker {
     /// Create a new PyWorker
     #[new]
+    #[pyo3(signature = (coordinator_endpoint, service_name, service_version, service_type, tenant_id=None, deployment_id=None))]
     fn new(
         coordinator_endpoint: String,
         service_name: String,
         service_version: String,
         service_type: String,
+        tenant_id: Option<String>,
+        deployment_id: Option<String>,
     ) -> Self {
         Self {
             coordinator_endpoint,
             service_name,
             service_version,
             service_type,
+            tenant_id,
+            deployment_id,
             runtime: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
         }
@@ -39,18 +46,23 @@ impl PyWorker {
 
     /// Get a worker ID (creates a new worker each time for simplicity)
     fn worker_id(&self) -> String {
-        let worker = Worker::new(
-            self.coordinator_endpoint.clone(),
-            self.service_name.clone(),
-            self.service_version.clone(),
-            self.service_type.clone(),
-        );
+        let worker = self.create_worker();
         worker.worker_id().to_string()
     }
 
     /// Get the coordinator endpoint
     fn get_endpoint(&self) -> String {
         self.coordinator_endpoint.clone()
+    }
+
+    /// Get the tenant ID
+    fn tenant_id(&self) -> Option<String> {
+        self.tenant_id.clone()
+    }
+
+    /// Get the deployment ID
+    fn deployment_id(&self) -> Option<String> {
+        self.deployment_id.clone()
     }
 
     /// Start the worker in the background
@@ -112,16 +124,36 @@ impl PyWorker {
         let service_name = self.service_name.clone();
         let service_version = self.service_version.clone();
         let service_type = self.service_type.clone();
+        let tenant_id = self.tenant_id.clone();
+        let deployment_id = self.deployment_id.clone();
 
         // Spawn the worker task
         rt.spawn(async move {
-            let worker = Worker::new_with_components(
-                coordinator_endpoint,
-                service_name,
-                service_version,
-                service_type,
-                components,
-            );
+            let worker = match (&tenant_id, &deployment_id) {
+                (Some(tenant), Some(deployment)) => {
+                    // Create worker with explicit tenant/deployment and add components
+                    let mut worker = Worker::new_with_tenant(
+                        coordinator_endpoint,
+                        service_name,
+                        service_version,
+                        service_type,
+                        tenant.clone(),
+                        deployment.clone(),
+                    );
+                    worker.set_components(components);
+                    worker
+                },
+                _ => {
+                    // Use environment-based constructor with components
+                    Worker::new_with_components(
+                        coordinator_endpoint,
+                        service_name,
+                        service_version,
+                        service_type,
+                        components,
+                    )
+                }
+            };
 
             // Message handler that processes function invocations  
             let worker_task = worker.run(|runtime_message| async {
@@ -230,5 +262,30 @@ impl PyWorker {
         let runtime_guard = self.runtime.lock().unwrap();
         runtime_guard.is_some()
     }
+}
 
+impl PyWorker {
+    /// Helper method to create a Worker instance
+    fn create_worker(&self) -> Worker {
+        match (&self.tenant_id, &self.deployment_id) {
+            (Some(tenant), Some(deployment)) => {
+                Worker::new_with_tenant(
+                    self.coordinator_endpoint.clone(),
+                    self.service_name.clone(),
+                    self.service_version.clone(),
+                    self.service_type.clone(),
+                    tenant.clone(),
+                    deployment.clone(),
+                )
+            },
+            _ => {
+                Worker::new(
+                    self.coordinator_endpoint.clone(),
+                    self.service_name.clone(),
+                    self.service_version.clone(),
+                    self.service_type.clone(),
+                )
+            }
+        }
+    }
 }
