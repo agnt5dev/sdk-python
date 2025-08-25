@@ -29,6 +29,15 @@ features = ["pyo3/extension-module"]
 python-source = "src"
 module-name = "agnt5._core"
 
+# Wheel configuration
+[tool.maturin.wheel]
+classifier = [
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Architecture :: x86_64",
+    "Architecture :: aarch64",
+]
+
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
