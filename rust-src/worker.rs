@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
-use agnt5_sdk_core::Worker;
-use agnt5_sdk_core::pb::{RuntimeMessage, ServiceMessage, InvokeFunctionResponse, ComponentInfo, ComponentType};
+use agnt5_sdk_core::{Worker, init_logging, get_error_buffer, clear_error_buffer};
+use agnt5_sdk_core::worker::ConnectionState;
+use agnt5_sdk_core::pb::{ServiceMessage, InvokeFunctionResponse, ComponentInfo, ComponentType};
 use agnt5_sdk_core::pb::runtime_message::MessageData;
 use agnt5_sdk_core::pb::service_message::MessageType;
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,7 @@ pub struct PyWorker {
     deployment_id: Option<String>,
     runtime: Arc<Mutex<Option<tokio::runtime::Runtime>>>,
     shutdown_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    worker_instance: Arc<Mutex<Option<Worker>>>,
 }
 
 #[pymethods]
@@ -41,6 +43,7 @@ impl PyWorker {
             deployment_id,
             runtime: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
+            worker_instance: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -65,7 +68,42 @@ impl PyWorker {
         self.deployment_id.clone()
     }
 
-    /// Start the worker in the background
+    /// Initialize logging for error capture
+    #[staticmethod]
+    fn init_logging() -> PyResult<()> {
+        init_logging().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to initialize logging: {}", e)
+        ))?;
+        Ok(())
+    }
+
+    /// Get recent error messages from Rust core
+    #[staticmethod]
+    fn get_errors() -> Vec<String> {
+        get_error_buffer()
+    }
+
+    /// Clear the error buffer
+    #[staticmethod]
+    fn clear_errors() {
+        clear_error_buffer();
+    }
+
+    /// Get connection state as string
+    fn get_connection_state(&self) -> String {
+        if let Some(worker) = self.worker_instance.lock().unwrap().as_ref() {
+            match worker.connection_state() {
+                ConnectionState::Disconnected => "disconnected".to_string(),
+                ConnectionState::Connecting => "connecting".to_string(),
+                ConnectionState::Connected => "connected".to_string(),
+                ConnectionState::Error(msg) => format!("error: {}", msg),
+            }
+        } else {
+            "not_started".to_string()
+        }
+    }
+
+    /// Start the worker and wait for connection acknowledgment
     fn start(&self) -> PyResult<()> {
         let mut runtime_guard = self.runtime.lock().unwrap();
         let mut shutdown_guard = self.shutdown_tx.lock().unwrap();
@@ -75,6 +113,9 @@ impl PyWorker {
                 "Worker is already running"
             ));
         }
+
+        // Initialize logging if not already done
+        let _ = init_logging();
 
         // Collect registered functions from Python decorators
         let components = Python::with_gil(|py| -> PyResult<Vec<ComponentInfo>> {
@@ -119,6 +160,9 @@ impl PyWorker {
         // Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
+        // Create connection result channel to wait for connection acknowledgment
+        let (connection_tx, connection_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
         // Clone data for the background task
         let coordinator_endpoint = self.coordinator_endpoint.clone();
         let service_name = self.service_name.clone();
@@ -126,9 +170,12 @@ impl PyWorker {
         let service_type = self.service_type.clone();
         let tenant_id = self.tenant_id.clone();
         let deployment_id = self.deployment_id.clone();
+        let worker_instance_ref = self.worker_instance.clone();
 
         // Spawn the worker task
         rt.spawn(async move {
+            let mut connection_tx = Some(connection_tx);
+            
             let worker = match (&tenant_id, &deployment_id) {
                 (Some(tenant), Some(deployment)) => {
                     // Create worker with explicit tenant/deployment and add components
@@ -155,7 +202,27 @@ impl PyWorker {
                 }
             };
 
-            // Message handler that processes function invocations  
+            // Store the worker instance for connection state tracking
+            *worker_instance_ref.lock().unwrap() = Some(worker.clone());
+
+            // First attempt to connect and register to verify connection
+            match worker.connect_and_run_once().await {
+                Ok(()) => {
+                    // Connection successful, report back to main thread
+                    if let Some(tx) = connection_tx.take() {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+                Err(e) => {
+                    // Connection failed, report error and return
+                    if let Some(tx) = connection_tx.take() {
+                        let _ = tx.send(Err(format!("Connection failed: {}", e)));
+                    }
+                    return;
+                }
+            }
+
+            // Now run the main worker loop with retries
             let worker_task = worker.run(|runtime_message| async {
                 match runtime_message.message_data {
                     Some(MessageData::InvokeFunction(invocation)) => {
@@ -220,12 +287,25 @@ impl PyWorker {
 
             tokio::select! {
                 result = worker_task => {
-                    if let Err(e) = result {
-                        eprintln!("Worker error: {}", e);
+                    match result {
+                        Ok(()) => {
+                            // Worker completed successfully - this is normal for reconnection scenarios
+                            println!("Worker completed successfully");
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Worker error: {}", e);
+                            eprintln!("{}", error_msg);
+                            
+                            // Log via eprintln for now since we can't directly access tracing from here
+                            // The error is already printed above and will be visible
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => {
                     println!("Worker shutdown requested");
+                    if let Some(tx) = connection_tx.take() {
+                        let _ = tx.send(Err("Worker shutdown before connection".to_string()));
+                    }
                 }
             }
         });
@@ -234,13 +314,41 @@ impl PyWorker {
         *runtime_guard = Some(rt);
         *shutdown_guard = Some(shutdown_tx);
 
-        Ok(())
+        // Get a handle to the runtime before dropping the guard
+        let rt_handle = {
+            let guard = self.runtime.lock().unwrap();
+            guard.as_ref().unwrap().handle().clone()
+        };
+
+        // Wait for connection result with timeout using the runtime handle
+        let connection_result = match rt_handle.block_on(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                connection_rx
+            )
+        ) {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Connection channel closed unexpectedly"
+            )),
+            Err(_) => return Err(PyErr::new::<pyo3::exceptions::PyTimeoutError, _>(
+                "Connection timeout: Worker could not connect to coordinator within 30 seconds"
+            )),
+        };
+
+        match connection_result {
+            Ok(()) => Ok(()),
+            Err(error_msg) => Err(PyErr::new::<pyo3::exceptions::PyConnectionError, _>(
+                format!("Failed to connect to coordinator: {}", error_msg)
+            )),
+        }
     }
 
     /// Stop the worker
     fn stop(&self) -> PyResult<()> {
         let mut runtime_guard = self.runtime.lock().unwrap();
         let mut shutdown_guard = self.shutdown_tx.lock().unwrap();
+        let mut worker_guard = self.worker_instance.lock().unwrap();
 
         if let Some(shutdown_tx) = shutdown_guard.take() {
             // Send shutdown signal
@@ -254,6 +362,9 @@ impl PyWorker {
             rt.shutdown_background();
         }
 
+        // Clean up worker instance
+        *worker_guard = None;
+
         Ok(())
     }
 
@@ -261,6 +372,11 @@ impl PyWorker {
     fn is_running(&self) -> bool {
         let runtime_guard = self.runtime.lock().unwrap();
         runtime_guard.is_some()
+    }
+
+    /// Check if worker is connected (alias for is_running for clarity)
+    fn is_connected(&self) -> bool {
+        self.is_running()
     }
 }
 

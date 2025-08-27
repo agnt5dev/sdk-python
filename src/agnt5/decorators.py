@@ -82,9 +82,10 @@ def get_function_metadata(func: Callable) -> Optional[Dict[str, Any]]:
         
     signature = inspect.signature(func)
     parameters = []
+    param_items = list(signature.parameters.items())
     
-    for param_name, param in signature.parameters.items():
-        if param_name == 'ctx':  # Skip context parameter
+    for i, (param_name, param) in enumerate(param_items):
+        if i == 0 and param_name == 'ctx':  # Skip context parameter if it's the first one
             continue
             
         param_info = {
@@ -107,6 +108,10 @@ def get_function_metadata(func: Callable) -> Optional[Dict[str, Any]]:
         'parameters': parameters,
         'return_type': str(signature.return_annotation.__name__ if signature.return_annotation != inspect.Parameter.empty else 'any')
     }
+
+
+# Alias for more intuitive usage
+handler = function
 
 
 def clear_registry():
@@ -170,12 +175,22 @@ def invoke_function(handler_name: str, input_data: bytes, context: Any = None) -
             
         logger.debug(f"Invoking function {handler_name} with params: {input_params}")
         
-        # Call function with context as first parameter
-        if isinstance(input_params, dict):
-            result = func(context, **input_params)
+        # Call function - check if it expects context as first parameter
+        sig = inspect.signature(func)
+        params = list(sig.parameters.keys())
+        
+        if params and params[0] == 'ctx':
+            # Function expects context as first parameter
+            if isinstance(input_params, dict):
+                result = func(context, **input_params)
+            else:
+                result = func(context, input_params)
         else:
-            # Handle case where input is not a dict (e.g., single value)
-            result = func(context, input_params)
+            # Function doesn't expect context
+            if isinstance(input_params, dict):
+                result = func(**input_params)
+            else:
+                result = func(input_params)
             
         # Encode result
         if result is None:
