@@ -209,6 +209,18 @@ impl PyWorker {
                 );
                 log::debug!("Request metadata: {:?}", invoke_request.metadata);
                 
+                // Extract trace context from request metadata
+                let parent_context = agnt5_sdk_core::extract_trace_context_from_runtime_message(&invoke_request.metadata);
+                
+                // Create span for function execution
+                let mut span = agnt5_sdk_core::create_function_span(
+                    &invoke_request.component_name,
+                    &invoke_request.service_name,
+                    &runtime_message.worker_id,
+                    &invoke_request.invocation_id,
+                    Some(parent_context),
+                );
+                
                 // Convert to Python types
                 let py_request = PyInvokeFunctionRequest::from(invoke_request);
                 
@@ -220,6 +232,14 @@ impl PyWorker {
                             match py_result.extract::<PyInvokeFunctionResponse>(py) {
                                 Ok(py_response) => {
                                     log::debug!("Python handler returned response successfully");
+                                    
+                                    // Record span result based on success/error
+                                    if py_response.success {
+                                        agnt5_sdk_core::record_span_success(&mut span, py_response.output_data.len());
+                                    } else {
+                                        let error_msg = py_response.error_message.as_deref().unwrap_or("Unknown error");
+                                        agnt5_sdk_core::record_span_error(&mut span, error_msg);
+                                    }
                                     
                                     // Convert back to Rust types
                                     let rust_response: InvokeFunctionResponse = py_response.into();
@@ -237,6 +257,7 @@ impl PyWorker {
                                 Err(e) => {
                                     let err_msg = format!("Failed to extract Python response: {}", e);
                                     log::error!("{}", err_msg);
+                                    agnt5_sdk_core::record_span_error(&mut span, &err_msg);
                                     Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg)))
                                 }
                             }
@@ -244,10 +265,14 @@ impl PyWorker {
                         Err(e) => {
                             let err_msg = format!("Python handler failed: {}", e);
                             log::error!("{}", err_msg);
+                            agnt5_sdk_core::record_span_error(&mut span, &err_msg);
                             Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg)))
                         }
                     }
                 })?;
+                
+                // End the span
+                agnt5_sdk_core::end_span(span);
                 
                 Ok(result)
             }
