@@ -61,6 +61,7 @@ class Worker:
         config = PyWorkerConfig(service_name, service_version, "python")
         self._rust_worker = PyWorker(config)
         
+        # Note: Telemetry initialization deferred to run() method due to Tokio runtime requirement
         
         # Set the message handler - this is the simple FFI boundary
         self._rust_worker.set_message_handler(self._handle_message)

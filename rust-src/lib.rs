@@ -5,7 +5,6 @@ mod types;
 use worker::{PyWorker, PyWorkerConfig};
 use types::{PyInvokeFunctionRequest, PyInvokeFunctionResponse, PyComponentInfo};
 
-
 /// The Python module
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
