@@ -11,7 +11,8 @@ path = "rust-src/lib.rs"
 
 [dependencies]
 # PyO3 for Python bindings
-pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+pyo3-async-runtimes = { version = "0.25", features = ["tokio-runtime"] }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -21,6 +22,15 @@ agnt5-sdk-core = { path = "../sdk-core" }
 
 # Base64 decoding
 base64 = "0.22"
+serde = "1.0"
+
+# Logging integration
+pyo3-log = "0.12.4"
+log = "0.4"
+tracing = "0.1"
+
+# Error handling
+anyhow = "1.0"
 
 [build-dependencies]
 pyo3-build-config = "0.25.0"

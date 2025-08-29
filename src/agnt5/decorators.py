@@ -10,6 +10,8 @@ import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+# Set default logging level to DEBUG
+logging.getLogger().setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Global registry of decorated functions
@@ -137,77 +139,102 @@ def invoke_function(handler_name: str, input_data: bytes, context: Any = None) -
         RuntimeError: If function execution fails
     """
     import json
+    import traceback
+    
+    # Input validation
+    if not handler_name:
+        error_msg = "Empty handler name provided"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
     
     if handler_name not in _function_registry:
-        raise ValueError(f"Handler '{handler_name}' not found")
+        error_msg = f"Handler '{handler_name}' not found in registry. Available handlers: {list(_function_registry.keys())}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
     
     func = _function_registry[handler_name]
+    logger.info(f"Invoking handler: {handler_name}")
     
     try:
         # Decode input data
         if input_data:
-            print(f"📨 Received function invocation: {handler_name}")
+            logger.debug(f"Processing {len(input_data)} bytes for {handler_name}")
             
-            # Check if this is protobuf data by looking for the pattern
+            # Try direct JSON first
             try:
                 raw_data = input_data.decode('utf-8')
                 input_params = json.loads(raw_data)
+                logger.info(f"Decoded JSON input for {handler_name}: {type(input_params)} with keys: {list(input_params.keys()) if isinstance(input_params, dict) else 'non-dict'}")
+                logger.debug(f"Input parameters: {input_params}")
             except (UnicodeDecodeError, json.JSONDecodeError):
-                # This is protobuf data - extract the JSON payload
-                # The JSON is embedded after the \x1a<length> pattern
+                # Fallback to protobuf extraction
+                logger.debug(f"JSON decoding failed, trying protobuf extraction for {handler_name}")
                 start_idx = input_data.find(b'\x1a')
-                if start_idx != -1 and start_idx + 1 < len(input_data):
-                    # The byte after \x1a indicates the length of the JSON data
-                    json_length = input_data[start_idx + 1]
-                    json_start = start_idx + 2
-                    
-                    if json_start + json_length <= len(input_data):
-                        json_bytes = input_data[json_start:json_start + json_length]
-                        raw_data = json_bytes.decode('utf-8')
-                        print(f"📋 Extracted JSON from protobuf: {raw_data}")
-                        input_params = json.loads(raw_data)
-                    else:
-                        raise ValueError("Invalid protobuf structure - JSON length exceeds available data")
-                else:
-                    raise ValueError("Could not find JSON data in protobuf message")
+                if start_idx == -1 or start_idx + 1 >= len(input_data):
+                    logger.error(f"Invalid data format for {handler_name}. Length: {len(input_data)}, Hex: {input_data.hex()}")
+                    raise RuntimeError("Invalid input data - not JSON and no protobuf marker found")
+                
+                json_length = input_data[start_idx + 1]
+                json_start = start_idx + 2
+                
+                if json_start + json_length > len(input_data):
+                    raise RuntimeError(f"Protobuf structure invalid - length {json_length} exceeds data")
+                
+                json_bytes = input_data[json_start:json_start + json_length]
+                raw_data = json_bytes.decode('utf-8')
+                input_params = json.loads(raw_data)
+                logger.info(f"Extracted from protobuf for {handler_name}: {type(input_params)} with keys: {list(input_params.keys()) if isinstance(input_params, dict) else 'non-dict'}")
+                logger.debug(f"Extracted parameters: {input_params}")
+                
         else:
             input_params = {}
+            logger.debug(f"No input data provided for {handler_name}")
             
-        logger.debug(f"Invoking function {handler_name} with params: {input_params}")
-        
-        # Call function - check if it expects context as first parameter
-        sig = inspect.signature(func)
-        params = list(sig.parameters.keys())
-        
-        if params and params[0] == 'ctx':
-            # Function expects context as first parameter
-            if isinstance(input_params, dict):
-                result = func(context, **input_params)
+        # Execute function
+        try:
+            sig = inspect.signature(func)
+            params = list(sig.parameters.keys())
+            
+            logger.info(f"Calling {handler_name} with signature: {sig}")
+            
+            if params and params[0] == 'ctx':
+                if isinstance(input_params, dict):
+                    logger.debug(f"Calling {handler_name}(ctx, **{input_params})")
+                    result = func(context, **input_params)
+                else:
+                    logger.debug(f"Calling {handler_name}(ctx, {input_params})")
+                    result = func(context, input_params)
             else:
-                result = func(context, input_params)
-        else:
-            # Function doesn't expect context
-            if isinstance(input_params, dict):
-                result = func(**input_params)
-            else:
-                result = func(input_params)
+                if isinstance(input_params, dict):
+                    logger.debug(f"Calling {handler_name}(**{input_params})")
+                    result = func(**input_params)
+                else:
+                    logger.debug(f"Calling {handler_name}({input_params})")
+                    result = func(input_params)
+                    
+        except TypeError as e:
+            logger.error(f"Signature mismatch in {handler_name}: {e}. Expected: {sig}, Got: {input_params}")
+            raise RuntimeError(f"Function signature mismatch: {e}")
+            
+        except Exception as e:
+            logger.error(f"Function {handler_name} failed: {type(e).__name__}: {e}")
+            raise RuntimeError(f"Function execution failed: {e}")
             
         # Encode result
         if result is None:
-            result_data = b""
-        else:
-            result_json = json.dumps(result)
-            result_data = result_json.encode('utf-8')
-            
-        logger.debug(f"Function {handler_name} completed successfully")
-        return result_data
+            return b""
         
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON parsing failed: {e}")
-        print(f"📋 Failed to parse: {repr(raw_data if 'raw_data' in locals() else 'No raw_data available')}")
-        logger.error(f"JSON decode error for {handler_name}: {e}")
-        raise RuntimeError(f"Invalid JSON input: {e}")
+        try:
+            result_json = json.dumps(result)
+            return result_json.encode('utf-8')
+        except (TypeError, ValueError, UnicodeEncodeError) as e:
+            logger.error(f"Cannot serialize/encode result from {handler_name}: {type(result)} - {e}")
+            raise RuntimeError(f"Result serialization/encoding error: {e}")
+        
+    except RuntimeError:
+        raise
+        
     except Exception as e:
-        print(f"❌ Function '{handler_name}' failed: {type(e).__name__}: {e}")
-        logger.error(f"Function {handler_name} failed: {e}")
-        raise RuntimeError(f"Function execution failed: {e}")
+        logger.error(f"Unexpected error in {handler_name}: {type(e).__name__}: {e}")
+        logger.debug(f"Stack trace: {traceback.format_exc()}")
+        raise RuntimeError(f"Unexpected error: {e}")
