@@ -27,6 +27,9 @@ serde = "1.0"
 # Logging integration
 pyo3-log = "0.12.4"
 log = "0.4"
+
+# OpenTelemetry for baggage support
+opentelemetry = "0.30"
 tracing = "0.1"
 
 # Error handling

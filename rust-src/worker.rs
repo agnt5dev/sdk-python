@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use pyo3_async_runtimes::tokio::future_into_py;
 use anyhow;
 use crate::types::{PyInvokeFunctionRequest, PyInvokeFunctionResponse, PyComponentInfo};
+use tracing;
+// Removed baggage import - using span inheritance instead
 
 
 #[pyclass]
@@ -201,16 +203,25 @@ impl PyWorker {
         // Handle the message based on type
         match runtime_message.message_data {
             Some(runtime_message::MessageData::InvokeFunction(invoke_request)) => {
-                log::info!("Received function invocation request - ID: {}, Service: {}, Component: {}, Data size: {} bytes", 
-                    invoke_request.invocation_id,
-                    invoke_request.service_name,
-                    invoke_request.component_name,
+                // Create tracing span with invocation_id that will be inherited by all logs
+                let invocation_span = tracing::info_span!(
+                    "invoke_function",
+                    invocation.id = %invoke_request.invocation_id,
+                    service.name = %invoke_request.service_name,
+                    component.name = %invoke_request.component_name,
+                    worker.id = %runtime_message.worker_id,
+                );
+                let _guard = invocation_span.enter();
+                
+                log::info!("Received function invocation request - Data size: {} bytes", 
                     invoke_request.input_data.len()
                 );
                 log::debug!("Request metadata: {:?}", invoke_request.metadata);
                 
                 // Extract trace context from request metadata
-                let parent_context = agnt5_sdk_core::extract_trace_context_from_runtime_message(&invoke_request.metadata);
+                let parent_context = agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
+                
+                // Note: invocation.id will be handled by tracing span and Python log forwarding
                 
                 // Create span for function execution
                 let mut span = agnt5_sdk_core::create_function_span(

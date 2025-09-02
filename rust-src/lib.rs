@@ -5,6 +5,56 @@ mod types;
 use worker::{PyWorker, PyWorkerConfig};
 use types::{PyInvokeFunctionRequest, PyInvokeFunctionResponse, PyComponentInfo};
 
+/// Forward Python logs to Rust tracing system for OpenTelemetry integration
+#[pyfunction]
+fn log_from_python(
+    level: &str,
+    message: String,
+    target: Option<String>,
+    module_path: Option<String>,
+    filename: Option<String>,
+    line: Option<u32>,
+) -> PyResult<()> {
+    // Create a span with Python metadata, inheriting from current span if available
+    let current_span = tracing::Span::current();
+    let span = if current_span.is_none() || current_span == tracing::Span::none() {
+        // No current span, create standalone span
+        tracing::info_span!(
+            "python_log",
+            python.module = module_path.as_deref(),
+            python.filename = filename.as_deref(),
+            python.line = line,
+            python.target = target.as_deref(),
+            message = %message,
+        )
+    } else {
+        // Create child span that inherits fields from current span (including invocation.id)
+        tracing::info_span!(
+            parent: &current_span,
+            "python_log",
+            python.module = module_path.as_deref(),
+            python.filename = filename.as_deref(),
+            python.line = line,
+            python.target = target.as_deref(),
+            message = %message,
+        )
+    };
+    let _enter = span.enter();
+    
+    // Emit log at appropriate level through Rust tracing
+    // Include message in both span field (for OpenTelemetry attributes) and log event (for VictoriaMetrics)
+    match level.to_uppercase().as_str() {
+        "DEBUG" => tracing::debug!("{}", message),
+        "INFO" => tracing::info!("{}", message),
+        "WARNING" | "WARN" => tracing::warn!("{}", message),
+        "ERROR" => tracing::error!("{}", message),
+        "CRITICAL" => tracing::error!("[CRITICAL] {}", message),
+        _ => tracing::info!("[{}] {}", level, message),
+    }
+    
+    Ok(())
+}
+
 /// The Python module
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -16,5 +66,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyInvokeFunctionRequest>()?;
     m.add_class::<PyInvokeFunctionResponse>()?;
     m.add_class::<PyComponentInfo>()?;
+    m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     Ok(())
 }

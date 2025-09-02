@@ -2,6 +2,7 @@
 High-level Worker manager that integrates function decorators with the Rust core.
 """
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from ._compat import _rust_available, _import_error
 from .decorators import get_registered_functions, get_function_metadata, invoke_function
 from .runtimes import WorkerRuntime, ASGIRuntime
+from .logging import install_opentelemetry_logging
 
 # Core functionality import from Rust extension
 from ._compat import _rust_available
@@ -63,6 +65,17 @@ class Worker:
         
         # Note: Telemetry initialization deferred to run() method due to Tokio runtime requirement
         
+        # Set up OpenTelemetry logging integration (handler is resilient to timing issues)
+        try:
+            self._otel_handler = install_opentelemetry_logging(
+                logger=None,  # Install on root logger to capture all Python logs
+                level=logging.INFO
+            )
+            logger.info("OpenTelemetry logging integration enabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize OpenTelemetry logging: {e}")
+            self._otel_handler = None
+        
         # Set the message handler - this is the simple FFI boundary
         self._rust_worker.set_message_handler(self._handle_message)
         
@@ -94,6 +107,15 @@ class Worker:
         finally:
             self._running = False
             logger.info(f"Worker {self.service_name} stopped")
+            
+            # Clean up OpenTelemetry logging handler
+            if hasattr(self, '_otel_handler') and self._otel_handler:
+                try:
+                    from .logging import remove_opentelemetry_logging
+                    remove_opentelemetry_logging()
+                    logger.info("OpenTelemetry logging integration cleaned up")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup OpenTelemetry logging: {e}")
         
     def is_running(self) -> bool:
         """Check if the worker is running."""
