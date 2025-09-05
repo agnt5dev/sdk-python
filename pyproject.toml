@@ -9,11 +9,15 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Architecture :: x86_64",
+    "Architecture :: aarch64",
 ]
 dependencies = [
     "maturin>=1.9.3",
@@ -34,6 +38,7 @@ module-name = "agnt5._core"
 classifier = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Architecture :: x86_64",
     "Architecture :: aarch64",
 ]
