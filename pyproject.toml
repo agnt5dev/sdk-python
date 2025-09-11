@@ -16,8 +16,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
-    "Architecture :: x86_64",
-    "Architecture :: aarch64",
 ]
 dependencies = [
     "maturin>=1.9.3",
@@ -39,8 +37,6 @@ classifier = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
-    "Architecture :: x86_64",
-    "Architecture :: aarch64",
 ]
 
 [build-system]
