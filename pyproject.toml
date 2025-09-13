@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://agnt5.dev"
-"Documentation" = "https://docs.agnt5.dev"
+"Homepage" = "https://agnt5.com"
+"Documentation" = "https://docs.agnt5.com"
 
 
 [tool.maturin]
