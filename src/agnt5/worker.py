@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ._compat import _rust_available, _import_error
 from .decorators import get_registered_functions, get_function_metadata, invoke_function
+from .workflows import get_registered_workflows
 from .runtimes import WorkerRuntime, ASGIRuntime
 from .logging import install_opentelemetry_logging
 
@@ -94,8 +95,8 @@ class Worker:
         """
         logger.info(f"Starting worker {self.service_name}...")
         
-        # Register all decorated functions first
-        self._register_functions()
+        # Register all decorated functions and workflows first
+        self._register_components()
         
         # Run the Rust worker (this will block until shutdown)
         try:
@@ -121,40 +122,76 @@ class Worker:
         """Check if the worker is running."""
         return self._running
         
-    def _register_functions(self):
-        """Register all decorated functions with the Worker Coordinator."""
+    def _register_components(self):
+        """Register decorated functions and workflows with the Worker Coordinator."""
+
         functions = get_registered_functions()
-        
-        if not functions:
-            logger.warning("No @function decorated handlers found")
+        workflows = get_registered_workflows()
+        service_metadata: Dict[str, str] = {}
+
+        if not functions and not workflows:
+            logger.warning("No components registered via decorators")
             return
-            
-        logger.info(f"Registering {len(functions)} function handlers: {list(functions.keys())}")
-        
-        # Build component list for registration
+
         py_components = []
-        for handler_name, func in functions.items():
-            metadata = get_function_metadata(func)
-            if metadata:
-                # Create PyComponentInfo for the Rust worker
+
+        if functions:
+            logger.info("Registering %d function handlers: %s", len(functions), list(functions.keys()))
+            for handler_name, func in functions.items():
+                metadata = get_function_metadata(func)
+                if not metadata:
+                    continue
+
                 component_metadata = {
                     'handler_name': handler_name,
                     'return_type': metadata.get('return_type', 'any'),
                     'parameters': str(len(metadata.get('parameters', [])))
                 }
-                
-                py_component = PyComponentInfo(
-                    name=handler_name,
-                    component_type='function',
-                    metadata=component_metadata
+
+                py_components.append(
+                    PyComponentInfo(
+                        name=handler_name,
+                        component_type='function',
+                        metadata=component_metadata,
+                    )
                 )
-                py_components.append(py_component)
-                
-        # Set components on the Rust worker
+
+        if workflows:
+            workflow_names = list(workflows.keys())
+            logger.info("Registering %d workflows: %s", len(workflow_names), workflow_names)
+            for flow_name, definition in workflows.items():
+                try:
+                    flow_json = definition.to_json()
+                except (TypeError, ValueError) as exc:
+                    logger.error("Failed to serialize workflow '%s': %s", flow_name, exc)
+                    continue
+
+                component_metadata = {
+                    'flow_definition': flow_json,
+                    'step_count': str(len(definition.steps)),
+                }
+
+                service_metadata[f"workflow:{flow_name}"] = flow_json
+
+                py_components.append(
+                    PyComponentInfo(
+                        name=flow_name,
+                        component_type='workflow',
+                        metadata=component_metadata,
+                    )
+                )
+
+        try:
+            self._rust_worker.set_service_metadata(service_metadata)
+        except Exception as exc:
+            logger.error("Failed to set service metadata: %s", exc)
+
         if py_components:
             self._rust_worker.set_components(py_components)
-            logger.info(f"Registered {len(py_components)} components with Rust worker")
-        
+            logger.info("Registered %d components with Rust worker", len(py_components))
+        else:
+            logger.warning("No components were registered after serialization step")
+
         # Function invocations are now handled through the message handler
     
     def _handle_message(self, request: 'PyInvokeFunctionRequest') -> 'PyInvokeFunctionResponse':

@@ -1,5 +1,7 @@
+use agnt5_sdk_core::pb::{
+    ComponentInfo, ComponentType, InvokeFunctionRequest, InvokeFunctionResponse,
+};
 use pyo3::prelude::*;
-use agnt5_sdk_core::pb::{InvokeFunctionRequest, InvokeFunctionResponse, ComponentInfo, ComponentType};
 use std::collections::HashMap;
 
 #[pyclass]
@@ -91,7 +93,7 @@ impl From<PyInvokeFunctionResponse> for InvokeFunctionResponse {
         } else {
             None
         };
-        
+
         Self {
             invocation_id: resp.invocation_id,
             success: resp.success,

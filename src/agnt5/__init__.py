@@ -11,11 +11,27 @@ from ._compat import _rust_available, _import_error
 from .decorators import function
 from .worker import Worker
 from .logging import install_opentelemetry_logging, remove_opentelemetry_logging
+from .workflows import (
+    FlowDefinition,
+    WorkflowStep,
+    register_workflow,
+    workflow,
+    task_step,
+    wait_signal_step,
+    wait_timer_step,
+)
 
 __version__ = _get_version()
 
 __all__ = [
     'function',
+    'workflow',
+    'register_workflow',
+    'FlowDefinition',
+    'WorkflowStep',
+    'task_step',
+    'wait_signal_step',
+    'wait_timer_step',
     'Worker',
     'install_opentelemetry_logging',
     'remove_opentelemetry_logging',

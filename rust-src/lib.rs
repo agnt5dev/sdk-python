@@ -1,9 +1,9 @@
 use pyo3::prelude::*;
 
-mod worker;
 mod types;
+mod worker;
+use types::{PyComponentInfo, PyInvokeFunctionRequest, PyInvokeFunctionResponse};
 use worker::{PyWorker, PyWorkerConfig};
-use types::{PyInvokeFunctionRequest, PyInvokeFunctionResponse, PyComponentInfo};
 
 /// Forward Python logs to Rust tracing system for OpenTelemetry integration
 #[pyfunction]
@@ -40,7 +40,7 @@ fn log_from_python(
         )
     };
     let _enter = span.enter();
-    
+
     // Emit log at appropriate level through Rust tracing
     // Include message in both span field (for OpenTelemetry attributes) and log event (for VictoriaMetrics)
     match level.to_uppercase().as_str() {
@@ -51,7 +51,7 @@ fn log_from_python(
         "CRITICAL" => tracing::error!("[CRITICAL] {}", message),
         _ => tracing::info!("[{}] {}", level, message),
     }
-    
+
     Ok(())
 }
 
@@ -60,7 +60,7 @@ fn log_from_python(
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize PyO3-log to bridge Rust logs to Python
     pyo3_log::init();
-    
+
     m.add_class::<PyWorkerConfig>()?;
     m.add_class::<PyWorker>()?;
     m.add_class::<PyInvokeFunctionRequest>()?;
