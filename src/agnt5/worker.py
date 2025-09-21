@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ._compat import _rust_available, _import_error
-from .decorators import get_registered_functions, get_function_metadata, invoke_function
+from .decorators import get_registered_functions, get_function_metadata, execute_component
 from .workflows import get_registered_workflows
 from .runtimes import WorkerRuntime, ASGIRuntime
 from .logging import install_opentelemetry_logging
@@ -17,7 +17,7 @@ from .logging import install_opentelemetry_logging
 from ._compat import _rust_available
 
 if _rust_available:
-    from ._core import PyWorker, PyWorkerConfig, PyInvokeFunctionRequest, PyInvokeFunctionResponse, PyComponentInfo
+    from ._core import PyWorker, PyWorkerConfig, PyExecuteComponentRequest, PyExecuteComponentResponse, PyComponentInfo
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ class Worker:
 
         # Function invocations are now handled through the message handler
     
-    def _handle_message(self, request: 'PyInvokeFunctionRequest') -> 'PyInvokeFunctionResponse':
+    def _handle_message(self, request: 'PyExecuteComponentRequest') -> 'PyExecuteComponentResponse':
         """Handle incoming function invocation requests."""
         try:
             # Extract request data
@@ -227,9 +227,9 @@ class Worker:
             }
             
             # Call the function through the decorator system
-            # RuntimeAdapter is used internally by invoke_function if needed
+            # RuntimeAdapter is used internally by execute_component if needed
             try:
-                result_data = invoke_function(
+                result_data = execute_component(
                     handler_name=handler_name,
                     input_data=input_data,
                     context=context
@@ -238,7 +238,7 @@ class Worker:
                 logger.info(f"Function {handler_name} completed successfully")
                 
                 # Return successful response
-                return PyInvokeFunctionResponse(
+                return PyExecuteComponentResponse(
                     invocation_id=invocation_id,
                     success=True,
                     output_data=list(result_data),  # Convert bytes to list for PyO3
@@ -251,7 +251,7 @@ class Worker:
                 logger.error(error_msg)
                 
                 # Return error response
-                return PyInvokeFunctionResponse(
+                return PyExecuteComponentResponse(
                     invocation_id=invocation_id,
                     success=False,
                     output_data=[],
@@ -264,7 +264,7 @@ class Worker:
             logger.error(error_msg)
             
             # Return error response with fallback invocation_id
-            return PyInvokeFunctionResponse(
+            return PyExecuteComponentResponse(
                 invocation_id=getattr(request, 'invocation_id', 'unknown'),
                 success=False,
                 output_data=[],

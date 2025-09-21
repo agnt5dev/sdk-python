@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 mod types;
 mod worker;
-use types::{PyComponentInfo, PyInvokeFunctionRequest, PyInvokeFunctionResponse};
+use types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use worker::{PyWorker, PyWorkerConfig};
 
 /// Forward Python logs to Rust tracing system for OpenTelemetry integration
@@ -63,8 +63,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<PyWorkerConfig>()?;
     m.add_class::<PyWorker>()?;
-    m.add_class::<PyInvokeFunctionRequest>()?;
-    m.add_class::<PyInvokeFunctionResponse>()?;
+    m.add_class::<PyExecuteComponentRequest>()?;
+    m.add_class::<PyExecuteComponentResponse>()?;
     m.add_class::<PyComponentInfo>()?;
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     Ok(())

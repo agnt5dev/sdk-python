@@ -1,12 +1,12 @@
 use agnt5_sdk_core::pb::{
-    ComponentInfo, ComponentType, InvokeFunctionRequest, InvokeFunctionResponse,
+    ComponentInfo, ComponentType, ExecuteComponentRequest, ExecuteComponentResponse,
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
 #[pyclass]
 #[derive(Clone)]
-pub struct PyInvokeFunctionRequest {
+pub struct PyExecuteComponentRequest {
     #[pyo3(get)]
     pub invocation_id: String,
     #[pyo3(get)]
@@ -20,7 +20,7 @@ pub struct PyInvokeFunctionRequest {
 }
 
 #[pymethods]
-impl PyInvokeFunctionRequest {
+impl PyExecuteComponentRequest {
     #[new]
     fn new(
         invocation_id: String,
@@ -39,8 +39,8 @@ impl PyInvokeFunctionRequest {
     }
 }
 
-impl From<InvokeFunctionRequest> for PyInvokeFunctionRequest {
-    fn from(req: InvokeFunctionRequest) -> Self {
+impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
+    fn from(req: ExecuteComponentRequest) -> Self {
         Self {
             invocation_id: req.invocation_id,
             service_name: req.service_name,
@@ -53,7 +53,7 @@ impl From<InvokeFunctionRequest> for PyInvokeFunctionRequest {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct PyInvokeFunctionResponse {
+pub struct PyExecuteComponentResponse {
     #[pyo3(get)]
     pub invocation_id: String,
     #[pyo3(get)]
@@ -67,7 +67,7 @@ pub struct PyInvokeFunctionResponse {
 }
 
 #[pymethods]
-impl PyInvokeFunctionResponse {
+impl PyExecuteComponentResponse {
     #[new]
     fn new(
         invocation_id: String,
@@ -86,10 +86,14 @@ impl PyInvokeFunctionResponse {
     }
 }
 
-impl From<PyInvokeFunctionResponse> for InvokeFunctionResponse {
-    fn from(resp: PyInvokeFunctionResponse) -> Self {
+impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
+    fn from(resp: PyExecuteComponentResponse) -> Self {
         let result = if resp.success {
-            Some(agnt5_sdk_core::pb::invoke_function_response::Result::OutputData(resp.output_data))
+            Some(
+                agnt5_sdk_core::pb::execute_component_response::Result::OutputData(
+                    resp.output_data,
+                ),
+            )
         } else {
             None
         };

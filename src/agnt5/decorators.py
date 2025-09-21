@@ -122,7 +122,7 @@ def clear_registry():
     _function_registry.clear()
 
 
-def invoke_function(handler_name: str, input_data: bytes, context: Any = None) -> bytes:
+def execute_component(handler_name: str, input_data: bytes, context: Any = None) -> bytes:
     """
     Invoke a registered function handler.
     

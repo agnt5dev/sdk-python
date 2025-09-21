@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Tuple, Union
 from urllib.parse import parse_qs
 
 from .base import RuntimeAdapter, RuntimeContext, InvocationRequest, InvocationResponse
-from ..decorators import invoke_function, get_registered_functions
+from ..decorators import execute_component, get_registered_functions
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class ASGIRuntime(RuntimeAdapter):
             }
             
             # Call the function through the decorator system
-            result_data = invoke_function(
+            result_data = execute_component(
                 handler_name=request.handler_name,
                 input_data=request.input_data, 
                 context=function_context

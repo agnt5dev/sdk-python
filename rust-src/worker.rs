@@ -1,6 +1,6 @@
-use crate::types::{PyComponentInfo, PyInvokeFunctionRequest, PyInvokeFunctionResponse};
+use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::pb::{
-    runtime_message, ComponentInfo, InvokeFunctionResponse, RuntimeMessage, ServiceMessage,
+    runtime_message, ComponentInfo, ExecuteComponentResponse, RuntimeMessage, ServiceMessage,
 };
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
@@ -255,10 +255,10 @@ impl PyWorker {
 
         // Handle the message based on type
         match runtime_message.message_data {
-            Some(runtime_message::MessageData::InvokeFunction(invoke_request)) => {
+            Some(runtime_message::MessageData::ExecuteComponent(invoke_request)) => {
                 // Create tracing span with invocation_id that will be inherited by all logs
                 let invocation_span = tracing::info_span!(
-                    "invoke_function",
+                    "execute_component",
                     invocation.id = %invoke_request.invocation_id,
                     service.name = %invoke_request.service_name,
                     component.name = %invoke_request.component_name,
@@ -288,15 +288,15 @@ impl PyWorker {
                 );
 
                 // Convert to Python types
-                let py_request = PyInvokeFunctionRequest::from(invoke_request);
+                let py_request = PyExecuteComponentRequest::from(invoke_request);
 
                 // Call Python handler with GIL
                 let result = Python::with_gil(
                     |py| -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
                         match handler.call1(py, (py_request,)) {
                             Ok(py_result) => {
-                                // Extract PyInvokeFunctionResponse from Python result
-                                match py_result.extract::<PyInvokeFunctionResponse>(py) {
+                                // Extract PyExecuteComponentResponse from Python result
+                                match py_result.extract::<PyExecuteComponentResponse>(py) {
                                     Ok(py_response) => {
                                         log::debug!(
                                             "Python handler returned response successfully"
@@ -317,7 +317,7 @@ impl PyWorker {
                                         }
 
                                         // Convert back to Rust types
-                                        let rust_response: InvokeFunctionResponse =
+                                        let rust_response: ExecuteComponentResponse =
                                             py_response.into();
 
                                         // Create ServiceMessage

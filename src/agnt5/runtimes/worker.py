@@ -10,7 +10,7 @@ import uuid
 from typing import Any, Dict
 
 from .base import RuntimeAdapter, RuntimeContext, InvocationRequest, InvocationResponse
-from ..decorators import invoke_function
+from ..decorators import execute_component
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class WorkerRuntime(RuntimeAdapter):
             }
             
             # Call the function through the decorator system
-            result_data = invoke_function(
+            result_data = execute_component(
                 handler_name=request.handler_name,
                 input_data=request.input_data, 
                 context=function_context
