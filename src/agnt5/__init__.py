@@ -8,6 +8,9 @@ Rust core.
 
 from .version import _get_version
 from ._compat import _rust_available, _import_error
+from . import durable, llm, agent
+from .context import Context, SignalClient, TimerClient, HumanClient, ApprovalResult, SpawnHandle
+from .durable import BackoffPolicy, RetryPolicy
 from .decorators import function
 from .worker import Worker
 from .logging import install_opentelemetry_logging, remove_opentelemetry_logging
@@ -24,7 +27,18 @@ from .workflows import (
 __version__ = _get_version()
 
 __all__ = [
+    'durable',
+    'llm',
+    'agent',
     'function',
+    'Context',
+    'SignalClient',
+    'TimerClient',
+    'HumanClient',
+    'ApprovalResult',
+    'SpawnHandle',
+    'RetryPolicy',
+    'BackoffPolicy',
     'workflow',
     'register_workflow',
     'FlowDefinition',

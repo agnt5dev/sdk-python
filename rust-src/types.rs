@@ -1,8 +1,202 @@
 use agnt5_sdk_core::pb::{
-    ComponentInfo, ComponentType, ExecuteComponentRequest, ExecuteComponentResponse,
+    execute_component_response,
+    ComponentInfo,
+    ComponentType,
+    ExecuteComponentRequest,
+    ExecuteComponentResponse,
+    StateTransition,
+    StateUpdate,
+    StepCheckpoint,
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
+
+#[pyclass]
+#[derive(Clone)]
+pub struct PyStepCheckpoint {
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub key: Option<String>,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub attempt: i32,
+    #[pyo3(get)]
+    pub updated_at: Option<String>,
+    #[pyo3(get)]
+    pub result: Vec<u8>,
+}
+
+#[pymethods]
+impl PyStepCheckpoint {
+    #[new]
+    fn new(
+        name: String,
+        key: Option<String>,
+        status: String,
+        attempt: i32,
+        updated_at: Option<String>,
+        result: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            name,
+            key,
+            status,
+            attempt,
+            updated_at,
+            result: result.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<StepCheckpoint> for PyStepCheckpoint {
+    fn from(checkpoint: StepCheckpoint) -> Self {
+        Self {
+            name: checkpoint.name,
+            key: if checkpoint.key.is_empty() {
+                None
+            } else {
+                Some(checkpoint.key)
+            },
+            status: checkpoint.status,
+            attempt: checkpoint.attempt,
+            updated_at: if checkpoint.updated_at.is_empty() {
+                None
+            } else {
+                Some(checkpoint.updated_at)
+            },
+            result: checkpoint.result,
+        }
+    }
+}
+
+impl From<PyStepCheckpoint> for StepCheckpoint {
+    fn from(py_checkpoint: PyStepCheckpoint) -> Self {
+        Self {
+            name: py_checkpoint.name,
+            key: py_checkpoint.key.unwrap_or_default(),
+            status: py_checkpoint.status,
+            attempt: py_checkpoint.attempt,
+            updated_at: py_checkpoint.updated_at.unwrap_or_default(),
+            result: py_checkpoint.result,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct PyStateTransition {
+    #[pyo3(get)]
+    pub operation: String,
+    #[pyo3(get)]
+    pub key: String,
+    #[pyo3(get)]
+    pub old_value: Vec<u8>,
+    #[pyo3(get)]
+    pub new_value: Vec<u8>,
+    #[pyo3(get)]
+    pub timestamp: i64,
+}
+
+#[pymethods]
+impl PyStateTransition {
+    #[new]
+    fn new(
+        operation: String,
+        key: String,
+        old_value: Option<Vec<u8>>,
+        new_value: Option<Vec<u8>>,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            operation,
+            key,
+            old_value: old_value.unwrap_or_default(),
+            new_value: new_value.unwrap_or_default(),
+            timestamp,
+        }
+    }
+}
+
+impl From<PyStateTransition> for StateTransition {
+    fn from(transition: PyStateTransition) -> Self {
+        Self {
+            operation: transition.operation,
+            key: transition.key,
+            old_value: transition.old_value,
+            new_value: transition.new_value,
+            timestamp: transition.timestamp,
+        }
+    }
+}
+
+impl From<StateTransition> for PyStateTransition {
+    fn from(transition: StateTransition) -> Self {
+        Self {
+            operation: transition.operation,
+            key: transition.key,
+            old_value: transition.old_value,
+            new_value: transition.new_value,
+            timestamp: transition.timestamp,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct PyStateUpdate {
+    #[pyo3(get)]
+    pub new_state: Vec<u8>,
+    #[pyo3(get)]
+    pub transitions: Vec<PyStateTransition>,
+    #[pyo3(get)]
+    pub output_data: Vec<u8>,
+}
+
+#[pymethods]
+impl PyStateUpdate {
+    #[new]
+    fn new(
+        new_state: Vec<u8>,
+        transitions: Option<Vec<PyStateTransition>>,
+        output_data: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            new_state,
+            transitions: transitions.unwrap_or_default(),
+            output_data: output_data.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<PyStateUpdate> for StateUpdate {
+    fn from(update: PyStateUpdate) -> Self {
+        Self {
+            new_state: update.new_state,
+            transitions: update
+                .transitions
+                .into_iter()
+                .map(StateTransition::from)
+                .collect(),
+            output_data: update.output_data,
+        }
+    }
+}
+
+impl From<StateUpdate> for PyStateUpdate {
+    fn from(update: StateUpdate) -> Self {
+        Self {
+            new_state: update.new_state,
+            transitions: update
+                .transitions
+                .into_iter()
+                .map(PyStateTransition::from)
+                .collect(),
+            output_data: update.output_data,
+        }
+    }
+}
 
 #[pyclass]
 #[derive(Clone)]
@@ -16,37 +210,113 @@ pub struct PyExecuteComponentRequest {
     #[pyo3(get)]
     pub input_data: Vec<u8>,
     #[pyo3(get)]
+    pub component_type: String,
+    #[pyo3(get)]
+    pub object_id: Option<String>,
+    #[pyo3(get)]
+    pub method_name: Option<String>,
+    #[pyo3(get)]
+    pub state_snapshot: Vec<u8>,
+    #[pyo3(get)]
+    pub journal_position: i64,
+    #[pyo3(get)]
+    pub flow_instance_id: Option<String>,
+    #[pyo3(get)]
+    pub flow_step: Option<i32>,
+    #[pyo3(get)]
     pub metadata: HashMap<String, String>,
+    #[pyo3(get)]
+    pub step_checkpoints: Vec<PyStepCheckpoint>,
 }
 
 #[pymethods]
 impl PyExecuteComponentRequest {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         invocation_id: String,
         service_name: String,
         component_name: String,
         input_data: Vec<u8>,
+        component_type: Option<String>,
+        object_id: Option<String>,
+        method_name: Option<String>,
+        state_snapshot: Option<Vec<u8>>,
+        journal_position: Option<i64>,
         metadata: Option<HashMap<String, String>>,
+        step_checkpoints: Option<Vec<PyStepCheckpoint>>,
+        flow_instance_id: Option<String>,
+        flow_step: Option<i32>,
     ) -> Self {
         Self {
             invocation_id,
             service_name,
             component_name,
             input_data,
+            component_type: component_type.unwrap_or_else(|| "function".to_string()),
+            object_id,
+            method_name,
+            state_snapshot: state_snapshot.unwrap_or_default(),
+            journal_position: journal_position.unwrap_or_default(),
+            flow_instance_id,
+            flow_step,
             metadata: metadata.unwrap_or_default(),
+            step_checkpoints: step_checkpoints.unwrap_or_default(),
         }
     }
 }
 
 impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
     fn from(req: ExecuteComponentRequest) -> Self {
+        let component_type = match ComponentType::try_from(req.component_type)
+            .unwrap_or(ComponentType::Function)
+        {
+            ComponentType::Function => "function",
+            ComponentType::Flow => "flow",
+            ComponentType::Object => "object",
+            ComponentType::Task => "task",
+            ComponentType::Workflow => "workflow",
+            ComponentType::Agent => "agent",
+            ComponentType::Tool => "tool",
+            ComponentType::Mcp => "mcp",
+            ComponentType::Unspecified => "unspecified",
+        }
+        .to_string();
+
         Self {
             invocation_id: req.invocation_id,
             service_name: req.service_name,
             component_name: req.component_name,
             input_data: req.input_data,
+            component_type,
+            object_id: if req.object_id.is_empty() {
+                None
+            } else {
+                Some(req.object_id)
+            },
+            method_name: if req.method_name.is_empty() {
+                None
+            } else {
+                Some(req.method_name)
+            },
+            state_snapshot: req.state_snapshot,
+            journal_position: req.journal_position,
+            flow_instance_id: if req.flow_instance_id.is_empty() {
+                None
+            } else {
+                Some(req.flow_instance_id)
+            },
+            flow_step: if req.flow_step == 0 {
+                None
+            } else {
+                Some(req.flow_step)
+            },
             metadata: req.metadata,
+            step_checkpoints: req
+                .step_checkpoints
+                .into_iter()
+                .map(PyStepCheckpoint::from)
+                .collect(),
         }
     }
 }
@@ -61,6 +331,8 @@ pub struct PyExecuteComponentResponse {
     #[pyo3(get)]
     pub output_data: Vec<u8>,
     #[pyo3(get)]
+    pub state_update: Option<PyStateUpdate>,
+    #[pyo3(get)]
     pub error_message: Option<String>,
     #[pyo3(get)]
     pub metadata: HashMap<String, String>,
@@ -73,6 +345,7 @@ impl PyExecuteComponentResponse {
         invocation_id: String,
         success: bool,
         output_data: Vec<u8>,
+        state_update: Option<PyStateUpdate>,
         error_message: Option<String>,
         metadata: Option<HashMap<String, String>>,
     ) -> Self {
@@ -80,6 +353,7 @@ impl PyExecuteComponentResponse {
             invocation_id,
             success,
             output_data,
+            state_update,
             error_message,
             metadata: metadata.unwrap_or_default(),
         }
@@ -89,11 +363,13 @@ impl PyExecuteComponentResponse {
 impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
     fn from(resp: PyExecuteComponentResponse) -> Self {
         let result = if resp.success {
-            Some(
-                agnt5_sdk_core::pb::execute_component_response::Result::OutputData(
-                    resp.output_data,
-                ),
-            )
+            if let Some(update) = resp.state_update.clone() {
+                Some(execute_component_response::Result::StateUpdate(update.into()))
+            } else {
+                Some(execute_component_response::Result::OutputData(
+                    resp.output_data.clone(),
+                ))
+            }
         } else {
             None
         };
@@ -103,6 +379,32 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
             success: resp.success,
             result,
             error_message: resp.error_message.unwrap_or_default(),
+            metadata: resp.metadata,
+        }
+    }
+}
+
+impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
+    fn from(resp: ExecuteComponentResponse) -> Self {
+        let (output_data, state_update) = match resp.result {
+            Some(execute_component_response::Result::OutputData(data)) => (data, None),
+            Some(execute_component_response::Result::StateUpdate(update)) => {
+                (Vec::new(), Some(PyStateUpdate::from(update)))
+            }
+            Some(execute_component_response::Result::FlowContinuation(_)) => (Vec::new(), None),
+            None => (Vec::new(), None),
+        };
+
+        Self {
+            invocation_id: resp.invocation_id,
+            success: resp.success,
+            output_data,
+            state_update,
+            error_message: if resp.error_message.is_empty() {
+                None
+            } else {
+                Some(resp.error_message)
+            },
             metadata: resp.metadata,
         }
     }

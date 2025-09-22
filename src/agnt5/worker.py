@@ -3,12 +3,19 @@ High-level Worker manager that integrates function decorators with the Rust core
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
 
 from ._compat import _rust_available, _import_error
-from .decorators import get_registered_functions, get_function_metadata, execute_component
+from .agent import get_registered_agents
+from .decorators import (
+    ComponentExecutionResult,
+    execute_component,
+    get_function_metadata,
+    get_registered_functions,
+)
 from .workflows import get_registered_workflows
 from .runtimes import WorkerRuntime, ASGIRuntime
 from .logging import install_opentelemetry_logging
@@ -17,9 +24,52 @@ from .logging import install_opentelemetry_logging
 from ._compat import _rust_available
 
 if _rust_available:
-    from ._core import PyWorker, PyWorkerConfig, PyExecuteComponentRequest, PyExecuteComponentResponse, PyComponentInfo
+    from ._core import (
+        PyComponentInfo,
+        PyExecuteComponentRequest,
+        PyExecuteComponentResponse,
+        PyStateTransition,
+        PyStateUpdate,
+        PyWorker,
+        PyWorkerConfig,
+    )
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_checkpoint_result(raw: Any) -> Any:
+    if isinstance(raw, (bytes, bytearray)):
+        if not raw:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return raw
+
+
+def _serialize_step_checkpoints(py_checkpoints: List[Any]) -> List[Dict[str, Any]]:
+    serialized: List[Dict[str, Any]] = []
+    for checkpoint in py_checkpoints:
+        try:
+            result = _decode_checkpoint_result(getattr(checkpoint, "result", b""))
+            serialized.append(
+                {
+                    "name": getattr(checkpoint, "name", ""),
+                    "key": getattr(checkpoint, "key", None),
+                    "status": getattr(checkpoint, "status", ""),
+                    "attempt": getattr(checkpoint, "attempt", 0),
+                    "updated_at": getattr(checkpoint, "updated_at", None),
+                    "result": result,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to serialize step checkpoint %s: %s", checkpoint, exc)
+    return serialized
 
 
 class Worker:
@@ -126,10 +176,11 @@ class Worker:
         """Register decorated functions and workflows with the Worker Coordinator."""
 
         functions = get_registered_functions()
+        agents = get_registered_agents()
         workflows = get_registered_workflows()
         service_metadata: Dict[str, str] = {}
 
-        if not functions and not workflows:
+        if not functions and not workflows and not agents:
             logger.warning("No components registered via decorators")
             return
 
@@ -143,15 +194,36 @@ class Worker:
                     continue
 
                 component_metadata = {
-                    'handler_name': handler_name,
-                    'return_type': metadata.get('return_type', 'any'),
-                    'parameters': str(len(metadata.get('parameters', [])))
+                    'handler_name': metadata.get('handler', handler_name),
+                    'module': metadata.get('module', func.__module__),
+                    'signature': metadata.get('signature', ''),
+                    'retry_policy': json.dumps(metadata.get('retry_policy', {})),
+                    'backoff_policy': json.dumps(metadata.get('backoff_policy', {})),
+                    'parameters': json.dumps(metadata.get('parameters', [])),
                 }
 
                 py_components.append(
                     PyComponentInfo(
                         name=handler_name,
                         component_type='function',
+                        metadata=component_metadata,
+                    )
+                )
+
+        if agents:
+            agent_names = list(agents.keys())
+            logger.info("Registering %d stateful agents: %s", len(agent_names), agent_names)
+            for agent_name, definition in agents.items():
+                component_metadata = {
+                    'class_name': definition.agent_cls.__name__,
+                    'module': definition.module,
+                    'qualname': definition.qualname,
+                }
+
+                py_components.append(
+                    PyComponentInfo(
+                        name=agent_name,
+                        component_type='agent',
                         metadata=component_metadata,
                     )
                 )
@@ -200,9 +272,16 @@ class Worker:
             # Extract request data
             invocation_id = request.invocation_id
             handler_name = request.component_name
+            component_type = getattr(request, "component_type", "function") or "function"
             input_data = bytes(request.input_data)
-            
-            logger.info(f"Processing function invocation - Handler: {handler_name}, ID: {invocation_id}, Data size: {len(input_data)} bytes")
+
+            logger.info(
+                "Processing %s invocation - Handler: %s, ID: %s, Data size: %d bytes",
+                component_type,
+                handler_name,
+                invocation_id,
+                len(input_data),
+            )
             if request.metadata:
                 logger.debug(f"Request metadata: {dict(request.metadata)}")
             
@@ -218,58 +297,96 @@ class Worker:
                 except Exception:
                     logger.debug(f"Input data (raw bytes): {len(input_data)} bytes")
             
+            # Prepare step checkpoints for the durable context
+            raw_step_checkpoints = list(getattr(request, 'step_checkpoints', []))
+            step_checkpoints = _serialize_step_checkpoints(raw_step_checkpoints)
+
             # Create context for the function
             context = {
                 'invocation_id': invocation_id,
                 'service_name': request.service_name,
                 'handler_name': handler_name,
-                'metadata': request.metadata
+                'metadata': request.metadata,
+                'step_checkpoints': step_checkpoints,
+                'component_type': component_type,
+                'object_id': getattr(request, 'object_id', None),
+                'method_name': getattr(request, 'method_name', None),
+                'state_snapshot': getattr(request, 'state_snapshot', b""),
+                'journal_position': getattr(request, 'journal_position', 0),
+                'flow_instance_id': getattr(request, 'flow_instance_id', None),
+                'flow_step': getattr(request, 'flow_step', None),
             }
-            
+
             # Call the function through the decorator system
             # RuntimeAdapter is used internally by execute_component if needed
             try:
-                result_data = execute_component(
+                execution = execute_component(
                     handler_name=handler_name,
                     input_data=input_data,
-                    context=context
+                    context=context,
+                    component_type=component_type,
+                    method_name=getattr(request, 'method_name', None),
+                    object_id=getattr(request, 'object_id', None),
+                    state_snapshot=getattr(request, 'state_snapshot', b""),
+                    journal_position=getattr(request, 'journal_position', 0),
                 )
-                
-                logger.info(f"Function {handler_name} completed successfully")
-                
+
+                logger.info("Component %s completed successfully", handler_name)
+
+                state_update_obj = None
+                if execution.state_update is not None:
+                    py_transitions = [
+                        PyStateTransition(
+                            operation=transition.operation,
+                            key=transition.key,
+                            old_value=transition.old_value if transition.old_value else None,
+                            new_value=transition.new_value if transition.new_value else None,
+                            timestamp=transition.timestamp_ms,
+                        )
+                        for transition in execution.state_update.transitions
+                    ]
+                    state_update_obj = PyStateUpdate(
+                        new_state=execution.state_update.new_state,
+                        transitions=py_transitions,
+                        output_data=execution.state_update.output_data,
+                    )
+
                 # Return successful response
                 return PyExecuteComponentResponse(
                     invocation_id=invocation_id,
                     success=True,
-                    output_data=list(result_data),  # Convert bytes to list for PyO3
+                    output_data=execution.output_data,
+                    state_update=state_update_obj,
                     error_message=None,
-                    metadata={}
+                    metadata=execution.metadata,
                 )
-                
+
             except Exception as e:
-                error_msg = f"Function {handler_name} failed: {str(e)}"
+                error_msg = f"{component_type.title()} {handler_name} failed: {str(e)}"
                 logger.error(error_msg)
-                
+
                 # Return error response
                 return PyExecuteComponentResponse(
                     invocation_id=invocation_id,
                     success=False,
-                    output_data=[],
+                    output_data=b"",
+                    state_update=None,
                     error_message=error_msg,
-                    metadata={}
+                    metadata={},
                 )
-                
+
         except Exception as e:
             error_msg = f"Message handling failed: {str(e)}"
             logger.error(error_msg)
-            
+
             # Return error response with fallback invocation_id
             return PyExecuteComponentResponse(
                 invocation_id=getattr(request, 'invocation_id', 'unknown'),
                 success=False,
-                output_data=[],
+                output_data=b"",
+                state_update=None,
                 error_message=error_msg,
-                metadata={}
+                metadata={},
             )
         
     async def __call__(self, scope, receive, send):

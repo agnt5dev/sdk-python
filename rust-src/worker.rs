@@ -285,6 +285,7 @@ impl PyWorker {
                     &runtime_message.worker_id,
                     &invoke_request.invocation_id,
                     Some(parent_context),
+                    Some(&invoke_request.metadata),
                 );
 
                 // Convert to Python types

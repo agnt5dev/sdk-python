@@ -1,240 +1,375 @@
-"""
-Function decorators for AGNT5 workers.
+"""Compatibility layer exposing decorators and execution helpers."""
 
-This module provides decorators for registering functions as handlers
-that can be invoked through the AGNT5 platform.
-"""
+from __future__ import annotations
 
-import functools
+import asyncio
 import inspect
+import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
-# Set default logging level to DEBUG
-logging.getLogger().setLevel(logging.DEBUG)
+from .agent import get_agent_registry
+from .context import Context
+from .durable import DurableFunctionDefinition, function as durable_function
+from .durable import get_registry
+
 logger = logging.getLogger(__name__)
 
-# Global registry of decorated functions
-_function_registry: Dict[str, Callable] = {}
+
+@dataclass
+class StateTransitionPayload:
+    operation: str
+    key: str
+    old_value: Optional[bytes]
+    new_value: Optional[bytes]
+    timestamp_ms: int
 
 
-def function(name: str = None):
-    """
-    Decorator to register a function as an AGNT5 handler.
-    
-    Args:
-        name: The name to register the function under. If None, uses the function's name.
-        
-    Usage:
-        @function("add_numbers")
-        def add_numbers(ctx, a: int, b: int) -> int:
-            return a + b
-            
-        @function()
-        def greet_user(ctx, name: str) -> str:
-            return f"Hello, {name}!"
-    """
-    def decorator(func: Callable) -> Callable:
-        handler_name = name if name is not None else func.__name__
-        
-        # Store function metadata
-        func._agnt5_handler_name = handler_name
-        func._agnt5_is_function = True
-        
-        # Register in global registry
-        _function_registry[handler_name] = func
-        
-        logger.debug(f"Registered function handler: {handler_name}")
-        
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return func(*args, **kwargs)
-        
-        # Copy metadata to wrapper
-        wrapper._agnt5_handler_name = handler_name
-        wrapper._agnt5_is_function = True
-        
-        return wrapper
-    
-    return decorator
+@dataclass
+class StateUpdatePayload:
+    new_state: bytes
+    transitions: list[StateTransitionPayload]
+    output_data: bytes = b""
 
 
-def get_registered_functions() -> Dict[str, Callable]:
-    """
-    Get all registered function handlers.
-    
-    Returns:
-        Dictionary mapping handler names to functions
-    """
-    return _function_registry.copy()
+@dataclass
+class ComponentExecutionResult:
+    output_data: bytes = b""
+    metadata: Dict[str, str] = field(default_factory=dict)
+    state_update: Optional[StateUpdatePayload] = None
 
 
-def get_function_metadata(func: Callable) -> Optional[Dict[str, Any]]:
-    """
-    Extract metadata from a decorated function.
-    
-    Args:
-        func: The function to extract metadata from
-        
-    Returns:
-        Dictionary with function metadata or None if not decorated
-    """
-    if not hasattr(func, '_agnt5_is_function'):
-        return None
-        
-    signature = inspect.signature(func)
-    parameters = []
-    param_items = list(signature.parameters.items())
-    
-    for i, (param_name, param) in enumerate(param_items):
-        if i == 0 and param_name == 'ctx':  # Skip context parameter if it's the first one
-            continue
-            
-        param_info = {
-            'name': param_name,
-            'type': 'any'  # Default type, could be enhanced with type hints
-        }
-        
-        # Extract type information if available
-        if param.annotation != inspect.Parameter.empty:
-            param_info['type'] = str(param.annotation.__name__ if hasattr(param.annotation, '__name__') else param.annotation)
-            
-        if param.default != inspect.Parameter.empty:
-            param_info['default'] = param.default
-            
-        parameters.append(param_info)
-    
-    return {
-        'name': func._agnt5_handler_name,
-        'type': 'function',
-        'parameters': parameters,
-        'return_type': str(signature.return_annotation.__name__ if signature.return_annotation != inspect.Parameter.empty else 'any')
-    }
+def function(*args, **kwargs):  # type: ignore[no-redef]
+    """Backward compatible alias for ``durable.function``."""
+
+    return durable_function(*args, **kwargs)
 
 
-# Alias for more intuitive usage
 handler = function
 
 
-def clear_registry():
-    """Clear the function registry. Mainly for testing."""
-    global _function_registry
-    _function_registry.clear()
+def get_registered_functions() -> Dict[str, Any]:
+    return {name: definition.handler for name, definition in get_registry().functions().items()}
 
 
-def execute_component(handler_name: str, input_data: bytes, context: Any = None) -> bytes:
-    """
-    Invoke a registered function handler.
-    
-    Args:
-        handler_name: Name of the handler to invoke
-        input_data: Input data as bytes (will be decoded from JSON)
-        context: Execution context
-        
-    Returns:
-        Function result as bytes (JSON encoded)
-        
-    Raises:
-        ValueError: If handler is not found
-        RuntimeError: If function execution fails
-    """
-    import json
-    import traceback
-    
-    # Input validation
-    if not handler_name:
-        error_msg = "Empty handler name provided"
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    if handler_name not in _function_registry:
-        error_msg = f"Handler '{handler_name}' not found in registry. Available handlers: {list(_function_registry.keys())}"
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    func = _function_registry[handler_name]
-    logger.info(f"Invoking handler: {handler_name}")
-    
+def get_function_metadata(func: Any) -> Optional[Dict[str, Any]]:
+    definition: Optional[DurableFunctionDefinition]
+    definition = getattr(func, "_agnt5_durable", None)
+    if not definition:
+        registry = get_registry().functions()
+        for candidate in registry.values():
+            if candidate.handler is func:
+                definition = candidate
+                break
+    if not definition:
+        return None
+
+    signature = inspect.signature(definition.handler)
+    parameters = []
+    for index, param in enumerate(signature.parameters.values()):
+        if index == 0 and param.name == "ctx":
+            continue
+        param_entry = {"name": param.name, "kind": str(param.kind).split(".")[-1]}
+        if param.annotation is not inspect.Parameter.empty:
+            param_entry["annotation"] = getattr(param.annotation, "__name__", str(param.annotation))
+        if param.default is not inspect.Parameter.empty:
+            param_entry["default"] = param.default
+        parameters.append(param_entry)
+
+    metadata = definition.to_metadata()
+    metadata["parameters"] = parameters
+    return metadata
+
+
+def clear_registry() -> None:
+    get_registry().clear()
+
+
+def execute_component(
+    handler_name: str,
+    input_data: bytes,
+    context: Dict[str, Any],
+    *,
+    component_type: str = "function",
+    method_name: Optional[str] = None,
+    object_id: Optional[str] = None,
+    state_snapshot: Optional[bytes] = None,
+    journal_position: Optional[int] = None,
+) -> ComponentExecutionResult:
+    component_key = (component_type or "function").lower()
+    if component_key == "agent":
+        return _execute_agent(
+            handler_name=handler_name,
+            input_data=input_data,
+            context=context,
+            method_name=method_name,
+            state_snapshot=state_snapshot,
+            journal_position=journal_position,
+            object_id=object_id,
+        )
+    if component_key in {"function", "unspecified"}:
+        return _execute_function(
+            handler_name=handler_name,
+            input_data=input_data,
+            context=context,
+            state_snapshot=state_snapshot,
+            journal_position=journal_position,
+            component_type=component_key,
+        )
+    if component_key in {"spawn", "task"}:
+        # Spawned child invocations reuse durable function handling.
+        return _execute_function(
+            handler_name=handler_name,
+            input_data=input_data,
+            context=context,
+            state_snapshot=state_snapshot,
+            journal_position=journal_position,
+            component_type="function",
+        )
+    raise ValueError(f"Unsupported component type '{component_type}' for handler '{handler_name}'")
+
+
+def _execute_function(
+    *,
+    handler_name: str,
+    input_data: bytes,
+    context: Dict[str, Any],
+    state_snapshot: Optional[bytes],
+    journal_position: Optional[int],
+    component_type: str,
+) -> ComponentExecutionResult:
+    registry = get_registry()
+    definition = registry.get(handler_name)
+    if not definition:
+        raise ValueError(f"Handler '{handler_name}' not found in registry")
+
+    ctx, outbound_metadata = _build_context(
+        handler_name=handler_name,
+        context=context,
+        state_snapshot=state_snapshot,
+        journal_position=journal_position,
+        component_type=component_type,
+    )
+
+    decoded_input = _decode_input(input_data)
+
     try:
-        # Decode input data
-        if input_data:
-            logger.debug(f"Processing {len(input_data)} bytes for {handler_name}")
-            
-            # Try direct JSON first
-            try:
-                raw_data = input_data.decode('utf-8')
-                input_params = json.loads(raw_data)
-                logger.info(f"Decoded JSON input for {handler_name}: {type(input_params)} with keys: {list(input_params.keys()) if isinstance(input_params, dict) else 'non-dict'}")
-                logger.debug(f"Input parameters: {input_params}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                # Fallback to protobuf extraction
-                logger.debug(f"JSON decoding failed, trying protobuf extraction for {handler_name}")
-                start_idx = input_data.find(b'\x1a')
-                if start_idx == -1 or start_idx + 1 >= len(input_data):
-                    logger.error(f"Invalid data format for {handler_name}. Length: {len(input_data)}, Hex: {input_data.hex()}")
-                    raise RuntimeError("Invalid input data - not JSON and no protobuf marker found")
-                
-                json_length = input_data[start_idx + 1]
-                json_start = start_idx + 2
-                
-                if json_start + json_length > len(input_data):
-                    raise RuntimeError(f"Protobuf structure invalid - length {json_length} exceeds data")
-                
-                json_bytes = input_data[json_start:json_start + json_length]
-                raw_data = json_bytes.decode('utf-8')
-                input_params = json.loads(raw_data)
-                logger.info(f"Extracted from protobuf for {handler_name}: {type(input_params)} with keys: {list(input_params.keys()) if isinstance(input_params, dict) else 'non-dict'}")
-                logger.debug(f"Extracted parameters: {input_params}")
-                
-        else:
-            input_params = {}
-            logger.debug(f"No input data provided for {handler_name}")
-            
-        # Execute function
+        result = _invoke_handler(definition.handler, ctx, decoded_input)
+    except Exception as exc:
+        logger.exception("Durable function '%s' failed", handler_name)
+        raise RuntimeError(f"Function execution failed: {exc}") from exc
+
+    output_bytes = _encode_output(result)
+
+    checkpoints = ctx.export_new_checkpoints()
+    if checkpoints:
+        outbound_metadata["step_checkpoints"] = json.dumps(checkpoints)
+    else:
+        outbound_metadata.pop("step_checkpoints", None)
+
+    return ComponentExecutionResult(output_data=output_bytes, metadata=outbound_metadata)
+
+
+def _execute_agent(
+    *,
+    handler_name: str,
+    input_data: bytes,
+    context: Dict[str, Any],
+    method_name: Optional[str],
+    state_snapshot: Optional[bytes],
+    journal_position: Optional[int],
+    object_id: Optional[str],
+) -> ComponentExecutionResult:
+    registry = get_agent_registry()
+    definition = registry.get(handler_name)
+    if not definition:
+        raise ValueError(f"Stateful agent '{handler_name}' is not registered")
+
+    ctx, outbound_metadata = _build_context(
+        handler_name=handler_name,
+        context=context,
+        state_snapshot=state_snapshot,
+        journal_position=journal_position,
+        component_type="agent",
+        object_id=object_id,
+        method_name=method_name,
+    )
+
+    agent_instance = definition.agent_cls()
+    target_method = method_name or "on_message"
+    if not hasattr(agent_instance, target_method):
+        raise AttributeError(
+            f"Agent '{handler_name}' does not implement method '{target_method}'"
+        )
+
+    decoded_input = _decode_input(input_data)
+    method = getattr(agent_instance, target_method)
+    result = method(ctx, decoded_input)
+    if inspect.isawaitable(result):
+        result = _run_awaitable(result)
+
+    output_bytes = _encode_output(result)
+
+    checkpoints = ctx.export_new_checkpoints()
+    if checkpoints:
+        outbound_metadata["step_checkpoints"] = json.dumps(checkpoints)
+
+    state_update = ctx.memory.export_state_update()
+    if state_update:
+        state_update.output_data = output_bytes
+        transitions = [
+            StateTransitionPayload(
+                operation=transition.operation,
+                key=transition.key,
+                old_value=transition.old_value,
+                new_value=transition.new_value,
+                timestamp_ms=transition.timestamp_ms,
+            )
+            for transition in state_update.transitions
+        ]
+        normalized_update = StateUpdatePayload(
+            new_state=state_update.new_state,
+            transitions=transitions,
+            output_data=state_update.output_data,
+        )
+        return ComponentExecutionResult(
+            output_data=b"",
+            metadata=outbound_metadata,
+            state_update=normalized_update,
+        )
+
+    return ComponentExecutionResult(output_data=output_bytes, metadata=outbound_metadata)
+
+
+def _build_context(
+    *,
+    handler_name: str,
+    context: Dict[str, Any],
+    state_snapshot: Optional[bytes],
+    journal_position: Optional[int],
+    component_type: str,
+    object_id: Optional[str] = None,
+    method_name: Optional[str] = None,
+) -> tuple[Context, Dict[str, str]]:
+    invocation_metadata = dict(context.get("metadata") or {})
+    run_id = invocation_metadata.get("run_id") or context.get("invocation_id")
+    step_id = invocation_metadata.get("step_id") or handler_name
+    attempt_raw = invocation_metadata.get("attempt", 1)
+    try:
+        attempt = int(attempt_raw)
+    except (TypeError, ValueError):
+        attempt = 1
+
+    step_checkpoint_payload = context.get("step_checkpoints") if context else None
+    if not step_checkpoint_payload:
+        step_checkpoint_payload = invocation_metadata.get("step_checkpoints")
+    parsed_checkpoints = _parse_step_checkpoints(step_checkpoint_payload)
+
+    ctx = Context(
+        run_id=str(run_id) if run_id is not None else str(context.get("invocation_id")),
+        step_id=str(step_id),
+        attempt=attempt,
+        invocation_id=str(context.get("invocation_id") or ""),
+        service_name=str(context.get("service_name") or ""),
+        component_name=handler_name,
+        metadata=invocation_metadata,
+        step_checkpoints=parsed_checkpoints,
+        parent_run_id=invocation_metadata.get("parent_run_id"),
+        component_type=component_type,
+        object_id=object_id,
+        method_name=method_name,
+        state_snapshot=state_snapshot,
+        journal_position=journal_position,
+    )
+
+    outbound_metadata: Dict[str, str] = dict(invocation_metadata)
+    outbound_metadata["component_type"] = component_type
+    if object_id:
+        outbound_metadata["object_id"] = object_id
+    if method_name:
+        outbound_metadata["method_name"] = method_name
+    if journal_position is not None:
+        outbound_metadata["journal_position"] = str(journal_position)
+
+    return ctx, outbound_metadata
+
+
+def _parse_step_checkpoints(payload: Any) -> Optional[list[dict[str, Any]]]:
+    if not payload:
+        return None
+    if isinstance(payload, str):
         try:
-            sig = inspect.signature(func)
-            params = list(sig.parameters.keys())
-            
-            logger.info(f"Calling {handler_name} with signature: {sig}")
-            
-            if params and params[0] == 'ctx':
-                if isinstance(input_params, dict):
-                    logger.debug(f"Calling {handler_name}(ctx, **{input_params})")
-                    result = func(context, **input_params)
-                else:
-                    logger.debug(f"Calling {handler_name}(ctx, {input_params})")
-                    result = func(context, input_params)
-            else:
-                if isinstance(input_params, dict):
-                    logger.debug(f"Calling {handler_name}(**{input_params})")
-                    result = func(**input_params)
-                else:
-                    logger.debug(f"Calling {handler_name}({input_params})")
-                    result = func(input_params)
-                    
-        except TypeError as e:
-            logger.error(f"Signature mismatch in {handler_name}: {e}. Expected: {sig}, Got: {input_params}")
-            raise RuntimeError(f"Function signature mismatch: {e}")
-            
-        except Exception as e:
-            logger.error(f"Function {handler_name} failed: {type(e).__name__}: {e}")
-            raise RuntimeError(f"Function execution failed: {e}")
-            
-        # Encode result
-        if result is None:
-            return b""
-        
-        try:
-            result_json = json.dumps(result)
-            return result_json.encode('utf-8')
-        except (TypeError, ValueError, UnicodeEncodeError) as e:
-            logger.error(f"Cannot serialize/encode result from {handler_name}: {type(result)} - {e}")
-            raise RuntimeError(f"Result serialization/encoding error: {e}")
-        
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            logger.warning("Received invalid step_checkpoints payload: %s", payload)
+            return None
+    if isinstance(payload, (list, tuple)):
+        return list(payload)
+    logger.warning("Unsupported step_checkpoints payload type: %s", type(payload))
+    return None
+
+
+def _decode_input(input_data: bytes) -> Any:
+    if not input_data:
+        return {}
+    try:
+        text = input_data.decode("utf-8")
+        return json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.error("Failed to decode input payload: %s", exc)
+        raise RuntimeError("Invalid input payload; expected UTF-8 JSON") from exc
+
+
+def _invoke_handler(handler: Any, ctx: Context, decoded_input: Any) -> Any:
+    if isinstance(decoded_input, dict):
+        result = handler(ctx, **decoded_input)
+    elif isinstance(decoded_input, list):
+        result = handler(ctx, *decoded_input)
+    else:
+        result = handler(ctx, decoded_input)
+
+    if inspect.isawaitable(result):
+        return _run_awaitable(result)
+    return result
+
+
+def _run_awaitable(awaitable: Any) -> Any:
+    try:
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        raise
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in {handler_name}: {type(e).__name__}: {e}")
-        logger.debug(f"Stack trace: {traceback.format_exc()}")
-        raise RuntimeError(f"Unexpected error: {e}")
+        return asyncio.run(awaitable)
+
+    if loop.is_running():  # pragma: no cover - defensive path when nested loops exist
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(awaitable)
+        finally:
+            new_loop.close()
+    return loop.run_until_complete(awaitable)
+
+
+def _encode_output(result: Any) -> bytes:
+    if result is None:
+        return b""
+    if isinstance(result, bytes):
+        return result
+    if isinstance(result, str):
+        return result.encode("utf-8")
+    try:
+        return json.dumps(result).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Result serialization error: {exc}") from exc
+
+
+__all__ = [
+    "ComponentExecutionResult",
+    "StateTransitionPayload",
+    "StateUpdatePayload",
+    "clear_registry",
+    "execute_component",
+    "function",
+    "get_function_metadata",
+    "get_registered_functions",
+    "handler",
+]
