@@ -22,6 +22,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Awaitable,
+    AsyncIterator,
     Callable,
     Dict,
     Iterable,
@@ -427,12 +428,13 @@ class Context:
 
         loop = asyncio.get_running_loop()
         spawn_key = self._allocate_spawn_key(key)
+        child_invocation_id = str(uuid.uuid4())
 
         async def runner() -> Any:
-            return await self._run_spawn(handler, args, kwargs, spawn_key)
+            return await self._run_spawn(handler, args, kwargs, spawn_key, child_invocation_id)
 
         task = loop.create_task(runner())
-        handle = SpawnHandle(spawn_key, task, self)
+        handle = SpawnHandle(spawn_key, child_invocation_id, task, self)
         self._pending_spawns.append(handle)
         return handle
 
@@ -457,6 +459,162 @@ class Context:
         """Await multiple spawn handles in parallel (alias of :meth:`gather`)."""
 
         return await self.gather(*handles)
+
+    async def send_to(
+        self,
+        target: str,
+        message: Mapping[str, Any],
+        *,
+        metadata: Optional[Mapping[str, str]] = None,
+        priority: Optional[int] = None,
+        message_type: str = "coordination",
+    ) -> str:
+        """Send a message to another durable participant within the run."""
+
+        if not target:
+            raise ValueError("target must be provided")
+        if not self.run_id:
+            raise RuntimeError("send_to requires a run context")
+
+        _ensure_json_serialisable(message)
+
+        transport = _GatewayTransport(self)
+
+        metadata_map: Dict[str, str] = {}
+        if metadata:
+            for key, value in metadata.items():
+                metadata_map[str(key)] = str(value)
+
+        if self._invocation_id:
+            metadata_map.setdefault("from_invocation_id", str(self._invocation_id))
+        if self.step_id:
+            metadata_map.setdefault("from_step", self.step_id)
+
+        body: Dict[str, Any] = {
+            "target": target,
+            "message": message,
+            "message_type": message_type,
+            "metadata": metadata_map,
+        }
+
+        if priority is not None and priority > 0:
+            body["priority"] = int(priority)
+
+        response = await asyncio.to_thread(
+            transport.request,
+            "POST",
+            f"/runs/{urllib.parse.quote(self.run_id, safe='')}/messages",
+            body,
+        )
+
+        message_id = response.get("message_id") or response.get("messageId")
+        if not message_id:
+            raise RuntimeError("gateway did not return a message_id for send_to")
+
+        return str(message_id)
+
+    def subscribe(
+        self,
+        target: str,
+        *,
+        poll_interval: float = 1.0,
+        limit: int = 50,
+    ) -> AsyncIterator[InboundMessage]:
+        """Yield messages for ``target`` as they become available."""
+
+        if not target:
+            raise ValueError("target must be provided")
+        if not self.run_id:
+            raise RuntimeError("subscribe requires a run context")
+
+        async def iterator() -> AsyncIterator[InboundMessage]:
+            transport = _GatewayTransport(self)
+            after: Optional[int] = None
+
+            while True:
+                query: Dict[str, Any] = {
+                    "target": target,
+                    "status": "pending",
+                    "limit": str(max(1, min(limit, 200))),
+                }
+                if after:
+                    query["after"] = str(after)
+
+                path = f"/runs/{urllib.parse.quote(self.run_id, safe='')}/messages?{urllib.parse.urlencode(query)}"
+
+                try:
+                    response = await asyncio.to_thread(transport.request, "GET", path, None)
+                except Exception as exc:  # pragma: no cover - network errors
+                    self._logger.debug("message poll failed: %s", exc)
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                items = response.get("messages") or []
+                if not items:
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                for item in items:
+                    message_id = str(item.get("message_id") or item.get("messageId"))
+                    payload = item.get("payload")
+                    metadata_raw = item.get("metadata") or {}
+                    metadata_map: Dict[str, str] = {}
+                    if isinstance(metadata_raw, Mapping):
+                        for key, value in metadata_raw.items():
+                            metadata_map[str(key)] = str(value)
+
+                    created_at = 0
+                    if ts := item.get("created_at"):
+                        try:
+                            created_at = int(ts)
+                        except (TypeError, ValueError):
+                            created_at = 0
+
+                    status = str(item.get("status") or "pending")
+
+                    inbound = InboundMessage(
+                        message_id=message_id,
+                        target=target,
+                        payload=payload,
+                        metadata=metadata_map,
+                        created_at=created_at,
+                        status=status,
+                        _context=self,
+                    )
+
+                    if created_at > 0 and (after is None or created_at > after):
+                        after = created_at
+
+                    yield inbound
+
+        return iterator()
+
+    async def _ack_message(
+        self,
+        message_id: str,
+        *,
+        target: str,
+        acked_by: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        if not message_id:
+            raise ValueError("message_id must be provided for ack")
+        if not self.run_id:
+            raise RuntimeError("ack requires a run context")
+
+        transport = _GatewayTransport(self)
+        body: Dict[str, Any] = {"channel": target}
+        if acked_by:
+            body["acked_by"] = acked_by
+        if reason:
+            body["reason"] = reason
+
+        await asyncio.to_thread(
+            transport.request,
+            "POST",
+            f"/runs/{urllib.parse.quote(self.run_id, safe='')}/messages/{urllib.parse.quote(message_id, safe='')}/ack",
+            body,
+        )
 
     @property
     def llm(self) -> "_ContextLlmFacade":
@@ -590,24 +748,52 @@ class Context:
         args: Sequence[Any],
         kwargs: Mapping[str, Any],
         spawn_key: str,
+        child_invocation_id: str,
     ) -> Any:
         async def invoke_child() -> Any:
-            return await self._invoke_spawn(handler, args, kwargs, spawn_key)
+            return await self._execute_spawn(handler, args, kwargs, spawn_key, child_invocation_id)
 
         step_name = f"spawn:{spawn_key}"
         return await self.step(step_name, invoke_child, key=spawn_key)
 
-    async def _invoke_spawn(
+    async def _execute_spawn(
         self,
         handler: Any,
         args: Sequence[Any],
         kwargs: Mapping[str, Any],
         spawn_key: str,
+        child_invocation_id: str,
+    ) -> Any:
+        if self._can_spawn_via_gateway():
+            try:
+                return await self._spawn_via_gateway(handler, args, kwargs, spawn_key, child_invocation_id)
+            except Exception as exc:
+                self._logger.warning(
+                    "Spawn via gateway failed; falling back to in-process execution: %s",
+                    exc,
+                )
+
+        return await self._spawn_local(handler, args, kwargs, spawn_key, child_invocation_id)
+
+    def _can_spawn_via_gateway(self) -> bool:
+        if not self.run_id:
+            return False
+        tenant_id = str(self._metadata.get("tenant_id") or "").strip()
+        if not tenant_id:
+            return False
+        return True
+
+    async def _spawn_local(
+        self,
+        handler: Any,
+        args: Sequence[Any],
+        kwargs: Mapping[str, Any],
+        spawn_key: str,
+        child_invocation_id: str,
     ) -> Any:
         handler_name, handler_callable = self._resolve_spawn_handler(handler)
         payload = self._encode_spawn_payload(handler_callable, args, kwargs)
 
-        child_invocation_id = uuid.uuid4().hex
         metadata = {
             "run_id": self.run_id,
             "parent_invocation_id": self._invocation_id,
@@ -630,6 +816,112 @@ class Context:
             payload,
             context_dict,
         )
+
+    async def _spawn_via_gateway(
+        self,
+        handler: Any,
+        args: Sequence[Any],
+        kwargs: Mapping[str, Any],
+        spawn_key: str,
+        child_invocation_id: str,
+    ) -> Any:
+        service_name = str(self._service_name or self._metadata.get("service_name") or "").strip()
+        if not service_name:
+            raise RuntimeError("Service name unavailable for spawn request")
+
+        handler_name, handler_callable = self._resolve_spawn_handler(handler)
+        payload_bytes = self._encode_spawn_payload(handler_callable, args, kwargs)
+
+        if payload_bytes:
+            try:
+                input_payload = json.loads(payload_bytes.decode("utf-8"))
+            except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+                self._logger.debug("spawn payload decode failed; sending raw string: %s", exc)
+                input_payload = payload_bytes.decode("utf-8", errors="ignore")
+        else:
+            input_payload = {}
+
+        metadata: Dict[str, str] = {
+            "run_id": self.run_id or "",
+            "parent_invocation_id": str(self._invocation_id or ""),
+            "spawn_key": spawn_key,
+            "attempt": str(self.attempt),
+        }
+        if self.step_id:
+            metadata["parent_step_id"] = self.step_id
+        if self.object_id:
+            metadata["parent_object_id"] = self.object_id
+        correlation_id = str(self._metadata.get("correlation_id") or "").strip()
+        if correlation_id:
+            metadata.setdefault("correlation_id", correlation_id)
+
+        transport = _GatewayTransport(self)
+
+        body: Dict[str, Any] = {
+            "service_name": service_name,
+            "handler_name": handler_name,
+            "input_data": input_payload,
+            "spawn_key": spawn_key,
+            "metadata": metadata,
+            "child_invocation_id": child_invocation_id,
+            "parent_invocation_id": str(self._invocation_id or ""),
+        }
+
+        if self.object_id:
+            body["parent_object_id"] = self.object_id
+
+        trace_id = str(self._metadata.get("trace_id") or "").strip()
+        if trace_id:
+            body["trace_id"] = trace_id
+
+        response = await asyncio.to_thread(
+            transport.request,
+            "POST",
+            f"/runs/{urllib.parse.quote(self.run_id, safe='')}/spawns",
+            body,
+        )
+
+        returned_child = str(response.get("child_invocation_id") or "")
+        if returned_child and returned_child != child_invocation_id:
+            self._logger.debug(
+                "Spawn response child invocation id mismatch (expected %s, got %s)",
+                child_invocation_id,
+                returned_child,
+            )
+
+        return await self._wait_for_spawn_completion(child_invocation_id, spawn_key)
+
+    async def _wait_for_spawn_completion(self, invocation_id: str, spawn_key: str) -> Any:
+        transport = _GatewayTransport(self)
+        delay = 0.5
+
+        status_path = f"/status/{urllib.parse.quote(invocation_id, safe='')}"
+        output_path = f"/output/{urllib.parse.quote(invocation_id, safe='')}"
+
+        while True:
+            try:
+                status_response = await asyncio.to_thread(transport.request, "GET", status_path)
+            except RuntimeError as exc:
+                if "404" in str(exc):  # Spawn not visible yet; retry shortly
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.5, 5.0)
+                    continue
+                raise
+
+            status = str(status_response.get("status") or "").lower()
+
+            if status in {"completed", "failed", "cancelled"}:
+                if status == "completed":
+                    output_response = await asyncio.to_thread(transport.request, "GET", output_path)
+                    return output_response.get("output")
+
+                error_message = status_response.get("errorMessage") or f"spawn {invocation_id} {status}"
+                raise RuntimeError(
+                    f"Spawned invocation '{invocation_id}' (key={spawn_key}) failed: {error_message}"
+                )
+
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 5.0)
 
     def _resolve_spawn_handler(self, handler: Any) -> tuple[str, Callable[..., Any]]:
         definition = getattr(handler, "_agnt5_durable", None)
@@ -937,10 +1229,17 @@ _UNSET = object()
 class SpawnHandle:
     """Handle representing a spawned child invocation."""
 
-    __slots__ = ("key", "_task", "_context", "_result")
+    __slots__ = ("key", "invocation_id", "_task", "_context", "_result")
 
-    def __init__(self, key: str, task: "asyncio.Task[Any]", context: "Context") -> None:
+    def __init__(
+        self,
+        key: str,
+        invocation_id: str,
+        task: "asyncio.Task[Any]",
+        context: "Context",
+    ) -> None:
         self.key = key
+        self.invocation_id = invocation_id
         self._task = task
         self._context = context
         self._result: Any = _UNSET
@@ -959,6 +1258,27 @@ class SpawnHandle:
 
     def __await__(self):  # pragma: no cover - delegated to result()
         return self.result().__await__()
+
+
+@dataclass
+class InboundMessage:
+    """Message fetched via :meth:`Context.subscribe`."""
+
+    message_id: str
+    target: str
+    payload: Any
+    metadata: Mapping[str, str]
+    created_at: int
+    status: str
+    _context: "Context"
+
+    async def ack(self, *, acked_by: Optional[str] = None, reason: Optional[str] = None) -> None:
+        await self._context._ack_message(
+            self.message_id,
+            target=self.target,
+            acked_by=acked_by,
+            reason=reason,
+        )
 
 
 class AgentClient:
