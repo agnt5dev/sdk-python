@@ -20,9 +20,10 @@ tokio = { version = "1.0", features = ["full"] }
 # Local dependencies
 agnt5-sdk-core = { path = "../sdk-core" }
 
-# Base64 decoding
+# Base64 decoding and JSON handling
 base64 = "0.22"
 serde = "1.0"
+serde_json = "1.0"
 
 # Logging integration
 pyo3-log = "0.12.4"

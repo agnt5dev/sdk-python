@@ -1,6 +1,7 @@
 use agnt5_sdk_core::pb::{
     execute_component_response,
     ComponentInfo,
+    ComponentSchema,
     ComponentType,
     ExecuteComponentRequest,
     ExecuteComponentResponse,
@@ -10,6 +11,90 @@ use agnt5_sdk_core::pb::{
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use serde_json;
+
+/// Convert a JSON schema string to ComponentSchema proto
+fn parse_json_schema(json_str: &str) -> Option<ComponentSchema> {
+    let json_value: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(val) => val,
+        Err(_) => return None,
+    };
+
+    json_value_to_component_schema(&json_value)
+}
+
+/// Recursively convert a serde_json::Value to ComponentSchema
+fn json_value_to_component_schema(json_value: &serde_json::Value) -> Option<ComponentSchema> {
+    match json_value {
+        serde_json::Value::Object(obj) => {
+            let mut schema = ComponentSchema::default();
+
+            // Set type
+            if let Some(type_val) = obj.get("type") {
+                if let serde_json::Value::String(type_str) = type_val {
+                    schema.r#type = type_str.clone();
+                }
+            }
+
+            // Set description
+            if let Some(desc_val) = obj.get("description") {
+                if let serde_json::Value::String(desc_str) = desc_val {
+                    schema.description = Some(desc_str.clone());
+                }
+            }
+
+            // Set format
+            if let Some(format_val) = obj.get("format") {
+                if let serde_json::Value::String(format_str) = format_val {
+                    schema.format = Some(format_str.clone());
+                }
+            }
+
+            // Set properties
+            if let Some(props_val) = obj.get("properties") {
+                if let serde_json::Value::Object(props_obj) = props_val {
+                    for (key, value) in props_obj {
+                        if let Some(prop_schema) = json_value_to_component_schema(value) {
+                            schema.properties.insert(key.clone(), prop_schema);
+                        }
+                    }
+                }
+            }
+
+            // Set required
+            if let Some(req_val) = obj.get("required") {
+                if let serde_json::Value::Array(req_array) = req_val {
+                    for item in req_array {
+                        if let serde_json::Value::String(req_str) = item {
+                            schema.required.push(req_str.clone());
+                        }
+                    }
+                }
+            }
+
+            // Set items (for arrays)
+            if let Some(items_val) = obj.get("items") {
+                if let Some(items_schema) = json_value_to_component_schema(items_val) {
+                    schema.items = Some(Box::new(items_schema));
+                }
+            }
+
+            // Set enum_values
+            if let Some(enum_val) = obj.get("enum") {
+                if let serde_json::Value::Array(enum_array) = enum_val {
+                    for item in enum_array {
+                        if let serde_json::Value::String(enum_str) = item {
+                            schema.enum_values.push(enum_str.clone());
+                        }
+                    }
+                }
+            }
+
+            Some(schema)
+        }
+        _ => None,
+    }
+}
 
 #[pyclass]
 #[derive(Clone)]
@@ -413,12 +498,20 @@ impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyComponentInfo {
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub name: String,
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub component_type: String,
-    #[pyo3(get)]
+    #[pyo3(get, set)]
     pub metadata: HashMap<String, String>,
+    #[pyo3(get, set)]
+    pub config: HashMap<String, String>,
+    #[pyo3(get, set)]
+    pub input_schema: Option<String>,  // JSON string
+    #[pyo3(get, set)]
+    pub output_schema: Option<String>, // JSON string
+    #[pyo3(get, set)]
+    pub definition: Option<String>,    // Source code or definition
 }
 
 #[pymethods]
@@ -428,11 +521,19 @@ impl PyComponentInfo {
         name: String,
         component_type: String,
         metadata: Option<HashMap<String, String>>,
+        config: Option<HashMap<String, String>>,
+        input_schema: Option<String>,
+        output_schema: Option<String>,
+        definition: Option<String>,
     ) -> Self {
         Self {
             name,
             component_type,
             metadata: metadata.unwrap_or_default(),
+            config: config.unwrap_or_default(),
+            input_schema,
+            output_schema,
+            definition,
         }
     }
 }
@@ -451,12 +552,22 @@ impl From<PyComponentInfo> for ComponentInfo {
             _ => ComponentType::Unspecified as i32,
         };
 
+        // Parse input schema if provided
+        let input_schema = comp.input_schema
+            .as_ref()
+            .and_then(|json_str| parse_json_schema(json_str));
+
+        // Parse output schema if provided
+        let output_schema = comp.output_schema
+            .as_ref()
+            .and_then(|json_str| parse_json_schema(json_str));
+
         Self {
             name: comp.name,
             component_type,
-            input_schema: None,
-            output_schema: None,
-            config: HashMap::new(),
+            input_schema,
+            output_schema,
+            config: comp.config,
             metadata: comp.metadata,
         }
     }

@@ -19,6 +19,8 @@ classifiers = [
 ]
 dependencies = [
     "maturin>=1.9.3",
+    "docstring-parser>=0.15",
+    "typing-extensions>=4.8",
 ]
 
 [project.urls]

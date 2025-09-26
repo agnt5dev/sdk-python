@@ -19,6 +19,7 @@ from .decorators import (
 from .workflows import get_registered_workflows
 from .runtimes import WorkerRuntime, ASGIRuntime
 from .logging import install_opentelemetry_logging
+from .schema_extractor import extract_function_schema, extract_workflow_schema
 
 # Core functionality import from Rust extension
 from ._compat import _rust_available
@@ -193,6 +194,9 @@ class Worker:
                 if not metadata:
                     continue
 
+                # Extract schema information
+                schema_info = extract_function_schema(func)
+
                 component_metadata = {
                     'handler_name': metadata.get('handler', handler_name),
                     'module': metadata.get('module', func.__module__),
@@ -200,13 +204,28 @@ class Worker:
                     'retry_policy': json.dumps(metadata.get('retry_policy', {})),
                     'backoff_policy': json.dumps(metadata.get('backoff_policy', {})),
                     'parameters': json.dumps(metadata.get('parameters', [])),
+                    'description': schema_info.get('description', ''),
+                    'long_description': schema_info.get('long_description', ''),
                 }
+
+                # Extract function source as definition
+                definition = None
+                try:
+                    import inspect
+                    definition = inspect.getsource(func)
+                except Exception:
+                    # If we can't get source, that's okay
+                    pass
 
                 py_components.append(
                     PyComponentInfo(
                         name=handler_name,
                         component_type='function',
                         metadata=component_metadata,
+                        config={},
+                        input_schema=json.dumps(schema_info.get('input_schema', {})),
+                        output_schema=json.dumps(schema_info.get('output_schema', {})),
+                        definition=definition,
                     )
                 )
 
@@ -225,6 +244,10 @@ class Worker:
                         name=agent_name,
                         component_type='agent',
                         metadata=component_metadata,
+                        config={},
+                        input_schema=None,  # TODO: Extract agent method schemas
+                        output_schema=None,
+                        definition=None,
                     )
                 )
 
@@ -234,13 +257,18 @@ class Worker:
             for flow_name, definition in workflows.items():
                 try:
                     flow_json = definition.to_json()
+                    flow_def = definition.to_dict()
                 except (TypeError, ValueError) as exc:
                     logger.error("Failed to serialize workflow '%s': %s", flow_name, exc)
                     continue
 
+                # Extract workflow schema
+                workflow_schema = extract_workflow_schema(flow_def)
+
                 component_metadata = {
                     'flow_definition': flow_json,
                     'step_count': str(len(definition.steps)),
+                    'description': definition.__doc__ or '',
                 }
 
                 service_metadata[f"workflow:{flow_name}"] = flow_json
@@ -250,6 +278,10 @@ class Worker:
                         name=flow_name,
                         component_type='workflow',
                         metadata=component_metadata,
+                        config={},
+                        input_schema=json.dumps(workflow_schema.get('input_schema', {})),
+                        output_schema=json.dumps(workflow_schema.get('output_schema', {})),
+                        definition=flow_json,
                     )
                 )
 
