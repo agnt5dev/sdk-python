@@ -1,14 +1,12 @@
 use pyo3::prelude::*;
 
+mod adk;
+mod language_model;
 mod types;
 mod worker;
 use types::{
-    PyComponentInfo,
-    PyExecuteComponentRequest,
-    PyExecuteComponentResponse,
-    PyStateTransition,
-    PyStateUpdate,
-    PyStepCheckpoint,
+    PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse, PyStateTransition,
+    PyStateUpdate, PyStepCheckpoint,
 };
 use worker::{PyWorker, PyWorkerConfig};
 
@@ -68,6 +66,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize PyO3-log to bridge Rust logs to Python
     pyo3_log::init();
 
+    // Worker-related classes
     m.add_class::<PyWorkerConfig>()?;
     m.add_class::<PyWorker>()?;
     m.add_class::<PyExecuteComponentRequest>()?;
@@ -76,6 +75,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStepCheckpoint>()?;
     m.add_class::<PyStateTransition>()?;
     m.add_class::<PyStateUpdate>()?;
+
+    // Language Model classes
+    language_model::register_language_model(m)?;
+
+    // ADK scaffolding
+    adk::register_adk(m)?;
+
+    // Utility functions
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     Ok(())
 }

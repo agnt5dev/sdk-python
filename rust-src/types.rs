@@ -1,17 +1,11 @@
 use agnt5_sdk_core::pb::{
-    execute_component_response,
-    ComponentInfo,
-    ComponentSchema,
-    ComponentType,
-    ExecuteComponentRequest,
-    ExecuteComponentResponse,
-    StateTransition,
-    StateUpdate,
+    execute_component_response, ComponentInfo, ComponentSchema, ComponentType,
+    ExecuteComponentRequest, ExecuteComponentResponse, StateTransition, StateUpdate,
     StepCheckpoint,
 };
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use serde_json;
+use std::collections::HashMap;
 
 /// Convert a JSON schema string to ComponentSchema proto
 fn parse_json_schema(json_str: &str) -> Option<ComponentSchema> {
@@ -353,20 +347,19 @@ impl PyExecuteComponentRequest {
 
 impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
     fn from(req: ExecuteComponentRequest) -> Self {
-        let component_type = match ComponentType::try_from(req.component_type)
-            .unwrap_or(ComponentType::Function)
-        {
-            ComponentType::Function => "function",
-            ComponentType::Flow => "flow",
-            ComponentType::Object => "object",
-            ComponentType::Task => "task",
-            ComponentType::Workflow => "workflow",
-            ComponentType::Agent => "agent",
-            ComponentType::Tool => "tool",
-            ComponentType::Mcp => "mcp",
-            ComponentType::Unspecified => "unspecified",
-        }
-        .to_string();
+        let component_type =
+            match ComponentType::try_from(req.component_type).unwrap_or(ComponentType::Function) {
+                ComponentType::Function => "function",
+                ComponentType::Flow => "flow",
+                ComponentType::Object => "object",
+                ComponentType::Task => "task",
+                ComponentType::Workflow => "workflow",
+                ComponentType::Agent => "agent",
+                ComponentType::Tool => "tool",
+                ComponentType::Mcp => "mcp",
+                ComponentType::Unspecified => "unspecified",
+            }
+            .to_string();
 
         Self {
             invocation_id: req.invocation_id,
@@ -449,7 +442,9 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
     fn from(resp: PyExecuteComponentResponse) -> Self {
         let result = if resp.success {
             if let Some(update) = resp.state_update.clone() {
-                Some(execute_component_response::Result::StateUpdate(update.into()))
+                Some(execute_component_response::Result::StateUpdate(
+                    update.into(),
+                ))
             } else {
                 Some(execute_component_response::Result::OutputData(
                     resp.output_data.clone(),
@@ -507,11 +502,11 @@ pub struct PyComponentInfo {
     #[pyo3(get, set)]
     pub config: HashMap<String, String>,
     #[pyo3(get, set)]
-    pub input_schema: Option<String>,  // JSON string
+    pub input_schema: Option<String>, // JSON string
     #[pyo3(get, set)]
     pub output_schema: Option<String>, // JSON string
     #[pyo3(get, set)]
-    pub definition: Option<String>,    // Source code or definition
+    pub definition: Option<String>, // Source code or definition
 }
 
 #[pymethods]
@@ -553,12 +548,14 @@ impl From<PyComponentInfo> for ComponentInfo {
         };
 
         // Parse input schema if provided
-        let input_schema = comp.input_schema
+        let input_schema = comp
+            .input_schema
             .as_ref()
             .and_then(|json_str| parse_json_schema(json_str));
 
         // Parse output schema if provided
-        let output_schema = comp.output_schema
+        let output_schema = comp
+            .output_schema
             .as_ref()
             .and_then(|json_str| parse_json_schema(json_str));
 

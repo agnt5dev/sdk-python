@@ -230,7 +230,6 @@ impl PyWorker {
         handler_arc: Arc<Mutex<Option<PyObject>>>,
         runtime_message: RuntimeMessage,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
-        
         // Get the Python handler by cloning it properly
         let handler = {
             let handler_guard = handler_arc.lock().map_err(|e| {
@@ -369,9 +368,14 @@ impl PyWorker {
                 );
                 Ok(None)
             }
-            Some(runtime_message::MessageData::HealthResponse(_)) => {
+            Some(runtime_message::MessageData::RuntimeServiceResponse(_)) => {
+                log::debug!(
+                    "Ignoring RuntimeServiceResponse message (type: {})",
+                    runtime_message.message_type as i32
+                );
                 Ok(None)
             }
+            Some(runtime_message::MessageData::HealthResponse(_)) => Ok(None),
             None => {
                 log::debug!(
                     "Ignoring message with no data (type: {})",

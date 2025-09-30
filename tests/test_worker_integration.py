@@ -3,7 +3,7 @@ import json
 import pytest
 
 from agnt5 import Context, durable
-from agnt5.decorators import clear_registry
+from agnt5.function import clear_registry
 from agnt5.worker import Worker
 from agnt5._compat import _rust_available
 

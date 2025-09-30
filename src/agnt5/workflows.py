@@ -129,7 +129,9 @@ def register_workflow(name: str, definition: FlowDefinition) -> None:
     logger.debug("Registered workflow definition: %s", name)
 
 
-def workflow(name: Optional[str] = None) -> Callable[[Callable[[], FlowDefinition]], Callable[[], FlowDefinition]]:
+def workflow(
+    name: Optional[str] = None,
+) -> Callable[[Callable[[], FlowDefinition]], Callable[[], FlowDefinition]]:
     """Decorator to register a workflow definition provided by a factory function."""
 
     def decorator(factory: Callable[[], FlowDefinition]) -> Callable[[], FlowDefinition]:
@@ -208,7 +210,9 @@ def wait_timer_step(
         name=name,
         step_type=StepType.WAIT_TIMER,
         dependencies=dependencies or [],
-        timer=TimerConfig(key=timer_key, delay_ms=delay_ms, cron_expr=cron_expr, max_retries=max_retries),
+        timer=TimerConfig(
+            key=timer_key, delay_ms=delay_ms, cron_expr=cron_expr, max_retries=max_retries
+        ),
     )
 
 

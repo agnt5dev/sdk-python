@@ -57,7 +57,9 @@ class DurableFunctionRegistry:
                     f"with handler '{existing.qualname}'."
                 )
             self._functions[definition.name] = definition
-            logger.debug("Registered durable function '%s' from %s", definition.name, definition.module)
+            logger.debug(
+                "Registered durable function '%s' from %s", definition.name, definition.module
+            )
 
     def get(self, name: str) -> Optional[DurableFunctionDefinition]:
         with self._lock:

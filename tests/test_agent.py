@@ -11,7 +11,7 @@ from agnt5.agent import (
     stateful,
 )
 from agnt5.context import Context
-from agnt5.decorators import execute_component
+from agnt5.function import execute_component
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +41,7 @@ def test_duplicate_registration_raises():
             return message
 
     with pytest.raises(ValueError):
+
         @stateful(name="dupe", key=lambda *_: "key")
         class SecondAgent(DurableAgent):
             async def on_message(self, ctx: AgentContext, message):
@@ -49,6 +50,7 @@ def test_duplicate_registration_raises():
 
 def test_requires_durable_agent_base():
     with pytest.raises(TypeError):
+
         @stateful(name="bad", key=lambda *_: "key")
         class NotAnAgent:  # type: ignore
             pass
@@ -56,6 +58,7 @@ def test_requires_durable_agent_base():
 
 def test_requires_key():
     with pytest.raises(ValueError):
+
         @stateful(name="missing")  # type: ignore
         class MissingKey(DurableAgent):
             async def on_message(self, ctx: AgentContext, message):

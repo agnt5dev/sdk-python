@@ -12,6 +12,7 @@ from agnt5.schema_extractor import SchemaExtractor, extract_function_schema
 @dataclass
 class UserProfile:
     """User profile data."""
+
     name: str
     age: int
     email: Optional[str] = None
@@ -21,6 +22,7 @@ class UserProfile:
 @dataclass
 class ProcessingResult:
     """Result of processing operation."""
+
     success: bool
     message: str
     data: Dict[str, Any]
@@ -39,50 +41,40 @@ class TestSchemaExtractor:
         assert self.extractor.type_to_json_schema(int) == {"type": "integer"}
         assert self.extractor.type_to_json_schema(float) == {"type": "number"}
         assert self.extractor.type_to_json_schema(bool) == {"type": "boolean"}
-        assert self.extractor.type_to_json_schema(bytes) == {"type": "string", "contentEncoding": "base64"}
+        assert self.extractor.type_to_json_schema(bytes) == {
+            "type": "string",
+            "contentEncoding": "base64",
+        }
 
     def test_collection_types(self):
         """Test conversion of collection types."""
         # Basic collections
-        assert self.extractor.type_to_json_schema(dict) == {"type": "object", "additionalProperties": True}
+        assert self.extractor.type_to_json_schema(dict) == {
+            "type": "object",
+            "additionalProperties": True,
+        }
         assert self.extractor.type_to_json_schema(list) == {"type": "array"}
 
         # Typed dict
         dict_schema = self.extractor.type_to_json_schema(Dict[str, int])
-        expected = {
-            "type": "object",
-            "additionalProperties": {"type": "integer"}
-        }
+        expected = {"type": "object", "additionalProperties": {"type": "integer"}}
         assert dict_schema == expected
 
         # Typed list
         list_schema = self.extractor.type_to_json_schema(List[str])
-        expected = {
-            "type": "array",
-            "items": {"type": "string"}
-        }
+        expected = {"type": "array", "items": {"type": "string"}}
         assert list_schema == expected
 
     def test_optional_types(self):
         """Test Optional type handling."""
         optional_schema = self.extractor.type_to_json_schema(Optional[str])
-        expected = {
-            "oneOf": [
-                {"type": "null"},
-                {"type": "string"}
-            ]
-        }
+        expected = {"oneOf": [{"type": "null"}, {"type": "string"}]}
         assert optional_schema == expected
 
     def test_union_types(self):
         """Test Union type handling."""
         union_schema = self.extractor.type_to_json_schema(Union[str, int])
-        expected = {
-            "oneOf": [
-                {"type": "string"},
-                {"type": "integer"}
-            ]
-        }
+        expected = {"oneOf": [{"type": "string"}, {"type": "integer"}]}
         assert union_schema == expected
 
     def test_dataclass_conversion(self):
@@ -102,13 +94,17 @@ class TestSchemaExtractor:
         assert props["email"]["oneOf"] == [{"type": "null"}, {"type": "string"}]
 
         # Check list field
-        assert props["tags"]["oneOf"] == [{"type": "null"}, {"type": "array", "items": {"type": "string"}}]
+        assert props["tags"]["oneOf"] == [
+            {"type": "null"},
+            {"type": "array", "items": {"type": "string"}},
+        ]
 
         # Check required fields
         assert set(schema["required"]) == {"name", "age"}
 
     def test_nested_dataclass(self):
         """Test nested dataclass handling."""
+
         @dataclass
         class NestedData:
             profile: UserProfile
@@ -131,10 +127,11 @@ class TestSchemaExtractor:
 
     def test_circular_reference_handling(self):
         """Test that circular references are handled gracefully."""
+
         @dataclass
         class Node:
             value: str
-            parent: Optional['Node'] = None
+            parent: Optional["Node"] = None
 
         schema = self.extractor.type_to_json_schema(Node)
 
@@ -160,6 +157,7 @@ class TestFunctionSchemaExtraction:
 
     def test_simple_function(self):
         """Test schema extraction for a simple function."""
+
         def greet(name: str) -> str:
             """Greet a user by name."""
             return f"Hello, {name}!"
@@ -180,10 +178,9 @@ class TestFunctionSchemaExtraction:
 
     def test_function_with_defaults(self):
         """Test function with default parameters."""
+
         def process_data(
-            data: str,
-            count: int = 1,
-            optional_flag: Optional[bool] = None
+            data: str, count: int = 1, optional_flag: Optional[bool] = None
         ) -> Dict[str, Any]:
             """Process some data with optional parameters."""
             return {"processed": True}
@@ -207,10 +204,9 @@ class TestFunctionSchemaExtraction:
 
     def test_function_with_complex_types(self):
         """Test function with complex parameter types."""
+
         def process_user(
-            user_id: str,
-            profile: UserProfile,
-            options: Dict[str, str] = None
+            user_id: str, profile: UserProfile, options: Dict[str, str] = None
         ) -> ProcessingResult:
             """Process a user profile."""
             return ProcessingResult(True, "Done", {})
@@ -233,6 +229,7 @@ class TestFunctionSchemaExtraction:
 
     def test_function_without_annotations(self):
         """Test function without type annotations."""
+
         def legacy_function(data, count=1):
             """A legacy function without type hints."""
             return "processed"
@@ -248,10 +245,8 @@ class TestFunctionSchemaExtraction:
 
     def test_function_with_docstring_params(self):
         """Test function with detailed docstring."""
-        def advanced_process(
-            input_data: str,
-            max_retries: int = 3
-        ) -> bool:
+
+        def advanced_process(input_data: str, max_retries: int = 3) -> bool:
             """
             Process input data with retry logic.
 
@@ -283,6 +278,7 @@ class TestFunctionSchemaExtraction:
 
     def test_async_function(self):
         """Test schema extraction for async functions."""
+
         async def async_process(data: str) -> Dict[str, Any]:
             """Async processing function."""
             return {"result": "processed"}
@@ -317,6 +313,7 @@ class TestEdgeCases:
 
     def test_function_without_docstring(self):
         """Test function without docstring."""
+
         def no_docs(x: int) -> int:
             return x * 2
 
@@ -329,6 +326,7 @@ class TestEdgeCases:
 
     def test_malformed_annotations(self):
         """Test function with malformed or missing annotations."""
+
         def mixed_annotations(a: str, b, c: int = 5) -> str:
             return "result"
 
@@ -344,8 +342,9 @@ class TestEdgeCases:
 
     def test_very_complex_nested_types(self):
         """Test very complex nested type structures."""
+
         def complex_function(
-            data: Dict[str, List[Optional[UserProfile]]]
+            data: Dict[str, List[Optional[UserProfile]]],
         ) -> List[Dict[str, Union[str, int]]]:
             """Function with very complex types."""
             return []

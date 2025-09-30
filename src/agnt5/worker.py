@@ -9,12 +9,13 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ._compat import _rust_available, _import_error
-from .agent import get_registered_agents
-from .decorators import (
+
+# from .agent import get_registered_agents  # REMOVED
+from .function import (
     ComponentExecutionResult,
     execute_component,
-    get_function_metadata,
     get_registered_functions,
+    get_function_metadata,
 )
 from .workflows import get_registered_workflows
 from .runtimes import WorkerRuntime, ASGIRuntime
@@ -76,33 +77,35 @@ def _serialize_step_checkpoints(py_checkpoints: List[Any]) -> List[Dict[str, Any
 class Worker:
     """
     High-level AGNT5 Worker that automatically registers decorated functions.
-    
+
     This class wraps the low-level Rust PyWorker and provides automatic
     registration of @function decorated handlers.
     """
-    
-    def __init__(self, 
-                 service_name: str,
-                 service_version: str = "1.0.0",
-                 coordinator_endpoint: str = "http://localhost:9091",
-                 runtime: str = "standalone"):
+
+    def __init__(
+        self,
+        service_name: str,
+        service_version: str = "1.0.0",
+        coordinator_endpoint: str = "http://localhost:34186",
+        runtime: str = "standalone",
+    ):
         """
         Initialize the worker.
-        
+
         Args:
             service_name: Name of the service
-            service_version: Version of the service  
+            service_version: Version of the service
             coordinator_endpoint: Endpoint of the coordinator service
             runtime: Runtime mode - "standalone" or "asgi"
         """
         if not _rust_available:
             raise RuntimeError(f"Rust core is required but not available: {_import_error}")
-            
+
         self.service_name = service_name
         self.service_version = service_version
         self.coordinator_endpoint = coordinator_endpoint
         self.runtime_mode = runtime
-        
+
         # Create runtime adapter
         if runtime == "asgi":
             self.runtime_adapter = ASGIRuntime(worker=self)
@@ -110,45 +113,45 @@ class Worker:
             self.runtime_adapter = WorkerRuntime()
         else:
             raise ValueError(f"Unknown runtime: {runtime}. Supported: 'standalone', 'asgi'")
-        
+
         # Import and create Rust worker
         config = PyWorkerConfig(service_name, service_version, "python")
         self._rust_worker = PyWorker(config)
-        
+
         # Note: Telemetry initialization deferred to run() method due to Tokio runtime requirement
-        
+
         # Set up OpenTelemetry logging integration (handler is resilient to timing issues)
         try:
             self._otel_handler = install_opentelemetry_logging(
                 logger=None,  # Install on root logger to capture all Python logs
-                level=logging.INFO
+                level=logging.INFO,
             )
             logger.info("OpenTelemetry logging integration enabled")
         except Exception as e:
             logger.warning(f"Failed to initialize OpenTelemetry logging: {e}")
             self._otel_handler = None
-        
+
         # Set the message handler - this is the simple FFI boundary
         self._rust_worker.set_message_handler(self._handle_message)
-        
+
         self._running = False
-        
+
         logger.info(f"Worker created: {service_name} v{service_version} (runtime: {runtime})")
-        
+
     async def run(self):
         """
         Run the worker and handle decorated function invocations.
-        
+
         This will:
         1. Register all decorated functions
         2. Start the underlying Rust worker
         3. Handle incoming invocations
         """
         logger.info(f"Starting worker {self.service_name}...")
-        
+
         # Register all decorated functions and workflows first
         self._register_components()
-        
+
         # Run the Rust worker (this will block until shutdown)
         try:
             self._running = True
@@ -159,36 +162,41 @@ class Worker:
         finally:
             self._running = False
             logger.info(f"Worker {self.service_name} stopped")
-            
+
             # Clean up OpenTelemetry logging handler
-            if hasattr(self, '_otel_handler') and self._otel_handler:
+            if hasattr(self, "_otel_handler") and self._otel_handler:
                 try:
                     from .logging import remove_opentelemetry_logging
+
                     remove_opentelemetry_logging()
                     logger.info("OpenTelemetry logging integration cleaned up")
                 except Exception as e:
                     logger.warning(f"Failed to cleanup OpenTelemetry logging: {e}")
-        
+
     def is_running(self) -> bool:
         """Check if the worker is running."""
         return self._running
-        
+
     def _register_components(self):
         """Register decorated functions and workflows with the Worker Coordinator."""
 
+        from .entity import get_entity_registry
+
         functions = get_registered_functions()
-        agents = get_registered_agents()
+        entities = get_entity_registry().list_entities()
         workflows = get_registered_workflows()
         service_metadata: Dict[str, str] = {}
 
-        if not functions and not workflows and not agents:
+        if not functions and not workflows and not entities:
             logger.warning("No components registered via decorators")
             return
 
         py_components = []
 
         if functions:
-            logger.info("Registering %d function handlers: %s", len(functions), list(functions.keys()))
+            logger.info(
+                "Registering %d function handlers: %s", len(functions), list(functions.keys())
+            )
             for handler_name, func in functions.items():
                 metadata = get_function_metadata(func)
                 if not metadata:
@@ -198,20 +206,21 @@ class Worker:
                 schema_info = extract_function_schema(func)
 
                 component_metadata = {
-                    'handler_name': metadata.get('handler', handler_name),
-                    'module': metadata.get('module', func.__module__),
-                    'signature': metadata.get('signature', ''),
-                    'retry_policy': json.dumps(metadata.get('retry_policy', {})),
-                    'backoff_policy': json.dumps(metadata.get('backoff_policy', {})),
-                    'parameters': json.dumps(metadata.get('parameters', [])),
-                    'description': schema_info.get('description', ''),
-                    'long_description': schema_info.get('long_description', ''),
+                    "handler_name": metadata.get("handler", handler_name),
+                    "module": metadata.get("module", func.__module__),
+                    "signature": metadata.get("signature", ""),
+                    "retry_policy": json.dumps(metadata.get("retry_policy", {})),
+                    "backoff_policy": json.dumps(metadata.get("backoff_policy", {})),
+                    "parameters": json.dumps(metadata.get("parameters", [])),
+                    "description": schema_info.get("description", ""),
+                    "long_description": schema_info.get("long_description", ""),
                 }
 
                 # Extract function source as definition
                 definition = None
                 try:
                     import inspect
+
                     definition = inspect.getsource(func)
                 except Exception:
                     # If we can't get source, that's okay
@@ -220,32 +229,32 @@ class Worker:
                 py_components.append(
                     PyComponentInfo(
                         name=handler_name,
-                        component_type='function',
+                        component_type="function",
                         metadata=component_metadata,
                         config={},
-                        input_schema=json.dumps(schema_info.get('input_schema', {})),
-                        output_schema=json.dumps(schema_info.get('output_schema', {})),
+                        input_schema=json.dumps(schema_info.get("input_schema", {})),
+                        output_schema=json.dumps(schema_info.get("output_schema", {})),
                         definition=definition,
                     )
                 )
 
-        if agents:
-            agent_names = list(agents.keys())
-            logger.info("Registering %d stateful agents: %s", len(agent_names), agent_names)
-            for agent_name, definition in agents.items():
+        if entities:
+            entity_names = list(entities.keys())
+            logger.info("Registering %d entities: %s", len(entity_names), entity_names)
+            for entity_name, entity_type in entities.items():
                 component_metadata = {
-                    'class_name': definition.agent_cls.__name__,
-                    'module': definition.module,
-                    'qualname': definition.qualname,
+                    "entity_type": entity_name,
+                    "write_methods": list(entity_type._write_methods.keys()),
+                    "shared_methods": list(entity_type._shared_methods.keys()),
                 }
 
                 py_components.append(
                     PyComponentInfo(
-                        name=agent_name,
-                        component_type='agent',
+                        name=entity_name,
+                        component_type="entity",
                         metadata=component_metadata,
                         config={},
-                        input_schema=None,  # TODO: Extract agent method schemas
+                        input_schema=None,  # TODO: Extract entity method schemas
                         output_schema=None,
                         definition=None,
                     )
@@ -266,9 +275,9 @@ class Worker:
                 workflow_schema = extract_workflow_schema(flow_def)
 
                 component_metadata = {
-                    'flow_definition': flow_json,
-                    'step_count': str(len(definition.steps)),
-                    'description': definition.__doc__ or '',
+                    "flow_definition": flow_json,
+                    "step_count": str(len(definition.steps)),
+                    "description": definition.__doc__ or "",
                 }
 
                 service_metadata[f"workflow:{flow_name}"] = flow_json
@@ -276,11 +285,11 @@ class Worker:
                 py_components.append(
                     PyComponentInfo(
                         name=flow_name,
-                        component_type='workflow',
+                        component_type="workflow",
                         metadata=component_metadata,
                         config={},
-                        input_schema=json.dumps(workflow_schema.get('input_schema', {})),
-                        output_schema=json.dumps(workflow_schema.get('output_schema', {})),
+                        input_schema=json.dumps(workflow_schema.get("input_schema", {})),
+                        output_schema=json.dumps(workflow_schema.get("output_schema", {})),
                         definition=flow_json,
                     )
                 )
@@ -297,8 +306,8 @@ class Worker:
             logger.warning("No components were registered after serialization step")
 
         # Function invocations are now handled through the message handler
-    
-    def _handle_message(self, request: 'PyExecuteComponentRequest') -> 'PyExecuteComponentResponse':
+
+    def _handle_message(self, request: "PyExecuteComponentRequest") -> "PyExecuteComponentResponse":
         """Handle incoming function invocation requests."""
         try:
             # Extract request data
@@ -316,7 +325,7 @@ class Worker:
             )
             if request.metadata:
                 logger.debug(f"Request metadata: {dict(request.metadata)}")
-            
+
             # Log input data preview for debugging
             if input_data:
                 try:
@@ -328,39 +337,39 @@ class Worker:
                     logger.debug(f"Input data hex preview: {preview}")
                 except Exception:
                     logger.debug(f"Input data (raw bytes): {len(input_data)} bytes")
-            
+
             # Prepare step checkpoints for the durable context
-            raw_step_checkpoints = list(getattr(request, 'step_checkpoints', []))
+            raw_step_checkpoints = list(getattr(request, "step_checkpoints", []))
             step_checkpoints = _serialize_step_checkpoints(raw_step_checkpoints)
 
             # Create context for the function
             context = {
-                'invocation_id': invocation_id,
-                'service_name': request.service_name,
-                'handler_name': handler_name,
-                'metadata': request.metadata,
-                'step_checkpoints': step_checkpoints,
-                'component_type': component_type,
-                'object_id': getattr(request, 'object_id', None),
-                'method_name': getattr(request, 'method_name', None),
-                'state_snapshot': getattr(request, 'state_snapshot', b""),
-                'journal_position': getattr(request, 'journal_position', 0),
-                'flow_instance_id': getattr(request, 'flow_instance_id', None),
-                'flow_step': getattr(request, 'flow_step', None),
+                "invocation_id": invocation_id,
+                "service_name": request.service_name,
+                "handler_name": handler_name,
+                "metadata": request.metadata,
+                "step_checkpoints": step_checkpoints,
+                "component_type": component_type,
+                "object_id": getattr(request, "object_id", None),
+                "method_name": getattr(request, "method_name", None),
+                "state_snapshot": getattr(request, "state_snapshot", b""),
+                "journal_position": getattr(request, "journal_position", 0),
+                "flow_instance_id": getattr(request, "flow_instance_id", None),
+                "flow_step": getattr(request, "flow_step", None),
             }
 
             # Call the function through the decorator system
             # RuntimeAdapter is used internally by execute_component if needed
             try:
                 execution = execute_component(
-                    handler_name=handler_name,
+                    name=handler_name,
                     input_data=input_data,
                     context=context,
                     component_type=component_type,
-                    method_name=getattr(request, 'method_name', None),
-                    object_id=getattr(request, 'object_id', None),
-                    state_snapshot=getattr(request, 'state_snapshot', b""),
-                    journal_position=getattr(request, 'journal_position', 0),
+                    method_name=getattr(request, "method_name", None),
+                    object_id=getattr(request, "object_id", None),
+                    state_snapshot=getattr(request, "state_snapshot", b""),
+                    journal_position=getattr(request, "journal_position", 0),
                 )
 
                 logger.info("Component %s completed successfully", handler_name)
@@ -413,35 +422,35 @@ class Worker:
 
             # Return error response with fallback invocation_id
             return PyExecuteComponentResponse(
-                invocation_id=getattr(request, 'invocation_id', 'unknown'),
+                invocation_id=getattr(request, "invocation_id", "unknown"),
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
                 metadata={},
             )
-        
+
     async def __call__(self, scope, receive, send):
         """
         ASGI application interface.
-        
+
         This makes the Worker itself callable as an ASGI app when using ASGI runtime.
         """
         if self.runtime_mode != "asgi":
             raise RuntimeError("ASGI interface only available when runtime='asgi'")
-            
+
         return await self.runtime_adapter(scope, receive, send)
-        
+
     def enable_cors(self, origins: List[str] = None):
         """Enable CORS for ASGI runtime."""
-        if self.runtime_mode == "asgi" and hasattr(self.runtime_adapter, 'enable_cors'):
+        if self.runtime_mode == "asgi" and hasattr(self.runtime_adapter, "enable_cors"):
             self.runtime_adapter.enable_cors(origins)
         else:
             logger.warning("CORS can only be enabled for ASGI runtime")
-            
+
     def disable_cors(self):
         """Disable CORS for ASGI runtime."""
-        if self.runtime_mode == "asgi" and hasattr(self.runtime_adapter, 'disable_cors'):
+        if self.runtime_mode == "asgi" and hasattr(self.runtime_adapter, "disable_cors"):
             self.runtime_adapter.disable_cors()
         else:
             logger.warning("CORS can only be disabled for ASGI runtime")

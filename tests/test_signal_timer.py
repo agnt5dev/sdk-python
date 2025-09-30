@@ -111,11 +111,13 @@ async def test_context_sleep_uses_durable_timer(monkeypatch, context: Context):
     wait_calls: list[tuple[str, str]] = []
 
     def fake_timer_request(method: str, path: str, body=None):
-        schedule_calls.append({
-            "method": method,
-            "path": path,
-            "body": body,
-        })
+        schedule_calls.append(
+            {
+                "method": method,
+                "path": path,
+                "body": body,
+            }
+        )
         return {"event_id": "timer-evt"}
 
     wait_responses = [
@@ -146,6 +148,7 @@ async def test_context_sleep_uses_durable_timer(monkeypatch, context: Context):
     checkpoint = context._checkpoints.get_completed("__sleep__", "step-1:sleep:1")
     assert checkpoint is not None
     assert checkpoint.result["seconds"] == pytest.approx(0.1)
+
 
 @pytest.mark.asyncio
 async def test_human_approval_flow(monkeypatch, context: Context):

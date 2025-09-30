@@ -14,8 +14,7 @@ import urllib.error
 class Transport(Protocol):
     async def __call__(
         self, method: str, url: str, *, headers: Dict[str, str], data: bytes
-    ) -> "TransportResponse":
-        ...
+    ) -> "TransportResponse": ...
 
 
 @dataclass
@@ -65,7 +64,15 @@ class LlmStreamChunk:
 class LlmError(RuntimeError):
     """Raised when the LLM proxy returns an error response."""
 
-    def __init__(self, status: int, message: str, *, code: Optional[str] = None, details: Any = None, raw: Any = None):
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        details: Any = None,
+        raw: Any = None,
+    ):
         super().__init__(message)
         self.status = status
         self.code = code

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from agnt5.decorators import get_function_metadata, get_registered_functions
+from agnt5.function import get_function_metadata, get_registered_functions
 from agnt5.durable import function, get_registry
 from agnt5.context import Context
 
@@ -17,6 +17,7 @@ from agnt5.context import Context
 @dataclass
 class TestData:
     """Test data structure."""
+
     name: str
     value: int
     optional_field: Optional[str] = None
@@ -36,6 +37,7 @@ class TestWorkerSchemaRegistration:
 
     def test_function_registration_with_schema(self):
         """Test that functions are registered with proper schema information."""
+
         @function
         async def test_handler(ctx: Context, data: TestData) -> Dict[str, str]:
             """
@@ -59,6 +61,7 @@ class TestWorkerSchemaRegistration:
 
         # Test schema extraction
         from agnt5.schema_extractor import extract_function_schema
+
         schema_info = extract_function_schema(functions["test_handler"])
 
         assert schema_info["description"] == "Test handler function."
@@ -84,19 +87,21 @@ class TestWorkerSchemaRegistration:
 
     def test_function_with_complex_signature(self):
         """Test function with complex signature."""
+
         @function
         async def complex_handler(
             ctx: Context,
             user_id: str,
             data_list: List[TestData],
             options: Optional[Dict[str, str]] = None,
-            count: int = 10
+            count: int = 10,
         ) -> List[str]:
             """Complex handler with multiple parameter types."""
             return ["result1", "result2"]
 
         functions = get_registered_functions()
         from agnt5.schema_extractor import extract_function_schema
+
         schema_info = extract_function_schema(functions["complex_handler"])
 
         input_schema = schema_info["input_schema"]
@@ -123,7 +128,7 @@ class TestWorkerSchemaRegistration:
         assert output_schema["type"] == "array"
         assert output_schema["items"]["type"] == "string"
 
-    @patch('agnt5.worker.PyWorker')
+    @patch("agnt5.worker.PyWorker")
     def test_worker_component_registration(self, mock_py_worker):
         """Test that worker properly registers components with schema information."""
         from agnt5.worker import Worker
@@ -135,10 +140,7 @@ class TestWorkerSchemaRegistration:
             return True
 
         # Create worker instance
-        worker = Worker(
-            service_name="test-service",
-            service_version="1.0.0"
-        )
+        worker = Worker(service_name="test-service", service_version="1.0.0")
 
         # Mock the Rust worker
         mock_rust_worker = Mock()
@@ -158,13 +160,13 @@ class TestWorkerSchemaRegistration:
         component = py_components[0]
 
         # Verify component has all the new fields
-        assert hasattr(component, 'name')
-        assert hasattr(component, 'component_type')
-        assert hasattr(component, 'metadata')
-        assert hasattr(component, 'config')
-        assert hasattr(component, 'input_schema')
-        assert hasattr(component, 'output_schema')
-        assert hasattr(component, 'definition')
+        assert hasattr(component, "name")
+        assert hasattr(component, "component_type")
+        assert hasattr(component, "metadata")
+        assert hasattr(component, "config")
+        assert hasattr(component, "input_schema")
+        assert hasattr(component, "output_schema")
+        assert hasattr(component, "definition")
 
         # Verify the schema fields are populated
         assert component.input_schema is not None
@@ -180,6 +182,7 @@ class TestWorkerSchemaRegistration:
 
     def test_function_without_type_hints(self):
         """Test function without type hints."""
+
         @function
         async def untyped_function(ctx, data):
             """Function without type hints."""
@@ -187,6 +190,7 @@ class TestWorkerSchemaRegistration:
 
         functions = get_registered_functions()
         from agnt5.schema_extractor import extract_function_schema
+
         schema_info = extract_function_schema(functions["untyped_function"])
 
         # Should still extract schema, but with Any types
@@ -199,6 +203,7 @@ class TestWorkerSchemaRegistration:
 
     def test_function_with_source_extraction(self):
         """Test that function source code is extracted."""
+
         @function
         async def source_test_function(ctx: Context, value: int) -> str:
             """Function to test source extraction."""
@@ -209,6 +214,7 @@ class TestWorkerSchemaRegistration:
 
         # Test source extraction
         import inspect
+
         try:
             source = inspect.getsource(func)
             assert "def source_test_function" in source
@@ -219,6 +225,7 @@ class TestWorkerSchemaRegistration:
 
     def test_error_handling_in_schema_extraction(self):
         """Test that schema extraction errors are handled gracefully."""
+
         # Create a function that might cause schema extraction issues
         @function
         async def problematic_function(ctx: Context, data) -> str:
@@ -229,6 +236,7 @@ class TestWorkerSchemaRegistration:
 
         # Schema extraction should not crash even with problematic types
         from agnt5.schema_extractor import extract_function_schema
+
         schema_info = extract_function_schema(functions["problematic_function"])
 
         # Should return some schema even if not perfect
@@ -237,6 +245,7 @@ class TestWorkerSchemaRegistration:
 
     def test_multiple_functions_registration(self):
         """Test registration of multiple functions with different signatures."""
+
         @function
         async def func1(ctx: Context, x: int) -> str:
             """First function."""
@@ -266,6 +275,7 @@ class TestWorkerSchemaRegistration:
 
     def test_metadata_enrichment(self):
         """Test that metadata is enriched with schema information."""
+
         @function
         async def documented_function(ctx: Context, user_id: str) -> Dict[str, Any]:
             """
@@ -283,6 +293,7 @@ class TestWorkerSchemaRegistration:
 
         functions = get_registered_functions()
         from agnt5.schema_extractor import extract_function_schema
+
         schema_info = extract_function_schema(functions["documented_function"])
 
         # Check that descriptions are extracted
@@ -302,7 +313,7 @@ class TestWorkflowSchemaExtraction:
         workflow_def = {
             "steps": [
                 {"name": "step1", "type": "function", "handler": "process_data"},
-                {"name": "step2", "type": "function", "handler": "validate_result"}
+                {"name": "step2", "type": "function", "handler": "validate_result"},
             ]
         }
 

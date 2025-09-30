@@ -20,8 +20,7 @@ class BackoffPolicy:
         strategy_normalised = self.strategy.lower()
         if strategy_normalised not in {"exponential", "fixed"}:
             raise ValueError(
-                "BackoffPolicy.strategy must be 'exponential' or 'fixed', "
-                f"got '{self.strategy}'."
+                f"BackoffPolicy.strategy must be 'exponential' or 'fixed', got '{self.strategy}'."
             )
         object.__setattr__(self, "strategy", strategy_normalised)
 

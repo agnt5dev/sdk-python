@@ -4,7 +4,7 @@ import json
 import pytest
 
 from agnt5 import Context, durable
-from agnt5.decorators import clear_registry, execute_component
+from agnt5.function import clear_registry, execute_component
 from agnt5.durable import BackoffPolicy, RetryPolicy, get_registry
 from agnt5.llm import (
     ChatMessage,
@@ -26,10 +26,14 @@ def _clear_registry():
 
 def test_durable_function_registration():
     retry_policy = RetryPolicy(max_attempts=5)
-    backoff_policy = BackoffPolicy(strategy="fixed", initial_delay_seconds=2.0, max_delay_seconds=10.0)
+    backoff_policy = BackoffPolicy(
+        strategy="fixed", initial_delay_seconds=2.0, max_delay_seconds=10.0
+    )
 
     @durable.function(name="demo", retries=retry_policy, backoff=backoff_policy)
-    async def handler(ctx: Context, value: int) -> int:  # pragma: no cover - executed via execute_component
+    async def handler(
+        ctx: Context, value: int
+    ) -> int:  # pragma: no cover - executed via execute_component
         return value
 
     definition = get_registry().get("demo")
@@ -44,6 +48,7 @@ def test_duplicate_registration_raises():
         return None
 
     with pytest.raises(ValueError):
+
         @durable.function(name="duplicate")
         async def handler_2(ctx: Context) -> None:  # pragma: no cover
             return None
@@ -86,7 +91,9 @@ async def test_context_surface_matches_spec_contract():
         async def complete(self, *, prompt: str, model: str, schema, context) -> LlmResponse:
             return LlmResponse(model=model, output=prompt, usage=LlmUsage())
 
-        async def chat(self, *, messages, model: str, tools, context, stream: bool = False, on_chunk=None):
+        async def chat(
+            self, *, messages, model: str, tools, context, stream: bool = False, on_chunk=None
+        ):
             return LlmResponse(model=model, output="chat", usage=LlmUsage())
 
     metadata = {
@@ -195,7 +202,9 @@ async def test_context_llm_facade_uses_injected_client():
                 usage=LlmUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
             )
 
-        async def chat(self, *, messages, model: str, tools, context, stream: bool = False, on_chunk=None):
+        async def chat(
+            self, *, messages, model: str, tools, context, stream: bool = False, on_chunk=None
+        ):
             self.called_with = {
                 "messages": messages,
                 "model": model,
@@ -206,7 +215,9 @@ async def test_context_llm_facade_uses_injected_client():
             }
             if stream:
                 chunk1 = LlmStreamChunk(index=0, content="hello", model=model)
-                chunk2 = LlmStreamChunk(index=0, content=" world", model=model, finish_reason="stop")
+                chunk2 = LlmStreamChunk(
+                    index=0, content=" world", model=model, finish_reason="stop"
+                )
                 if on_chunk:
                     maybe = on_chunk(chunk1)
                     if asyncio.iscoroutine(maybe):

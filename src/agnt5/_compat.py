@@ -8,6 +8,7 @@ for cross-referencing throughout the project.
 # Check if Rust core is available
 try:
     from . import _core
+
     _rust_available = True
     _import_error = None
 except ImportError as e:
