@@ -1,22 +1,19 @@
-# Read version from pyproject.toml to maintain single source of truth
-def _get_version():
-    try:
-        import tomllib
-    except ImportError:
-        # Python < 3.11 fallback
-        try:
-            import tomli as tomllib
-        except ImportError:
-            # Final fallback if no toml library available
-            return "UNKNOWN"
+"""Version information for agnt5 SDK."""
 
-    try:
-        import pathlib
 
-        pyproject_path = pathlib.Path(__file__).parent.parent.parent / "pyproject.toml"
-        with open(pyproject_path, "rb") as f:
-            pyproject_data = tomllib.load(f)
-        return pyproject_data["project"]["version"]
+def _get_version() -> str:
+    """Get package version from installed metadata.
+
+    This uses importlib.metadata (Python 3.8+) to read the version from
+    the installed package metadata, maintaining pyproject.toml as the
+    single source of truth.
+
+    Returns:
+        Package version string, or "0.0.0+dev" for development installs.
+    """
+    try:
+        from importlib.metadata import version
+        return version("agnt5")
     except Exception:
-        # Fallback version if reading fails
-        return "UNKNOWN"
+        # Development/editable install fallback
+        return "0.0.0+dev"
