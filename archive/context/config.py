@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Dict, Optional
 
+from .function_registry import FunctionRegistry
+
 
 @dataclass(frozen=True)
 class ContextConfig:
@@ -17,6 +19,7 @@ class ContextConfig:
     attempt: int = 0
     invocation_id: Optional[str] = None
     metadata: Dict[str, str] = field(default_factory=dict)
+    function_registry: FunctionRegistry = field(default_factory=FunctionRegistry)
 
     def with_invocation_id(self, invocation_id: str) -> "ContextConfig":
         return replace(self, invocation_id=invocation_id)
@@ -25,3 +28,6 @@ class ContextConfig:
         metadata = dict(self.metadata)
         metadata[key] = value
         return replace(self, metadata=metadata)
+
+    def with_function_registry(self, registry: FunctionRegistry) -> "ContextConfig":
+        return replace(self, function_registry=registry)

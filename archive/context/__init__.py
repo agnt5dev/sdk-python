@@ -8,17 +8,26 @@ from .config import ContextConfig
 from .core import (
     Context,
     ContextNotReadyError,
+    FunctionHandle,
     FunctionNamespace,
+    FunctionResult,
+    FunctionStatus,
     LanguageModelNamespace,
     SignalNamespace,
     TimerNamespace,
 )
+from .function_registry import FunctionCall, FunctionRegistry
 
 __all__ = [
     "Context",
     "ContextConfig",
     "ContextNotReadyError",
+    "FunctionCall",
+    "FunctionHandle",
     "FunctionNamespace",
+    "FunctionRegistry",
+    "FunctionResult",
+    "FunctionStatus",
     "LanguageModelNamespace",
     "SignalNamespace",
     "TimerNamespace",
@@ -35,6 +44,7 @@ def create_context(
     attempt: int = 0,
     invocation_id: Optional[str] = None,
     metadata: Optional[dict[str, str]] = None,
+    function_registry: Optional[FunctionRegistry] = None,
     runtime_handle: Any = None,
 ) -> Context:
     """Convenience helper for constructing a core Context."""
@@ -47,5 +57,6 @@ def create_context(
         attempt=attempt,
         invocation_id=invocation_id,
         metadata=metadata or {},
+        function_registry=function_registry or FunctionRegistry(),
     )
     return Context(config=config, runtime_handle=runtime_handle)
