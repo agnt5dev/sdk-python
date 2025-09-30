@@ -19,12 +19,12 @@ class ContextNotReadyError(RuntimeError):
 
 
 @dataclass
-class CoreContext:
+class Context:
     config: ContextConfig
     runtime_handle: Optional[Any] = None
 
-    def tasks(self) -> "TaskNamespace":
-        return TaskNamespace(self)
+    def functions(self) -> "FunctionNamespace":
+        return FunctionNamespace(self)
 
     def signals(self) -> "SignalNamespace":
         return SignalNamespace(self)
@@ -32,13 +32,13 @@ class CoreContext:
     def timers(self) -> "TimerNamespace":
         return TimerNamespace(self)
 
-    def llm(self) -> "LlmNamespace":
-        return LlmNamespace(self)
+    def language_model(self) -> "LanguageModelNamespace":
+        return LanguageModelNamespace(self)
 
 
 @dataclass
 class _BaseNamespace:
-    context: CoreContext
+    context: Context
 
     def _not_ready(self, capability: str) -> ContextNotReadyError:
         return ContextNotReadyError(
@@ -46,9 +46,9 @@ class _BaseNamespace:
         )
 
 
-class TaskNamespace(_BaseNamespace):
+class FunctionNamespace(_BaseNamespace):
     async def call(self, *args: Any, **kwargs: Any) -> Any:
-        raise self._not_ready("Task orchestration")
+        raise self._not_ready("Function orchestration")
 
 
 class SignalNamespace(_BaseNamespace):
@@ -64,6 +64,6 @@ class TimerNamespace(_BaseNamespace):
         raise self._not_ready("Durable timers")
 
 
-class LlmNamespace(_BaseNamespace):
+class LanguageModelNamespace(_BaseNamespace):
     async def generate(self, *args: Any, **kwargs: Any) -> Any:
-        raise self._not_ready("LLM integration")
+        raise self._not_ready("Language model integration")

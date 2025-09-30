@@ -13,6 +13,7 @@ class ContextConfig:
     tenant_id: str
     session_id: str
     run_id: str
+    step_id: str
     attempt: int = 0
     invocation_id: Optional[str] = None
     metadata: Dict[str, str] = field(default_factory=dict)
