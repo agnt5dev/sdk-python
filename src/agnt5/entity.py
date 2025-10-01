@@ -81,10 +81,19 @@ class EntityType:
                 )
 
             first_param = params[0]
-            if first_param.annotation != Context and first_param.annotation != inspect.Parameter.empty:
+            # Check if first parameter is Context (can be class, string "Context", or empty)
+            annotation = first_param.annotation
+            is_context = (
+                annotation == Context
+                or annotation == "Context"
+                or annotation is Context
+                or annotation == inspect.Parameter.empty
+                or (hasattr(annotation, "__name__") and annotation.__name__ == "Context")
+            )
+            if not is_context:
                 raise ConfigurationError(
                     f"Entity method {f.__name__} first parameter must be 'ctx: Context', "
-                    f"got '{first_param.annotation}'"
+                    f"got '{annotation}' (type: {type(annotation).__name__})"
                 )
 
             # Convert sync to async if needed

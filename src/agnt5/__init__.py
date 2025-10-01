@@ -21,6 +21,7 @@ from .function import FunctionRegistry, function
 from .tool import Tool, ToolRegistry, tool
 from .types import BackoffPolicy, BackoffType, FunctionConfig, RetryPolicy, WorkflowConfig
 from .version import _get_version
+from .worker import Worker
 from .workflow import WorkflowRegistry, workflow
 
 __version__ = _get_version()
@@ -42,6 +43,7 @@ __all__ = [
     "ToolRegistry",
     "Agent",
     "AgentResult",
+    "Worker",
     # Types
     "RetryPolicy",
     "BackoffPolicy",
