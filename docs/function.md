@@ -107,13 +107,13 @@ async def process_data_pipeline(ctx: Context, dataset_id: str) -> dict:
     """Process a multi-step data pipeline with checkpoints."""
 
     # Step 1: Load data (checkpointed)
-    data = await ctx.run("load_data", lambda: load_from_storage(dataset_id))
+    data = await ctx.step("load_data", lambda: load_from_storage(dataset_id))
 
     # Step 2: Transform data (checkpointed)
-    transformed = await ctx.run("transform", lambda: apply_transformations(data))
+    transformed = await ctx.step("transform", lambda: apply_transformations(data))
 
     # Step 3: Validate (checkpointed)
-    validation = await ctx.run("validate", lambda: validate_results(transformed))
+    validation = await ctx.step("validate", lambda: validate_results(transformed))
 
     return {
         "dataset_id": dataset_id,
@@ -210,13 +210,13 @@ async def process_order(ctx: Context, order: dict) -> dict:
     total = order["total"]
 
     # Process the order
-    confirmation = await ctx.run(
+    confirmation = await ctx.step(
         "generate_confirmation",
         lambda: create_confirmation(order_id, items)
     )
 
     # Send notification
-    await ctx.run(
+    await ctx.step(
         "send_email",
         lambda: send_order_confirmation(
             to=order["customer_email"],
@@ -303,10 +303,10 @@ Always checkpoint expensive or non-idempotent operations:
 @function
 async def process_large_file(ctx: Context, file_url: str) -> dict:
     # Checkpoint expensive download
-    content = await ctx.run("download", lambda: download_file(file_url))
+    content = await ctx.step("download", lambda: download_file(file_url))
 
     # Checkpoint expensive processing
-    result = await ctx.run("process", lambda: process_content(content))
+    result = await ctx.step("process", lambda: process_content(content))
 
     return result
 ```
@@ -319,7 +319,7 @@ Functions may be retried, so ensure they're idempotent:
 async def update_record(ctx: Context, record_id: str, data: dict) -> dict:
     """Idempotent update using upsert."""
     # Use upsert instead of insert to handle retries
-    return await ctx.run(
+    return await ctx.step(
         "upsert_record",
         lambda: database.upsert(record_id, data)
     )
@@ -398,9 +398,9 @@ async def load_data(ctx: Context, data: dict) -> bool:
 @function
 async def etl_pipeline(ctx: Context, source: str) -> dict:
     """Compose functions into an ETL pipeline."""
-    extracted = await ctx.run("extract", lambda: extract_data(ctx, source))
-    transformed = await ctx.run("transform", lambda: transform_data(ctx, extracted))
-    loaded = await ctx.run("load", lambda: load_data(ctx, transformed))
+    extracted = await ctx.step("extract", lambda: extract_data(ctx, source))
+    transformed = await ctx.step("transform", lambda: transform_data(ctx, extracted))
+    loaded = await ctx.step("load", lambda: load_data(ctx, transformed))
     return {"success": loaded}
 ```
 
@@ -412,9 +412,9 @@ async def conditional_processing(ctx: Context, data: dict, mode: str) -> dict:
     """Execute different logic based on mode."""
 
     if mode == "fast":
-        result = await ctx.run("fast_process", lambda: quick_process(data))
+        result = await ctx.step("fast_process", lambda: quick_process(data))
     elif mode == "thorough":
-        result = await ctx.run("thorough_process", lambda: detailed_process(data))
+        result = await ctx.step("thorough_process", lambda: detailed_process(data))
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
@@ -431,7 +431,7 @@ async def monitored_function(ctx: Context, data: str) -> dict:
     """Function with detailed logging."""
     ctx.logger.info(f"Processing started for data: {data}")
 
-    result = await ctx.run("process", lambda: process_data(data))
+    result = await ctx.step("process", lambda: process_data(data))
 
     ctx.logger.info(f"Processing completed: {result}")
     return result
