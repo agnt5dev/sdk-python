@@ -92,10 +92,16 @@ class Worker:
         )
 
     def _discover_components(self):
-        """Discover all registered functions and workflows."""
+        """Discover all registered components across all registries."""
         components = []
 
+        # Import all registries
+        from .tool import ToolRegistry
+        from .entity import EntityRegistry
+        from .agent import AgentRegistry
+
         # Discover functions
+        import json
         for name, config in FunctionRegistry.all().items():
             component_info = self._PyComponentInfo(
                 name=name,
@@ -123,6 +129,68 @@ class Worker:
             components.append(component_info)
             logger.debug(f"Discovered workflow: {name}")
 
+        # Discover tools
+        for name, tool in ToolRegistry.all().items():
+            # Serialize schemas to JSON strings
+            input_schema_str = None
+            if hasattr(tool, 'input_schema') and tool.input_schema:
+                input_schema_str = json.dumps(tool.input_schema)
+
+            output_schema_str = None
+            if hasattr(tool, 'output_schema') and tool.output_schema:
+                output_schema_str = json.dumps(tool.output_schema)
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="tool",
+                metadata={},
+                config={},
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered tool: {name}")
+
+        # Discover entities
+        for name, entity_type in EntityRegistry.all().items():
+            # Build metadata dict with methods list as JSON string
+            metadata_dict = {
+                "methods": json.dumps(list(entity_type._methods.keys()))
+            }
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="entity",
+                metadata=metadata_dict,
+                config={},
+                input_schema=None,
+                output_schema=None,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._methods.keys())}")
+
+        # Discover agents
+        for name, agent in AgentRegistry.all().items():
+            # Build metadata dict with agent info
+            metadata_dict = {
+                "model": agent.model_name,
+                "tools": json.dumps(list(agent.tools.keys()) if hasattr(agent, 'tools') else [])
+            }
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="agent",
+                metadata=metadata_dict,
+                config={},
+                input_schema=None,
+                output_schema=None,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered agent: {name}")
+
         logger.info(f"Discovered {len(components)} components")
         return components
 
@@ -141,22 +209,49 @@ class Worker:
                     f"Handling {component_type} request: {component_name}, input size: {len(input_data)} bytes"
                 )
 
-                # Look up the component - try both registries
-                # Check workflow registry first, then function registry
-                workflow_config = WorkflowRegistry.get(component_name)
-                if workflow_config:
-                    logger.debug(f"Found workflow: {component_name}")
-                    result = asyncio.run(self._execute_workflow(workflow_config, input_data, request))
-                    return result
+                # Import all registries
+                from .tool import ToolRegistry
+                from .entity import EntityRegistry
+                from .agent import AgentRegistry
 
-                function_config = FunctionRegistry.get(component_name)
-                if function_config:
-                    logger.debug(f"Found function: {component_name}")
-                    result = asyncio.run(self._execute_function(function_config, input_data, request))
-                    return result
+                # Route based on component type
+                if component_type == "tool":
+                    tool = ToolRegistry.get(component_name)
+                    if tool:
+                        logger.debug(f"Found tool: {component_name}")
+                        result = asyncio.run(self._execute_tool(tool, input_data, request))
+                        return result
 
-                # Not found in either registry
-                error_msg = f"Component '{component_name}' not found in function or workflow registry"
+                elif component_type == "entity":
+                    entity_type = EntityRegistry.get(component_name)
+                    if entity_type:
+                        logger.debug(f"Found entity: {component_name}")
+                        result = asyncio.run(self._execute_entity(entity_type, input_data, request))
+                        return result
+
+                elif component_type == "agent":
+                    agent = AgentRegistry.get(component_name)
+                    if agent:
+                        logger.debug(f"Found agent: {component_name}")
+                        result = asyncio.run(self._execute_agent(agent, input_data, request))
+                        return result
+
+                elif component_type == "workflow":
+                    workflow_config = WorkflowRegistry.get(component_name)
+                    if workflow_config:
+                        logger.debug(f"Found workflow: {component_name}")
+                        result = asyncio.run(self._execute_workflow(workflow_config, input_data, request))
+                        return result
+
+                elif component_type == "function":
+                    function_config = FunctionRegistry.get(component_name)
+                    if function_config:
+                        logger.debug(f"Found function: {component_name}")
+                        result = asyncio.run(self._execute_function(function_config, input_data, request))
+                        return result
+
+                # Not found
+                error_msg = f"Component '{component_name}' of type '{component_type}' not found"
                 logger.error(error_msg)
                 return self._create_error_response(request, error_msg)
 
@@ -249,6 +344,158 @@ class Worker:
 
         except Exception as e:
             error_msg = f"Workflow execution failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=False,
+                output_data=b"",
+                state_update=None,
+                error_message=error_msg,
+                metadata=None,
+            )
+
+    async def _execute_tool(self, tool, input_data: bytes, request):
+        """Execute a tool handler."""
+        import json
+        from .context import Context
+        from ._core import PyExecuteComponentResponse
+
+        try:
+            # Parse input data
+            input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
+
+            # Create context
+            ctx = Context(
+                run_id=f"{self.service_name}:{tool.name}",
+                component_type="tool",
+            )
+
+            # Execute tool
+            result = await tool.invoke(ctx, **input_dict)
+
+            # Serialize result
+            output_data = json.dumps(result).encode("utf-8")
+
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,
+                output_data=output_data,
+                state_update=None,
+                error_message=None,
+                metadata=None,
+            )
+
+        except Exception as e:
+            error_msg = f"Tool execution failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=False,
+                output_data=b"",
+                state_update=None,
+                error_message=error_msg,
+                metadata=None,
+            )
+
+    async def _execute_entity(self, entity_type, input_data: bytes, request):
+        """Execute an entity method."""
+        import json
+        from .context import Context
+        from ._core import PyExecuteComponentResponse
+
+        try:
+            # Parse input data
+            input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
+
+            # Extract entity key and method name from input
+            entity_key = input_dict.pop("key", None)
+            method_name = input_dict.pop("method", None)
+
+            if not entity_key:
+                raise ValueError("Entity invocation requires 'key' parameter")
+            if not method_name:
+                raise ValueError("Entity invocation requires 'method' parameter")
+
+            # Create entity instance
+            entity_instance = entity_type(entity_key)
+
+            # Get method
+            if not hasattr(entity_instance, method_name):
+                raise ValueError(f"Entity '{entity_type.name}' has no method '{method_name}'")
+
+            method = getattr(entity_instance, method_name)
+
+            # Execute method
+            result = await method(**input_dict)
+
+            # Serialize result
+            output_data = json.dumps(result).encode("utf-8")
+
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,
+                output_data=output_data,
+                state_update=None,
+                error_message=None,
+                metadata=None,
+            )
+
+        except Exception as e:
+            error_msg = f"Entity execution failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=False,
+                output_data=b"",
+                state_update=None,
+                error_message=error_msg,
+                metadata=None,
+            )
+
+    async def _execute_agent(self, agent, input_data: bytes, request):
+        """Execute an agent."""
+        import json
+        from .context import Context
+        from ._core import PyExecuteComponentResponse
+
+        try:
+            # Parse input data
+            input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
+
+            # Extract user message
+            user_message = input_dict.get("message", "")
+            if not user_message:
+                raise ValueError("Agent invocation requires 'message' parameter")
+
+            # Create context
+            ctx = Context(
+                run_id=f"{self.service_name}:{agent.name}",
+                component_type="agent",
+            )
+
+            # Execute agent
+            agent_result = await agent.run(user_message, context=ctx)
+
+            # Build response
+            result = {
+                "output": agent_result.output,
+                "tool_calls": agent_result.tool_calls,
+            }
+
+            # Serialize result
+            output_data = json.dumps(result).encode("utf-8")
+
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,
+                output_data=output_data,
+                state_update=None,
+                error_message=None,
+                metadata=None,
+            )
+
+        except Exception as e:
+            error_msg = f"Agent execution failed: {e}"
             logger.error(error_msg, exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,

@@ -25,6 +25,37 @@ EntityMethod = Callable[..., Awaitable[T]]
 _entity_states: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (type, key) -> state
 _entity_locks: Dict[Tuple[str, str], asyncio.Lock] = {}  # (type, key) -> lock
 
+# Global entity registry
+_ENTITY_REGISTRY: Dict[str, "EntityType"] = {}
+
+
+class EntityRegistry:
+    """Registry for entity types."""
+
+    @staticmethod
+    def register(entity_type: "EntityType") -> None:
+        """Register an entity type."""
+        if entity_type.name in _ENTITY_REGISTRY:
+            logger.warning(f"Overwriting existing entity type '{entity_type.name}'")
+        _ENTITY_REGISTRY[entity_type.name] = entity_type
+        logger.debug(f"Registered entity type '{entity_type.name}'")
+
+    @staticmethod
+    def get(name: str) -> Optional["EntityType"]:
+        """Get entity type by name."""
+        return _ENTITY_REGISTRY.get(name)
+
+    @staticmethod
+    def all() -> Dict[str, "EntityType"]:
+        """Get all registered entities."""
+        return _ENTITY_REGISTRY.copy()
+
+    @staticmethod
+    def clear() -> None:
+        """Clear all registered entities."""
+        _ENTITY_REGISTRY.clear()
+        logger.debug("Cleared entity registry")
+
 
 class EntityType:
     """
@@ -311,7 +342,9 @@ def entity(name: str) -> EntityType:
         Single-writer consistency uses asyncio.Lock (process-local).
         Phase 2 will add durable state and distributed locks via the platform.
     """
-    return EntityType(name)
+    entity_type = EntityType(name)
+    EntityRegistry.register(entity_type)
+    return entity_type
 
 
 # Utility functions for testing and debugging

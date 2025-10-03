@@ -6,9 +6,9 @@ with built-in durability guarantees and state management.
 """
 
 from ._compat import _import_error, _rust_available
-from .agent import Agent, AgentResult
+from .agent import Agent, AgentRegistry, AgentResult, agent
 from .context import Context
-from .entity import EntityInstance, EntityType, entity
+from .entity import EntityInstance, EntityRegistry, EntityType, entity
 from .exceptions import (
     AGNT5Error,
     CheckpointError,
@@ -36,12 +36,15 @@ __all__ = [
     "entity",
     "EntityType",
     "EntityInstance",
+    "EntityRegistry",
     "workflow",
     "WorkflowRegistry",
     "tool",
     "Tool",
     "ToolRegistry",
+    "agent",
     "Agent",
+    "AgentRegistry",
     "AgentResult",
     "Worker",
     # Types
