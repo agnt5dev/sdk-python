@@ -58,6 +58,9 @@ class FunctionConfig:
     handler: HandlerFunc
     retries: Optional[RetryPolicy] = None
     backoff: Optional[BackoffPolicy] = None
+    input_schema: Optional[Dict[str, Any]] = None
+    output_schema: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -66,6 +69,9 @@ class WorkflowConfig:
 
     name: str
     handler: HandlerFunc
+    input_schema: Optional[Dict[str, Any]] = None
+    output_schema: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, str]] = None
 
 
 class ContextProtocol(Protocol):

@@ -148,6 +148,33 @@ class Agent:
 
         self.logger = logging.getLogger(f"agnt5.agent.{name}")
 
+        # Define schemas based on the run method signature
+        # Input: user_message (string)
+        self.input_schema = {
+            "type": "object",
+            "properties": {
+                "user_message": {"type": "string"}
+            },
+            "required": ["user_message"]
+        }
+        # Output: AgentResult with output and tool_calls
+        self.output_schema = {
+            "type": "object",
+            "properties": {
+                "output": {"type": "string"},
+                "tool_calls": {
+                    "type": "array",
+                    "items": {"type": "object"}
+                }
+            }
+        }
+
+        # Store metadata
+        self.metadata = {
+            "description": instructions,
+            "model": model_name
+        }
+
     async def run(
         self,
         user_message: str,

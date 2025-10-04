@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
 from .context import Context
 from .types import HandlerFunc, WorkflowConfig
+from .function import _extract_function_schemas, _extract_function_metadata
 
 T = TypeVar("T")
 
@@ -99,10 +100,19 @@ def workflow(
 
             handler_func = cast(HandlerFunc, async_wrapper)
 
+        # Extract schemas from type hints
+        input_schema, output_schema = _extract_function_schemas(func)
+
+        # Extract metadata (description, etc.)
+        metadata = _extract_function_metadata(func)
+
         # Register workflow
         config = WorkflowConfig(
             name=workflow_name,
             handler=handler_func,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            metadata=metadata,
         )
         WorkflowRegistry.register(config)
 

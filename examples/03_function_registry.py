@@ -44,6 +44,8 @@ def inspect_registry() -> None:
         print(f"  Handler: {config.handler.__name__}")
         print(f"  Retries: {config.retries}")
         print(f"  Backoff: {config.backoff}")
+        print(f"  Input Schema: {config.input_schema}")
+        print(f"  Output Schema: {config.output_schema}")
         print()
 
 

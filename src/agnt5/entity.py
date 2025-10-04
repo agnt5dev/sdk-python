@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
 
 from .context import Context
 from .exceptions import ConfigurationError, ExecutionError
+from .function import _extract_function_schemas, _extract_function_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,8 @@ class EntityType:
         """
         self.name = name
         self._methods: Dict[str, EntityMethod] = {}
+        self._method_schemas: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = {}
+        self._method_metadata: Dict[str, Dict[str, str]] = {}
         logger.debug(f"Created entity type: {name}")
 
     def method(self, func: Optional[EntityMethod] = None) -> EntityMethod:
@@ -137,6 +140,13 @@ class EntityType:
 
                 f = async_wrapper
 
+            # Extract schemas from type hints (use original func before async wrapping)
+            original_func = original_func if 'original_func' in locals() else f
+            input_schema, output_schema = _extract_function_schemas(original_func)
+
+            # Extract metadata (description, etc.)
+            method_metadata = _extract_function_metadata(original_func)
+
             # Register method
             method_name = f.__name__
             if method_name in self._methods:
@@ -145,6 +155,8 @@ class EntityType:
                 )
 
             self._methods[method_name] = f
+            self._method_schemas[method_name] = (input_schema, output_schema)
+            self._method_metadata[method_name] = method_metadata
             logger.debug(f"Registered method '{method_name}' on entity type '{self.name}'")
 
             return f

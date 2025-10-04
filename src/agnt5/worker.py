@@ -103,13 +103,25 @@ class Worker:
         # Discover functions
         import json
         for name, config in FunctionRegistry.all().items():
+            # Serialize schemas to JSON strings
+            input_schema_str = None
+            if config.input_schema:
+                input_schema_str = json.dumps(config.input_schema)
+
+            output_schema_str = None
+            if config.output_schema:
+                output_schema_str = json.dumps(config.output_schema)
+
+            # Get metadata with description
+            metadata = config.metadata if config.metadata else {}
+
             component_info = self._PyComponentInfo(
                 name=name,
                 component_type="function",
-                metadata={},
+                metadata=metadata,
                 config={},
-                input_schema=None,
-                output_schema=None,
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
                 definition=None,
             )
             components.append(component_info)
@@ -117,17 +129,111 @@ class Worker:
 
         # Discover workflows
         for name, config in WorkflowRegistry.all().items():
+            # Serialize schemas to JSON strings
+            input_schema_str = None
+            if config.input_schema:
+                input_schema_str = json.dumps(config.input_schema)
+
+            output_schema_str = None
+            if config.output_schema:
+                output_schema_str = json.dumps(config.output_schema)
+
+            # Get metadata with description
+            metadata = config.metadata if config.metadata else {}
+
             component_info = self._PyComponentInfo(
                 name=name,
                 component_type="workflow",
-                metadata={},
+                metadata=metadata,
                 config={},
-                input_schema=None,
-                output_schema=None,
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
                 definition=None,
             )
             components.append(component_info)
             logger.debug(f"Discovered workflow: {name}")
+
+        # Discover tools
+        for name, tool in ToolRegistry.all().items():
+            # Serialize schemas to JSON strings
+            input_schema_str = None
+            if hasattr(tool, 'input_schema') and tool.input_schema:
+                input_schema_str = json.dumps(tool.input_schema)
+
+            output_schema_str = None
+            if hasattr(tool, 'output_schema') and tool.output_schema:
+                output_schema_str = json.dumps(tool.output_schema)
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="tool",
+                metadata={},
+                config={},
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered tool: {name}")
+
+        # Discover entities
+        for name, entity_type in EntityRegistry.all().items():
+            # Build method schemas and metadata for each method
+            method_schemas = {}
+            for method_name, (input_schema, output_schema) in entity_type._method_schemas.items():
+                method_metadata = entity_type._method_metadata.get(method_name, {})
+                method_schemas[method_name] = {
+                    "input_schema": input_schema,
+                    "output_schema": output_schema,
+                    "metadata": method_metadata
+                }
+
+            # Build metadata dict with methods list and schemas
+            metadata_dict = {
+                "methods": json.dumps(list(entity_type._methods.keys())),
+                "method_schemas": json.dumps(method_schemas)
+            }
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="entity",
+                metadata=metadata_dict,
+                config={},
+                input_schema=None,  # Entities have per-method schemas in metadata
+                output_schema=None,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._methods.keys())}")
+
+        # Discover agents
+        for name, agent in AgentRegistry.all().items():
+            # Serialize schemas to JSON strings
+            input_schema_str = None
+            if hasattr(agent, 'input_schema') and agent.input_schema:
+                input_schema_str = json.dumps(agent.input_schema)
+
+            output_schema_str = None
+            if hasattr(agent, 'output_schema') and agent.output_schema:
+                output_schema_str = json.dumps(agent.output_schema)
+
+            # Get metadata (includes description and model info)
+            metadata_dict = agent.metadata if hasattr(agent, 'metadata') else {}
+            # Add tools list to metadata
+            if hasattr(agent, 'tools'):
+                metadata_dict["tools"] = json.dumps(list(agent.tools.keys()))
+
+            component_info = self._PyComponentInfo(
+                name=name,
+                component_type="agent",
+                metadata=metadata_dict,
+                config={},
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
+                definition=None,
+            )
+            components.append(component_info)
+            logger.debug(f"Discovered agent: {name}")
 
         # Discover tools
         for name, tool in ToolRegistry.all().items():
