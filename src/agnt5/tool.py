@@ -15,8 +15,9 @@ from docstring_parser import parse as parse_docstring
 
 from .context import Context
 from .exceptions import ConfigurationError
+from ._telemetry import setup_module_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_module_logger(__name__)
 
 T = TypeVar("T")
 ToolHandler = Callable[..., Awaitable[T]]

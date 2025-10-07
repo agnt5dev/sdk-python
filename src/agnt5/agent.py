@@ -12,10 +12,12 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from .context import Context
-from .lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ToolDefinition
+from . import lm
+from .lm import GenerateRequest, GenerateResponse, Message, ModelConfig, ToolDefinition
 from .tool import Tool, ToolRegistry
+from ._telemetry import setup_module_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_module_logger(__name__)
 
 # Global agent registry
 _AGENT_REGISTRY: Dict[str, "Agent"] = {}
@@ -75,20 +77,20 @@ class Agent:
 
     Example:
         ```python
-        from agnt5 import Agent, tool
-        from agnt5.lm import OpenAILanguageModel
+        from agnt5 import Agent, tool, Context
 
         @tool(auto_schema=True)
         async def search_web(ctx: Context, query: str) -> List[Dict]:
             # Search implementation
             return [{"title": "Result", "url": "..."}]
 
-        lm = OpenAILanguageModel()
+        # Simple usage with model string
         agent = Agent(
             name="researcher",
-            model=lm,
+            model="openai/gpt-4o-mini",
             instructions="You are a research assistant.",
-            tools=[search_web]
+            tools=[search_web],
+            temperature=0.7
         )
 
         result = await agent.run("What are the latest AI trends?")
@@ -99,29 +101,35 @@ class Agent:
     def __init__(
         self,
         name: str,
-        model: LanguageModel,
+        model: str,
         instructions: str,
         tools: Optional[List[Any]] = None,
-        model_name: str = "gpt-4o-mini",
         temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        model_config: Optional[ModelConfig] = None,
         max_iterations: int = 10,
     ):
         """Initialize agent.
 
         Args:
             name: Agent name/identifier
-            model: Language model instance
+            model: Model string with provider prefix (e.g., "openai/gpt-4o-mini")
             instructions: System instructions for the agent
             tools: List of tools available to the agent (functions with @tool decorator)
-            model_name: Model name to use (e.g., "gpt-4", "claude-3-opus")
             temperature: LLM temperature (0.0 to 1.0)
+            max_tokens: Maximum tokens to generate
+            top_p: Nucleus sampling parameter
+            model_config: Optional advanced configuration (custom endpoints, headers, etc.)
             max_iterations: Maximum reasoning iterations
         """
         self.name = name
         self.model = model
         self.instructions = instructions
-        self.model_name = model_name
         self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.top_p = top_p
+        self.model_config = model_config
         self.max_iterations = max_iterations
 
         # Build tool registry
@@ -222,17 +230,34 @@ class Agent:
                 for tool in self.tools.values()
             ]
 
-            # Create LLM request
+            # Convert messages to dict format for lm.generate()
+            messages_dict = []
+            for msg in messages:
+                messages_dict.append({
+                    "role": msg.role.value,
+                    "content": msg.content
+                })
+
+            # Call LLM using simplified API
+            # TODO: Support tools in lm.generate() - for now using GenerateRequest internally
             request = GenerateRequest(
-                model=self.model_name,
+                model=self.model,
                 system_prompt=self.instructions,
                 messages=messages,
                 tools=tool_defs if tool_defs else [],
             )
             request.config.temperature = self.temperature
+            if self.max_tokens:
+                request.config.max_tokens = self.max_tokens
+            if self.top_p:
+                request.config.top_p = self.top_p
 
-            # Call LLM
-            response = await self.model.generate(request)
+            # Create internal LM instance for generation
+            # TODO: Use model_config when provided
+            from .lm import _LanguageModel
+            provider, model_name = self.model.split('/', 1)
+            internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+            response = await internal_lm.generate(request)
 
             # Add assistant response to messages
             messages.append(Message.assistant(response.text))
@@ -347,14 +372,21 @@ class Agent:
 
         # Build request (no tools for simple chat)
         request = GenerateRequest(
-            model=self.model_name,
+            model=self.model,
             system_prompt=self.instructions,
             messages=conversation,
         )
         request.config.temperature = self.temperature
+        if self.max_tokens:
+            request.config.max_tokens = self.max_tokens
+        if self.top_p:
+            request.config.top_p = self.top_p
 
-        # Call LLM
-        response = await self.model.generate(request)
+        # Create internal LM instance for generation
+        from .lm import _LanguageModel
+        provider, model_name = self.model.split('/', 1)
+        internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+        response = await internal_lm.generate(request)
 
         # Add assistant response
         conversation.append(Message.assistant(response.text))

@@ -1,20 +1,58 @@
 """Language Model interface for AGNT5 SDK.
 
-Phase 1: Simple Python interface with OpenAI provider.
-Phase 2: Python bindings to Rust SDK core for full provider support.
+Simplified API inspired by Vercel AI SDK for seamless multi-provider LLM access.
+Uses Rust-backed implementation via PyO3 for performance and reliability.
+
+Basic Usage:
+    >>> from agnt5 import lm
+    >>>
+    >>> # Simple generation
+    >>> response = await lm.generate(
+    ...     model="openai/gpt-4o-mini",
+    ...     prompt="What is love?",
+    ...     temperature=0.7
+    ... )
+    >>> print(response.text)
+    >>>
+    >>> # Streaming
+    >>> async for chunk in lm.stream(
+    ...     model="anthropic/claude-3-5-haiku",
+    ...     prompt="Write a story"
+    ... ):
+    ...     print(chunk, end="", flush=True)
+
+Supported Providers (via model prefix):
+    - openai/model-name
+    - anthropic/model-name
+    - groq/model-name
+    - openrouter/provider/model-name
+    - azure/model-name
+    - bedrock/model-name
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-# Phase 1: We define the interface matching Rust SDK core
-# Phase 2: This will be replaced with PyO3 bindings to sdk-core
+try:
+    from ._core import LanguageModel as RustLanguageModel
+    from ._core import LanguageModelConfig as RustLanguageModelConfig
+    from ._core import Response as RustResponse
+    from ._core import StreamChunk as RustStreamChunk
+    from ._core import Usage as RustUsage
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
+    RustLanguageModel = None
+    RustLanguageModelConfig = None
+    RustResponse = None
+    RustStreamChunk = None
+    RustUsage = None
 
 
+# Keep Python classes for backward compatibility and convenience
 class MessageRole(str, Enum):
     """Message role in conversation."""
 
@@ -64,6 +102,39 @@ class ToolChoice(str, Enum):
 
 
 @dataclass
+class ModelConfig:
+    """Advanced model configuration for custom endpoints and settings.
+
+    Use this for advanced scenarios like custom API endpoints, special headers,
+    or overriding default timeouts. Most users won't need this - the basic
+    model string with temperature/max_tokens is sufficient for common cases.
+
+    Example:
+        >>> from agnt5.lm import ModelConfig
+        >>> from agnt5 import Agent
+        >>>
+        >>> # Custom API endpoint
+        >>> config = ModelConfig(
+        ...     base_url="https://custom-api.example.com",
+        ...     api_key="custom-key",
+        ...     timeout=60,
+        ...     headers={"X-Custom-Header": "value"}
+        ... )
+        >>>
+        >>> agent = Agent(
+        ...     name="custom_agent",
+        ...     model="openai/gpt-4o-mini",
+        ...     instructions="...",
+        ...     model_config=config
+        ... )
+    """
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    timeout: Optional[int] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+@dataclass
 class GenerationConfig:
     """LLM generation configuration."""
 
@@ -103,68 +174,96 @@ class GenerateRequest:
     config: GenerationConfig = field(default_factory=GenerationConfig)
 
 
-class LanguageModel(ABC):
-    """Abstract base class for language models.
+# Internal wrapper for the Rust-backed implementation
+# Users should use the module-level generate() and stream() functions instead
+class _LanguageModel:
+    """Internal Language Model wrapper using Rust SDK core.
 
-    Phase 1: Simple Python interface.
-    Phase 2: Will use Rust SDK core via PyO3.
+    This class is for internal use only. Users should use the module-level
+    lm.generate() and lm.stream() functions for a simpler interface.
     """
 
-    @abstractmethod
-    async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        """Generate completion from LLM."""
-        pass
-
-    @abstractmethod
-    async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
-        """Stream completion from LLM."""
-        pass
-
-
-class OpenAILanguageModel(LanguageModel):
-    """OpenAI language model implementation.
-
-    Phase 1: Uses OpenAI Python SDK directly.
-    Phase 2: Will use Rust SDK core OpenAI provider.
-    """
-
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        """Initialize OpenAI model.
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        default_model: Optional[str] = None,
+    ):
+        """Initialize language model.
 
         Args:
-            api_key: OpenAI API key (or set OPENAI_API_KEY env var)
-            base_url: Optional base URL for API
+            provider: Provider name (e.g., 'openai', 'anthropic', 'azure', 'bedrock', 'groq', 'openrouter')
+                     If None, provider will be auto-detected from model prefix (e.g., 'openai/gpt-4o')
+            default_model: Default model to use if not specified in requests
         """
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
+        if not _RUST_AVAILABLE:
             raise ImportError(
-                "OpenAI package required for OpenAILanguageModel. "
-                "Install with: pip install openai"
+                "Rust extension not available. Please rebuild the SDK with: "
+                "cd sdk/sdk-python && maturin develop"
             )
 
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._provider = provider
+        self._default_model = default_model
+
+        # Create config object for Rust
+        config = RustLanguageModelConfig(
+            default_model=default_model,
+            default_provider=provider,
+        )
+
+        self._rust_lm = RustLanguageModel(config=config)
+
+    def _prepare_model_name(self, model: str) -> str:
+        """Prepare model name with provider prefix if needed.
+
+        Args:
+            model: Model name (e.g., 'gpt-4o-mini' or 'openai/gpt-4o-mini')
+
+        Returns:
+            Model name with provider prefix (e.g., 'openai/gpt-4o-mini')
+        """
+        # If model already has a prefix, return as is
+        # This handles cases like OpenRouter where models already have their provider prefix
+        # (e.g., 'anthropic/claude-3.5-haiku' for OpenRouter)
+        if '/' in model:
+            return model
+
+        # If we have a default provider, prefix the model
+        if self._provider:
+            return f"{self._provider}/{model}"
+
+        # Otherwise return as is and let Rust handle the error
+        return model
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
-        """Generate completion from OpenAI."""
-        # Build messages
-        messages = []
+        """Generate completion from LLM.
 
-        # Add system prompt if provided
-        if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
+        Args:
+            request: Generation request with model, messages, and configuration
 
-        # Add conversation messages
-        for msg in request.messages:
-            messages.append({"role": msg.role.value, "content": msg.content})
+        Returns:
+            GenerateResponse with text, usage, and optional tool calls
+        """
+        # Convert Python request to structured format for Rust
+        prompt = self._build_prompt_messages(request)
 
-        # Build request kwargs
-        kwargs: Dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
+        # Prepare model name with provider prefix
+        model = self._prepare_model_name(request.model)
+
+        # Build kwargs for Rust
+        kwargs = {
+            "model": model,
         }
 
-        # Add config
+        # Always pass provider explicitly if set
+        # For gateway providers like OpenRouter, this allows them to handle
+        # models with provider prefixes (e.g., openrouter can handle anthropic/claude-3.5-haiku)
+        if self._provider:
+            kwargs["provider"] = self._provider
+
+        # Pass system prompt separately if provided
+        if request.system_prompt:
+            kwargs["system_prompt"] = request.system_prompt
+
         if request.config.temperature is not None:
             kwargs["temperature"] = request.config.temperature
         if request.config.max_tokens is not None:
@@ -172,85 +271,312 @@ class OpenAILanguageModel(LanguageModel):
         if request.config.top_p is not None:
             kwargs["top_p"] = request.config.top_p
 
-        # Add tools if provided
-        if request.tools:
-            kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.parameters or {},
-                    },
-                }
-                for tool in request.tools
-            ]
+        # TODO: Add tools and tool_choice support when needed
+        # if request.tools:
+        #     kwargs["tools"] = self._serialize_tools(request.tools)
+        # if request.tool_choice:
+        #     kwargs["tool_choice"] = request.tool_choice.value
 
-            if request.tool_choice:
-                kwargs["tool_choice"] = request.tool_choice.value
+        # Call Rust implementation
+        rust_response = self._rust_lm.generate(prompt=prompt, **kwargs)
 
-        # Call OpenAI
-        response = await self.client.chat.completions.create(**kwargs)
-
-        # Extract response
-        choice = response.choices[0]
-        message = choice.message
-
-        # Build response
-        text = message.content or ""
-        tool_calls = None
-
-        if message.tool_calls:
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                }
-                for tc in message.tool_calls
-            ]
-
-        usage = None
-        if response.usage:
-            usage = TokenUsage(
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens,
-            )
-
-        return GenerateResponse(
-            text=text,
-            usage=usage,
-            finish_reason=choice.finish_reason,
-            tool_calls=tool_calls,
-        )
+        # Convert Rust response to Python
+        return self._convert_response(rust_response)
 
     async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
-        """Stream completion from OpenAI."""
-        # Build messages (same as generate)
-        messages = []
+        """Stream completion from LLM.
 
-        if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
+        Args:
+            request: Generation request with model, messages, and configuration
 
-        for msg in request.messages:
-            messages.append({"role": msg.role.value, "content": msg.content})
+        Yields:
+            Text chunks as they are generated
+        """
+        # Convert Python request to structured format for Rust
+        prompt = self._build_prompt_messages(request)
 
-        # Build request kwargs
-        kwargs: Dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "stream": True,
+        # Prepare model name with provider prefix
+        model = self._prepare_model_name(request.model)
+
+        # Build kwargs for Rust
+        kwargs = {
+            "model": model,
         }
+
+        # Always pass provider explicitly if set
+        # For gateway providers like OpenRouter, this allows them to handle
+        # models with provider prefixes (e.g., openrouter can handle anthropic/claude-3.5-haiku)
+        if self._provider:
+            kwargs["provider"] = self._provider
+
+        # Pass system prompt separately if provided
+        if request.system_prompt:
+            kwargs["system_prompt"] = request.system_prompt
 
         if request.config.temperature is not None:
             kwargs["temperature"] = request.config.temperature
         if request.config.max_tokens is not None:
             kwargs["max_tokens"] = request.config.max_tokens
+        if request.config.top_p is not None:
+            kwargs["top_p"] = request.config.top_p
 
-        # Stream from OpenAI
-        stream = await self.client.chat.completions.create(**kwargs)
+        # TODO: Add tools and tool_choice support when needed
+        # if request.tools:
+        #     kwargs["tools"] = self._serialize_tools(request.tools)
+        # if request.tool_choice:
+        #     kwargs["tool_choice"] = request.tool_choice.value
 
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        # Call Rust implementation (it returns a list of chunks)
+        rust_chunks = self._rust_lm.stream(prompt=prompt, **kwargs)
+
+        # Yield each chunk
+        for chunk in rust_chunks:
+            if chunk.text:
+                yield chunk.text
+
+    def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, str]]:
+        """Build structured message list for Rust.
+
+        Rust expects a list of dicts with 'role' and 'content' keys.
+        System prompt is passed separately via kwargs.
+
+        Args:
+            request: Generation request with messages
+
+        Returns:
+            List of message dicts with role and content
+        """
+        # Convert messages to Rust format (list of dicts with role and content)
+        messages = []
+        for msg in request.messages:
+            messages.append({
+                "role": msg.role.value,  # "system", "user", or "assistant"
+                "content": msg.content
+            })
+
+        # If no messages and no system prompt, return a default user message
+        if not messages and not request.system_prompt:
+            messages.append({
+                "role": "user",
+                "content": ""
+            })
+
+        return messages
+
+    def _convert_response(self, rust_response: RustResponse) -> GenerateResponse:
+        """Convert Rust response to Python response."""
+        usage = None
+        if rust_response.usage:
+            usage = TokenUsage(
+                prompt_tokens=rust_response.usage.prompt_tokens,
+                completion_tokens=rust_response.usage.completion_tokens,
+                total_tokens=rust_response.usage.total_tokens,
+            )
+
+        return GenerateResponse(
+            text=rust_response.content,
+            usage=usage,
+            finish_reason=None,  # TODO: Add finish_reason to Rust response
+            tool_calls=None,  # TODO: Add tool calls support
+        )
+
+
+# ============================================================================
+# Simplified API (Recommended)
+# ============================================================================
+# This is the recommended simple interface for most use cases
+
+async def generate(
+    model: str,
+    prompt: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
+    system_prompt: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    top_p: Optional[float] = None,
+) -> GenerateResponse:
+    """Generate text using any LLM provider (simplified API).
+
+    This is the recommended way to use the LLM API. Provider is auto-detected
+    from the model prefix (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-5-haiku').
+
+    Args:
+        model: Model identifier with provider prefix (e.g., 'openai/gpt-4o-mini')
+        prompt: Simple text prompt (for single-turn requests)
+        messages: List of message dicts with 'role' and 'content' (for multi-turn)
+        system_prompt: Optional system prompt
+        temperature: Sampling temperature (0.0-2.0)
+        max_tokens: Maximum tokens to generate
+        top_p: Nucleus sampling parameter
+
+    Returns:
+        GenerateResponse with text and usage information
+
+    Examples:
+        Simple prompt:
+        >>> response = await generate(
+        ...     model="openai/gpt-4o-mini",
+        ...     prompt="What is love?",
+        ...     temperature=0.7
+        ... )
+        >>> print(response.text)
+
+        Multi-turn conversation:
+        >>> response = await generate(
+        ...     model="anthropic/claude-3-5-haiku",
+        ...     messages=[
+        ...         {"role": "user", "content": "What is calculus?"},
+        ...         {"role": "assistant", "content": "Calculus is..."},
+        ...         {"role": "user", "content": "Give me an example"}
+        ...     ]
+        ... )
+    """
+    # Validate input
+    if not prompt and not messages:
+        raise ValueError("Either 'prompt' or 'messages' must be provided")
+    if prompt and messages:
+        raise ValueError("Provide either 'prompt' or 'messages', not both")
+
+    # Auto-detect provider from model prefix
+    if '/' not in model:
+        raise ValueError(
+            f"Model must include provider prefix (e.g., 'openai/{model}'). "
+            f"Supported providers: openai, anthropic, groq, openrouter, azure, bedrock"
+        )
+
+    provider, model_name = model.split('/', 1)
+
+    # Create language model client
+    lm = _LanguageModel(provider=provider.lower(), default_model=None)
+
+    # Build messages list
+    if prompt:
+        msg_list = [{"role": "user", "content": prompt}]
+    else:
+        msg_list = messages
+
+    # Convert to Message objects for internal API
+    message_objects = []
+    for msg in msg_list:
+        role = MessageRole(msg["role"])
+        if role == MessageRole.USER:
+            message_objects.append(Message.user(msg["content"]))
+        elif role == MessageRole.ASSISTANT:
+            message_objects.append(Message.assistant(msg["content"]))
+        elif role == MessageRole.SYSTEM:
+            message_objects.append(Message.system(msg["content"]))
+
+    # Build request
+    config = GenerationConfig(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+    )
+
+    request = GenerateRequest(
+        model=model,
+        messages=message_objects,
+        system_prompt=system_prompt,
+        config=config,
+    )
+
+    # Generate and return
+    return await lm.generate(request)
+
+
+async def stream(
+    model: str,
+    prompt: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
+    system_prompt: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    top_p: Optional[float] = None,
+) -> AsyncIterator[str]:
+    """Stream text using any LLM provider (simplified API).
+
+    This is the recommended way to use streaming. Provider is auto-detected
+    from the model prefix (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-5-haiku').
+
+    Args:
+        model: Model identifier with provider prefix (e.g., 'openai/gpt-4o-mini')
+        prompt: Simple text prompt (for single-turn requests)
+        messages: List of message dicts with 'role' and 'content' (for multi-turn)
+        system_prompt: Optional system prompt
+        temperature: Sampling temperature (0.0-2.0)
+        max_tokens: Maximum tokens to generate
+        top_p: Nucleus sampling parameter
+
+    Yields:
+        Text chunks as they are generated
+
+    Examples:
+        Simple streaming:
+        >>> async for chunk in stream(
+        ...     model="openai/gpt-4o-mini",
+        ...     prompt="Write a story"
+        ... ):
+        ...     print(chunk, end="", flush=True)
+
+        Streaming conversation:
+        >>> async for chunk in stream(
+        ...     model="groq/llama-3.3-70b-versatile",
+        ...     messages=[
+        ...         {"role": "user", "content": "Tell me a joke"}
+        ...     ],
+        ...     temperature=0.9
+        ... ):
+        ...     print(chunk, end="")
+    """
+    # Validate input
+    if not prompt and not messages:
+        raise ValueError("Either 'prompt' or 'messages' must be provided")
+    if prompt and messages:
+        raise ValueError("Provide either 'prompt' or 'messages', not both")
+
+    # Auto-detect provider from model prefix
+    if '/' not in model:
+        raise ValueError(
+            f"Model must include provider prefix (e.g., 'openai/{model}'). "
+            f"Supported providers: openai, anthropic, groq, openrouter, azure, bedrock"
+        )
+
+    provider, model_name = model.split('/', 1)
+
+    # Create language model client
+    lm = _LanguageModel(provider=provider.lower(), default_model=None)
+
+    # Build messages list
+    if prompt:
+        msg_list = [{"role": "user", "content": prompt}]
+    else:
+        msg_list = messages
+
+    # Convert to Message objects for internal API
+    message_objects = []
+    for msg in msg_list:
+        role = MessageRole(msg["role"])
+        if role == MessageRole.USER:
+            message_objects.append(Message.user(msg["content"]))
+        elif role == MessageRole.ASSISTANT:
+            message_objects.append(Message.assistant(msg["content"]))
+        elif role == MessageRole.SYSTEM:
+            message_objects.append(Message.system(msg["content"]))
+
+    # Build request
+    config = GenerationConfig(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+    )
+
+    request = GenerateRequest(
+        model=model,
+        messages=message_objects,
+        system_prompt=system_prompt,
+        config=config,
+    )
+
+    # Stream and yield chunks
+    async for chunk in lm.stream(request):
+        yield chunk

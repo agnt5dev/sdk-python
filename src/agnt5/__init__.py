@@ -7,8 +7,18 @@ with built-in durability guarantees and state management.
 
 from ._compat import _import_error, _rust_available
 from .agent import Agent, AgentRegistry, AgentResult, agent
+from .client import Client, RunError
 from .context import Context
-from .entity import EntityInstance, EntityRegistry, EntityType, entity
+from .entity import (
+    DurableEntity,
+    SessionEntity,
+    MemoryEntity,
+    WorkflowEntity,
+    EntityInstance,
+    EntityRegistry,
+    EntityType,
+    entity,
+)
 from .exceptions import (
     AGNT5Error,
     CheckpointError,
@@ -24,6 +34,9 @@ from .version import _get_version
 from .worker import Worker
 from .workflow import WorkflowRegistry, workflow
 
+# Expose simplified language model API (recommended)
+from . import lm
+
 __version__ = _get_version()
 
 __all__ = [
@@ -31,12 +44,18 @@ __all__ = [
     "__version__",
     # Core components
     "Context",
+    "Client",
+    "Worker",
     "function",
     "FunctionRegistry",
     "entity",
     "EntityType",
     "EntityInstance",
     "EntityRegistry",
+    "DurableEntity",
+    "SessionEntity",
+    "MemoryEntity",
+    "WorkflowEntity",
     "workflow",
     "WorkflowRegistry",
     "tool",
@@ -46,7 +65,6 @@ __all__ = [
     "Agent",
     "AgentRegistry",
     "AgentResult",
-    "Worker",
     # Types
     "RetryPolicy",
     "BackoffPolicy",
@@ -60,4 +78,7 @@ __all__ = [
     "RetryError",
     "StateError",
     "CheckpointError",
+    "RunError",
+    # Language Model (Simplified API)
+    "lm",
 ]

@@ -6,11 +6,35 @@ An **Agent** in AGNT5 is an autonomous LLM-driven system that can reason, plan, 
 
 **Key Characteristics:**
 - **LLM-Powered**: Driven by language models for reasoning and decision-making
+- **Multi-Provider Support**: Works with OpenAI, Anthropic, Groq, Azure, Bedrock, OpenRouter
+- **Simple API**: Just specify `model="provider/model-name"` - no factory functions needed
 - **Tool Orchestration**: Automatically selects and executes appropriate tools
 - **Memory Integration**: Maintains long-term knowledge across conversations
 - **Session Aware**: Uses sessions for conversation context and multi-agent coordination
 - **Streaming Support**: Real-time event streaming for responsive UX
 - **Durable by Default**: Built on AGNT5 primitives for automatic fault tolerance
+
+**Quick Start:**
+```python
+from agnt5 import Agent
+
+agent = Agent(
+    name="assistant",
+    model="openai/gpt-4o-mini",  # Provider auto-detected from prefix
+    instructions="You are a helpful assistant.",
+    temperature=0.7
+)
+
+result = await agent.run("What is recursion?")
+```
+
+**Supported Providers:**
+- `openai/gpt-4o-mini`, `openai/gpt-4o`, etc.
+- `anthropic/claude-3-5-haiku-20241022`, etc.
+- `groq/llama-3.3-70b-versatile`, etc.
+- `openrouter/anthropic/claude-3.5-sonnet`, etc.
+- `azure/your-deployment-name`
+- `bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0`
 
 ## Why are Agents Needed?
 
@@ -19,7 +43,7 @@ An **Agent** in AGNT5 is an autonomous LLM-driven system that can reason, plan, 
 Agents break down complex tasks and execute them autonomously:
 
 ```python
-from agnt5 import Agent, LanguageModel, tool
+from agnt5 import Agent, tool
 
 @tool(auto_schema=True)
 def search_papers(query: str) -> List[Dict]:
@@ -31,12 +55,12 @@ def analyze_paper(paper_url: str) -> Dict:
     """Analyze paper content."""
     pass
 
-lm = LanguageModel()
 agent = Agent(
     name="researcher",
-    model=lm,
+    model="openai/gpt-4o-mini",
     instructions="You are a research assistant. Break down complex research tasks.",
-    tools=[search_papers, analyze_paper]
+    tools=[search_papers, analyze_paper],
+    temperature=0.7
 )
 
 # Agent autonomously:
@@ -54,14 +78,15 @@ Agents chain tool calls based on reasoning:
 # Agent decides tool execution order based on context
 agent = Agent(
     name="analyst",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[
         search_web,
         fetch_stock_data,
         calculate_metrics,
         generate_chart
     ],
-    instructions="Analyze companies thoroughly before making recommendations."
+    instructions="Analyze companies thoroughly before making recommendations.",
+    temperature=0.7
 )
 
 result = await agent.run("Should I invest in Tesla?")
@@ -87,14 +112,14 @@ session = Session(id="code-review-123", user_id="developer-456")
 # Specialized agents
 code_analyzer = Agent(
     name="analyzer",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[lint_tool, complexity_tool],
     session=session
 )
 
 security_checker = Agent(
     name="security",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[vuln_scan_tool, dependency_check_tool],
     session=session
 )
@@ -110,14 +135,13 @@ security = await security_checker.run("Check for security issues")
 ### Basic Agent Creation
 
 ```python
-from agnt5 import Agent, LanguageModel
-
-lm = LanguageModel()
+from agnt5 import Agent
 
 agent = Agent(
     name="assistant",
-    model=lm,
-    instructions="You are a helpful coding assistant."
+    model="openai/gpt-4o-mini",
+    instructions="You are a helpful coding assistant.",
+    temperature=0.7
 )
 
 # Simple agent without tools
@@ -142,11 +166,12 @@ def run_code(code: str, language: str = "python") -> Dict[str, str]:
 
 agent = Agent(
     name="coding_assistant",
-    model=lm,
+    model="openai/gpt-4o-mini",
     instructions="""You are a coding assistant. Help users write and test code.
     Use search_docs to find API references.
     Use run_code to test code examples.""",
-    tools=[search_docs, run_code]
+    tools=[search_docs, run_code],
+    temperature=0.7
 )
 
 result = await agent.run("How do I read a file in Python? Show me an example.")
@@ -156,7 +181,7 @@ result = await agent.run("How do I read a file in Python? Show me an example.")
 ### Agent with Session and Memory
 
 ```python
-from agnt5 import Agent, Session, Memory, LanguageModel
+from agnt5 import Agent, Session, Memory
 
 # Create session for conversation
 session = Session(
@@ -170,14 +195,14 @@ memory = Memory(service=VectorMemoryService())
 await memory.store("student_level", "Advanced calculus, struggles with proofs")
 
 # Create agent with context
-lm = LanguageModel()
 agent = Agent(
     name="math_tutor",
-    model=lm,
+    model="openai/gpt-4o-mini",
     instructions="You are a patient math tutor. Adapt to student's level.",
     tools=[solve_equation_tool, plot_function_tool],
     session=session,
-    memory=memory
+    memory=memory,
+    temperature=0.7
 )
 
 # Agent uses memory and session for personalized tutoring
@@ -222,6 +247,44 @@ if user_approves(plan):
     result = await agent.run("Analyze competitor pricing strategies")
 ```
 
+### Advanced Model Configuration
+
+For custom endpoints, special headers, or advanced settings:
+
+```python
+from agnt5 import Agent
+from agnt5.lm import ModelConfig
+
+# Create custom configuration
+config = ModelConfig(
+    base_url="https://custom-api.example.com",  # Custom API endpoint
+    api_key="custom-key",                        # Override default API key
+    timeout=60,                                  # Custom timeout (seconds)
+    headers={"X-Custom-Header": "value"}        # Additional headers
+)
+
+# Agent with advanced configuration
+agent = Agent(
+    name="custom_agent",
+    model="openai/gpt-4o-mini",
+    instructions="You are a helpful assistant.",
+    temperature=0.7,
+    max_tokens=500,              # Limit response length
+    top_p=0.9,                   # Nucleus sampling parameter
+    model_config=config          # Advanced configuration
+)
+
+result = await agent.run("Explain custom API configuration")
+```
+
+**When to use ModelConfig:**
+- Custom API endpoints (e.g., Azure OpenAI with custom domains)
+- Special authentication headers
+- Custom timeout requirements
+- Testing with mock LLM endpoints
+
+**For most use cases**, the basic parameters (`temperature`, `max_tokens`, `top_p`) are sufficient.
+
 ## Common Patterns
 
 ### Research Agent Pattern
@@ -245,7 +308,7 @@ memory = Memory(service=VectorMemoryService())
 
 research_agent = Agent(
     name="research_agent",
-    model=lm,
+    model="openai/gpt-4o-mini",
     instructions="""You are a research assistant specializing in AI safety.
 
     Research process:
@@ -257,7 +320,8 @@ research_agent = Agent(
     Focus on papers from 2020 onwards.""",
     tools=[search_academic, extract_insights],
     session=session,
-    memory=memory
+    memory=memory,
+    temperature=0.7
 )
 
 result = await research_agent.run(
@@ -277,26 +341,29 @@ session = Session(id="product-launch-001", user_id="pm-456")
 # Specialized agents
 market_researcher = Agent(
     name="market_analyst",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[market_data_tool, competitor_analysis_tool],
     session=session,
-    instructions="Analyze market opportunities and competitive landscape."
+    instructions="Analyze market opportunities and competitive landscape.",
+    temperature=0.7
 )
 
 product_designer = Agent(
     name="designer",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[design_tool, user_research_tool],
     session=session,
-    instructions="Design products based on market research and user needs."
+    instructions="Design products based on market research and user needs.",
+    temperature=0.7
 )
 
 technical_lead = Agent(
     name="tech_lead",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[architecture_tool, feasibility_tool],
     session=session,
-    instructions="Assess technical feasibility and propose architecture."
+    instructions="Assess technical feasibility and propose architecture.",
+    temperature=0.7
 )
 
 # Sequential execution with shared context
@@ -323,22 +390,24 @@ from agnt5.tools import AgentTool
 # Create specialized agents
 billing_agent = Agent(
     name="billing_specialist",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[payment_tool, invoice_tool, refund_tool],
-    instructions="Handle billing, payments, and refunds."
+    instructions="Handle billing, payments, and refunds.",
+    temperature=0.7
 )
 
 technical_agent = Agent(
     name="tech_support",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[diagnostic_tool, fix_tool, escalation_tool],
-    instructions="Diagnose and fix technical issues."
+    instructions="Diagnose and fix technical issues.",
+    temperature=0.7
 )
 
 # Coordinator with agent handoff capability
 coordinator = Agent(
     name="coordinator",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[
         classify_request_tool,
         AgentTool(target_agent=billing_agent),
@@ -349,7 +418,8 @@ coordinator = Agent(
 
     Hand off to:
     - billing_specialist: payment, invoice, refund questions
-    - tech_support: technical issues, bugs, troubleshooting"""
+    - tech_support: technical issues, bugs, troubleshooting""",
+    temperature=0.7
 )
 
 session = Session(id="support-ticket-789", user_id="customer-123")
@@ -374,10 +444,11 @@ def deploy_to_production(version: str) -> Dict[str, str]:
 
 deployment_agent = Agent(
     name="deployer",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[run_tests_tool, deploy_to_production],
     instructions="""Run all tests before deploying.
-    Always request human approval for production deployments."""
+    Always request human approval for production deployments.""",
+    temperature=0.7
 )
 
 result = await deployment_agent.run("Deploy version 2.0 to production")
@@ -391,7 +462,7 @@ result = await deployment_agent.run("Deploy version 2.0 to production")
 ```python
 debugging_agent = Agent(
     name="debugger",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[
         analyze_logs_tool,
         run_diagnostic_tool,
@@ -407,7 +478,8 @@ debugging_agent = Agent(
     4. Verify fix works
     5. If not fixed, iterate (max 3 attempts)
 
-    Always verify fixes before considering issue resolved."""
+    Always verify fixes before considering issue resolved.""",
+    temperature=0.7
 )
 
 result = await debugging_agent.run(
@@ -426,7 +498,7 @@ Good instructions help agents make better decisions:
 # Good - Specific, actionable instructions
 agent = Agent(
     name="code_reviewer",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[analyze_code_tool, suggest_improvements_tool],
     instructions="""You are an expert code reviewer specializing in Python.
 
@@ -436,15 +508,17 @@ agent = Agent(
     3. Suggest specific improvements with code examples
     4. Prioritize: security > correctness > performance > style
 
-    Be constructive and explain your reasoning."""
+    Be constructive and explain your reasoning.""",
+    temperature=0.7
 )
 
 # Avoid - Vague instructions
 agent = Agent(
     name="helper",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[tool1, tool2],
-    instructions="Help the user with stuff."  # Too vague
+    instructions="Help the user with stuff.",  # Too vague
+    temperature=0.7
 )
 ```
 
@@ -479,9 +553,10 @@ await memory.store("coding_style", "Prefers functional programming")
 # Agent recalls context automatically
 agent = Agent(
     name="assistant",
-    model=lm,
+    model="openai/gpt-4o-mini",
     tools=[code_gen_tool],
-    memory=memory
+    memory=memory,
+    temperature=0.7
 )
 
 # Memory influences agent's responses

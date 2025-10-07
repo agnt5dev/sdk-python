@@ -2,22 +2,23 @@
 Example: Basic Agent Usage
 
 This example demonstrates:
-- Creating an agent with LLM integration
+- Creating an agent with LLM integration (multiple providers supported)
 - Agent with tools for autonomous task execution
 - Multi-turn conversations
 - Tool orchestration
 
 Prerequisites:
-    pip install openai
-    export OPENAI_API_KEY=your-key-here
+    Set environment variables for providers you want to use:
+    - OPENAI_API_KEY=your-key
+    - ANTHROPIC_API_KEY=your-key
+    - GROQ_API_KEY=your-key
 """
 
 import asyncio
 import os
 from typing import Dict, List
 
-from agnt5 import Agent, Context, tool
-from agnt5.lm import OpenAILanguageModel
+from agnt5 import Agent, Context, lm, tool
 
 
 # Define tools for the agent
@@ -79,15 +80,15 @@ async def example_simple_agent():
     """Example: Simple agent without tools."""
     print("=== Example 1: Simple Agent (No Tools) ===\n")
 
-    # Create language model
-    lm = OpenAILanguageModel()
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠️  Skipped: OPENAI_API_KEY not set\n")
+        return
 
-    # Create simple agent
+    # Create simple agent with model string
     agent = Agent(
         name="assistant",
-        model=lm,
+        model="openai/gpt-4o-mini",
         instructions="You are a helpful assistant. Be concise and friendly.",
-        model_name="gpt-4o-mini",
         temperature=0.7,
     )
 
@@ -102,13 +103,14 @@ async def example_agent_with_tools():
     """Example: Agent with tool orchestration."""
     print("=== Example 2: Agent with Tools ===\n")
 
-    # Create language model
-    lm = OpenAILanguageModel()
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠️  Skipped: OPENAI_API_KEY not set\n")
+        return
 
-    # Create agent with tools
+    # Create agent with tools using model string
     agent = Agent(
         name="research_assistant",
-        model=lm,
+        model="openai/gpt-4o-mini",
         instructions="""You are a research assistant. You can:
         - Search the web for information
         - Perform calculations
@@ -116,7 +118,6 @@ async def example_agent_with_tools():
 
         Use tools when needed to provide accurate information.""",
         tools=[search_web, calculate, get_current_time],
-        model_name="gpt-4o-mini",
         temperature=0.7,
         max_iterations=5,
     )
@@ -151,16 +152,16 @@ async def example_multi_turn_chat():
     """Example: Multi-turn conversation."""
     print("=== Example 3: Multi-Turn Conversation ===\n")
 
-    # Create language model
-    lm = OpenAILanguageModel()
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠️  Skipped: OPENAI_API_KEY not set\n")
+        return
 
-    # Create conversational agent
+    # Create conversational agent with model string
     agent = Agent(
         name="tutor",
-        model=lm,
+        model="openai/gpt-4o-mini",
         instructions="""You are a patient math tutor.
         Explain concepts clearly and ask follow-up questions to check understanding.""",
-        model_name="gpt-4o-mini",
         temperature=0.7,
     )
 
@@ -206,15 +207,17 @@ async def example_agent_with_state():
         """List all saved notes."""
         return ctx.get("notes", [])
 
-    # Create agent with state tools
-    lm = OpenAILanguageModel()
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠️  Skipped: OPENAI_API_KEY not set\n")
+        return
+
+    # Create agent with state tools using model string
     agent = Agent(
         name="note_keeper",
-        model=lm,
+        model="openai/gpt-4o-mini",
         instructions="""You are a note-taking assistant.
         Help users save and retrieve notes.""",
         tools=[save_note, list_notes],
-        model_name="gpt-4o-mini",
         temperature=0.7,
     )
 
@@ -236,16 +239,98 @@ async def example_agent_with_state():
     print(f"Notes in context state: {ctx.get('notes', [])}\n")
 
 
-async def main():
-    # Check for API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("ERROR: Please set OPENAI_API_KEY environment variable")
-        print("Example: export OPENAI_API_KEY=your-key-here\n")
+async def example_multi_provider_agents():
+    """Example: Use agents with different LLM providers."""
+    print("=== Example 5: Multi-Provider Agents ===\n")
+
+    providers = []
+
+    # Test with OpenAI
+    if os.getenv("OPENAI_API_KEY"):
+        providers.append(("OpenAI GPT-4o-mini", "openai/gpt-4o-mini"))
+
+    # Test with Anthropic
+    if os.getenv("ANTHROPIC_API_KEY"):
+        providers.append(("Anthropic Claude 3.5 Haiku", "anthropic/claude-3-5-haiku-20241022"))
+
+    # Test with Groq
+    if os.getenv("GROQ_API_KEY"):
+        providers.append(("Groq Llama 3.3 70B", "groq/llama-3.3-70b-versatile"))
+
+    if not providers:
+        print("⚠️  Skipped: No API keys set\n")
         return
 
+    question = "What are the three most important skills for a software engineer?"
+
+    for provider_name, model in providers:
+        print(f"\n[{provider_name}]")
+
+        agent = Agent(
+            name=f"advisor_{provider_name.lower().replace(' ', '_')}",
+            model=model,
+            instructions="You are a career advisor. Give concise, practical advice.",
+            temperature=0.7,
+        )
+
+        result = await agent.run(question)
+        print(f"  {result.output}\n")
+
+    print()
+
+
+async def example_advanced_model_config():
+    """Example: Using ModelConfig for advanced configuration."""
+    print("=== Example 6: Advanced Model Configuration ===\n")
+
+    if not os.getenv("OPENAI_API_KEY"):
+        print("⚠️  Skipped: OPENAI_API_KEY not set\n")
+        return
+
+    from agnt5.lm import ModelConfig
+
+    # Create custom model configuration
+    # Useful for custom endpoints, timeouts, or special headers
+    config = ModelConfig(
+        timeout=60,  # Custom timeout in seconds
+        # base_url="https://custom-api.example.com",  # Custom endpoint
+        # headers={"X-Custom-Header": "value"},  # Custom headers
+    )
+
+    # Create agent with advanced configuration
+    agent = Agent(
+        name="custom_agent",
+        model="openai/gpt-4o-mini",
+        instructions="You are a helpful assistant with custom configuration.",
+        temperature=0.7,
+        max_tokens=150,  # Limit response length
+        model_config=config,
+    )
+
+    result = await agent.run("Explain what custom API configuration means in one sentence.")
+    print(f"Agent: {result.output}\n")
+    print("✅ Successfully used ModelConfig for advanced settings\n")
+
+
+async def main():
     print("=== AGNT5 Agent Examples ===\n")
-    print("Phase 1: Simple agent with external LLM integration")
-    print("Phase 2: Platform-backed agents with durability and multi-agent coordination\n")
+    print("Phase 2: Rust-backed language models with multi-provider support")
+    print("Supported providers: OpenAI, Anthropic, Groq, Azure, Bedrock, OpenRouter\n")
+
+    # Check if at least one provider is configured
+    has_provider = any([
+        os.getenv("OPENAI_API_KEY"),
+        os.getenv("ANTHROPIC_API_KEY"),
+        os.getenv("GROQ_API_KEY"),
+        os.getenv("OPENROUTER_API_KEY"),
+    ])
+
+    if not has_provider:
+        print("⚠️  WARNING: No API keys found. Please set at least one:")
+        print("  - OPENAI_API_KEY=your-key")
+        print("  - ANTHROPIC_API_KEY=your-key")
+        print("  - GROQ_API_KEY=your-key")
+        print("  - OPENROUTER_API_KEY=your-key\n")
 
     try:
         # Run examples
@@ -253,12 +338,11 @@ async def main():
         await example_agent_with_tools()
         await example_multi_turn_chat()
         await example_agent_with_state()
+        await example_multi_provider_agents()
+        await example_advanced_model_config()
 
         print("=== All Examples Complete ===")
 
-    except ImportError:
-        print("ERROR: OpenAI package not installed")
-        print("Install with: pip install openai")
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback

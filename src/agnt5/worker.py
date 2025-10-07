@@ -8,8 +8,9 @@ from typing import Any, Dict, Optional
 
 from .function import FunctionRegistry
 from .workflow import WorkflowRegistry
+from ._telemetry import setup_module_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_module_logger(__name__)
 
 
 class Worker:
@@ -352,7 +353,7 @@ class Worker:
                 elif component_type == "function":
                     function_config = FunctionRegistry.get(component_name)
                     if function_config:
-                        logger.debug(f"Found function: {component_name}")
+                        logger.info(f"🔥 WORKER: Received request for function: {component_name}")
                         result = asyncio.run(self._execute_function(function_config, input_data, request))
                         return result
 
@@ -369,10 +370,13 @@ class Worker:
         return handle_message
 
     async def _execute_function(self, config, input_data: bytes, request):
-        """Execute a function handler."""
+        """Execute a function handler (supports both regular and streaming functions)."""
         import json
+        import inspect
         from .context import Context
         from ._core import PyExecuteComponentResponse
+
+        logger.info(f"🔥 WORKER: Executing function {config.name}")
 
         try:
             # Parse input data
@@ -386,25 +390,76 @@ class Worker:
 
             # Execute function
             if input_dict:
-                result = await config.handler(ctx, **input_dict)
+                result = config.handler(ctx, **input_dict)
             else:
-                result = await config.handler(ctx)
+                result = config.handler(ctx)
 
-            # Serialize result
-            output_data = json.dumps(result).encode("utf-8")
+            # Debug: Log what type result is
+            logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
 
-            return PyExecuteComponentResponse(
-                invocation_id=request.invocation_id,
-                success=True,
-                output_data=output_data,
-                state_update=None,
-                error_message=None,
-                metadata=None,
-            )
+            # Check if result is an async generator (streaming function)
+            if inspect.isasyncgen(result):
+                # Streaming function - return list of responses
+                # Rust bridge will send each response separately to coordinator
+                responses = []
+                chunk_index = 0
+
+                async for chunk in result:
+                    # Serialize chunk
+                    chunk_data = json.dumps(chunk).encode("utf-8")
+
+                    responses.append(PyExecuteComponentResponse(
+                        invocation_id=request.invocation_id,
+                        success=True,
+                        output_data=chunk_data,
+                        state_update=None,
+                        error_message=None,
+                        metadata=None,
+                        is_chunk=True,
+                        done=False,
+                        chunk_index=chunk_index,
+                    ))
+                    chunk_index += 1
+
+                # Add final "done" marker
+                responses.append(PyExecuteComponentResponse(
+                    invocation_id=request.invocation_id,
+                    success=True,
+                    output_data=b"",
+                    state_update=None,
+                    error_message=None,
+                    metadata=None,
+                    is_chunk=True,
+                    done=True,
+                    chunk_index=chunk_index,
+                ))
+
+                logger.debug(f"Streaming function produced {len(responses)} chunks")
+                return responses
+            else:
+                # Regular function - await and return single response
+                if inspect.iscoroutine(result):
+                    result = await result
+
+                # Serialize result
+                output_data = json.dumps(result).encode("utf-8")
+
+                return PyExecuteComponentResponse(
+                    invocation_id=request.invocation_id,
+                    success=True,
+                    output_data=output_data,
+                    state_update=None,
+                    error_message=None,
+                    metadata=None,
+                    is_chunk=False,
+                    done=True,
+                    chunk_index=0,
+                )
 
         except Exception as e:
-            error_msg = f"Function execution failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            # Include exception type for better error messages
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Function execution failed: {error_msg}", exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -412,10 +467,13 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
     async def _execute_workflow(self, config, input_data: bytes, request):
-        """Execute a workflow handler."""
+        """Execute a workflow handler with replay support (Phase 6B)."""
         import json
         from .context import Context
         from ._core import PyExecuteComponentResponse
@@ -424,10 +482,37 @@ class Worker:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
 
-            # Create context
+            # Phase 6B: Parse replay data from request metadata
+            completed_steps = {}
+            initial_state = {}
+
+            if hasattr(request, 'metadata') and request.metadata:
+                # Parse completed steps for replay
+                if "completed_steps" in request.metadata:
+                    completed_steps_json = request.metadata["completed_steps"]
+                    if completed_steps_json:
+                        try:
+                            completed_steps = json.loads(completed_steps_json)
+                            logger.info(f"🔄 Replaying workflow with {len(completed_steps)} cached steps")
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse completed_steps from metadata")
+
+                # Parse initial workflow state for replay
+                if "workflow_state" in request.metadata:
+                    workflow_state_json = request.metadata["workflow_state"]
+                    if workflow_state_json:
+                        try:
+                            initial_state = json.loads(workflow_state_json)
+                            logger.info(f"🔄 Loaded workflow state: {len(initial_state)} keys")
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse workflow_state from metadata")
+
+            # Create context with replay data
             ctx = Context(
                 run_id=f"{self.service_name}:{config.name}",
                 component_type="workflow",
+                completed_steps=completed_steps if completed_steps else None,
+                initial_state=initial_state if initial_state else None,
             )
 
             # Execute workflow
@@ -439,18 +524,38 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
+            # Phase 6: Collect workflow execution metadata (similar to entity pattern)
+            metadata = {}
+
+            # Add step events to metadata (for workflow durability)
+            if ctx._step_events:
+                metadata["step_events"] = json.dumps(ctx._step_events)
+                logger.debug(f"Workflow has {len(ctx._step_events)} recorded steps")
+
+            # Add final state snapshot to metadata (if state was used)
+            if hasattr(ctx, '_state_client') and ctx.state.has_changes():
+                state_snapshot = ctx.state.get_state_snapshot()
+                metadata["workflow_state"] = json.dumps(state_snapshot)
+                logger.debug(f"Workflow state snapshot: {state_snapshot}")
+
+            logger.info(f"Workflow completed successfully with {len(ctx._step_events)} steps")
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
-                state_update=None,
+                state_update=None,  # Not used for workflows (use metadata instead)
                 error_message=None,
-                metadata=None,
+                metadata=metadata if metadata else None,  # Include step events + state
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
         except Exception as e:
-            error_msg = f"Workflow execution failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            # Include exception type for better error messages
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -458,6 +563,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
     async def _execute_tool(self, tool, input_data: bytes, request):
@@ -489,11 +597,15 @@ class Worker:
                 state_update=None,
                 error_message=None,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
         except Exception as e:
-            error_msg = f"Tool execution failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            # Include exception type for better error messages
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Tool execution failed: {error_msg}", exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -501,12 +613,16 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
     async def _execute_entity(self, entity_type, input_data: bytes, request):
         """Execute an entity method."""
         import json
         from .context import Context
+        from .entity import EntityType, DurableEntity, _entity_states
         from ._core import PyExecuteComponentResponse
 
         try:
@@ -522,8 +638,13 @@ class Worker:
             if not method_name:
                 raise ValueError("Entity invocation requires 'method' parameter")
 
-            # Create entity instance
-            entity_instance = entity_type(entity_key)
+            # Check if this is a class-based entity (DurableEntity subclass) or method-based (EntityType)
+            if entity_type.entity_class is not None:
+                # Class-based entity: use the stored class reference
+                entity_instance = entity_type.entity_class(key=entity_key)
+            else:
+                # Method-based entity: create EntityInstance
+                entity_instance = entity_type(entity_key)
 
             # Get method
             if not hasattr(entity_instance, method_name):
@@ -537,18 +658,37 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
+            # Phase 5B: Capture entity state after execution for persistence
+            state_key = (entity_type.name, entity_key)
+            metadata = {}
+            if state_key in _entity_states:
+                entity_state = _entity_states[state_key]
+                # Serialize state as JSON string for platform persistence
+                state_json = json.dumps(entity_state)
+                # Pass in metadata for Worker Coordinator to publish
+                metadata = {
+                    "entity_state": state_json,
+                    "entity_type": entity_type.name,
+                    "entity_key": entity_key,
+                }
+                logger.debug(f"Entity state update: {entity_type.name}:{entity_key}, state: {state_json}")
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
-                state_update=None,
+                state_update=None,  # TODO: Phase 6 - Use structured StateUpdate object
                 error_message=None,
-                metadata=None,
+                metadata=metadata,  # Include state in metadata for Worker Coordinator
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
         except Exception as e:
-            error_msg = f"Entity execution failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            # Include exception type for better error messages
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Entity execution failed: {error_msg}", exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -556,6 +696,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
     async def _execute_agent(self, agent, input_data: bytes, request):
@@ -598,11 +741,15 @@ class Worker:
                 state_update=None,
                 error_message=None,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
         except Exception as e:
-            error_msg = f"Agent execution failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            # Include exception type for better error messages
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            logger.error(f"Agent execution failed: {error_msg}", exc_info=True)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -610,6 +757,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=None,
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
             )
 
     def _create_error_response(self, request, error_message: str):
@@ -623,6 +773,9 @@ class Worker:
             state_update=None,
             error_message=error_message,
             metadata=None,
+            is_chunk=False,
+            done=True,
+            chunk_index=0,
         )
 
     async def run(self):

@@ -27,7 +27,7 @@ async def process_data(ctx: Context, data: str) -> dict:
     ctx.set("input_data", data)
 
     # Retrieve from state
-    stored = await ctx.get("input_data")
+    stored = ctx.get("input_data")
     ctx.logger.info(f"Stored data: {stored}")
 
     return {"processed": data.upper(), "length": len(data)}
@@ -61,22 +61,76 @@ async def expensive_pipeline(ctx: Context, dataset_id: str) -> dict:
     }
 
 
+@function
+async def failing_function(ctx: Context, should_fail: bool, error_type: str = "ValueError") -> dict:
+    """Function that can raise different types of errors for testing."""
+    ctx.logger.info(f"Testing error handling: should_fail={should_fail}, error_type={error_type}")
+
+    if should_fail:
+        if error_type == "ValueError":
+            raise ValueError("This is a user-thrown ValueError for testing")
+        elif error_type == "TypeError":
+            raise TypeError("This is a user-thrown TypeError for testing")
+        elif error_type == "RuntimeError":
+            raise RuntimeError("This is a user-thrown RuntimeError for testing")
+        else:
+            raise Exception(f"Generic exception: {error_type}")
+
+    return {"success": True, "message": "No error was raised"}
+
+
+@function
+async def long_running_task(ctx: Context, duration_seconds: int = 30) -> dict:
+    """
+    Long-running task for testing durability and crash recovery.
+
+    This function simulates work that takes a while to complete. It's useful for:
+    - Testing crash recovery (kill server during execution)
+    - Testing async execution patterns
+    - Verifying event sourcing durability
+    """
+    ctx.logger.info(f"Starting long-running task: {duration_seconds} seconds")
+
+    # Checkpoint at 25% progress
+    await ctx.step(
+        "quarter", lambda: asyncio.sleep(duration_seconds * 0.25)  # type: ignore
+    )
+    ctx.logger.info("25% complete")
+
+    # Checkpoint at 50% progress
+    await ctx.step(
+        "half", lambda: asyncio.sleep(duration_seconds * 0.25)  # type: ignore
+    )
+    ctx.logger.info("50% complete")
+
+    # Checkpoint at 75% progress
+    await ctx.step(
+        "three_quarters", lambda: asyncio.sleep(duration_seconds * 0.25)  # type: ignore
+    )
+    ctx.logger.info("75% complete")
+
+    # Final 25%
+    await ctx.step(
+        "complete", lambda: asyncio.sleep(duration_seconds * 0.25)  # type: ignore
+    )
+    ctx.logger.info("100% complete")
+
+    return {
+        "completed": True,
+        "duration_seconds": duration_seconds,
+        "message": f"Task completed successfully after {duration_seconds} seconds"
+    }
+
+
 async def main() -> None:
-    """Run examples."""
-    print("=== Example 1: Basic Function ===")
-    ctx1 = Context(run_id="example-1")
-    result1 = await greet_user(ctx1, "Alice")
-    print(f"Result: {result1}\n")
+    """Run the worker and register with coordinator."""
+    from agnt5 import Worker
 
-    print("=== Example 2: State Management ===")
-    ctx2 = Context(run_id="example-2")
-    result2 = await process_data(ctx2, "hello world")
-    print(f"Result: {result2}\n")
-
-    print("=== Example 3: Checkpointing ===")
-    ctx3 = Context(run_id="example-3")
-    result3 = await expensive_pipeline(ctx3, "dataset-123")
-    print(f"Result: {result3}\n")
+    worker = Worker(
+        service_name="default-service",
+        service_version="1.0.0",
+    )
+    await worker.run()
 
 
 if __name__ == "__main__":

@@ -415,11 +415,19 @@ pub struct PyExecuteComponentResponse {
     pub error_message: Option<String>,
     #[pyo3(get)]
     pub metadata: HashMap<String, String>,
+    // Streaming support (v1.1)
+    #[pyo3(get)]
+    pub is_chunk: bool,
+    #[pyo3(get)]
+    pub done: bool,
+    #[pyo3(get)]
+    pub chunk_index: i64,
 }
 
 #[pymethods]
 impl PyExecuteComponentResponse {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         invocation_id: String,
         success: bool,
@@ -427,6 +435,9 @@ impl PyExecuteComponentResponse {
         state_update: Option<PyStateUpdate>,
         error_message: Option<String>,
         metadata: Option<HashMap<String, String>>,
+        is_chunk: Option<bool>,
+        done: Option<bool>,
+        chunk_index: Option<i64>,
     ) -> Self {
         Self {
             invocation_id,
@@ -435,6 +446,9 @@ impl PyExecuteComponentResponse {
             state_update,
             error_message,
             metadata: metadata.unwrap_or_default(),
+            is_chunk: is_chunk.unwrap_or(false),
+            done: done.unwrap_or(true),
+            chunk_index: chunk_index.unwrap_or(0),
         }
     }
 }
@@ -461,6 +475,9 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
             result,
             error_message: resp.error_message.unwrap_or_default(),
             metadata: resp.metadata,
+            is_chunk: resp.is_chunk,
+            done: resp.done,
+            chunk_index: resp.chunk_index,
         }
     }
 }
@@ -487,6 +504,9 @@ impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
                 Some(resp.error_message)
             },
             metadata: resp.metadata,
+            is_chunk: resp.is_chunk,
+            done: resp.done,
+            chunk_index: resp.chunk_index,
         }
     }
 }

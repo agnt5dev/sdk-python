@@ -199,9 +199,11 @@ impl PyWorker {
             };
 
             // Create message handler that calls Python callback
-            let message_handler = move |runtime_message: RuntimeMessage| {
+            let message_handler = move |runtime_message: RuntimeMessage, tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
                 let handler_arc_inner = handler_arc.clone();
-                async move { Self::handle_runtime_message(handler_arc_inner, runtime_message).await }
+                async move {
+                    Self::handle_runtime_message(handler_arc_inner, runtime_message, tx).await
+                }
             };
 
             log::info!("Starting worker event loop for service: {}", service_name);
@@ -229,6 +231,7 @@ impl PyWorker {
     async fn handle_runtime_message(
         handler_arc: Arc<Mutex<Option<PyObject>>>,
         runtime_message: RuntimeMessage,
+        tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
         // Get the Python handler by cloning it properly
         let handler = {
@@ -273,8 +276,8 @@ impl PyWorker {
 
                 // Note: invocation.id will be handled by tracing span and Python log forwarding
 
-                // Create span for function execution
-                let mut span = agnt5_sdk_core::create_function_span(
+                // Create OpenTelemetry span for function execution
+                let mut otel_span = agnt5_sdk_core::create_function_span(
                     &invoke_request.component_name,
                     &invoke_request.service_name,
                     &runtime_message.worker_id,
@@ -283,33 +286,79 @@ impl PyWorker {
                     Some(&invoke_request.metadata),
                 );
 
+                // IMPORTANT: Attach the span to the current context so Python code executes inside it
+                // This ensures Python logs and operations are children of this span
+                use opentelemetry::trace::TraceContextExt;
+                let cx = opentelemetry::Context::current_with_span(otel_span);
+                let _span_guard = cx.clone().attach();
+
                 // Convert to Python types
                 let py_request = PyExecuteComponentRequest::from(invoke_request);
 
                 // Call Python handler with GIL
+                // Clone tx for potential use inside GIL context
+                let tx_clone = tx.clone();
+                let worker_id = runtime_message.worker_id.clone();
+
                 let result = Python::with_gil(
                     |py| -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
                         match handler.call1(py, (py_request,)) {
                             Ok(py_result) => {
-                                // Extract PyExecuteComponentResponse from Python result
+                                // Try to extract as list first (streaming case)
+                                if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>(py) {
+                                    log::info!("🔥 STREAMING: Python returned {} chunks", py_list.len());
+
+                                    // Send each response via tx
+                                    for (idx, py_response) in py_list.into_iter().enumerate() {
+                                        log::info!("🔥 STREAMING: Sending chunk {} to coordinator", idx);
+
+                                        // Convert to Rust types
+                                        let rust_response: ExecuteComponentResponse = py_response.into();
+
+                                        // Create ServiceMessage
+                                        let service_message = ServiceMessage {
+                                            worker_id: worker_id.clone(),
+                                            message_type: Some(
+                                                agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(rust_response)
+                                            ),
+                                        };
+
+                                        // Send via channel (blocking send)
+                                        if let Err(e) = tx_clone.send(service_message) {
+                                            log::error!("Failed to send streaming chunk {}: {}", idx, e);
+                                            return Err(agnt5_sdk_core::error::SdkError::Other(
+                                                anyhow::anyhow!("Failed to send streaming chunk: {}", e)
+                                            ));
+                                        }
+                                    }
+
+                                    // Return None to indicate we handled sending ourselves
+                                    log::debug!("All streaming chunks sent successfully");
+                                    return Ok(None);
+                                }
+
+                                // Not a list, try single response (non-streaming case)
                                 match py_result.extract::<PyExecuteComponentResponse>(py) {
                                     Ok(py_response) => {
                                         log::debug!(
-                                            "Python handler returned response successfully"
+                                            "Python handler returned single response"
                                         );
 
                                         // Record span result based on success/error
+                                        use opentelemetry::trace::Span;
+                                        let span = cx.span();
                                         if py_response.success {
-                                            agnt5_sdk_core::record_span_success(
-                                                &mut span,
-                                                py_response.output_data.len(),
-                                            );
+                                            span.set_attribute(opentelemetry::KeyValue::new("function.status", "success"));
+                                            span.set_attribute(opentelemetry::KeyValue::new("function.output_size", py_response.output_data.len() as i64));
+                                            span.set_status(opentelemetry::trace::Status::Ok);
                                         } else {
                                             let error_msg = py_response
                                                 .error_message
                                                 .as_deref()
                                                 .unwrap_or("Unknown error");
-                                            agnt5_sdk_core::record_span_error(&mut span, error_msg);
+                                            span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
+                                            span.set_attribute(opentelemetry::KeyValue::new("function.error", error_msg.to_string()));
+                                            span.set_status(opentelemetry::trace::Status::error(error_msg.to_string()));
                                         }
 
                                         // Convert back to Rust types
@@ -318,7 +367,7 @@ impl PyWorker {
 
                                         // Create ServiceMessage
                                         let service_message = ServiceMessage {
-                                        worker_id: runtime_message.worker_id.clone(),
+                                        worker_id: worker_id.clone(),
                                         message_type: Some(
                                             agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(rust_response)
                                         ),
@@ -330,7 +379,11 @@ impl PyWorker {
                                         let err_msg =
                                             format!("Failed to extract Python response: {}", e);
                                         log::error!("{}", err_msg);
-                                        agnt5_sdk_core::record_span_error(&mut span, &err_msg);
+                                        use opentelemetry::trace::Span;
+                                        let span = cx.span();
+                                        span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
+                                        span.set_attribute(opentelemetry::KeyValue::new("function.error", err_msg.clone()));
+                                        span.set_status(opentelemetry::trace::Status::error(err_msg.clone()));
                                         Err(agnt5_sdk_core::error::SdkError::Other(
                                             anyhow::anyhow!(err_msg),
                                         ))
@@ -340,7 +393,11 @@ impl PyWorker {
                             Err(e) => {
                                 let err_msg = format!("Python handler failed: {}", e);
                                 log::error!("{}", err_msg);
-                                agnt5_sdk_core::record_span_error(&mut span, &err_msg);
+                                use opentelemetry::trace::Span;
+                                let span = cx.span();
+                                span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
+                                span.set_attribute(opentelemetry::KeyValue::new("function.error", err_msg.clone()));
+                                span.set_status(opentelemetry::trace::Status::error(err_msg.clone()));
                                 Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(
                                     err_msg
                                 )))
@@ -349,8 +406,8 @@ impl PyWorker {
                     },
                 )?;
 
-                // End the span
-                agnt5_sdk_core::end_span(span);
+                // Span will be automatically ended when _span_guard is dropped
+                // This ensures proper span lifecycle management
 
                 Ok(result)
             }
@@ -376,6 +433,13 @@ impl PyWorker {
                 Ok(None)
             }
             Some(runtime_message::MessageData::HealthResponse(_)) => Ok(None),
+            Some(runtime_message::MessageData::CancelExecution(_)) => {
+                log::debug!(
+                    "Ignoring CancelExecution message (type: {})",
+                    runtime_message.message_type as i32
+                );
+                Ok(None)
+            }
             None => {
                 log::debug!(
                     "Ignoring message with no data (type: {})",

@@ -21,6 +21,7 @@ dependencies = [
     "maturin>=1.9.3",
     "docstring-parser>=0.15",
     "typing-extensions>=4.8",
+    "httpx>=0.28.1",
 ]
 
 [project.urls]

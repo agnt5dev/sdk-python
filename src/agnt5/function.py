@@ -270,7 +270,8 @@ def function(
             )
 
         # Convert sync to async if needed
-        if inspect.iscoroutinefunction(func):
+        # Note: Async generators should NOT be wrapped - they need to be returned as-is
+        if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
             handler_func = cast(HandlerFunc, func)
         else:
             # Wrap sync function in async

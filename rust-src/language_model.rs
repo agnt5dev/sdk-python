@@ -319,11 +319,19 @@ impl PyLanguageModel {
             )
         })?;
 
-        if let Some((prefix, _)) = model.split_once('/') {
-            if provider.to_lowercase() != prefix.to_lowercase() {
-                return Err(PyValueError::new_err(format!(
-                    "Provider `{provider}` does not match model prefix `{prefix}`"
-                )));
+        // Gateway providers like OpenRouter can handle models with different prefixes
+        // (e.g., openrouter provider with anthropic/claude-3.5-haiku model)
+        // So we skip the validation for these gateway providers
+        let gateway_providers = ["openrouter", "litellm"];
+        let is_gateway = gateway_providers.contains(&provider.to_lowercase().as_str());
+
+        if !is_gateway {
+            if let Some((prefix, _)) = model.split_once('/') {
+                if provider.to_lowercase() != prefix.to_lowercase() {
+                    return Err(PyValueError::new_err(format!(
+                        "Provider `{provider}` does not match model prefix `{prefix}`"
+                    )));
+                }
             }
         }
 
