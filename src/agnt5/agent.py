@@ -180,7 +180,7 @@ class Agent:
         # Store metadata
         self.metadata = {
             "description": instructions,
-            "model": model_name
+            "model": model
         }
 
     async def run(

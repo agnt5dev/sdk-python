@@ -646,6 +646,10 @@ class DurableEntity:
         if cls.__name__ == 'DurableEntity':
             return
 
+        # Don't register SDK's built-in base classes (these are meant to be extended by users)
+        if cls.__name__ in ('SessionEntity', 'MemoryEntity', 'WorkflowEntity'):
+            return
+
         # Create an EntityType for this class, storing the class reference
         entity_type = EntityType(cls.__name__, entity_class=cls)
 

@@ -58,6 +58,11 @@ class OpenTelemetryHandler(logging.Handler):
             # No Rust bridge available, silently skip
             return
 
+        # Filter out gRPC internal logs to avoid noise
+        # These are low-level HTTP/2 protocol logs that aren't useful for application debugging
+        if record.name.startswith(('grpc.', 'h2.', '_grpc_', 'h2-')):
+            return
+
         try:
             # Format the message (applies any formatters)
             message = self.format(record)
