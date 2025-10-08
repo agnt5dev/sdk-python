@@ -277,8 +277,9 @@ class _LanguageModel:
         # if request.tool_choice:
         #     kwargs["tool_choice"] = request.tool_choice.value
 
-        # Call Rust implementation
-        rust_response = self._rust_lm.generate(prompt=prompt, **kwargs)
+        # Call Rust implementation - it returns a proper Python coroutine now
+        # Using pyo3-async-runtimes for truly async HTTP calls without blocking
+        rust_response = await self._rust_lm.generate(prompt=prompt, **kwargs)
 
         # Convert Rust response to Python
         return self._convert_response(rust_response)
@@ -326,8 +327,9 @@ class _LanguageModel:
         # if request.tool_choice:
         #     kwargs["tool_choice"] = request.tool_choice.value
 
-        # Call Rust implementation (it returns a list of chunks)
-        rust_chunks = self._rust_lm.stream(prompt=prompt, **kwargs)
+        # Call Rust implementation - it returns a proper Python coroutine now
+        # Using pyo3-async-runtimes for truly async streaming without blocking
+        rust_chunks = await self._rust_lm.stream(prompt=prompt, **kwargs)
 
         # Yield each chunk
         for chunk in rust_chunks:

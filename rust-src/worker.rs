@@ -199,12 +199,14 @@ impl PyWorker {
             };
 
             // Create message handler that calls Python callback
-            let message_handler = move |runtime_message: RuntimeMessage, tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
-                let handler_arc_inner = handler_arc.clone();
-                async move {
-                    Self::handle_runtime_message(handler_arc_inner, runtime_message, tx).await
-                }
-            };
+            let message_handler =
+                move |runtime_message: RuntimeMessage,
+                      tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
+                    let handler_arc_inner = handler_arc.clone();
+                    async move {
+                        Self::handle_runtime_message(handler_arc_inner, runtime_message, tx).await
+                    }
+                };
 
             log::info!("Starting worker event loop for service: {}", service_name);
 
@@ -277,43 +279,86 @@ impl PyWorker {
                 // Note: invocation.id will be handled by tracing span and Python log forwarding
 
                 // Create OpenTelemetry span for function execution
-                let mut otel_span = agnt5_sdk_core::create_function_span(
+                // Clone parent_context since we need it both for span creation and context attachment
+                let otel_span = agnt5_sdk_core::create_function_span(
                     &invoke_request.component_name,
                     &invoke_request.service_name,
                     &runtime_message.worker_id,
                     &invoke_request.invocation_id,
-                    Some(parent_context),
+                    Some(parent_context.clone()),
                     Some(&invoke_request.metadata),
                 );
 
-                // IMPORTANT: Attach the span to the current context so Python code executes inside it
+                // IMPORTANT: Attach the span to the parent context so Python code executes inside it
                 // This ensures Python logs and operations are children of this span
+                // and maintains the distributed trace link to the gateway/coordinator
+                // Using parent_context.with_span() instead of Context::current_with_span()
+                // is critical - it preserves the extracted trace context from the gateway
                 use opentelemetry::trace::TraceContextExt;
-                let cx = opentelemetry::Context::current_with_span(otel_span);
-                let _span_guard = cx.clone().attach();
+                let cx = parent_context.with_span(otel_span);
 
                 // Convert to Python types
                 let py_request = PyExecuteComponentRequest::from(invoke_request);
 
-                // Call Python handler with GIL
-                // Clone tx for potential use inside GIL context
+                // Call Python handler and get coroutine
+                // Clone tx for potential use inside async context
                 let tx_clone = tx.clone();
                 let worker_id = runtime_message.worker_id.clone();
 
+                // Get Python coroutine and convert to future within context guard
+                let py_future = {
+                    let _span_guard = cx.clone().attach();
+
+                    // Get Python coroutine
+                    let py_coroutine = Python::with_gil(|py| {
+                        handler.call1(py, (py_request,))
+                    })
+                    .map_err(|e| {
+                        let err_msg = format!("Failed to call Python handler: {}", e);
+                        log::error!("{}", err_msg);
+                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                    })?;
+
+                    // Convert Python coroutine to Rust future
+                    Python::with_gil(|py| {
+                        pyo3_async_runtimes::tokio::into_future(py_coroutine.bind(py).clone())
+                    })
+                    .map_err(|e| {
+                        let err_msg = format!("Failed to convert Python coroutine to future: {}", e);
+                        log::error!("{}", err_msg);
+                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                    })?
+                    // _span_guard is dropped here before the await
+                };
+
+                // Await the Python coroutine (outside the guard scope)
+                let result = py_future.await.map_err(|e| {
+                    let err_msg = format!("Python handler execution failed: {}", e);
+                    log::error!("{}", err_msg);
+                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                })?;
+
+                // Process the result
                 let result = Python::with_gil(
                     |py| -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
-                        match handler.call1(py, (py_request,)) {
-                            Ok(py_result) => {
-                                // Try to extract as list first (streaming case)
-                                if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>(py) {
-                                    log::info!("🔥 STREAMING: Python returned {} chunks", py_list.len());
+                        let py_result = result.bind(py);
+                        // Try to extract as list first (streaming case)
+                        if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>() {
+                                    log::info!(
+                                        "🔥 STREAMING: Python returned {} chunks",
+                                        py_list.len()
+                                    );
 
                                     // Send each response via tx
                                     for (idx, py_response) in py_list.into_iter().enumerate() {
-                                        log::info!("🔥 STREAMING: Sending chunk {} to coordinator", idx);
+                                        log::info!(
+                                            "🔥 STREAMING: Sending chunk {} to coordinator",
+                                            idx
+                                        );
 
                                         // Convert to Rust types
-                                        let rust_response: ExecuteComponentResponse = py_response.into();
+                                        let rust_response: ExecuteComponentResponse =
+                                            py_response.into();
 
                                         // Create ServiceMessage
                                         let service_message = ServiceMessage {
@@ -325,9 +370,16 @@ impl PyWorker {
 
                                         // Send via channel (blocking send)
                                         if let Err(e) = tx_clone.send(service_message) {
-                                            log::error!("Failed to send streaming chunk {}: {}", idx, e);
+                                            log::error!(
+                                                "Failed to send streaming chunk {}: {}",
+                                                idx,
+                                                e
+                                            );
                                             return Err(agnt5_sdk_core::error::SdkError::Other(
-                                                anyhow::anyhow!("Failed to send streaming chunk: {}", e)
+                                                anyhow::anyhow!(
+                                                    "Failed to send streaming chunk: {}",
+                                                    e
+                                                ),
                                             ));
                                         }
                                     }
@@ -335,30 +387,41 @@ impl PyWorker {
                                     // Return None to indicate we handled sending ourselves
                                     log::debug!("All streaming chunks sent successfully");
                                     return Ok(None);
-                                }
+                        }
 
-                                // Not a list, try single response (non-streaming case)
-                                match py_result.extract::<PyExecuteComponentResponse>(py) {
+                        // Not a list, try single response (non-streaming case)
+                        match py_result.extract::<PyExecuteComponentResponse>() {
                                     Ok(py_response) => {
-                                        log::debug!(
-                                            "Python handler returned single response"
-                                        );
+                                        log::debug!("Python handler returned single response");
 
                                         // Record span result based on success/error
-                                        use opentelemetry::trace::Span;
                                         let span = cx.span();
                                         if py_response.success {
-                                            span.set_attribute(opentelemetry::KeyValue::new("function.status", "success"));
-                                            span.set_attribute(opentelemetry::KeyValue::new("function.output_size", py_response.output_data.len() as i64));
+                                            span.set_attribute(opentelemetry::KeyValue::new(
+                                                "function.status",
+                                                "success",
+                                            ));
+                                            span.set_attribute(opentelemetry::KeyValue::new(
+                                                "function.output_size",
+                                                py_response.output_data.len() as i64,
+                                            ));
                                             span.set_status(opentelemetry::trace::Status::Ok);
                                         } else {
                                             let error_msg = py_response
                                                 .error_message
                                                 .as_deref()
                                                 .unwrap_or("Unknown error");
-                                            span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
-                                            span.set_attribute(opentelemetry::KeyValue::new("function.error", error_msg.to_string()));
-                                            span.set_status(opentelemetry::trace::Status::error(error_msg.to_string()));
+                                            span.set_attribute(opentelemetry::KeyValue::new(
+                                                "function.status",
+                                                "error",
+                                            ));
+                                            span.set_attribute(opentelemetry::KeyValue::new(
+                                                "function.error",
+                                                error_msg.to_string(),
+                                            ));
+                                            span.set_status(opentelemetry::trace::Status::error(
+                                                error_msg.to_string(),
+                                            ));
                                         }
 
                                         // Convert back to Rust types
@@ -373,34 +436,27 @@ impl PyWorker {
                                         ),
                                     };
 
-                                        Ok(Some(service_message))
-                                    }
-                                    Err(e) => {
-                                        let err_msg =
-                                            format!("Failed to extract Python response: {}", e);
-                                        log::error!("{}", err_msg);
-                                        use opentelemetry::trace::Span;
-                                        let span = cx.span();
-                                        span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
-                                        span.set_attribute(opentelemetry::KeyValue::new("function.error", err_msg.clone()));
-                                        span.set_status(opentelemetry::trace::Status::error(err_msg.clone()));
-                                        Err(agnt5_sdk_core::error::SdkError::Other(
-                                            anyhow::anyhow!(err_msg),
-                                        ))
-                                    }
-                                }
+                                Ok(Some(service_message))
                             }
                             Err(e) => {
-                                let err_msg = format!("Python handler failed: {}", e);
+                                let err_msg =
+                                    format!("Failed to extract Python response: {}", e);
                                 log::error!("{}", err_msg);
-                                use opentelemetry::trace::Span;
                                 let span = cx.span();
-                                span.set_attribute(opentelemetry::KeyValue::new("function.status", "error"));
-                                span.set_attribute(opentelemetry::KeyValue::new("function.error", err_msg.clone()));
-                                span.set_status(opentelemetry::trace::Status::error(err_msg.clone()));
-                                Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(
-                                    err_msg
-                                )))
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "function.status",
+                                    "error",
+                                ));
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "function.error",
+                                    err_msg.clone(),
+                                ));
+                                span.set_status(opentelemetry::trace::Status::error(
+                                    err_msg.clone(),
+                                ));
+                                Err(agnt5_sdk_core::error::SdkError::Other(
+                                    anyhow::anyhow!(err_msg),
+                                ))
                             }
                         }
                     },

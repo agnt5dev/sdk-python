@@ -3,6 +3,7 @@ use std::env;
 use std::sync::Mutex;
 
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
+use opentelemetry::Context as OtelContext;
 use agnt5_sdk_core::lm::{
     AnthropicProvider, AzureOpenAiProvider, BedrockProvider, GenerateRequest, GenerateResponse,
     GenerationConfig, GroqProvider, JsonSchemaFormat, Message, MessageRole, OpenAiProvider,
@@ -13,9 +14,9 @@ use futures::StreamExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
+use pyo3_async_runtimes::TaskLocals;
 use serde::Deserialize;
 use serde_json::{self, Value};
-use tokio::runtime::Runtime;
 
 /// Internal configuration representation for the Python wrapper.
 #[derive(Clone, Default)]
@@ -106,7 +107,6 @@ impl ProviderKind {
 pub struct PyLanguageModel {
     default_model: Option<String>,
     default_provider: Option<String>,
-    runtime: Runtime,
     providers: Mutex<HashMap<String, ProviderKind>>,
 }
 
@@ -115,10 +115,6 @@ impl PyLanguageModel {
     #[new]
     #[pyo3(signature = (config=None))]
     fn new(config: Option<&PyLanguageModelConfig>) -> PyResult<Self> {
-        let runtime = Runtime::new().map_err(|err| {
-            PyValueError::new_err(format!("Failed to create async runtime: {err}"))
-        })?;
-
         let (default_model, default_provider) = config
             .map(|cfg| {
                 (
@@ -131,7 +127,6 @@ impl PyLanguageModel {
         Ok(Self {
             default_model,
             default_provider,
-            runtime,
             providers: Mutex::new(HashMap::new()),
         })
     }
@@ -142,7 +137,7 @@ impl PyLanguageModel {
         py: Python<'py>,
         prompt: PyObject,
         kwargs: Option<Bound<'py, PyDict>>,
-    ) -> PyResult<PyResponse> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let kwargs_ref = kwargs.as_ref();
 
         let model_kw = get_optional_string(kwargs_ref, "model")?;
@@ -184,12 +179,18 @@ impl PyLanguageModel {
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
-        let runtime = &self.runtime;
-        let result: SdkResult<GenerateResponse> =
-            py.allow_threads(move || runtime.block_on(provider.generate(request)));
 
-        let response = result.map_err(sdk_error_to_py)?;
-        Ok(PyResponse { inner: response })
+        // Capture current OpenTelemetry context and attach to request
+        // This ensures LM spans are children of the function span in the distributed trace
+        request.otel_context = Some(OtelContext::current());
+
+        // Use pyo3-async-runtimes with proper runtime context
+        // The future will be executed within a Tokio runtime context managed by pyo3-async-runtimes
+        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            let response = provider.generate(request).await.map_err(sdk_error_to_py)?;
+            Ok(PyResponse { inner: response })
+        })
     }
 
     #[pyo3(signature = (prompt, **kwargs))]
@@ -198,7 +199,7 @@ impl PyLanguageModel {
         py: Python<'py>,
         prompt: PyObject,
         kwargs: Option<Bound<'py, PyDict>>,
-    ) -> PyResult<Vec<PyStreamChunk>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let kwargs_ref = kwargs.as_ref();
 
         let model_kw = get_optional_string(kwargs_ref, "model")?;
@@ -241,30 +242,31 @@ impl PyLanguageModel {
 
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_delta = model.clone();
-        let runtime = &self.runtime;
 
-        let result: SdkResult<Vec<PyStreamChunk>> = py.allow_threads(move || {
-            runtime.block_on(async move {
-                let mut handle = provider.stream(request).await?;
-                let mut chunks = Vec::new();
+        // Capture current OpenTelemetry context and attach to request
+        // This ensures LM spans are children of the function span in the distributed trace
+        request.otel_context = Some(OtelContext::current());
 
-                while let Some(item) = handle.next().await {
-                    let chunk = item?;
-                    match chunk {
-                        StreamChunk::Delta { content } => {
-                            chunks.push(PyStreamChunk::delta(model_for_delta.clone(), content));
-                        }
-                        StreamChunk::Completed(response) => {
-                            chunks.push(PyStreamChunk::from_response(response));
-                        }
+        // Use pyo3-async-runtimes with proper runtime context for streaming
+        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            let mut handle = provider.stream(request).await.map_err(sdk_error_to_py)?;
+            let mut chunks = Vec::new();
+
+            while let Some(item) = handle.next().await {
+                let chunk = item.map_err(sdk_error_to_py)?;
+                match chunk {
+                    StreamChunk::Delta { content } => {
+                        chunks.push(PyStreamChunk::delta(model_for_delta.clone(), content));
+                    }
+                    StreamChunk::Completed(response) => {
+                        chunks.push(PyStreamChunk::from_response(response));
                     }
                 }
+            }
 
-                Ok(chunks)
-            })
-        });
-
-        result.map_err(sdk_error_to_py)
+            Ok(chunks)
+        })
     }
 
     fn list_providers(&self) -> Vec<String> {

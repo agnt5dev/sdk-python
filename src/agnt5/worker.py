@@ -305,67 +305,66 @@ class Worker:
         """Create the message handler that will be called by Rust worker."""
 
         def handle_message(request):
-            """Handle incoming execution requests."""
-            try:
-                # Extract request details
-                component_name = request.component_name
-                component_type = request.component_type
-                input_data = request.input_data
+            """Handle incoming execution requests - returns coroutine for Rust to await."""
+            # Extract request details
+            component_name = request.component_name
+            component_type = request.component_type
+            input_data = request.input_data
 
-                logger.debug(
-                    f"Handling {component_type} request: {component_name}, input size: {len(input_data)} bytes"
-                )
+            logger.debug(
+                f"Handling {component_type} request: {component_name}, input size: {len(input_data)} bytes"
+            )
 
-                # Import all registries
-                from .tool import ToolRegistry
-                from .entity import EntityRegistry
-                from .agent import AgentRegistry
+            # Import all registries
+            from .tool import ToolRegistry
+            from .entity import EntityRegistry
+            from .agent import AgentRegistry
 
-                # Route based on component type
-                if component_type == "tool":
-                    tool = ToolRegistry.get(component_name)
-                    if tool:
-                        logger.debug(f"Found tool: {component_name}")
-                        result = asyncio.run(self._execute_tool(tool, input_data, request))
-                        return result
+            # Route based on component type and return coroutines
+            if component_type == "tool":
+                tool = ToolRegistry.get(component_name)
+                if tool:
+                    logger.debug(f"Found tool: {component_name}")
+                    # Return coroutine, don't await it
+                    return self._execute_tool(tool, input_data, request)
 
-                elif component_type == "entity":
-                    entity_type = EntityRegistry.get(component_name)
-                    if entity_type:
-                        logger.debug(f"Found entity: {component_name}")
-                        result = asyncio.run(self._execute_entity(entity_type, input_data, request))
-                        return result
+            elif component_type == "entity":
+                entity_type = EntityRegistry.get(component_name)
+                if entity_type:
+                    logger.debug(f"Found entity: {component_name}")
+                    # Return coroutine, don't await it
+                    return self._execute_entity(entity_type, input_data, request)
 
-                elif component_type == "agent":
-                    agent = AgentRegistry.get(component_name)
-                    if agent:
-                        logger.debug(f"Found agent: {component_name}")
-                        result = asyncio.run(self._execute_agent(agent, input_data, request))
-                        return result
+            elif component_type == "agent":
+                agent = AgentRegistry.get(component_name)
+                if agent:
+                    logger.debug(f"Found agent: {component_name}")
+                    # Return coroutine, don't await it
+                    return self._execute_agent(agent, input_data, request)
 
-                elif component_type == "workflow":
-                    workflow_config = WorkflowRegistry.get(component_name)
-                    if workflow_config:
-                        logger.debug(f"Found workflow: {component_name}")
-                        result = asyncio.run(self._execute_workflow(workflow_config, input_data, request))
-                        return result
+            elif component_type == "workflow":
+                workflow_config = WorkflowRegistry.get(component_name)
+                if workflow_config:
+                    logger.debug(f"Found workflow: {component_name}")
+                    # Return coroutine, don't await it
+                    return self._execute_workflow(workflow_config, input_data, request)
 
-                elif component_type == "function":
-                    function_config = FunctionRegistry.get(component_name)
-                    if function_config:
-                        logger.info(f"🔥 WORKER: Received request for function: {component_name}")
-                        result = asyncio.run(self._execute_function(function_config, input_data, request))
-                        return result
+            elif component_type == "function":
+                function_config = FunctionRegistry.get(component_name)
+                if function_config:
+                    logger.info(f"🔥 WORKER: Received request for function: {component_name}")
+                    # Return coroutine, don't await it
+                    return self._execute_function(function_config, input_data, request)
 
-                # Not found
-                error_msg = f"Component '{component_name}' of type '{component_type}' not found"
-                logger.error(error_msg)
+            # Not found - need to return an async error response
+            error_msg = f"Component '{component_name}' of type '{component_type}' not found"
+            logger.error(error_msg)
+
+            # Create async wrapper for error response
+            async def error_response():
                 return self._create_error_response(request, error_msg)
 
-            except Exception as e:
-                error_msg = f"Handler error: {e}"
-                logger.error(error_msg, exc_info=True)
-                return self._create_error_response(request, error_msg)
+            return error_response()
 
         return handle_message
 

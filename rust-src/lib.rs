@@ -1,8 +1,8 @@
-use pyo3::prelude::*;
 use agnt5_sdk_core::telemetry::{
-    create_tool_execution_span, record_tool_success, record_tool_error,
+    create_tool_execution_span, record_tool_error, record_tool_success,
 };
 use opentelemetry::global::BoxedSpan;
+use pyo3::prelude::*;
 use std::sync::Mutex;
 
 mod adk;
@@ -123,14 +123,15 @@ fn log_from_python(
     let _enter = span.enter();
 
     // Emit log at appropriate level through Rust tracing
-    // Include message in both span field (for OpenTelemetry attributes) and log event (for VictoriaMetrics)
+    // Use agnt5_sdk_python target to ensure logs match the agnt5=info filter
+    // Include message in both span field (for OpenTelemetry attributes) and log event
     match level.to_uppercase().as_str() {
-        "DEBUG" => tracing::debug!("{}", message),
-        "INFO" => tracing::info!("{}", message),
-        "WARNING" | "WARN" => tracing::warn!("{}", message),
-        "ERROR" => tracing::error!("{}", message),
-        "CRITICAL" => tracing::error!("[CRITICAL] {}", message),
-        _ => tracing::info!("[{}] {}", level, message),
+        "DEBUG" => tracing::debug!(target: "agnt5_sdk_python", "{}", message),
+        "INFO" => tracing::info!(target: "agnt5_sdk_python", "{}", message),
+        "WARNING" | "WARN" => tracing::warn!(target: "agnt5_sdk_python", "{}", message),
+        "ERROR" => tracing::error!(target: "agnt5_sdk_python", "{}", message),
+        "CRITICAL" => tracing::error!(target: "agnt5_sdk_python", "[CRITICAL] {}", message),
+        _ => tracing::info!(target: "agnt5_sdk_python", "[{}] {}", level, message),
     }
 
     Ok(())
