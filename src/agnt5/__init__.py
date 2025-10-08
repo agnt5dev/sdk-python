@@ -6,7 +6,7 @@ with built-in durability guarantees and state management.
 """
 
 from ._compat import _import_error, _rust_available
-from .agent import Agent, AgentRegistry, AgentResult, agent
+from .agent import Agent, AgentRegistry, AgentResult, Handoff, agent, handoff
 from .client import Client, RunError
 from .context import Context
 from .entity import (
@@ -65,6 +65,8 @@ __all__ = [
     "Agent",
     "AgentRegistry",
     "AgentResult",
+    "Handoff",
+    "handoff",
     # Types
     "RetryPolicy",
     "BackoffPolicy",

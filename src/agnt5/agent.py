@@ -23,6 +23,97 @@ logger = setup_module_logger(__name__)
 _AGENT_REGISTRY: Dict[str, "Agent"] = {}
 
 
+class Handoff:
+    """Configuration for agent-to-agent handoff.
+
+    Handoffs enable one agent to delegate control to another specialized agent,
+    following the pattern popularized by LangGraph and OpenAI Agents SDK.
+
+    The handoff is exposed to the LLM as a tool named 'transfer_to_{agent_name}'
+    that allows explicit delegation with conversation history.
+
+    Example:
+        ```python
+        specialist = Agent(name="specialist", ...)
+
+        # Create handoff configuration
+        handoff_to_specialist = Handoff(
+            agent=specialist,
+            description="Transfer to specialist for detailed analysis"
+        )
+
+        # Use in coordinator agent
+        coordinator = Agent(
+            name="coordinator",
+            handoffs=[handoff_to_specialist]
+        )
+        ```
+    """
+
+    def __init__(
+        self,
+        agent: "Agent",
+        description: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        pass_full_history: bool = True,
+    ):
+        """Initialize handoff configuration.
+
+        Args:
+            agent: Target agent to hand off to
+            description: Description shown to LLM (defaults to agent instructions)
+            tool_name: Custom tool name (defaults to 'transfer_to_{agent_name}')
+            pass_full_history: Whether to pass full conversation history to target agent
+        """
+        self.agent = agent
+        self.description = description or agent.instructions or f"Transfer to {agent.name}"
+        self.tool_name = tool_name or f"transfer_to_{agent.name}"
+        self.pass_full_history = pass_full_history
+
+
+def handoff(
+    agent: "Agent",
+    description: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    pass_full_history: bool = True,
+) -> Handoff:
+    """Create a handoff configuration for agent-to-agent delegation.
+
+    This is a convenience function for creating Handoff instances with a clean API.
+
+    Args:
+        agent: Target agent to hand off to
+        description: Description shown to LLM
+        tool_name: Custom tool name
+        pass_full_history: Whether to pass full conversation history
+
+    Returns:
+        Handoff configuration
+
+    Example:
+        ```python
+        from agnt5 import Agent, handoff
+
+        research_agent = Agent(name="researcher", ...)
+        writer_agent = Agent(name="writer", ...)
+
+        coordinator = Agent(
+            name="coordinator",
+            handoffs=[
+                handoff(research_agent, "Transfer for research tasks"),
+                handoff(writer_agent, "Transfer for writing tasks"),
+            ]
+        )
+        ```
+    """
+    return Handoff(
+        agent=agent,
+        description=description,
+        tool_name=tool_name,
+        pass_full_history=pass_full_history,
+    )
+
+
 class AgentRegistry:
     """Registry for agents."""
 
@@ -54,10 +145,19 @@ class AgentRegistry:
 class AgentResult:
     """Result from agent execution."""
 
-    def __init__(self, output: str, tool_calls: List[Dict[str, Any]], context: Context):
+    def __init__(
+        self,
+        output: str,
+        tool_calls: List[Dict[str, Any]],
+        context: Context,
+        handoff_to: Optional[str] = None,
+        handoff_metadata: Optional[Dict[str, Any]] = None,
+    ):
         self.output = output
         self.tool_calls = tool_calls
         self.context = context
+        self.handoff_to = handoff_to  # Name of agent that was handed off to
+        self.handoff_metadata = handoff_metadata or {}  # Additional handoff info
 
 
 class Agent:
@@ -104,6 +204,7 @@ class Agent:
         model: str,
         instructions: str,
         tools: Optional[List[Any]] = None,
+        handoffs: Optional[List[Handoff]] = None,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -116,7 +217,8 @@ class Agent:
             name: Agent name/identifier
             model: Model string with provider prefix (e.g., "openai/gpt-4o-mini")
             instructions: System instructions for the agent
-            tools: List of tools available to the agent (functions with @tool decorator)
+            tools: List of tools available to the agent (functions, Tool instances, or Agent instances)
+            handoffs: List of Handoff configurations for agent-to-agent delegation
             temperature: LLM temperature (0.0 to 1.0)
             max_tokens: Maximum tokens to generate
             top_p: Nucleus sampling parameter
@@ -132,12 +234,20 @@ class Agent:
         self.model_config = model_config
         self.max_iterations = max_iterations
 
-        # Build tool registry
+        # Store handoffs for building handoff tools
+        self.handoffs = handoffs or []
+
+        # Build tool registry (includes regular tools, agent-as-tools, and handoff tools)
         self.tools: Dict[str, Tool] = {}
         if tools:
             for tool_item in tools:
+                # Check if it's an Agent instance (agents-as-tools pattern)
+                if isinstance(tool_item, Agent):
+                    agent_tool = tool_item.to_tool()
+                    self.tools[agent_tool.name] = agent_tool
+                    logger.info(f"Added agent '{tool_item.name}' as tool to '{self.name}'")
                 # Check if it's a Tool instance
-                if isinstance(tool_item, Tool):
+                elif isinstance(tool_item, Tool):
                     self.tools[tool_item.name] = tool_item
                 # Check if it's a decorated function with config
                 elif hasattr(tool_item, "_agnt5_config"):
@@ -153,6 +263,12 @@ class Agent:
                     tool_instance = ToolRegistry.get(tool_name)
                     if tool_instance:
                         self.tools[tool_instance.name] = tool_instance
+
+        # Build handoff tools
+        for handoff_config in self.handoffs:
+            handoff_tool = self._create_handoff_tool(handoff_config)
+            self.tools[handoff_tool.name] = handoff_tool
+            logger.info(f"Added handoff tool '{handoff_tool.name}' to '{self.name}'")
 
         self.logger = logging.getLogger(f"agnt5.agent.{name}")
 
@@ -182,6 +298,130 @@ class Agent:
             "description": instructions,
             "model": model
         }
+
+    def to_tool(self, description: Optional[str] = None) -> Tool:
+        """Convert this agent to a Tool that can be used by other agents.
+
+        This enables agents-as-tools pattern where one agent can invoke another
+        agent as if it were a regular tool.
+
+        Args:
+            description: Optional custom description (defaults to agent instructions)
+
+        Returns:
+            Tool instance that wraps this agent
+
+        Example:
+            ```python
+            research_agent = Agent(
+                name="researcher",
+                model="openai/gpt-4o-mini",
+                instructions="You are a research specialist."
+            )
+
+            # Use research agent as a tool for another agent
+            coordinator = Agent(
+                name="coordinator",
+                model="openai/gpt-4o-mini",
+                instructions="Coordinate tasks using specialist agents.",
+                tools=[research_agent.to_tool()]
+            )
+            ```
+        """
+        agent_name = self.name
+
+        # Handler that runs the agent
+        async def agent_tool_handler(ctx: Context, user_message: str) -> str:
+            """Execute agent and return output."""
+            ctx.logger.info(f"Invoking agent '{agent_name}' as tool")
+
+            # Run the agent with the user message
+            result = await self.run(user_message, context=ctx)
+
+            return result.output
+
+        # Create tool with agent's schema
+        tool_description = description or self.instructions or f"Agent: {self.name}"
+
+        agent_tool = Tool(
+            name=self.name,
+            description=tool_description,
+            handler=agent_tool_handler,
+            input_schema=self.input_schema,
+            auto_schema=False,
+        )
+
+        return agent_tool
+
+    def _create_handoff_tool(self, handoff_config: Handoff, current_messages_callback: Optional[Callable] = None) -> Tool:
+        """Create a tool for handoff to another agent.
+
+        Args:
+            handoff_config: Handoff configuration
+            current_messages_callback: Optional callback to get current conversation messages
+
+        Returns:
+            Tool instance that executes the handoff
+        """
+        target_agent = handoff_config.agent
+        tool_name = handoff_config.tool_name
+
+        # Handler that executes the handoff
+        async def handoff_handler(ctx: Context, message: str) -> Dict[str, Any]:
+            """Transfer control to target agent."""
+            ctx.logger.info(
+                f"Handoff from '{self.name}' to '{target_agent.name}': {message}"
+            )
+
+            # If we should pass conversation history, add it to context
+            if handoff_config.pass_full_history:
+                # Get current conversation from the agent's run loop
+                # (This will be set when we detect the handoff in run())
+                conversation_history = ctx.get("_current_conversation", [])
+                if conversation_history:
+                    ctx.logger.info(
+                        f"Passing {len(conversation_history)} messages to target agent"
+                    )
+                    # Store in context for target agent to optionally use
+                    ctx.set("_handoff_conversation_history", conversation_history)
+
+            # Execute target agent with the message and shared context
+            result = await target_agent.run(message, context=ctx)
+
+            # Store handoff metadata - this signals that a handoff occurred
+            handoff_data = {
+                "_handoff": True,
+                "from_agent": self.name,
+                "to_agent": target_agent.name,
+                "message": message,
+                "output": result.output,
+                "tool_calls": result.tool_calls,
+            }
+
+            ctx.set("_handoff_result", handoff_data)
+
+            # Return the handoff data (will be detected in run() loop)
+            return handoff_data
+
+        # Create tool with handoff schema
+        handoff_tool = Tool(
+            name=tool_name,
+            description=handoff_config.description,
+            handler=handoff_handler,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Message or task to pass to the target agent"
+                    }
+                },
+                "required": ["message"]
+            },
+            auto_schema=False,
+        )
+
+        return handoff_tool
 
     async def run(
         self,
@@ -266,6 +506,9 @@ class Agent:
             if response.tool_calls:
                 self.logger.info(f"Agent calling {len(response.tool_calls)} tool(s)")
 
+                # Store current conversation in context for potential handoffs
+                context.set("_current_conversation", messages)
+
                 # Execute tool calls
                 tool_results = []
                 for tool_call in response.tool_calls:
@@ -293,6 +536,22 @@ class Agent:
                         else:
                             # Execute tool
                             result = await tool.invoke(context, **tool_args)
+
+                            # Check if this was a handoff
+                            if isinstance(result, dict) and result.get("_handoff"):
+                                self.logger.info(
+                                    f"Handoff detected to '{result['to_agent']}', "
+                                    f"terminating current agent"
+                                )
+                                # Return immediately with handoff result
+                                return AgentResult(
+                                    output=result["output"],
+                                    tool_calls=all_tool_calls + result.get("tool_calls", []),
+                                    context=context,
+                                    handoff_to=result["to_agent"],
+                                    handoff_metadata=result,
+                                )
+
                             result_text = json.dumps(result) if result else "null"
 
                         tool_results.append(
