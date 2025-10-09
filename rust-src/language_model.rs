@@ -180,14 +180,18 @@ impl PyLanguageModel {
 
         let provider = self.get_or_init_provider(&provider_name)?;
 
-        // Capture current OpenTelemetry context and attach to request
-        // This ensures LM spans are children of the function span in the distributed trace
-        request.otel_context = Some(OtelContext::current());
+        // IMPORTANT: Extract trace context from Python's contextvar
+        // The Rust worker injects traceparent into request.metadata, and Python worker
+        // stores it in a contextvar. We read it here and reconstruct the OtelContext
+        // to enable proper trace propagation across the async boundary.
+        let otel_context = extract_context_from_python(py)?;
 
         // Use pyo3-async-runtimes with proper runtime context
-        // The future will be executed within a Tokio runtime context managed by pyo3-async-runtimes
         let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            let mut request = request;
+            request.otel_context = Some(otel_context);
+
             let response = provider.generate(request).await.map_err(sdk_error_to_py)?;
             Ok(PyResponse { inner: response })
         })
@@ -243,13 +247,18 @@ impl PyLanguageModel {
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_delta = model.clone();
 
-        // Capture current OpenTelemetry context and attach to request
-        // This ensures LM spans are children of the function span in the distributed trace
-        request.otel_context = Some(OtelContext::current());
+        // IMPORTANT: Extract trace context from Python's contextvar
+        // The Rust worker injects traceparent into request.metadata, and Python worker
+        // stores it in a contextvar. We read it here and reconstruct the OtelContext
+        // to enable proper trace propagation across the async boundary.
+        let otel_context = extract_context_from_python(py)?;
 
         // Use pyo3-async-runtimes with proper runtime context for streaming
         let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            let mut request = request;
+            request.otel_context = Some(otel_context);
+
             let mut handle = provider.stream(request).await.map_err(sdk_error_to_py)?;
             let mut chunks = Vec::new();
 
@@ -876,6 +885,39 @@ impl PyUsage {
     fn total_tokens(&self) -> Option<u32> {
         self.inner.total_tokens
     }
+}
+
+/// Extract OpenTelemetry context from Python's contextvar
+///
+/// The Rust worker injects traceparent into request metadata, and the Python worker
+/// stores it in a contextvar named _trace_metadata. This function reads that contextvar
+/// and reconstructs the OpenTelemetry context for trace propagation.
+fn extract_context_from_python(py: Python<'_>) -> PyResult<OtelContext> {
+    // Import agnt5.worker module to access _trace_metadata contextvar
+    let worker_module = py.import("agnt5.worker")?;
+    let trace_metadata_var = worker_module.getattr("_trace_metadata")?;
+
+    // Call .get() on the contextvar to get the current value (dict)
+    let metadata_dict = trace_metadata_var.call_method0("get")?;
+
+    // Convert Python dict to Rust HashMap
+    let metadata: HashMap<String, String> = metadata_dict.extract()?;
+
+    // Use the sdk-core function to extract context from metadata
+    let ctx = agnt5_sdk_core::extract_context_from_runtime_message(&metadata);
+
+    // Log for debugging
+    use opentelemetry::trace::TraceContextExt;
+    let span = ctx.span();
+    let span_ctx = span.span_context();
+    log::info!(
+        "Trace propagation: Extracted from Python contextvar - trace_id={}, span_id={}, valid={}",
+        span_ctx.trace_id().to_string(),
+        span_ctx.span_id().to_string(),
+        span_ctx.is_valid()
+    );
+
+    Ok(ctx)
 }
 
 /// Register the language model bindings with the Python module.

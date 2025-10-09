@@ -32,9 +32,12 @@ Supported Providers (via model prefix):
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional
+
+from ._schema_utils import detect_format_type
 
 try:
     from ._core import LanguageModel as RustLanguageModel
@@ -160,6 +163,39 @@ class GenerateResponse:
     usage: Optional[TokenUsage] = None
     finish_reason: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    _rust_response: Optional[Any] = field(default=None, repr=False)
+
+    @property
+    def structured_output(self) -> Optional[Any]:
+        """Parsed structured output (Pydantic model, dataclass, or dict).
+
+        Returns the parsed object when response_format is specified.
+        This is the recommended property name for accessing structured output.
+
+        Returns:
+            Parsed object according to the specified response_format, or None if not available
+        """
+        if self._rust_response and hasattr(self._rust_response, 'object'):
+            return self._rust_response.object
+        return None
+
+    @property
+    def parsed(self) -> Optional[Any]:
+        """Alias for structured_output (OpenAI SDK compatibility).
+
+        Returns:
+            Same as structured_output
+        """
+        return self.structured_output
+
+    @property
+    def object(self) -> Optional[Any]:
+        """Alias for structured_output.
+
+        Returns:
+            Same as structured_output
+        """
+        return self.structured_output
 
 
 @dataclass
@@ -172,6 +208,7 @@ class GenerateRequest:
     tools: List[ToolDefinition] = field(default_factory=list)
     tool_choice: Optional[ToolChoice] = None
     config: GenerationConfig = field(default_factory=GenerationConfig)
+    response_schema: Optional[str] = None  # JSON-encoded schema for structured output
 
 
 # Internal wrapper for the Rust-backed implementation
@@ -270,6 +307,10 @@ class _LanguageModel:
             kwargs["max_tokens"] = request.config.max_tokens
         if request.config.top_p is not None:
             kwargs["top_p"] = request.config.top_p
+
+        # Pass response schema for structured output if provided
+        if request.response_schema is not None:
+            kwargs["response_schema_kw"] = request.response_schema
 
         # TODO: Add tools and tool_choice support when needed
         # if request.tools:
@@ -380,6 +421,7 @@ class _LanguageModel:
             usage=usage,
             finish_reason=None,  # TODO: Add finish_reason to Rust response
             tool_calls=None,  # TODO: Add tool calls support
+            _rust_response=rust_response,  # Store for .structured_output access
         )
 
 
@@ -396,6 +438,7 @@ async def generate(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
+    response_format: Optional[Any] = None,
 ) -> GenerateResponse:
     """Generate text using any LLM provider (simplified API).
 
@@ -410,9 +453,10 @@ async def generate(
         temperature: Sampling temperature (0.0-2.0)
         max_tokens: Maximum tokens to generate
         top_p: Nucleus sampling parameter
+        response_format: Pydantic model, dataclass, or JSON schema dict for structured output
 
     Returns:
-        GenerateResponse with text and usage information
+        GenerateResponse with text, usage, and optional structured output
 
     Examples:
         Simple prompt:
@@ -423,15 +467,21 @@ async def generate(
         ... )
         >>> print(response.text)
 
-        Multi-turn conversation:
+        Structured output with dataclass:
+        >>> from dataclasses import dataclass
+        >>>
+        >>> @dataclass
+        ... class CodeReview:
+        ...     issues: list[str]
+        ...     suggestions: list[str]
+        ...     overall_quality: int
+        >>>
         >>> response = await generate(
-        ...     model="anthropic/claude-3-5-haiku",
-        ...     messages=[
-        ...         {"role": "user", "content": "What is calculus?"},
-        ...         {"role": "assistant", "content": "Calculus is..."},
-        ...         {"role": "user", "content": "Give me an example"}
-        ...     ]
+        ...     model="openai/gpt-4o",
+        ...     prompt="Analyze this code...",
+        ...     response_format=CodeReview
         ... )
+        >>> review = response.structured_output  # Returns dict
     """
     # Validate input
     if not prompt and not messages:
@@ -447,6 +497,12 @@ async def generate(
         )
 
     provider, model_name = model.split('/', 1)
+
+    # Convert response_format to JSON schema if provided
+    response_schema_json = None
+    if response_format is not None:
+        format_type, json_schema = detect_format_type(response_format)
+        response_schema_json = json.dumps(json_schema)
 
     # Create language model client
     lm = _LanguageModel(provider=provider.lower(), default_model=None)
@@ -480,6 +536,7 @@ async def generate(
         messages=message_objects,
         system_prompt=system_prompt,
         config=config,
+        response_schema=response_schema_json,
     )
 
     # Generate and return

@@ -229,14 +229,25 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation but confirmation is not implemented in Phase 1"
             )
 
-        # Execute handler
-        logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
+        # Create tool span via Rust FFI
+        from ._core import create_span
 
-        # Handler is already async (validated in tool() decorator)
-        result = await self.handler(ctx, **kwargs)
+        with create_span(
+            self.name,
+            "tool",
+            {
+                "tool.name": self.name,
+                "tool.args": ",".join(kwargs.keys()),
+            },
+        ) as span:
+            # Execute handler
+            logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
 
-        logger.debug(f"Tool '{self.name}' completed successfully")
-        return result
+            # Handler is already async (validated in tool() decorator)
+            result = await self.handler(ctx, **kwargs)
+
+            logger.debug(f"Tool '{self.name}' completed successfully")
+            return result
 
     def get_schema(self) -> Dict[str, Any]:
         """

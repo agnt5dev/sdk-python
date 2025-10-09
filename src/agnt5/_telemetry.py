@@ -67,6 +67,12 @@ class OpenTelemetryHandler(logging.Handler):
             # Format the message (applies any formatters)
             message = self.format(record)
 
+            # Include exception traceback if present (from logger.exception() or exc_info=True)
+            if record.exc_info:
+                # formatException() returns the formatted traceback string
+                exc_text = self.formatException(record.exc_info)
+                message = f"{message}\n{exc_text}"
+
             # Forward to Rust tracing system
             # Rust side will:
             # - Add to current span context (inherits invocation.id)
@@ -92,9 +98,10 @@ def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None
 
     This function:
     1. Removes any existing handlers (avoid duplicates)
-    2. Adds OpenTelemetry handler for OTLP + console output
-    3. Sets appropriate log level
-    4. Disables propagation to avoid duplicate logs
+    2. Adds OpenTelemetry handler for OTLP + console output (when Worker is running)
+    3. Adds console handler for local testing (fallback)
+    4. Sets appropriate log level
+    5. Disables propagation to avoid duplicate logs
 
     Args:
         logger: Logger instance to configure
@@ -103,23 +110,37 @@ def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None
     # Remove existing handlers to avoid duplicate logs
     logger.handlers.clear()
 
-    # Add OpenTelemetry handler
+    # Add OpenTelemetry handler (for Worker/platform execution)
     otel_handler = OpenTelemetryHandler()
     otel_handler.setLevel(logging.DEBUG)
 
     # Use simple formatter - Rust side handles structured logging
-    # We just want the message here
     formatter = logging.Formatter('%(message)s')
     otel_handler.setFormatter(formatter)
 
     logger.addHandler(otel_handler)
 
-    # Set log level (default to DEBUG to let Rust side filter)
+    # Add console handler for local testing (fallback when Rust bridge not available)
+    # This ensures logs appear when testing functions locally without Worker
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+
+    # Console format includes level, message, and exception info if present
+    # exc_info=True in the format string means "include traceback if present"
+    console_formatter = logging.Formatter(
+        '[%(levelname)s] %(message)s',
+        # Python automatically appends exception traceback when exc_info is set
+    )
+    console_handler.setFormatter(console_formatter)
+
+    logger.addHandler(console_handler)
+
+    # Set log level (default to DEBUG to let handlers filter)
     if log_level is None:
         log_level = logging.DEBUG
     logger.setLevel(log_level)
 
-    # Don't propagate to root logger (we handle everything via OpenTelemetry)
+    # Don't propagate to root logger (we handle everything ourselves)
     logger.propagate = False
 
 

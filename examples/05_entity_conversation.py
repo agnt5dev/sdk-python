@@ -5,102 +5,87 @@ This example demonstrates:
 - Using Entity to implement conversation sessions
 - Managing conversation history and context
 - Multi-turn dialogues with state persistence
-- Session pattern (replacing the need for a separate Session component)
+- Session pattern using Entity base class
 """
 
 import asyncio
 from datetime import datetime
 from typing import Dict, List
 
-from agnt5 import Context, entity
-
-# Create Conversation entity type
-Conversation = entity("Conversation")
+from agnt5 import Entity
 
 
-@Conversation.method
-async def add_message(ctx: Context, role: str, content: str) -> Dict:
-    """Add a message to the conversation history."""
-    messages = ctx.get("messages", [])
-    timestamp = datetime.now().isoformat()
+class Conversation(Entity):
+    """Conversation entity for managing session state and history."""
 
-    message = {
-        "role": role,
-        "content": content,
-        "timestamp": timestamp
-    }
+    async def add_message(self, role: str, content: str) -> Dict:
+        """Add a message to the conversation history."""
+        messages = self.state.get("messages", [])
+        timestamp = datetime.now().isoformat()
 
-    messages.append(message)
-    ctx.set("messages", messages)
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": timestamp
+        }
 
-    # Update conversation metadata
-    ctx.set("last_updated", timestamp)
-    turn_count = ctx.get("turn_count", 0)
-    ctx.set("turn_count", turn_count + 1)
+        messages.append(message)
+        self.state.set("messages", messages)
 
-    ctx.logger.info(f"Message added ({role}): {content[:50]}...")
+        # Update conversation metadata
+        self.state.set("last_updated", timestamp)
+        turn_count = self.state.get("turn_count", 0)
+        self.state.set("turn_count", turn_count + 1)
 
-    return {
-        "message_id": len(messages) - 1,
-        "timestamp": timestamp
-    }
+        return {
+            "message_id": len(messages) - 1,
+            "timestamp": timestamp
+        }
 
+    async def get_history(self, limit: int = None) -> List[Dict]:
+        """Get conversation history, optionally limited to last N messages."""
+        messages = self.state.get("messages", [])
 
-@Conversation.method
-async def get_history(ctx: Context, limit: int = None) -> List[Dict]:
-    """Get conversation history, optionally limited to last N messages."""
-    messages = ctx.get("messages", [])
+        if limit:
+            return messages[-limit:]
+        return messages
 
-    if limit:
-        return messages[-limit:]
-    return messages
+    async def get_context(self) -> Dict:
+        """Get conversation context and metadata."""
+        return {
+            "conversation_id": self.key,
+            "turn_count": self.state.get("turn_count", 0),
+            "message_count": len(self.state.get("messages", [])),
+            "last_updated": self.state.get("last_updated"),
+            "metadata": self.state.get("metadata", {})
+        }
 
+    async def set_metadata(self, key: str, value: any) -> None:
+        """Set conversation metadata (user preferences, settings, etc.)."""
+        metadata = self.state.get("metadata", {})
+        metadata[key] = value
+        self.state.set("metadata", metadata)
 
-@Conversation.method
-async def get_context(ctx: Context) -> Dict:
-    """Get conversation context and metadata."""
-    return {
-        "conversation_id": ctx.object_id,
-        "turn_count": ctx.get("turn_count", 0),
-        "message_count": len(ctx.get("messages", [])),
-        "last_updated": ctx.get("last_updated"),
-        "metadata": ctx.get("metadata", {})
-    }
+    async def clear_history(self) -> None:
+        """Clear conversation history."""
+        self.state.set("messages", [])
+        self.state.set("turn_count", 0)
+        self.state.set("last_updated", datetime.now().isoformat())
 
+    async def get_summary(self) -> Dict:
+        """Get a summary of the conversation."""
+        messages = self.state.get("messages", [])
 
-@Conversation.method
-async def set_metadata(ctx: Context, key: str, value: any) -> None:
-    """Set conversation metadata (user preferences, settings, etc.)."""
-    metadata = ctx.get("metadata", {})
-    metadata[key] = value
-    ctx.set("metadata", metadata)
-    ctx.logger.info(f"Metadata updated: {key} = {value}")
+        user_messages = [m for m in messages if m["role"] == "user"]
+        assistant_messages = [m for m in messages if m["role"] == "assistant"]
 
-
-@Conversation.method
-async def clear_history(ctx: Context) -> None:
-    """Clear conversation history."""
-    ctx.set("messages", [])
-    ctx.set("turn_count", 0)
-    ctx.set("last_updated", datetime.now().isoformat())
-    ctx.logger.info("Conversation history cleared")
-
-
-@Conversation.method
-async def get_summary(ctx: Context) -> Dict:
-    """Get a summary of the conversation."""
-    messages = ctx.get("messages", [])
-
-    user_messages = [m for m in messages if m["role"] == "user"]
-    assistant_messages = [m for m in messages if m["role"] == "assistant"]
-
-    return {
-        "total_messages": len(messages),
-        "user_messages": len(user_messages),
-        "assistant_messages": len(assistant_messages),
-        "turn_count": ctx.get("turn_count", 0),
-        "metadata": ctx.get("metadata", {})
-    }
+        return {
+            "total_messages": len(messages),
+            "user_messages": len(user_messages),
+            "assistant_messages": len(assistant_messages),
+            "turn_count": self.state.get("turn_count", 0),
+            "metadata": self.state.get("metadata", {})
+        }
 
 
 async def simulate_conversation():

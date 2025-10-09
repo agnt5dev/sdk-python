@@ -452,148 +452,160 @@ class Agent:
                 component_type="agent",
             )
 
-        # Initialize conversation
-        messages: List[Message] = [Message.user(user_message)]
-        all_tool_calls: List[Dict[str, Any]] = []
+        # Create agent span via Rust FFI
+        from ._core import create_span
 
-        # Reasoning loop
-        for iteration in range(self.max_iterations):
-            self.logger.info(f"Agent iteration {iteration + 1}/{self.max_iterations}")
+        with create_span(
+            self.name,
+            "agent",
+            {
+                "agent.name": self.name,
+                "agent.model": self.model,
+                "agent.max_iterations": str(self.max_iterations),
+            },
+        ) as span:
+            # Initialize conversation
+            messages: List[Message] = [Message.user(user_message)]
+            all_tool_calls: List[Dict[str, Any]] = []
 
-            # Build tool definitions for LLM
-            tool_defs = [
-                ToolDefinition(
-                    name=tool.name,
-                    description=tool.description,
-                    parameters=tool.input_schema,
+            # Reasoning loop
+            for iteration in range(self.max_iterations):
+                self.logger.info(f"Agent iteration {iteration + 1}/{self.max_iterations}")
+
+                # Build tool definitions for LLM
+                tool_defs = [
+                    ToolDefinition(
+                        name=tool.name,
+                        description=tool.description,
+                        parameters=tool.input_schema,
+                    )
+                    for tool in self.tools.values()
+                ]
+
+                # Convert messages to dict format for lm.generate()
+                messages_dict = []
+                for msg in messages:
+                    messages_dict.append({
+                        "role": msg.role.value,
+                        "content": msg.content
+                    })
+
+                # Call LLM using simplified API
+                # TODO: Support tools in lm.generate() - for now using GenerateRequest internally
+                request = GenerateRequest(
+                    model=self.model,
+                    system_prompt=self.instructions,
+                    messages=messages,
+                    tools=tool_defs if tool_defs else [],
                 )
-                for tool in self.tools.values()
-            ]
+                request.config.temperature = self.temperature
+                if self.max_tokens:
+                    request.config.max_tokens = self.max_tokens
+                if self.top_p:
+                    request.config.top_p = self.top_p
 
-            # Convert messages to dict format for lm.generate()
-            messages_dict = []
-            for msg in messages:
-                messages_dict.append({
-                    "role": msg.role.value,
-                    "content": msg.content
-                })
+                # Create internal LM instance for generation
+                # TODO: Use model_config when provided
+                from .lm import _LanguageModel
+                provider, model_name = self.model.split('/', 1)
+                internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+                response = await internal_lm.generate(request)
 
-            # Call LLM using simplified API
-            # TODO: Support tools in lm.generate() - for now using GenerateRequest internally
-            request = GenerateRequest(
-                model=self.model,
-                system_prompt=self.instructions,
-                messages=messages,
-                tools=tool_defs if tool_defs else [],
-            )
-            request.config.temperature = self.temperature
-            if self.max_tokens:
-                request.config.max_tokens = self.max_tokens
-            if self.top_p:
-                request.config.top_p = self.top_p
+                # Add assistant response to messages
+                messages.append(Message.assistant(response.text))
 
-            # Create internal LM instance for generation
-            # TODO: Use model_config when provided
-            from .lm import _LanguageModel
-            provider, model_name = self.model.split('/', 1)
-            internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-            response = await internal_lm.generate(request)
+                # Check if LLM wants to use tools
+                if response.tool_calls:
+                    self.logger.info(f"Agent calling {len(response.tool_calls)} tool(s)")
 
-            # Add assistant response to messages
-            messages.append(Message.assistant(response.text))
+                    # Store current conversation in context for potential handoffs
+                    context.set("_current_conversation", messages)
 
-            # Check if LLM wants to use tools
-            if response.tool_calls:
-                self.logger.info(f"Agent calling {len(response.tool_calls)} tool(s)")
+                    # Execute tool calls
+                    tool_results = []
+                    for tool_call in response.tool_calls:
+                        tool_name = tool_call["name"]
+                        tool_args_str = tool_call["arguments"]
 
-                # Store current conversation in context for potential handoffs
-                context.set("_current_conversation", messages)
+                        # Track tool call
+                        all_tool_calls.append(
+                            {
+                                "name": tool_name,
+                                "arguments": tool_args_str,
+                                "iteration": iteration + 1,
+                            }
+                        )
 
-                # Execute tool calls
-                tool_results = []
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call["name"]
-                    tool_args_str = tool_call["arguments"]
+                        # Execute tool
+                        try:
+                            # Parse arguments
+                            tool_args = json.loads(tool_args_str)
 
-                    # Track tool call
-                    all_tool_calls.append(
-                        {
-                            "name": tool_name,
-                            "arguments": tool_args_str,
-                            "iteration": iteration + 1,
-                        }
+                            # Get tool
+                            tool = self.tools.get(tool_name)
+                            if not tool:
+                                result_text = f"Error: Tool '{tool_name}' not found"
+                            else:
+                                # Execute tool
+                                result = await tool.invoke(context, **tool_args)
+
+                                # Check if this was a handoff
+                                if isinstance(result, dict) and result.get("_handoff"):
+                                    self.logger.info(
+                                        f"Handoff detected to '{result['to_agent']}', "
+                                        f"terminating current agent"
+                                    )
+                                    # Return immediately with handoff result
+                                    return AgentResult(
+                                        output=result["output"],
+                                        tool_calls=all_tool_calls + result.get("tool_calls", []),
+                                        context=context,
+                                        handoff_to=result["to_agent"],
+                                        handoff_metadata=result,
+                                    )
+
+                                result_text = json.dumps(result) if result else "null"
+
+                            tool_results.append(
+                                {"tool": tool_name, "result": result_text, "error": None}
+                            )
+
+                        except Exception as e:
+                            self.logger.error(f"Tool execution error: {e}")
+                            tool_results.append(
+                                {"tool": tool_name, "result": None, "error": str(e)}
+                            )
+
+                    # Add tool results to conversation
+                    results_text = "\n".join(
+                        [
+                            f"Tool: {tr['tool']}\nResult: {tr['result']}"
+                            if tr["error"] is None
+                            else f"Tool: {tr['tool']}\nError: {tr['error']}"
+                            for tr in tool_results
+                        ]
+                    )
+                    messages.append(Message.user(f"Tool results:\n{results_text}"))
+
+                    # Continue loop for agent to process results
+
+                else:
+                    # No tool calls - agent is done
+                    self.logger.info(f"Agent completed after {iteration + 1} iterations")
+                    return AgentResult(
+                        output=response.text,
+                        tool_calls=all_tool_calls,
+                        context=context,
                     )
 
-                    # Execute tool
-                    try:
-                        # Parse arguments
-                        tool_args = json.loads(tool_args_str)
-
-                        # Get tool
-                        tool = self.tools.get(tool_name)
-                        if not tool:
-                            result_text = f"Error: Tool '{tool_name}' not found"
-                        else:
-                            # Execute tool
-                            result = await tool.invoke(context, **tool_args)
-
-                            # Check if this was a handoff
-                            if isinstance(result, dict) and result.get("_handoff"):
-                                self.logger.info(
-                                    f"Handoff detected to '{result['to_agent']}', "
-                                    f"terminating current agent"
-                                )
-                                # Return immediately with handoff result
-                                return AgentResult(
-                                    output=result["output"],
-                                    tool_calls=all_tool_calls + result.get("tool_calls", []),
-                                    context=context,
-                                    handoff_to=result["to_agent"],
-                                    handoff_metadata=result,
-                                )
-
-                            result_text = json.dumps(result) if result else "null"
-
-                        tool_results.append(
-                            {"tool": tool_name, "result": result_text, "error": None}
-                        )
-
-                    except Exception as e:
-                        self.logger.error(f"Tool execution error: {e}")
-                        tool_results.append(
-                            {"tool": tool_name, "result": None, "error": str(e)}
-                        )
-
-                # Add tool results to conversation
-                results_text = "\n".join(
-                    [
-                        f"Tool: {tr['tool']}\nResult: {tr['result']}"
-                        if tr["error"] is None
-                        else f"Tool: {tr['tool']}\nError: {tr['error']}"
-                        for tr in tool_results
-                    ]
-                )
-                messages.append(Message.user(f"Tool results:\n{results_text}"))
-
-                # Continue loop for agent to process results
-
-            else:
-                # No tool calls - agent is done
-                self.logger.info(f"Agent completed after {iteration + 1} iterations")
-                return AgentResult(
-                    output=response.text,
-                    tool_calls=all_tool_calls,
-                    context=context,
-                )
-
-        # Max iterations reached
-        self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
-        final_output = messages[-1].content if messages else "No output generated"
-        return AgentResult(
-            output=final_output,
-            tool_calls=all_tool_calls,
-            context=context,
-        )
+            # Max iterations reached
+            self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
+            final_output = messages[-1].content if messages else "No output generated"
+            return AgentResult(
+                output=final_output,
+                tool_calls=all_tool_calls,
+                context=context,
+            )
 
     async def chat(
         self,

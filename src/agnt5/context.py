@@ -11,6 +11,23 @@ from .exceptions import StateError
 T = TypeVar("T")
 
 
+class _CorrelationFilter(logging.Filter):
+    """Inject correlation IDs (run_id, trace_id, span_id) into every log record."""
+
+    def __init__(self, runtime_context: Any) -> None:
+        super().__init__()
+        self.runtime_context = runtime_context
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Add correlation IDs as extra fields to the log record."""
+        record.run_id = self.runtime_context.run_id
+        if self.runtime_context.trace_id:
+            record.trace_id = self.runtime_context.trace_id
+        if self.runtime_context.span_id:
+            record.span_id = self.runtime_context.span_id
+        return True
+
+
 class StateClient:
     """
     Workflow state management client for durable workflows.
@@ -132,6 +149,7 @@ class Context:
         method_name: Optional[str] = None,
         completed_steps: Optional[Dict[str, Any]] = None,  # Phase 6B: Replay support
         initial_state: Optional[Dict[str, Any]] = None,  # Phase 6B: State replay
+        runtime_context: Optional[Any] = None,  # RuntimeContext for trace correlation
     ) -> None:
         """Initialize context with execution metadata.
 
@@ -144,6 +162,7 @@ class Context:
             method_name: Entity method name (optional)
             completed_steps: Pre-recorded steps for workflow replay (Phase 6B)
             initial_state: Initial workflow state for replay (Phase 6B)
+            runtime_context: RuntimeContext providing trace/span IDs for correlation
         """
         self._run_id = run_id
         self._component_type = component_type
@@ -153,11 +172,16 @@ class Context:
         self._method_name = method_name
         self._state: Dict[str, Any] = {}
         self._checkpoints: Dict[str, Any] = {}
+        self._runtime_context = runtime_context
 
-        # Create logger with OpenTelemetry integration
+        # Create logger with OpenTelemetry integration and correlation IDs
         self._logger = logging.getLogger(f"agnt5.{run_id}")
         from ._telemetry import setup_context_logger
         setup_context_logger(self._logger)
+
+        # Add correlation filter if runtime_context is available
+        if runtime_context:
+            self._logger.addFilter(_CorrelationFilter(runtime_context))
 
         # Workflow durability: step tracking (Phase 6A)
         self._step_counter: int = 0  # Track step sequence for workflows
@@ -345,22 +369,36 @@ class Context:
         if func_config is None:
             raise ValueError(f"Function '{handler_name}' not found in registry")
 
-        # Create child context for function execution
-        child_ctx = Context(
-            run_id=f"{self.run_id}:task:{handler_name}",
-            component_type="function",
-        )
+        # Create task span via Rust FFI with runtime context for proper trace linkage
+        from ._core import create_span
 
-        # Execute function with input
-        if input is not None:
-            result = await func_config.handler(child_ctx, input)
-        else:
-            result = await func_config.handler(child_ctx)
+        with create_span(
+            handler_name,
+            "task",
+            self._runtime_context,  # Pass runtime context for span linkage
+            {
+                "task.name": handler_name,
+                "task.service": service_name,
+                "task.step_name": step_name,
+            },
+        ) as span:
+            # Create child context for function execution (pass runtime_context through)
+            child_ctx = Context(
+                run_id=f"{self.run_id}:task:{handler_name}",
+                component_type="function",
+                runtime_context=self._runtime_context,
+            )
 
-        # Phase 6: Record step completion for durability
-        self._record_step_completion(step_name, handler_name, input, result)
+            # Execute function with input
+            if input is not None:
+                result = await func_config.handler(child_ctx, input)
+            else:
+                result = await func_config.handler(child_ctx)
 
-        return result
+            # Phase 6: Record step completion for durability
+            self._record_step_completion(step_name, handler_name, input, result)
+
+            return result
 
     def _record_step_completion(
         self, step_name: str, handler_name: str, input: Any, result: Any

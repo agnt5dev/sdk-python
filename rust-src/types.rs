@@ -306,6 +306,8 @@ pub struct PyExecuteComponentRequest {
     pub metadata: HashMap<String, String>,
     #[pyo3(get)]
     pub step_checkpoints: Vec<PyStepCheckpoint>,
+    #[pyo3(get)]
+    pub runtime_context: Option<crate::PyRuntimeContext>,
 }
 
 #[pymethods]
@@ -341,6 +343,7 @@ impl PyExecuteComponentRequest {
             flow_step,
             metadata: metadata.unwrap_or_default(),
             step_checkpoints: step_checkpoints.unwrap_or_default(),
+            runtime_context: None,
         }
     }
 }
@@ -396,6 +399,7 @@ impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
                 .into_iter()
                 .map(PyStepCheckpoint::from)
                 .collect(),
+            runtime_context: None, // Will be set in worker.rs after context extraction
         }
     }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from typing import Any, Dict, Optional
 
@@ -11,6 +12,12 @@ from .workflow import WorkflowRegistry
 from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
+
+# Context variable to store trace metadata for propagation to LM calls
+# This allows Rust LM layer to access traceparent without explicit parameter passing
+_trace_metadata: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar(
+    '_trace_metadata', default={}
+)
 
 
 class Worker:
@@ -191,7 +198,7 @@ class Worker:
 
             # Build metadata dict with methods list and schemas
             metadata_dict = {
-                "methods": json.dumps(list(entity_type._methods.keys())),
+                "methods": json.dumps(list(entity_type._method_schemas.keys())),
                 "method_schemas": json.dumps(method_schemas)
             }
 
@@ -205,7 +212,7 @@ class Worker:
                 definition=None,
             )
             components.append(component_info)
-            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._methods.keys())}")
+            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._method_schemas.keys())}")
 
         # Discover agents
         for name, agent in AgentRegistry.all().items():
@@ -231,68 +238,6 @@ class Worker:
                 config={},
                 input_schema=input_schema_str,
                 output_schema=output_schema_str,
-                definition=None,
-            )
-            components.append(component_info)
-            logger.debug(f"Discovered agent: {name}")
-
-        # Discover tools
-        for name, tool in ToolRegistry.all().items():
-            # Serialize schemas to JSON strings
-            input_schema_str = None
-            if hasattr(tool, 'input_schema') and tool.input_schema:
-                input_schema_str = json.dumps(tool.input_schema)
-
-            output_schema_str = None
-            if hasattr(tool, 'output_schema') and tool.output_schema:
-                output_schema_str = json.dumps(tool.output_schema)
-
-            component_info = self._PyComponentInfo(
-                name=name,
-                component_type="tool",
-                metadata={},
-                config={},
-                input_schema=input_schema_str,
-                output_schema=output_schema_str,
-                definition=None,
-            )
-            components.append(component_info)
-            logger.debug(f"Discovered tool: {name}")
-
-        # Discover entities
-        for name, entity_type in EntityRegistry.all().items():
-            # Build metadata dict with methods list as JSON string
-            metadata_dict = {
-                "methods": json.dumps(list(entity_type._methods.keys()))
-            }
-
-            component_info = self._PyComponentInfo(
-                name=name,
-                component_type="entity",
-                metadata=metadata_dict,
-                config={},
-                input_schema=None,
-                output_schema=None,
-                definition=None,
-            )
-            components.append(component_info)
-            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._methods.keys())}")
-
-        # Discover agents
-        for name, agent in AgentRegistry.all().items():
-            # Build metadata dict with agent info
-            metadata_dict = {
-                "model": agent.model_name,
-                "tools": json.dumps(list(agent.tools.keys()) if hasattr(agent, 'tools') else [])
-            }
-
-            component_info = self._PyComponentInfo(
-                name=name,
-                component_type="agent",
-                metadata=metadata_dict,
-                config={},
-                input_schema=None,
-                output_schema=None,
                 definition=None,
             )
             components.append(component_info)
@@ -381,10 +326,17 @@ class Worker:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
 
-            # Create context
+            # Store trace metadata in contextvar for LM calls to access
+            # The Rust worker injects traceparent into request.metadata for trace propagation
+            if hasattr(request, 'metadata') and request.metadata:
+                _trace_metadata.set(dict(request.metadata))
+                logger.debug(f"Trace metadata stored: traceparent={request.metadata.get('traceparent', 'N/A')}")
+
+            # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{config.name}",
                 component_type="function",
+                runtime_context=request.runtime_context,
             )
 
             # Execute function
@@ -506,12 +458,13 @@ class Worker:
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse workflow_state from metadata")
 
-            # Create context with replay data
+            # Create context with replay data and runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{config.name}",
                 component_type="workflow",
                 completed_steps=completed_steps if completed_steps else None,
                 initial_state=initial_state if initial_state else None,
+                runtime_context=request.runtime_context,
             )
 
             # Execute workflow
@@ -577,10 +530,11 @@ class Worker:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
 
-            # Create context
+            # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{tool.name}",
                 component_type="tool",
+                runtime_context=request.runtime_context,
             )
 
             # Execute tool
@@ -621,7 +575,7 @@ class Worker:
         """Execute an entity method."""
         import json
         from .context import Context
-        from .entity import EntityType, DurableEntity, _entity_states
+        from .entity import EntityType, Entity, _entity_states
         from ._core import PyExecuteComponentResponse
 
         try:
@@ -637,13 +591,8 @@ class Worker:
             if not method_name:
                 raise ValueError("Entity invocation requires 'method' parameter")
 
-            # Check if this is a class-based entity (DurableEntity subclass) or method-based (EntityType)
-            if entity_type.entity_class is not None:
-                # Class-based entity: use the stored class reference
-                entity_instance = entity_type.entity_class(key=entity_key)
-            else:
-                # Method-based entity: create EntityInstance
-                entity_instance = entity_type(entity_key)
+            # Create entity instance using the stored class reference
+            entity_instance = entity_type.entity_class(key=entity_key)
 
             # Get method
             if not hasattr(entity_instance, method_name):
@@ -715,10 +664,11 @@ class Worker:
             if not user_message:
                 raise ValueError("Agent invocation requires 'message' parameter")
 
-            # Create context
+            # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{agent.name}",
                 component_type="agent",
+                runtime_context=request.runtime_context,
             )
 
             # Execute agent

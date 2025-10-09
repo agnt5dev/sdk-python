@@ -12,198 +12,169 @@ import asyncio
 from datetime import datetime
 from typing import Dict, List
 
-from agnt5 import Context, entity
-
-# Create Account entity type
-Account = entity("Account")
+from agnt5 import Entity
 
 
-@Account.method
-async def create_account(ctx: Context, owner_name: str, initial_balance: float = 0.0) -> Dict:
-    """Initialize a new account."""
-    if initial_balance < 0:
-        raise ValueError("Initial balance cannot be negative")
+class Account(Entity):
+    """Bank account entity with transaction management."""
 
-    ctx.set("owner_name", owner_name)
-    ctx.set("balance", initial_balance)
-    ctx.set("created_at", datetime.now().isoformat())
-    ctx.set("transactions", [])
-    ctx.set("status", "active")
+    async def create_account(self, owner_name: str, initial_balance: float = 0.0) -> Dict:
+        """Initialize a new account."""
+        if initial_balance < 0:
+            raise ValueError("Initial balance cannot be negative")
 
-    ctx.logger.info(f"Account created for {owner_name} with balance ${initial_balance}")
+        self.state.set("owner_name", owner_name)
+        self.state.set("balance", initial_balance)
+        self.state.set("created_at", datetime.now().isoformat())
+        self.state.set("transactions", [])
+        self.state.set("status", "active")
 
-    return {
-        "account_id": ctx.object_id,
-        "owner_name": owner_name,
-        "balance": initial_balance,
-        "status": "active"
-    }
+        return {
+            "account_id": self.key,
+            "owner_name": owner_name,
+            "balance": initial_balance,
+            "status": "active"
+        }
 
+    async def deposit(self, amount: float, description: str = "Deposit") -> Dict:
+        """Deposit money into the account."""
+        if amount <= 0:
+            raise ValueError("Deposit amount must be positive")
 
-@Account.method
-async def deposit(ctx: Context, amount: float, description: str = "Deposit") -> Dict:
-    """Deposit money into the account."""
-    if amount <= 0:
-        raise ValueError("Deposit amount must be positive")
+        # Check account status
+        status = self.state.get("status", "inactive")
+        if status != "active":
+            raise ValueError(f"Cannot deposit to {status} account")
 
-    # Check account status
-    status = ctx.get("status", "inactive")
-    if status != "active":
-        raise ValueError(f"Cannot deposit to {status} account")
+        # Update balance
+        current_balance = self.state.get("balance", 0.0)
+        new_balance = current_balance + amount
+        self.state.set("balance", new_balance)
 
-    # Update balance
-    current_balance = ctx.get("balance", 0.0)
-    new_balance = current_balance + amount
-    ctx.set("balance", new_balance)
+        # Record transaction
+        transaction = {
+            "type": "deposit",
+            "amount": amount,
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "balance_after": new_balance
+        }
 
-    # Record transaction
-    transaction = {
-        "type": "deposit",
-        "amount": amount,
-        "description": description,
-        "timestamp": datetime.now().isoformat(),
-        "balance_after": new_balance
-    }
+        transactions = self.state.get("transactions", [])
+        transactions.append(transaction)
+        self.state.set("transactions", transactions)
 
-    transactions = ctx.get("transactions", [])
-    transactions.append(transaction)
-    ctx.set("transactions", transactions)
+        return {
+            "success": True,
+            "transaction": transaction,
+            "new_balance": new_balance
+        }
 
-    ctx.logger.info(f"Deposited ${amount}: {description}")
+    async def withdraw(self, amount: float, description: str = "Withdrawal") -> Dict:
+        """Withdraw money from the account."""
+        if amount <= 0:
+            raise ValueError("Withdrawal amount must be positive")
 
-    return {
-        "success": True,
-        "transaction": transaction,
-        "new_balance": new_balance
-    }
+        # Check account status
+        status = self.state.get("status", "inactive")
+        if status != "active":
+            raise ValueError(f"Cannot withdraw from {status} account")
 
+        # Check sufficient funds
+        current_balance = self.state.get("balance", 0.0)
+        if current_balance < amount:
+            raise ValueError(f"Insufficient funds: ${current_balance} < ${amount}")
 
-@Account.method
-async def withdraw(ctx: Context, amount: float, description: str = "Withdrawal") -> Dict:
-    """Withdraw money from the account."""
-    if amount <= 0:
-        raise ValueError("Withdrawal amount must be positive")
+        # Update balance
+        new_balance = current_balance - amount
+        self.state.set("balance", new_balance)
 
-    # Check account status
-    status = ctx.get("status", "inactive")
-    if status != "active":
-        raise ValueError(f"Cannot withdraw from {status} account")
+        # Record transaction
+        transaction = {
+            "type": "withdrawal",
+            "amount": amount,
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "balance_after": new_balance
+        }
 
-    # Check sufficient funds
-    current_balance = ctx.get("balance", 0.0)
-    if current_balance < amount:
-        raise ValueError(f"Insufficient funds: ${current_balance} < ${amount}")
+        transactions = self.state.get("transactions", [])
+        transactions.append(transaction)
+        self.state.set("transactions", transactions)
 
-    # Update balance
-    new_balance = current_balance - amount
-    ctx.set("balance", new_balance)
+        return {
+            "success": True,
+            "transaction": transaction,
+            "new_balance": new_balance
+        }
 
-    # Record transaction
-    transaction = {
-        "type": "withdrawal",
-        "amount": amount,
-        "description": description,
-        "timestamp": datetime.now().isoformat(),
-        "balance_after": new_balance
-    }
+    async def transfer(self, to_account_key: str, amount: float) -> Dict:
+        """Transfer money to another account (simplified - just withdraws from this account)."""
+        if amount <= 0:
+            raise ValueError("Transfer amount must be positive")
 
-    transactions = ctx.get("transactions", [])
-    transactions.append(transaction)
-    ctx.set("transactions", transactions)
+        # In a real system, this would coordinate with the target account
+        # For this example, we just withdraw from source account
+        result = await self.withdraw(amount, description=f"Transfer to {to_account_key}")
 
-    ctx.logger.info(f"Withdrew ${amount}: {description}")
+        return {
+            "success": True,
+            "from_account": self.key,
+            "to_account": to_account_key,
+            "amount": amount,
+            "new_balance": result["new_balance"]
+        }
 
-    return {
-        "success": True,
-        "transaction": transaction,
-        "new_balance": new_balance
-    }
+    async def get_balance(self) -> float:
+        """Get current account balance."""
+        return self.state.get("balance", 0.0)
 
+    async def get_transaction_history(self, limit: int = None) -> List[Dict]:
+        """Get transaction history."""
+        transactions = self.state.get("transactions", [])
 
-@Account.method
-async def transfer(ctx: Context, to_account_key: str, amount: float) -> Dict:
-    """Transfer money to another account (simplified - just withdraws from this account)."""
-    if amount <= 0:
-        raise ValueError("Transfer amount must be positive")
+        if limit:
+            return transactions[-limit:]
+        return transactions
 
-    # In a real system, this would coordinate with the target account
-    # For this example, we just withdraw from source account
-    result = await withdraw(ctx, amount, description=f"Transfer to {to_account_key}")
+    async def get_account_info(self) -> Dict:
+        """Get complete account information."""
+        return {
+            "account_id": self.key,
+            "owner_name": self.state.get("owner_name"),
+            "balance": self.state.get("balance", 0.0),
+            "status": self.state.get("status", "inactive"),
+            "created_at": self.state.get("created_at"),
+            "transaction_count": len(self.state.get("transactions", []))
+        }
 
-    ctx.logger.info(f"Transferred ${amount} to account {to_account_key}")
+    async def suspend_account(self, reason: str) -> Dict:
+        """Suspend the account."""
+        self.state.set("status", "suspended")
+        self.state.set("suspended_reason", reason)
+        self.state.set("suspended_at", datetime.now().isoformat())
 
-    return {
-        "success": True,
-        "from_account": ctx.object_id,
-        "to_account": to_account_key,
-        "amount": amount,
-        "new_balance": result["new_balance"]
-    }
+        return {
+            "success": True,
+            "status": "suspended",
+            "reason": reason
+        }
 
+    async def activate_account(self) -> Dict:
+        """Reactivate a suspended account."""
+        current_status = self.state.get("status")
 
-@Account.method
-async def get_balance(ctx: Context) -> float:
-    """Get current account balance."""
-    return ctx.get("balance", 0.0)
+        if current_status == "active":
+            return {"success": True, "message": "Account already active"}
 
+        self.state.set("status", "active")
+        self.state.delete("suspended_reason")
+        self.state.delete("suspended_at")
 
-@Account.method
-async def get_transaction_history(ctx: Context, limit: int = None) -> List[Dict]:
-    """Get transaction history."""
-    transactions = ctx.get("transactions", [])
-
-    if limit:
-        return transactions[-limit:]
-    return transactions
-
-
-@Account.method
-async def get_account_info(ctx: Context) -> Dict:
-    """Get complete account information."""
-    return {
-        "account_id": ctx.object_id,
-        "owner_name": ctx.get("owner_name"),
-        "balance": ctx.get("balance", 0.0),
-        "status": ctx.get("status", "inactive"),
-        "created_at": ctx.get("created_at"),
-        "transaction_count": len(ctx.get("transactions", []))
-    }
-
-
-@Account.method
-async def suspend_account(ctx: Context, reason: str) -> Dict:
-    """Suspend the account."""
-    ctx.set("status", "suspended")
-    ctx.set("suspended_reason", reason)
-    ctx.set("suspended_at", datetime.now().isoformat())
-
-    ctx.logger.warning(f"Account suspended: {reason}")
-
-    return {
-        "success": True,
-        "status": "suspended",
-        "reason": reason
-    }
-
-
-@Account.method
-async def activate_account(ctx: Context) -> Dict:
-    """Reactivate a suspended account."""
-    current_status = ctx.get("status")
-
-    if current_status == "active":
-        return {"success": True, "message": "Account already active"}
-
-    ctx.set("status", "active")
-    ctx.delete("suspended_reason")
-    ctx.delete("suspended_at")
-
-    ctx.logger.info("Account reactivated")
-
-    return {
-        "success": True,
-        "status": "active"
-    }
+        return {
+            "success": True,
+            "status": "active"
+        }
 
 
 async def main():

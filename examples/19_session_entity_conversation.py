@@ -1,11 +1,14 @@
 """
-Conversation entity using SessionEntity with auto-history management.
+Conversation entity using Entity with session management pattern.
 
 This demonstrates:
-- SessionEntity base class with built-in history
-- Automatic message tracking
-- Auto-trimming when max_turns exceeded
+- Implementing session/conversation pattern with Entity
+- Managing conversation history manually
+- Auto-trimming when max messages exceeded
 - Multi-turn conversations with memory
+
+Note: SessionEntity was removed from the SDK core. This example shows
+how to implement the session pattern using the base Entity class.
 
 Run as worker:
     uv run 19_session_entity_conversation.py
@@ -15,18 +18,21 @@ Test with client:
 """
 
 import asyncio
+from typing import Optional
 
-from agnt5 import SessionEntity
+from agnt5 import Entity
 
 
-class Conversation(SessionEntity):
+class Conversation(Entity):
     """
-    Simple conversation entity with automatic history.
-    History is trimmed to last 20 turns (40 messages).
+    Conversation entity with automatic history management.
+
+    Implements the session pattern using Entity base class.
+    History is trimmed to last max_messages (default: 20 messages = 10 turns).
     """
 
-    max_turns: int = 10  # Keep last 10 turns (20 messages)
-    auto_summarize: bool = False  # For now, just trim
+    # Configuration (can be overridden in subclasses)
+    max_messages: int = 20  # Keep last 20 messages (10 turns)
 
     async def chat(self, message: str) -> dict:
         """
@@ -38,26 +44,53 @@ class Conversation(SessionEntity):
         Returns:
             dict with response and history info
         """
-        # Add user message to history (automatic)
+        # Add user message to history
         await self.add_message("user", message)
 
         # Get conversation history
-        history = await self.get_history()
+        history = self.state.get("messages", [])
 
         # Simple echo bot for now (in real app, call AI model with history)
         response = f"Echo: {message} (Turn {len(history) // 2})"
 
-        # Add assistant response to history (automatic)
+        # Add assistant response to history
         await self.add_message("assistant", response)
 
         # Get updated history
-        history = await self.get_history()
+        history = self.state.get("messages", [])
 
         return {
             "response": response,
             "turn": len(history) // 2,
             "history_length": len(history)
         }
+
+    async def add_message(self, role: str, content: str) -> dict:
+        """Add a message to conversation history with auto-trimming."""
+        messages = self.state.get("messages", [])
+
+        # Add new message
+        messages.append({"role": role, "content": content})
+
+        # Auto-trim if exceeds max_messages
+        if len(messages) > self.max_messages:
+            # Keep only the last max_messages
+            messages = messages[-self.max_messages:]
+
+        self.state.set("messages", messages)
+
+        return {
+            "message_index": len(messages) - 1,
+            "total_messages": len(messages)
+        }
+
+    async def get_history(self, limit: Optional[int] = None) -> list:
+        """Get conversation history with optional limit."""
+        messages = self.state.get("messages", [])
+
+        if limit:
+            return messages[-limit:]
+        return messages
 
     async def get_conversation_history(self, limit: int = 10) -> dict:
         """Get conversation history with formatting."""
@@ -69,6 +102,18 @@ class Conversation(SessionEntity):
             "turns": len(history) // 2
         }
 
+    async def clear_history(self) -> dict:
+        """Clear conversation history."""
+        messages = self.state.get("messages", [])
+        message_count = len(messages)
+
+        self.state.set("messages", [])
+
+        return {
+            "message_count": message_count,
+            "cleared": True
+        }
+
     async def reset_conversation(self) -> dict:
         """Reset the conversation history."""
         result = await self.clear_history()
@@ -78,14 +123,15 @@ class Conversation(SessionEntity):
         }
 
 
-class SmartConversation(SessionEntity):
+class SmartConversation(Entity):
     """
-    Advanced conversation with summarization.
-    Auto-summarizes when history gets too long.
+    Advanced conversation with summarization support.
+
+    This example shows how you might implement summarization
+    when history gets too long.
     """
 
-    max_turns: int = 5  # Keep last 5 turns only
-    auto_summarize: bool = True  # Enable summarization
+    max_messages: int = 10  # Keep last 5 turns only
 
     async def chat(self, message: str) -> dict:
         """
@@ -101,8 +147,8 @@ class SmartConversation(SessionEntity):
         await self.add_message("user", message)
 
         # Get history and summary
-        history = await self.get_history()
-        summary = await self.get_summary()
+        history = self.state.get("messages", [])
+        summary = self.state.get("summary")
 
         # Simple response
         response = f"Message received: '{message}'. I remember {len(history)} messages."
@@ -119,6 +165,42 @@ class SmartConversation(SessionEntity):
             "has_summary": summary is not None,
             "summary": summary
         }
+
+    async def add_message(self, role: str, content: str) -> dict:
+        """Add message with summarization when history exceeds limit."""
+        messages = self.state.get("messages", [])
+
+        # Add new message
+        messages.append({"role": role, "content": content})
+
+        # If exceeds limit, create summary and trim
+        if len(messages) > self.max_messages:
+            # In a real implementation, you'd use an LLM to summarize
+            old_messages = messages[:-self.max_messages]
+            summary = f"Discussed {len(old_messages)} earlier messages"
+
+            # Store summary and keep only recent messages
+            self.state.set("summary", summary)
+            messages = messages[-self.max_messages:]
+
+        self.state.set("messages", messages)
+
+        return {
+            "message_index": len(messages) - 1,
+            "total_messages": len(messages)
+        }
+
+    async def get_history(self, limit: Optional[int] = None) -> list:
+        """Get conversation history."""
+        messages = self.state.get("messages", [])
+
+        if limit:
+            return messages[-limit:]
+        return messages
+
+    async def get_summary(self) -> Optional[str]:
+        """Get conversation summary."""
+        return self.state.get("summary")
 
 
 async def test_conversation():
@@ -193,7 +275,7 @@ async def test_smart_conversation():
 
 
 async def test_with_client():
-    """Test using HTTP client with entity() API (Restate-style)."""
+    """Test using HTTP client with entity() API."""
     print("\n=== Testing Conversation via Client (entity API) ===\n")
 
     from agnt5 import Client
@@ -221,63 +303,17 @@ async def test_with_client():
         print(f"    [{msg['role']}]: {msg['content']}")
 
 
-async def test_with_session_api():
-    """Test using HTTP client with session() API (OpenAI/ADK-style)."""
-    print("\n=== Testing Conversation via Client (session API) ===\n")
-    print("This demonstrates the OpenAI/ADK-style session API\n")
-
-    from agnt5 import Client
-
-    client = Client("http://localhost:34181")
-
-    # Create session using session() API - cleaner for conversation use cases
-    session = client.session("Conversation", "user-diana")
-
-    print("Turn 1:")
-    response = session.chat("Hello! Tell me about yourself.")
-    print(f"  User: Hello! Tell me about yourself.")
-    print(f"  Bot: {response}\n")
-
-    print("Turn 2:")
-    response = session.chat("What can you help me with?")
-    print(f"  User: What can you help me with?")
-    print(f"  Bot: {response}\n")
-
-    print("Turn 3:")
-    response = session.chat("Great, thanks!")
-    print(f"  User: Great, thanks!")
-    print(f"  Bot: {response}\n")
-
-    # Get conversation history using session helper
-    print("Conversation history:")
-    history = session.get_history()
-    for msg in history:
-        print(f"  [{msg['role']}]: {msg['content']}")
-    print()
-
-    # Can also add messages directly
-    print("Adding system message...")
-    session.add_message("system", "You are a helpful AI assistant")
-    print()
-
-    # Clear history
-    print("Clearing history...")
-    session.clear_history()
-    print("  ✅ History cleared\n")
-
-
 async def main():
     """Main entry point."""
     import sys
 
     print("=" * 60)
-    print("SessionEntity Conversation Example")
+    print("Session Entity Conversation Example")
     print("=" * 60)
 
     if "--client" in sys.argv:
-        # Test with both client APIs
+        # Test with client
         await test_with_client()
-        await test_with_session_api()
     elif "--test" in sys.argv:
         # Run local tests
         print("\nRunning local tests...")

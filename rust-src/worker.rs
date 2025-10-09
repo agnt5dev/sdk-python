@@ -1,12 +1,17 @@
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::pb::{
-    runtime_message, ComponentInfo, ExecuteComponentResponse, RuntimeMessage, ServiceMessage,
+    runtime_message, ComponentInfo, ComponentType, ExecuteComponentResponse, RuntimeMessage,
+    ServiceMessage,
 };
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
+use futures::future::poll_fn;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry::global;
 use tracing;
 // Removed baggage import - using span inheritance instead
 use std::collections::HashMap;
@@ -276,12 +281,50 @@ impl PyWorker {
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
 
+                // Create RuntimeContext with extracted OTel context for Python access
+                // This provides Python with run_id, trace_id, span_id for logging correlation
+                let runtime_context = agnt5_sdk_core::RuntimeContext::with_trace_context(
+                    invoke_request.invocation_id.clone(), // run_id
+                    invoke_request.service_name.clone(),
+                    invoke_request.component_name.clone(),
+                    String::new(), // tenant_id - not available in this message, TODO: pass from worker registration
+                    String::new(), // deployment_id - not available in this message, TODO: pass from worker registration
+                    invoke_request.metadata.clone(),
+                    parent_context.clone(),
+                    std::sync::Arc::new(agnt5_sdk_core::DummyStateManager),
+                );
+
+                log::info!(
+                    "Created RuntimeContext with run_id={}, trace_id={:?}, span_id={:?}",
+                    runtime_context.run_id,
+                    runtime_context.trace_id,
+                    runtime_context.span_id
+                );
+
                 // Note: invocation.id will be handled by tracing span and Python log forwarding
 
-                // Create OpenTelemetry span for function execution
+                // Convert component_type from i32 to string for telemetry
+                let component_type_str =
+                    match ComponentType::try_from(invoke_request.component_type)
+                        .unwrap_or(ComponentType::Function)
+                    {
+                        ComponentType::Function => "function",
+                        ComponentType::Flow => "flow",
+                        ComponentType::Object => "object",
+                        ComponentType::Entity => "entity",
+                        ComponentType::Task => "task",
+                        ComponentType::Workflow => "workflow",
+                        ComponentType::Agent => "agent",
+                        ComponentType::Tool => "tool",
+                        ComponentType::Mcp => "mcp",
+                        ComponentType::Unspecified => "unspecified",
+                    };
+
+                // Create OpenTelemetry span for component execution
                 // Clone parent_context since we need it both for span creation and context attachment
-                let otel_span = agnt5_sdk_core::create_function_span(
+                let otel_span = agnt5_sdk_core::create_component_span(
                     &invoke_request.component_name,
+                    component_type_str,
                     &invoke_request.service_name,
                     &runtime_message.worker_id,
                     &invoke_request.invocation_id,
@@ -294,11 +337,62 @@ impl PyWorker {
                 // and maintains the distributed trace link to the gateway/coordinator
                 // Using parent_context.with_span() instead of Context::current_with_span()
                 // is critical - it preserves the extracted trace context from the gateway
-                use opentelemetry::trace::TraceContextExt;
+                {
+                    let parent_span_ref = parent_context.span();
+                    let parent_span_ctx = parent_span_ref.span_context();
+                    log::info!(
+                        "Trace propagation: BEFORE attach trace_id={}, span_id={}, valid={}",
+                        parent_span_ctx.trace_id().to_string(),
+                        parent_span_ctx.span_id().to_string(),
+                        parent_span_ctx.is_valid()
+                    );
+                }
                 let cx = parent_context.with_span(otel_span);
 
+                {
+                    let span_ref = cx.span();
+                    let span_ctx = span_ref.span_context();
+                    log::info!(
+                        "Trace propagation: AFTER attach trace_id={}, span_id={}, valid={}",
+                        span_ctx.trace_id().to_string(),
+                        span_ctx.span_id().to_string(),
+                        span_ctx.is_valid()
+                    );
+                }
+
                 // Convert to Python types
-                let py_request = PyExecuteComponentRequest::from(invoke_request);
+                let mut py_request = PyExecuteComponentRequest::from(invoke_request);
+
+                // CRITICAL: Inject trace context into request metadata for Python LM calls
+                // This enables trace propagation across the Python async boundary
+                {
+                    use opentelemetry::propagation::Injector;
+
+                    // Helper struct to inject into HashMap
+                    struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
+                    impl<'a> Injector for HashMapInjector<'a> {
+                        fn set(&mut self, key: &str, value: String) {
+                            self.0.insert(key.to_string(), value);
+                        }
+                    }
+
+                    let mut injector = HashMapInjector(&mut py_request.metadata);
+                    global::get_text_map_propagator(|propagator| {
+                        propagator.inject_context(&cx, &mut injector);
+                    });
+
+                    log::info!(
+                        "Trace propagation: Injected into metadata - traceparent: {:?}",
+                        py_request.metadata.get("traceparent")
+                    );
+                }
+
+                // Attach RuntimeContext to request for Python access to correlation IDs
+                py_request.runtime_context = Some(crate::PyRuntimeContext {
+                    inner: std::sync::Arc::new(runtime_context),
+                });
+
+                log::info!("Attached RuntimeContext to Python request");
 
                 // Call Python handler and get coroutine
                 // Clone tx for potential use inside async context
@@ -328,11 +422,30 @@ impl PyWorker {
                         log::error!("{}", err_msg);
                         agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                     })?
-                    // _span_guard is dropped here before the await
+                    // _span_guard is dropped here before the await; we reattach below
                 };
 
-                // Await the Python coroutine (outside the guard scope)
-                let result = py_future.await.map_err(|e| {
+                // Await the Python coroutine while reattaching context on each poll
+                let result_future = {
+                    let mut py_future = Box::pin(py_future);
+                    let cx_for_future = cx.clone();
+                    poll_fn(move |task_cx| {
+                        let _span_guard = cx_for_future.clone().attach();
+                        {
+                            let span_ref = cx_for_future.span();
+                            let span_ctx = span_ref.span_context();
+                            log::debug!(
+                                "Trace propagation: INSIDE attach trace_id={}, span_id={}, valid={}",
+                                span_ctx.trace_id().to_string(),
+                                span_ctx.span_id().to_string(),
+                                span_ctx.is_valid()
+                            );
+                        }
+                        py_future.as_mut().poll(task_cx)
+                    })
+                };
+
+                let result = result_future.await.map_err(|e| {
                     let err_msg = format!("Python handler execution failed: {}", e);
                     log::error!("{}", err_msg);
                     agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))

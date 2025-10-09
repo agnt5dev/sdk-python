@@ -1,5 +1,5 @@
 """
-End-to-end test for DurableEntity: Client -> Gateway -> Worker
+End-to-end test for Entity: Client -> Gateway -> Worker
 
 This test demonstrates the complete flow:
 1. Worker registers Counter and ShoppingCart entities
@@ -16,51 +16,51 @@ Run this test with:
 import asyncio
 import time
 
-from agnt5 import Client, DurableEntity, MemoryEntity, WorkflowEntity
+from agnt5 import Client, Entity
 
 
-# Define entities (same as 17_durable_entity_basic.py)
-class Counter(DurableEntity):
+# Define entities (same as 17_durable_entity_basic.py but simplified)
+class Counter(Entity):
     """Simple counter with durable state."""
 
     async def increment(self, amount: int = 1) -> int:
         """Increment counter by amount."""
-        count = await self.ctx.get("count", 0)
+        count = self.state.get("count", 0)
         count += amount
-        await self.ctx.set("count", count)
+        self.state.set("count", count)
         return count
 
     async def decrement(self, amount: int = 1) -> int:
         """Decrement counter by amount."""
-        count = await self.ctx.get("count", 0)
+        count = self.state.get("count", 0)
         count -= amount
-        await self.ctx.set("count", count)
+        self.state.set("count", count)
         return count
 
     async def get_value(self) -> int:
         """Get current counter value."""
-        return await self.ctx.get("count", 0)
+        return self.state.get("count", 0)
 
     async def reset(self) -> dict:
         """Reset counter to zero."""
-        await self.ctx.delete("count")
+        self.state.delete("count")
         return {"reset": True, "value": 0}
 
 
-class ShoppingCart(DurableEntity):
+class ShoppingCart(Entity):
     """Shopping cart with durable state."""
 
     async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
         """Add item to cart."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
 
         if item_id in items:
             items[item_id]["quantity"] += quantity
         else:
             items[item_id] = {"quantity": quantity, "price": price}
 
-        await self.ctx.set("items", items)
-        total = await self._calculate_total()
+        self.state.set("items", items)
+        total = self._calculate_total()
 
         return {
             "item_id": item_id,
@@ -70,102 +70,42 @@ class ShoppingCart(DurableEntity):
 
     async def remove_item(self, item_id: str) -> dict:
         """Remove item from cart."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
         removed = items.pop(item_id, None)
 
-        await self.ctx.set("items", items)
-        total = await self._calculate_total()
+        self.state.set("items", items)
+        total = self._calculate_total()
 
         return {"removed": removed is not None, "cart_total": total}
 
     async def get_total(self) -> float:
         """Get cart total."""
-        return await self._calculate_total()
+        return self._calculate_total()
 
     async def get_items(self) -> dict:
         """Get all items in cart."""
-        return await self.ctx.get("items", {})
+        return self.state.get("items", {})
 
     async def checkout(self) -> dict:
         """Checkout and clear cart."""
-        items = await self.ctx.get("items", {})
-        total = await self._calculate_total()
+        items = self.state.get("items", {})
+        total = self._calculate_total()
 
         # Clear cart
-        await self.ctx.clear_all()
+        self.state.clear()
 
         return {"items": items, "total": total, "checked_out": True}
 
-    async def _calculate_total(self) -> float:
+    def _calculate_total(self) -> float:
         """Private helper to calculate cart total."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
         return sum(item["quantity"] * item["price"] for item in items.values())
 
 
-class KnowledgeBase(MemoryEntity):
-    """Knowledge base with semantic search capabilities."""
-    max_memories: int = 50
-
-    async def learn(self, topic: str, fact: str) -> dict:
-        """Learn a new fact about a topic."""
-        return await self.store(key=topic, content=fact, category="fact")
-
-    async def search(self, query: str) -> list:
-        """Search the knowledge base."""
-        results = await self.recall(query, limit=3)
-        return [
-            {
-                "topic": r["key"],
-                "fact": r["content"],
-                "score": r["score"]
-            }
-            for r in results
-        ]
-
-
-class OrderWorkflow(WorkflowEntity):
-    """Durable order processing workflow with compensation."""
-    max_retries: int = 2
-
-    async def process_order(self, order_id: str, amount: float) -> dict:
-        """
-        Process an order through multiple steps.
-
-        Steps:
-        1. Validate order
-        2. Charge payment
-        3. Fulfill order
-        """
-        status = await self.get_status()
-
-        # Step 1: Validate order
-        if "validate" not in status["completed_steps"]:
-            validation_result = {
-                "order_id": order_id,
-                "valid": True,
-                "amount": amount
-            }
-            await self.mark_step_complete("validate", validation_result)
-
-        # Step 2: Charge payment
-        if "payment" not in status["completed_steps"]:
-            payment_result = {
-                "charged": True,
-                "amount": amount,
-                "transaction_id": f"txn_{order_id}"
-            }
-            await self.mark_step_complete("payment", payment_result)
-
-        # Step 3: Fulfill order
-        if "fulfill" not in status["completed_steps"]:
-            fulfillment_result = {
-                "shipped": True,
-                "tracking_number": f"TRACK_{order_id}"
-            }
-            await self.mark_step_complete("fulfill", fulfillment_result)
-
-        # Complete the workflow
-        return await self.complete_workflow()
+# NOTE: MemoryEntity and WorkflowEntity examples have been moved to separate files
+# See examples showing how to implement these patterns using the base Entity class:
+# - Memory/semantic search pattern: examples/XX_entity_memory_pattern.py (TODO)
+# - Workflow/saga pattern: examples/XX_entity_workflow_pattern.py (TODO)
 
 
 async def run_client_tests():
@@ -259,7 +199,7 @@ async def run_client_tests():
 async def main():
     """Main entry point."""
     print("=" * 60)
-    print("DurableEntity End-to-End Test")
+    print("Entity End-to-End Test")
     print("=" * 60)
 
     # Check if this script is being run as a worker or client

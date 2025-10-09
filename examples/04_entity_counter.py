@@ -2,52 +2,42 @@
 Example: Basic Entity Usage - Counter
 
 This example demonstrates:
-- Creating an entity type with the entity() function
-- Registering methods with @entity.method decorator
+- Creating an entity by inheriting from Entity
+- Synchronous state operations (self.state.get/set)
 - Single-writer consistency (no race conditions)
 - State isolation between entity instances
 """
 
 import asyncio
 
-from agnt5 import Context, entity
-
-# Create Counter entity type
-Counter = entity("Counter")
+from agnt5 import Entity
 
 
-@Counter.method
-async def increment(ctx: Context, amount: int = 1) -> int:
-    """Increment the counter by amount."""
-    current = ctx.get("count", 0)
-    new_count = current + amount
-    ctx.set("count", new_count)
-    ctx.logger.info(f"Counter incremented from {current} to {new_count}")
-    return new_count
+class Counter(Entity):
+    """Counter entity with increment/decrement operations."""
 
+    async def increment(self, amount: int = 1) -> int:
+        """Increment the counter by amount."""
+        current = self.state.get("count", 0)
+        new_count = current + amount
+        self.state.set("count", new_count)
+        return new_count
 
-@Counter.method
-async def decrement(ctx: Context, amount: int = 1) -> int:
-    """Decrement the counter by amount."""
-    current = ctx.get("count", 0)
-    new_count = current - amount
-    ctx.set("count", new_count)
-    ctx.logger.info(f"Counter decremented from {current} to {new_count}")
-    return new_count
+    async def decrement(self, amount: int = 1) -> int:
+        """Decrement the counter by amount."""
+        current = self.state.get("count", 0)
+        new_count = current - amount
+        self.state.set("count", new_count)
+        return new_count
 
+    async def get_count(self) -> int:
+        """Get the current count."""
+        return self.state.get("count", 0)
 
-@Counter.method
-async def get_count(ctx: Context) -> int:
-    """Get the current count."""
-    return ctx.get("count", 0)
-
-
-@Counter.method
-async def reset(ctx: Context) -> int:
-    """Reset counter to zero."""
-    ctx.set("count", 0)
-    ctx.logger.info("Counter reset to 0")
-    return 0
+    async def reset(self) -> int:
+        """Reset counter to zero."""
+        self.state.set("count", 0)
+        return 0
 
 
 async def main():

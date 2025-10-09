@@ -124,13 +124,21 @@ async def long_running_task(ctx: Context, duration_seconds: int = 30) -> dict:
 
 async def main() -> None:
     """Run the worker and register with coordinator."""
-    from agnt5 import Worker
+    # from agnt5 import Worker
 
-    worker = Worker(
-        service_name="default-service",
-        service_version="1.0.0",
-    )
-    await worker.run()
+    # worker = Worker(
+    #     service_name="default-service",
+    #     service_version="1.0.0",
+    # )
+    # await worker.run()
+    run_id = "17b2aa9f-a474-40f6-af7e-de00ed6a9b4a"
+    ctx = Context(run_id=run_id)
+    result = await greet_user(ctx, "Alice")
+    print(result)
+    result = await process_data(ctx, "sample data")
+    print(result)
+    result = await expensive_pipeline(ctx, "dataset123")
+    print(result)
 
 
 if __name__ == "__main__":

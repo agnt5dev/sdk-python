@@ -10,14 +10,9 @@ from .agent import Agent, AgentRegistry, AgentResult, Handoff, agent, handoff
 from .client import Client, RunError
 from .context import Context
 from .entity import (
-    DurableEntity,
-    SessionEntity,
-    MemoryEntity,
-    WorkflowEntity,
-    EntityInstance,
+    Entity,
     EntityRegistry,
     EntityType,
-    entity,
 )
 from .exceptions import (
     AGNT5Error,
@@ -48,14 +43,9 @@ __all__ = [
     "Worker",
     "function",
     "FunctionRegistry",
-    "entity",
+    "Entity",
     "EntityType",
-    "EntityInstance",
     "EntityRegistry",
-    "DurableEntity",
-    "SessionEntity",
-    "MemoryEntity",
-    "WorkflowEntity",
     "workflow",
     "WorkflowRegistry",
     "tool",

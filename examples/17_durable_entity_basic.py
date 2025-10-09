@@ -1,17 +1,17 @@
 """
-Basic example of DurableEntity (Cloudflare Durable Objects style).
+Basic example of Entity (Cloudflare Durable Objects style).
 
 This demonstrates the class-based entity API where:
-- State is accessed via self.ctx
+- State is accessed via self.state (synchronous operations)
 - Methods are regular async methods
 - Single-writer consistency per key is automatic
 """
 
 import asyncio
-from agnt5 import DurableEntity
+from agnt5 import Entity
 
 
-class Counter(DurableEntity):
+class Counter(Entity):
     """
     Simple counter with durable state.
     Each counter is identified by a unique key.
@@ -19,29 +19,29 @@ class Counter(DurableEntity):
 
     async def increment(self, amount: int = 1) -> int:
         """Increment counter by amount."""
-        count = await self.ctx.get("count", 0)
+        count = self.state.get("count", 0)
         count += amount
-        await self.ctx.set("count", count)
+        self.state.set("count", count)
         return count
 
     async def decrement(self, amount: int = 1) -> int:
         """Decrement counter by amount."""
-        count = await self.ctx.get("count", 0)
+        count = self.state.get("count", 0)
         count -= amount
-        await self.ctx.set("count", count)
+        self.state.set("count", count)
         return count
 
     async def get_value(self) -> int:
         """Get current counter value."""
-        return await self.ctx.get("count", 0)
+        return self.state.get("count", 0)
 
     async def reset(self) -> dict:
         """Reset counter to zero."""
-        await self.ctx.delete("count")
+        self.state.delete("count")
         return {"reset": True, "value": 0}
 
 
-class ShoppingCart(DurableEntity):
+class ShoppingCart(Entity):
     """
     Shopping cart with durable state.
     Each cart is identified by user_id.
@@ -49,7 +49,7 @@ class ShoppingCart(DurableEntity):
 
     async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
         """Add item to cart."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
 
         if item_id in items:
             items[item_id]["quantity"] += quantity
@@ -59,8 +59,8 @@ class ShoppingCart(DurableEntity):
                 "price": price
             }
 
-        await self.ctx.set("items", items)
-        total = await self._calculate_total()
+        self.state.set("items", items)
+        total = self._calculate_total()
 
         return {
             "item_id": item_id,
@@ -70,11 +70,11 @@ class ShoppingCart(DurableEntity):
 
     async def remove_item(self, item_id: str) -> dict:
         """Remove item from cart."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
         removed = items.pop(item_id, None)
 
-        await self.ctx.set("items", items)
-        total = await self._calculate_total()
+        self.state.set("items", items)
+        total = self._calculate_total()
 
         return {
             "removed": removed is not None,
@@ -83,19 +83,19 @@ class ShoppingCart(DurableEntity):
 
     async def get_total(self) -> float:
         """Get cart total."""
-        return await self._calculate_total()
+        return self._calculate_total()
 
     async def get_items(self) -> dict:
         """Get all items in cart."""
-        return await self.ctx.get("items", {})
+        return self.state.get("items", {})
 
     async def checkout(self) -> dict:
         """Checkout and clear cart."""
-        items = await self.ctx.get("items", {})
-        total = await self._calculate_total()
+        items = self.state.get("items", {})
+        total = self._calculate_total()
 
         # Clear cart
-        await self.ctx.clear_all()
+        self.state.clear()
 
         return {
             "items": items,
@@ -103,9 +103,9 @@ class ShoppingCart(DurableEntity):
             "checked_out": True
         }
 
-    async def _calculate_total(self) -> float:
+    def _calculate_total(self) -> float:
         """Private helper to calculate cart total."""
-        items = await self.ctx.get("items", {})
+        items = self.state.get("items", {})
         return sum(
             item["quantity"] * item["price"]
             for item in items.values()
