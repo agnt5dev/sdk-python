@@ -1,0 +1,506 @@
+"""
+Integration Test Fixtures
+
+Provides Testcontainers-based platform infrastructure for E2E testing
+across three runtime modes:
+
+1. Embedded - Dev server with SQLite + embedded journal (fastest)
+2. Postgres - Community edition with PostgreSQL backend
+3. Managed - Production mode with Redpanda + CockroachDB
+
+Fixtures:
+- runtime_mode: Parametrized fixture for testing across all modes
+- platform: Mode-aware platform fixture
+- worker_process: Start Python worker subprocess
+- client: Create agnt5.Client instance for testing
+"""
+
+import os
+import subprocess
+import time
+from typing import Dict, Generator
+
+import pytest
+import requests
+from testcontainers.core.container import DockerContainer
+from testcontainers.core.waiting_utils import wait_for_logs
+
+
+# ==================== Docker Configuration ====================
+
+
+@pytest.fixture(scope="session", autouse=True)
+def configure_docker():
+    """
+    Configure Docker environment for testcontainers.
+
+    On macOS, Docker Desktop uses ~/.docker/run/docker.sock instead of
+    the default /var/run/docker.sock. This fixture automatically detects
+    and configures the correct Docker socket path.
+    """
+    # Check if DOCKER_HOST is already set
+    if "DOCKER_HOST" in os.environ:
+        print(f"\n🐳 Using existing DOCKER_HOST: {os.environ['DOCKER_HOST']}")
+        return
+
+    # Detect Docker socket location
+    docker_socket_paths = [
+        "/var/run/docker.sock",  # Default Linux/Docker daemon
+        os.path.expanduser("~/.docker/run/docker.sock"),  # Docker Desktop for Mac
+        os.path.expanduser("~/.colima/default/docker.sock"),  # Colima
+    ]
+
+    for socket_path in docker_socket_paths:
+        if os.path.exists(socket_path):
+            docker_host = f"unix://{socket_path}"
+            os.environ["DOCKER_HOST"] = docker_host
+            print(f"\n🐳 Configured DOCKER_HOST: {docker_host}")
+            return
+
+    # If no socket found, let testcontainers use its default detection
+    print("\n🐳 No Docker socket detected, using testcontainers default detection")
+
+
+# ==================== Mode Configuration ====================
+
+
+@pytest.fixture(scope="session")
+def runtime_mode(request) -> str:
+    """
+    Runtime mode for integration tests.
+
+    Currently: embedded mode only (SQLite + embedded journal)
+
+    TODO: Add parametrization for postgres and managed modes:
+        params=["embedded", "postgres", "managed"]
+    """
+    return "embedded"
+
+
+# ==================== Mode-Specific Setup Functions ====================
+
+
+def setup_embedded_mode() -> Dict[str, any]:
+    """
+    Set up Embedded mode (dev-server with SQLite + embedded journal).
+
+    This is the fastest mode - single container, no external dependencies.
+
+    Architecture:
+    - Journal: Embedded (in-memory event log)
+    - State: SQLite (local file)
+    - Containers: 1 (dev-server only)
+    """
+    print("\n🔧 Setting up EMBEDDED mode (SQLite + embedded journal)")
+
+    # Start dev-server container
+    dev_server = DockerContainer("agnt5/dev-server:latest")
+    dev_server.with_exposed_ports(34181, 34182, 34186)  # HTTP, gRPC, Coordinator
+
+    # Configure for embedded mode (SQLite + embedded journal)
+    dev_server.with_env("AGNT5_DATA_DIR", "/data")
+    dev_server.with_env("AGNT5_JOURNAL_BACKEND", "embedded")
+    dev_server.with_env("AGNT5_ORCHESTRATION_BACKEND", "sqlite")
+    dev_server.with_env("AGNT5_DISABLE_WORKER", "true")  # Disable worker for testing
+    dev_server.with_env("AGNT5_VERBOSE", "true")  # Enable verbose logging for troubleshooting
+
+    # NOTE: Volume mounting causes issues with testcontainers
+    # The container will use its internal filesystem for /data
+
+    dev_server.start()
+
+    # Give services time to fully initialize
+    time.sleep(3)
+
+    # Get container connection details
+    gateway_host = dev_server.get_container_host_ip()
+    gateway_http_port = dev_server.get_exposed_port(34181)
+    gateway_grpc_port = dev_server.get_exposed_port(34182)
+    coordinator_port = dev_server.get_exposed_port(34186)
+
+    gateway_url = f"http://{gateway_host}:{gateway_http_port}"
+
+    print(f"✅ Dev-server container started")
+    print(f"   Gateway HTTP: {gateway_url}")
+    print(f"   Gateway gRPC: {gateway_host}:{gateway_grpc_port}")
+    print(f"   Coordinator: {gateway_host}:{coordinator_port}")
+
+    # Wait for platform health with container reference for logging
+    _wait_for_platform_health(gateway_url, container=dev_server)
+
+    # SQLite database path (inside container, not accessible from host)
+    sqlite_path = "/data/orchestration.db"
+
+    print(f"✅ Embedded mode ready")
+    print(f"   Database: {sqlite_path} (inside container)")
+
+    return {
+        "mode": "embedded",
+        "gateway_url": gateway_url,
+        "coordinator_url": f"http://{gateway_host}:{coordinator_port}",
+        "gateway_http_port": int(gateway_http_port),
+        "gateway_grpc_port": int(gateway_grpc_port),
+        "coordinator_port": int(coordinator_port),
+        "db_url": sqlite_path,
+        "db_type": "sqlite",
+        "journal_backend": "embedded",
+        "orchestration_backend": "sqlite",
+        "containers": {
+            "dev-server": dev_server,
+        }
+    }
+
+
+def setup_postgres_mode() -> Dict[str, any]:
+    """
+    Set up Postgres mode (community edition with PostgreSQL backend).
+
+    Architecture:
+    - Journal: Embedded (or could use PostgreSQL)
+    - State: PostgreSQL
+    - Containers: 2 (dev-server + PostgreSQL)
+    """
+    print("\n🔧 Setting up POSTGRES mode (PostgreSQL backend)")
+
+    # Start PostgreSQL container
+    postgres = DockerContainer("postgres:16-alpine")
+    postgres.with_exposed_ports(5432)
+    postgres.with_env("POSTGRES_USER", "agnt5")
+    postgres.with_env("POSTGRES_PASSWORD", "agnt5")
+    postgres.with_env("POSTGRES_DB", "orchestration")
+    postgres.start()
+
+    # Wait for PostgreSQL to be ready
+    wait_for_logs(postgres, "database system is ready to accept connections", timeout=30)
+    time.sleep(2)
+
+    postgres_host = postgres.get_container_host_ip()
+    postgres_port = postgres.get_exposed_port(5432)
+    postgres_url = f"postgresql://agnt5:agnt5@{postgres_host}:{postgres_port}/orchestration?sslmode=disable"
+
+    print(f"✅ PostgreSQL started: {postgres_url}")
+
+    # Start dev-server container configured for PostgreSQL
+    dev_server = DockerContainer("agnt5/dev-server:latest")
+    dev_server.with_exposed_ports(34181, 34182, 34186)
+
+    # Configure for postgres mode
+    dev_server.with_env("AGNT5_JOURNAL_BACKEND", "embedded")
+    dev_server.with_env("AGNT5_ORCHESTRATION_BACKEND", "postgres")
+    dev_server.with_env("AGNT5_ORCHESTRATION_DB_URL", postgres_url)
+
+    dev_server.start()
+
+    # Get container connection details
+    gateway_host = dev_server.get_container_host_ip()
+    gateway_http_port = dev_server.get_exposed_port(34181)
+    gateway_grpc_port = dev_server.get_exposed_port(34182)
+    coordinator_port = dev_server.get_exposed_port(34186)
+
+    gateway_url = f"http://{gateway_host}:{gateway_http_port}"
+
+    print(f"✅ Dev-server container started")
+    print(f"   Gateway HTTP: {gateway_url}")
+
+    _wait_for_platform_health(gateway_url)
+
+    print(f"✅ Postgres mode ready")
+
+    return {
+        "mode": "postgres",
+        "gateway_url": gateway_url,
+        "coordinator_url": f"http://{gateway_host}:{coordinator_port}",
+        "gateway_http_port": int(gateway_http_port),
+        "gateway_grpc_port": int(gateway_grpc_port),
+        "coordinator_port": int(coordinator_port),
+        "db_url": postgres_url,
+        "db_type": "postgres",
+        "journal_backend": "embedded",
+        "orchestration_backend": "postgres",
+        "containers": {
+            "postgres": postgres,
+            "dev-server": dev_server,
+        }
+    }
+
+
+def setup_managed_mode() -> Dict[str, any]:
+    """
+    Set up Managed mode (Redpanda + CockroachDB production setup).
+
+    Architecture:
+    - Journal: Redpanda (distributed event log)
+    - State: CockroachDB (distributed SQL)
+    - Containers: 3 (dev-server + Redpanda + CockroachDB)
+    """
+    print("\n🔧 Setting up MANAGED mode (Redpanda + CockroachDB)")
+
+    # Start CockroachDB
+    cockroach = DockerContainer("cockroachdb/cockroach:latest-v24.3")
+    cockroach.with_exposed_ports(26257, 8080)
+    cockroach.with_command("start-single-node --insecure --store=type=mem,size=0.25")
+    cockroach.start()
+
+    wait_for_logs(cockroach, "nodeID", timeout=30)
+    time.sleep(2)
+
+    cockroach_host = cockroach.get_container_host_ip()
+    cockroach_port = cockroach.get_exposed_port(26257)
+    cockroach_url = f"postgresql://root@{cockroach_host}:{cockroach_port}/defaultdb?sslmode=disable"
+
+    print(f"✅ CockroachDB started: {cockroach_url}")
+
+    # Start Redpanda
+    redpanda = DockerContainer("docker.redpanda.com/vectorized/redpanda:v24.3.1")
+    redpanda.with_exposed_ports(9092, 9644)
+    redpanda.with_command(
+        "redpanda start --smp 1 --memory 1G --reserve-memory 0M "
+        "--overprovisioned --node-id 0 "
+        "--kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092 "
+        "--advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092"
+    )
+    redpanda.start()
+
+    wait_for_logs(redpanda, "Successfully started Redpanda", timeout=30)
+    time.sleep(2)
+
+    redpanda_host = redpanda.get_container_host_ip()
+    redpanda_port = redpanda.get_exposed_port(9092)
+    redpanda_broker = f"{redpanda_host}:{redpanda_port}"
+
+    print(f"✅ Redpanda started: {redpanda_broker}")
+
+    # Start dev-server container configured for managed mode
+    dev_server = DockerContainer("agnt5/dev-server:latest")
+    dev_server.with_exposed_ports(34181, 34182, 34186)
+
+    # Configure for managed mode (Redpanda + CockroachDB)
+    dev_server.with_env("AGNT5_JOURNAL_BACKEND", "redpanda")
+    dev_server.with_env("AGNT5_ORCHESTRATION_BACKEND", "cockroach")
+    dev_server.with_env("AGNT5_ORCHESTRATION_DB_URL", cockroach_url)
+    dev_server.with_env("AGNT5_REDPANDA_BROKERS", redpanda_broker)
+
+    dev_server.start()
+
+    # Get container connection details
+    gateway_host = dev_server.get_container_host_ip()
+    gateway_http_port = dev_server.get_exposed_port(34181)
+    gateway_grpc_port = dev_server.get_exposed_port(34182)
+    coordinator_port = dev_server.get_exposed_port(34186)
+
+    gateway_url = f"http://{gateway_host}:{gateway_http_port}"
+
+    print(f"✅ Dev-server container started")
+    print(f"   Gateway HTTP: {gateway_url}")
+
+    _wait_for_platform_health(gateway_url)
+
+    print(f"✅ Managed mode ready")
+
+    return {
+        "mode": "managed",
+        "gateway_url": gateway_url,
+        "coordinator_url": f"http://{gateway_host}:{coordinator_port}",
+        "gateway_http_port": int(gateway_http_port),
+        "gateway_grpc_port": int(gateway_grpc_port),
+        "coordinator_port": int(coordinator_port),
+        "db_url": cockroach_url,
+        "db_type": "cockroach",
+        "journal_backend": "redpanda",
+        "orchestration_backend": "cockroach",
+        "redpanda_broker": redpanda_broker,
+        "containers": {
+            "cockroach": cockroach,
+            "redpanda": redpanda,
+            "dev-server": dev_server,
+        }
+    }
+
+
+def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=None):
+    """Wait for platform to become healthy."""
+    print(f"📡 Waiting for platform at {gateway_url}...")
+
+    for i in range(timeout):
+        try:
+            response = requests.get(f"{gateway_url}/api/health", timeout=2)
+            if response.status_code == 200:
+                print(f"✅ Platform is healthy")
+                return
+        except requests.exceptions.RequestException as e:
+            if i == timeout - 1:
+                error_msg = f"Platform failed to become healthy after {timeout}s\n"
+                error_msg += f"Last error: {str(e)}\n"
+
+                # Get container logs for debugging
+                if container:
+                    try:
+                        logs = container.get_logs()
+                        error_msg += f"\nContainer logs (last 50 lines):\n"
+                        error_msg += "\n".join(logs[0].decode('utf-8').split('\n')[-50:])
+                    except Exception as log_error:
+                        error_msg += f"\nCould not retrieve container logs: {log_error}"
+
+                raise Exception(error_msg)
+
+            # Print progress every 5 seconds
+            if i % 5 == 0 and i > 0:
+                print(f"   Still waiting... ({i}/{timeout}s) - {type(e).__name__}")
+
+            time.sleep(1)
+
+
+@pytest.fixture(scope="function")
+def platform(runtime_mode) -> Generator[Dict[str, any], None, None]:
+    """
+    Start AGNT5 platform in embedded mode.
+
+    Uses function scope so each test gets a clean platform state.
+
+    Currently supports:
+    - embedded: SQLite + embedded journal (dev-server container)
+
+    TODO: Add postgres and managed modes
+    """
+    # Setup embedded mode
+    platform_config = setup_embedded_mode()
+
+    yield platform_config
+
+    # Cleanup containers
+    containers = platform_config.get("containers", {})
+    if containers:
+        print(f"\n🧹 Stopping {runtime_mode} mode containers...")
+        for name, container in containers.items():
+            try:
+                container.stop()
+            except Exception as e:
+                print(f"⚠️  Failed to stop {name}: {e}")
+
+
+@pytest.fixture
+def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
+    """
+    Start Python worker process connected to platform.
+
+    Worker runs the test service blueprint and connects to Worker Coordinator.
+    """
+    service_path = os.path.join(
+        os.path.dirname(__file__),
+        "blueprints",
+        "test-service"
+    )
+
+    env = {
+        **os.environ,
+        "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
+        "AGNT5_SERVICE_NAME": "test-service",
+        "AGNT5_TENANT_ID": "test-tenant-001",
+        "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+    }
+
+    worker = subprocess.Popen(
+        ["uv", "run", "python", "app.py"],
+        cwd=service_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Wait for worker to register
+    time.sleep(3)
+
+    # Check if worker is still running
+    if worker.poll() is not None:
+        stdout, stderr = worker.communicate()
+        raise Exception(
+            f"Worker failed to start:\n"
+            f"STDOUT: {stdout.decode()}\n"
+            f"STDERR: {stderr.decode()}"
+        )
+
+    print(f"✅ Worker started (PID: {worker.pid})")
+
+    yield worker
+
+    # Cleanup
+    print(f"\n🧹 Stopping worker (PID: {worker.pid})...")
+    worker.terminate()
+    try:
+        worker.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        worker.kill()
+        worker.wait()
+
+
+@pytest.fixture
+def client(platform):
+    """
+    Create agnt5.Client instance for testing.
+
+    This is the primary test interface - all tests use this to interact
+    with the platform, just like end users do.
+    """
+    from agnt5 import Client
+
+    client = Client(platform["gateway_url"])
+    print(f"✅ Client created: {platform['gateway_url']}")
+
+    return client
+
+
+# Helper utilities for tests
+
+def wait_for_worker_registration(platform: Dict[str, any], timeout: int = 10) -> bool:
+    """
+    Wait for worker to register with platform.
+
+    Returns True if worker registered, False if timeout.
+    """
+    # TODO: Add health check endpoint to verify worker registration
+    # For now, use simple delay
+    time.sleep(2)
+    return True
+
+
+def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -> subprocess.Popen:
+    """
+    Restart worker process (simulate crash recovery).
+
+    Returns new worker process.
+    """
+    # Terminate old worker
+    worker_process.terminate()
+    try:
+        worker_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        worker_process.kill()
+        worker_process.wait()
+
+    # Start new worker
+    service_path = os.path.join(
+        os.path.dirname(__file__),
+        "blueprints",
+        "test-service"
+    )
+
+    env = {
+        **os.environ,
+        "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
+        "AGNT5_SERVICE_NAME": "test-service",
+        "AGNT5_TENANT_ID": "test-tenant-001",
+        "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+    }
+
+    new_worker = subprocess.Popen(
+        ["uv", "run", "python", "app.py"],
+        cwd=service_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Wait for registration
+    time.sleep(3)
+
+    return new_worker
