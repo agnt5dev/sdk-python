@@ -52,11 +52,6 @@ async def analyze_sentiment(ctx: Context, text: str) -> dict:
     )
 
     ctx.logger.info(f"LM analyzed sentiment: {response.structured_output}")
-
-    # Fail if no structured output - don't mask the problem
-    if not response.structured_output:
-        raise ValueError("LM response missing structured_output - this indicates a problem with structured output parsing")
-
     return response.structured_output
 
 

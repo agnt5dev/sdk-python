@@ -62,7 +62,6 @@ def test_function_with_lm_generate(client, worker_process):
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Structured output parsing in Rust core needs fixes - returns None for object field")
 def test_function_with_lm_structured_output(client, worker_process):
     """
     Test function that uses structured output from LM.

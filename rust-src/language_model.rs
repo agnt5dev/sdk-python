@@ -147,7 +147,7 @@ impl PyLanguageModel {
         let top_p_kw = get_optional_f32(kwargs_ref, "top_p")?;
         let max_tokens_kw = get_optional_u32(kwargs_ref, "max_tokens")?;
         let response_format_kw = get_optional_string(kwargs_ref, "response_format")?;
-        let response_schema_kw = get_optional_string(kwargs_ref, "response_schema")?;
+        let response_schema_kw = get_optional_string(kwargs_ref, "response_schema_kw")?;
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let response_format =
@@ -213,7 +213,7 @@ impl PyLanguageModel {
         let top_p_kw = get_optional_f32(kwargs_ref, "top_p")?;
         let max_tokens_kw = get_optional_u32(kwargs_ref, "max_tokens")?;
         let response_format_kw = get_optional_string(kwargs_ref, "response_format")?;
-        let response_schema_kw = get_optional_string(kwargs_ref, "response_schema")?;
+        let response_schema_kw = get_optional_string(kwargs_ref, "response_schema_kw")?;
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let response_format =
