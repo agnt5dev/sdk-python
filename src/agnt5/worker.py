@@ -339,7 +339,6 @@ class Worker:
             # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{config.name}",
-                component_type="function",
                 runtime_context=request.runtime_context,
             )
 
@@ -430,7 +429,8 @@ class Worker:
     async def _execute_workflow(self, config, input_data: bytes, request):
         """Execute a workflow handler with automatic replay support."""
         import json
-        from .context import Context
+        from .workflow import WorkflowEntity, WorkflowContext
+        from .entity import _get_state_manager
         from ._core import PyExecuteComponentResponse
 
         try:
@@ -462,12 +462,24 @@ class Worker:
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse workflow_state from metadata")
 
-            # Create context with replay data and runtime_context for trace correlation
-            ctx = Context(
+            # Create WorkflowEntity for state management
+            workflow_entity = WorkflowEntity(run_id=f"{self.service_name}:{config.name}")
+
+            # Load replay data into entity if provided
+            if completed_steps:
+                workflow_entity._completed_steps = completed_steps
+                logger.debug(f"Loaded {len(completed_steps)} completed steps into workflow entity")
+
+            if initial_state:
+                # Load initial state into entity's state manager
+                state_manager = _get_state_manager()
+                state_manager._states[workflow_entity._state_key] = initial_state
+                logger.debug(f"Loaded initial state with {len(initial_state)} keys into workflow entity")
+
+            # Create WorkflowContext with entity and runtime_context for trace correlation
+            ctx = WorkflowContext(
+                workflow_entity=workflow_entity,
                 run_id=f"{self.service_name}:{config.name}",
-                component_type="workflow",
-                completed_steps=completed_steps if completed_steps else None,
-                initial_state=initial_state if initial_state else None,
                 runtime_context=request.runtime_context,
             )
 
@@ -537,7 +549,6 @@ class Worker:
             # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{tool.name}",
-                component_type="tool",
                 runtime_context=request.runtime_context,
             )
 
@@ -698,7 +709,6 @@ class Worker:
             # Create context with runtime_context for trace correlation
             ctx = Context(
                 run_id=f"{self.service_name}:{agent.name}",
-                component_type="agent",
                 runtime_context=request.runtime_context,
             )
 

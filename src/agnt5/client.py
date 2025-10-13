@@ -71,7 +71,7 @@ class Client:
             input_data = {}
 
         # Build URL
-        url = urljoin(self.gateway_url + "/", f"run/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/run/{component}")
 
         # Make request
         response = self._client.post(
@@ -81,6 +81,17 @@ class Client:
         )
 
         # Handle errors
+        if response.status_code == 404:
+            try:
+                error_data = response.json()
+                raise RunError(
+                    error_data.get("error", "Component not found"),
+                    run_id=error_data.get("runId"),
+                )
+            except ValueError:
+                # JSON parsing failed
+                raise RunError(f"Component '{component}' not found")
+
         if response.status_code == 503:
             error_data = response.json()
             raise RunError(
@@ -159,7 +170,7 @@ class Client:
             input_data = {}
 
         # Build URL
-        url = urljoin(self.gateway_url + "/", f"submit/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/submit/{component}")
 
         # Make request
         response = self._client.post(
@@ -200,7 +211,7 @@ class Client:
             print(f"Status: {status['status']}")
             ```
         """
-        url = urljoin(self.gateway_url + "/", f"status/{run_id}")
+        url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
 
         response = self._client.get(url)
         response.raise_for_status()
@@ -234,7 +245,7 @@ class Client:
                     print(f"Run failed: {e}")
             ```
         """
-        url = urljoin(self.gateway_url + "/", f"result/{run_id}")
+        url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
 
         response = self._client.get(url)
 
@@ -351,7 +362,7 @@ class Client:
             input_data = {}
 
         # Build URL
-        url = urljoin(self.gateway_url + "/", f"stream/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/stream/{component}")
 
         # Use streaming request
         with self._client.stream(
@@ -523,10 +534,10 @@ class EntityProxy:
             Raises:
                 RunError: If the method execution fails
             """
-            # Build URL: /entity/:entityType/:key/:method
+            # Build URL: /v1/entity/:entityType/:key/:method
             url = urljoin(
                 self._client.gateway_url + "/",
-                f"entity/{self._entity_type}/{self._key}/{method_name}",
+                f"v1/entity/{self._entity_type}/{self._key}/{method_name}",
             )
 
             # Make request with method parameters as JSON body
