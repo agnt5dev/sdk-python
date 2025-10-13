@@ -1,7 +1,7 @@
 """Agent component implementation for AGNT5 SDK.
 
-Phase 1: Simple agent with external LLM integration and tool orchestration.
-Phase 2: Platform-backed agents with durable execution and multi-agent coordination.
+Provides simple agent with external LLM integration and tool orchestration.
+Future: Platform-backed agents with durable execution and multi-agent coordination.
 """
 
 from __future__ import annotations
@@ -163,13 +163,13 @@ class AgentResult:
 class Agent:
     """Autonomous LLM-driven agent with tool orchestration.
 
-    Phase 1: Simple agent with:
+    Current features:
     - LLM integration (OpenAI, Anthropic, etc.)
     - Tool selection and execution
     - Multi-turn reasoning
     - Context and state management
 
-    Phase 2 will add:
+    Future enhancements:
     - Durable execution with checkpointing
     - Multi-agent coordination
     - Platform-backed tool execution

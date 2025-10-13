@@ -187,8 +187,11 @@ async def example_multi_turn_chat():
 
 
 async def example_agent_with_state():
-    """Example: Agent using context state."""
+    """Example: Agent with stateful tools using closure."""
     print("=== Example 4: Agent with State Management ===\n")
+
+    # State storage for notes (shared across tool calls via closure)
+    notes_storage: List[str] = []
 
     @tool(auto_schema=True)
     async def save_note(ctx: Context, note: str) -> str:
@@ -197,15 +200,13 @@ async def example_agent_with_state():
         Args:
             note: Note text to save
         """
-        notes = ctx.get("notes", [])
-        notes.append(note)
-        ctx.set("notes", notes)
-        return f"Saved note #{len(notes)}"
+        notes_storage.append(note)
+        return f"Saved note #{len(notes_storage)}"
 
     @tool(auto_schema=True)
     async def list_notes(ctx: Context) -> List[str]:
         """List all saved notes."""
-        return ctx.get("notes", [])
+        return notes_storage
 
     if not os.getenv("OPENAI_API_KEY"):
         print("⚠️  Skipped: OPENAI_API_KEY not set\n")
@@ -221,22 +222,19 @@ async def example_agent_with_state():
         temperature=0.7,
     )
 
-    # Create context to persist state
-    ctx = Context(run_id="note-session")
-
     # Save some notes
-    result1 = await agent.run("Save a note: Buy groceries", context=ctx)
+    result1 = await agent.run("Save a note: Buy groceries")
     print(f"Agent: {result1.output}\n")
 
-    result2 = await agent.run("Save another note: Call dentist", context=ctx)
+    result2 = await agent.run("Save another note: Call dentist")
     print(f"Agent: {result2.output}\n")
 
     # List notes
-    result3 = await agent.run("Show me all my notes", context=ctx)
+    result3 = await agent.run("Show me all my notes")
     print(f"Agent: {result3.output}\n")
 
     # Check state
-    print(f"Notes in context state: {ctx.get('notes', [])}\n")
+    print(f"Notes in storage: {notes_storage}\n")
 
 
 async def example_multi_provider_agents():
@@ -314,7 +312,7 @@ async def example_advanced_model_config():
 
 async def main():
     print("=== AGNT5 Agent Examples ===\n")
-    print("Phase 2: Rust-backed language models with multi-provider support")
+    print("Language models with multi-provider support")
     print("Supported providers: OpenAI, Anthropic, Groq, Azure, Bedrock, OpenRouter\n")
 
     # Check if at least one provider is configured

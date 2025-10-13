@@ -1,0 +1,5 @@
+project: nF5DMhV94WfX6a5vWLxNMX
+name: agnt5-python-test-service
+language: python
+language_version: "3.11"
+environment: development

@@ -106,7 +106,7 @@ async def delete_records(ctx: Context, table_name: str, filter_condition: str) -
     Returns:
         Deletion summary
     """
-    # In Phase 1, confirmation just logs a warning
+    # Note: Confirmation just logs a warning in this example
     ctx.logger.warning(f"DESTRUCTIVE: Would delete from {table_name} where {filter_condition}")
 
     return {
@@ -265,7 +265,7 @@ async def main():
         table_name="users",
         filter_condition="created_at < '2020-01-01'"
     )
-    print(f"   Status: {result['status']} (confirmation not implemented in Phase 1)")
+    print(f"   Status: {result['status']} (confirmation logged as warning)")
 
     print()
 

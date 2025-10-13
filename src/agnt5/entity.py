@@ -1,30 +1,233 @@
 """
 Entity component for stateful operations with single-writer consistency.
-
-Entities provide isolated state per unique key with automatic consistency guarantees.
-In Phase 1, entities use in-memory state with asyncio locks for single-writer semantics.
 """
 
 import asyncio
+import contextvars
 import functools
 import inspect
-import logging
 from typing import Any, Dict, Optional, Tuple
 
-from .context import Context
-from .exceptions import ConfigurationError, ExecutionError
-from .function import _extract_function_schemas, _extract_function_metadata
+from ._schema_utils import extract_function_metadata, extract_function_schemas
+from .exceptions import ExecutionError
 from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
 
-# Global storage for in-memory entity state and locks
-# Phase 2 will replace these with platform-backed durable storage
-_entity_states: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (type, key) -> state
-_entity_locks: Dict[Tuple[str, str], asyncio.Lock] = {}  # (type, key) -> lock
+# Context variable for worker-scoped state manager
+# This is set by Worker before entity execution and accessed by Entity instances
+_entity_state_manager_ctx: contextvars.ContextVar[Optional["EntityStateManager"]] = \
+    contextvars.ContextVar('_entity_state_manager', default=None)
 
 # Global entity registry
 _ENTITY_REGISTRY: Dict[str, "EntityType"] = {}
+
+
+class EntityStateManager:
+    """
+    Worker-scoped state and lock management for entities.
+
+    This class provides isolated state management per Worker instance,
+    replacing the global dict approach. Each Worker gets its own state manager,
+    which provides:
+    - State storage per entity (type, key)
+    - Single-writer locks per entity
+    - Version tracking for optimistic locking
+    - Platform state loading/saving via Rust EntityStateManager
+    """
+
+    def __init__(self, rust_entity_state_manager=None):
+        """
+        Initialize empty state manager.
+
+        Args:
+            rust_entity_state_manager: Optional Rust EntityStateManager for gRPC communication.
+                                      TODO: Wire this up once PyO3 bindings are complete.
+        """
+        self._states: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+        self._versions: Dict[Tuple[str, str], int] = {}
+        self._rust_manager = rust_entity_state_manager  # TODO: Use for load/save
+        logger.debug("Created EntityStateManager")
+
+    def get_or_create_state(self, state_key: Tuple[str, str]) -> Dict[str, Any]:
+        """
+        Get or create state dict for entity instance.
+
+        Args:
+            state_key: Tuple of (entity_type, entity_key)
+
+        Returns:
+            State dict for the entity instance
+        """
+        if state_key not in self._states:
+            self._states[state_key] = {}
+        return self._states[state_key]
+
+    def get_or_create_lock(self, state_key: Tuple[str, str]) -> asyncio.Lock:
+        """
+        Get or create async lock for entity instance.
+
+        Args:
+            state_key: Tuple of (entity_type, entity_key)
+
+        Returns:
+            Async lock for single-writer guarantee
+        """
+        if state_key not in self._locks:
+            self._locks[state_key] = asyncio.Lock()
+        return self._locks[state_key]
+
+    def load_state_from_platform(
+        self,
+        state_key: Tuple[str, str],
+        platform_state_json: str,
+        version: int = 0
+    ) -> None:
+        """
+        Load state from platform for entity persistence.
+
+        Args:
+            state_key: Tuple of (entity_type, entity_key)
+            platform_state_json: JSON string of state from platform
+            version: Current version from platform
+        """
+        import json
+        try:
+            state = json.loads(platform_state_json)
+            self._states[state_key] = state
+            self._versions[state_key] = version
+            logger.debug(
+                f"Loaded platform state: {state_key[0]}/{state_key[1]} (version {version})"
+            )
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse platform state: {e}")
+            self._states[state_key] = {}
+            self._versions[state_key] = 0
+
+    def get_state_for_persistence(
+        self,
+        state_key: Tuple[str, str]
+    ) -> tuple[Dict[str, Any], int, int]:
+        """
+        Get state and version info for platform persistence.
+
+        Args:
+            state_key: Tuple of (entity_type, entity_key)
+
+        Returns:
+            Tuple of (state_dict, expected_version, new_version)
+        """
+        state_dict = self._states.get(state_key, {})
+        expected_version = self._versions.get(state_key, 0)
+        new_version = expected_version + 1
+
+        # Update version for next execution
+        self._versions[state_key] = new_version
+
+        return state_dict, expected_version, new_version
+
+    def clear_all(self) -> None:
+        """Clear all state, locks, and versions (for testing)."""
+        self._states.clear()
+        self._locks.clear()
+        self._versions.clear()
+        logger.debug("Cleared EntityStateManager")
+
+    def get_state(self, entity_type: str, key: str) -> Optional[Dict[str, Any]]:
+        """Get state for debugging/testing."""
+        state_key = (entity_type, key)
+        return self._states.get(state_key)
+
+    def get_all_keys(self, entity_type: str) -> list[str]:
+        """Get all keys for entity type (for debugging/testing)."""
+        return [
+            key for (etype, key) in self._states.keys()
+            if etype == entity_type
+        ]
+
+
+def _get_state_manager() -> EntityStateManager:
+    """
+    Get the current entity state manager from context.
+
+    The state manager must be set by Worker before entity execution.
+    This ensures proper worker-scoped state isolation.
+
+    Returns:
+        EntityStateManager instance
+
+    Raises:
+        RuntimeError: If called outside of Worker context (state manager not set)
+    """
+    manager = _entity_state_manager_ctx.get()
+    if manager is None:
+        raise RuntimeError(
+            "Entity requires state manager context.\n\n"
+            "In production:\n"
+            "  Entities run automatically through Worker.\n\n"
+            "In tests, use one of:\n"
+            "  Option 1 - Decorator:\n"
+            "    @with_entity_context\n"
+            "    async def test_cart():\n"
+            "        cart = ShoppingCart('key')\n"
+            "        await cart.add_item(...)\n\n"
+            "  Option 2 - Fixture:\n"
+            "    async def test_cart(entity_context):\n"
+            "        cart = ShoppingCart('key')\n"
+            "        await cart.add_item(...)\n\n"
+            "See: https://docs.agnt5.dev/sdk/entities#testing"
+        )
+    return manager
+
+
+# ============================================================================
+# Testing Helpers
+# ============================================================================
+
+def with_entity_context(func):
+    """
+    Decorator that sets up entity state manager for tests.
+
+    Usage:
+        @with_entity_context
+        async def test_shopping_cart():
+            cart = ShoppingCart(key="test")
+            await cart.add_item("item", 1, 10.0)
+            assert cart.state.get("items")
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        manager = EntityStateManager()
+        token = _entity_state_manager_ctx.set(manager)
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            _entity_state_manager_ctx.reset(token)
+            manager.clear_all()
+    return wrapper
+
+
+def create_entity_context():
+    """
+    Create an entity context for testing (can be used as pytest fixture).
+
+    Usage in conftest.py or test file:
+        import pytest
+        from agnt5.entity import create_entity_context
+
+        @pytest.fixture
+        def entity_context():
+            manager, token = create_entity_context()
+            yield manager
+            # Cleanup happens automatically
+
+    Returns:
+        Tuple of (EntityStateManager, context_token)
+    """
+    manager = EntityStateManager()
+    token = _entity_state_manager_ctx.set(manager)
+    return manager, token
 
 
 class EntityRegistry:
@@ -75,59 +278,11 @@ class EntityType:
         self.entity_class = entity_class
         self._method_schemas: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = {}
         self._method_metadata: Dict[str, Dict[str, str]] = {}
-        logger.debug(f"Created entity type: {name}")
-
-
-# Utility functions for testing and debugging
-
-def _clear_entity_state() -> None:
-    """
-    Clear all entity state and locks.
-
-    Warning: Only use for testing. This will delete all entity state.
-    """
-    _entity_states.clear()
-    _entity_locks.clear()
-    logger.debug("Cleared all entity state and locks")
-
-
-def _get_entity_state(entity_type: str, key: str) -> Optional[Dict[str, Any]]:
-    """
-    Get the current state of an entity instance.
-
-    Args:
-        entity_type: Entity type name
-        key: Entity instance key
-
-    Returns:
-        State dict or None if entity has no state
-
-    Note: For debugging and testing only.
-    """
-    state_key = (entity_type, key)
-    return _entity_states.get(state_key)
-
-
-def _get_all_entity_keys(entity_type: str) -> list[str]:
-    """
-    Get all keys for a given entity type.
-
-    Args:
-        entity_type: Entity type name
-
-    Returns:
-        List of keys that have state
-
-    Note: For debugging and testing only.
-    """
-    return [
-        key for (etype, key) in _entity_states.keys()
-        if etype == entity_type
-    ]
+        logger.debug("Created entity type: %s", name)
 
 
 # ============================================================================
-# New: Class-Based Entity API (Cloudflare Durable Objects style)
+# Class-Based Entity API (Cloudflare Durable Objects style)
 # ============================================================================
 
 class EntityState:
@@ -140,29 +295,112 @@ class EntityState:
         self.state.delete(key)
         self.state.clear()
 
-    State operations are synchronous and backed by the Context.
+    State operations are synchronous and backed by an internal dict.
     """
 
-    def __init__(self, context: Context):
-        """Initialize state wrapper with a Context."""
-        self._context = context
+    def __init__(self, state_dict: Dict[str, Any]):
+        """
+        Initialize state wrapper with a state dict.
+
+        Args:
+            state_dict: Dictionary to use for state storage
+        """
+        self._state = state_dict
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get value from state."""
-        return self._context.get(key, default)
+        return self._state.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
         """Set value in state."""
-        self._context.set(key, value)
+        self._state[key] = value
 
     def delete(self, key: str) -> None:
         """Delete key from state."""
-        self._context.delete(key)
+        self._state.pop(key, None)
 
     def clear(self) -> None:
         """Clear all state."""
-        # Clear all keys from the context state
-        self._context._state.clear()
+        self._state.clear()
+
+
+def _create_entity_method_wrapper(entity_type: str, method):
+    """
+    Create a wrapper for an entity method that provides single-writer consistency.
+
+    This wrapper:
+    1. Acquires a lock for the entity instance (single-writer guarantee)
+    2. Sets up EntityState with the state dict
+    3. Executes the method
+    4. Cleans up state reference
+    5. Handles errors appropriately
+
+    Args:
+        entity_type: Name of the entity type (class name)
+        method: The async method to wrap
+
+    Returns:
+        Wrapped async method with single-writer consistency
+    """
+    @functools.wraps(method)
+    async def entity_method_wrapper(self, *args, **kwargs):
+        """Execute entity method with single-writer guarantee."""
+        state_key = (entity_type, self._key)
+
+        # Get state manager and lock (single-writer guarantee)
+        state_manager = _get_state_manager()
+        lock = state_manager.get_or_create_lock(state_key)
+
+        async with lock:
+            # TODO: Load state from platform if not in memory
+            # if state_key not in state_manager._states and state_manager._rust_manager:
+            #     result = await state_manager._rust_manager.load_state(
+            #         tenant_id, entity_type, self._key
+            #     )
+            #     if result.found:
+            #         state_manager.load_state_from_platform(
+            #             state_key, result.state_json, result.version
+            #         )
+
+            # Get or create state for this entity instance
+            state_dict = state_manager.get_or_create_state(state_key)
+
+            # Set up EntityState on instance for method access
+            self._state = EntityState(state_dict)
+
+            try:
+                # Execute method
+                logger.debug("Executing %s:%s.%s", entity_type, self._key, method.__name__)
+                result = await method(self, *args, **kwargs)
+                logger.debug("Completed %s:%s.%s", entity_type, self._key, method.__name__)
+
+                # TODO: Save state to platform after successful execution
+                # if state_manager._rust_manager:
+                #     state_dict, expected_version, new_version = \
+                #         state_manager.get_state_for_persistence(state_key)
+                #     import json
+                #     state_json = json.dumps(state_dict).encode('utf-8')
+                #     save_result = await state_manager._rust_manager.save_state(
+                #         tenant_id, entity_type, self._key, state_json, expected_version
+                #     )
+                #     state_manager._versions[state_key] = save_result.new_version
+
+                return result
+
+            except Exception as e:
+                logger.error(
+                    "Error in %s:%s.%s: %s",
+                    entity_type, self._key, method.__name__, e,
+                    exc_info=True
+                )
+                raise ExecutionError(
+                    f"Entity method {method.__name__} failed: {e}"
+                ) from e
+            finally:
+                # Clear state reference after execution
+                self._state = None
+
+    return entity_method_wrapper
 
 
 class Entity:
@@ -212,11 +450,10 @@ class Entity:
         self._entity_type = self.__class__.__name__
         self._state_key = (self._entity_type, key)
 
-        # State will be initialized during method execution
+        # State will be initialized during method execution by wrapper
         self._state = None
-        self._context = None
 
-        logger.debug(f"Created Entity instance: {self._entity_type}:{key}")
+        logger.debug("Created Entity instance: %s:%s", self._entity_type, key)
 
     @property
     def state(self) -> EntityState:
@@ -231,17 +468,28 @@ class Entity:
 
         Returns:
             EntityState for synchronous state operations
+
+        Raises:
+            RuntimeError: If accessed outside of an entity method
         """
         if self._state is None:
-            # Create a context if not in method execution
-            # This allows initialization and setup
-            if self._context is None:
-                self._context = Context(
-                    run_id=f"{self._entity_type}:{self._key}:init",
-                    component_type="entity",
-                    object_id=self._key
-                )
-            self._state = EntityState(self._context)
+            raise RuntimeError(
+                f"Entity state can only be accessed within entity methods.\n\n"
+                f"You tried to access state on {self._entity_type}(key='{self._key}') "
+                f"outside of a method call.\n\n"
+                f"❌ Wrong:\n"
+                f"  cart = ShoppingCart(key='user-123')\n"
+                f"  items = cart.state.get('items')  # Error!\n\n"
+                f"✅ Correct:\n"
+                f"  class ShoppingCart(Entity):\n"
+                f"      async def get_items(self):\n"
+                f"          return self.state.get('items', {{}})  # Works!\n\n"
+                f"  cart = ShoppingCart(key='user-123')\n"
+                f"  items = await cart.get_items()  # Call method instead"
+            )
+
+        # Type narrowing: after the raise, self._state is guaranteed to be not None
+        assert self._state is not None
         return self._state
 
     @property
@@ -254,100 +502,14 @@ class Entity:
         """Get the entity type name."""
         return self._entity_type
 
-    def __getattribute__(self, name: str):
-        """
-        Intercept method calls to add single-writer consistency.
-
-        This wraps all async methods (except private/magic methods) with:
-        1. Lock acquisition (single-writer per key)
-        2. Context setup with entity state
-        3. Method execution
-        4. State persistence
-        """
-        attr = object.__getattribute__(self, name)
-
-        # Don't wrap private methods, properties, non-callables, or specific attributes
-        if (name.startswith('_') or
-            not callable(attr) or
-            not asyncio.iscoroutinefunction(attr) or
-            name in ('state', 'key', 'entity_type')):  # Skip properties
-            return attr
-
-        # Don't wrap if already wrapped
-        if hasattr(attr, '_entity_wrapped'):
-            return attr
-
-        @functools.wraps(attr)
-        async def entity_method_wrapper(*args, **kwargs):
-            """
-            Execute entity method with single-writer guarantee.
-
-            This wrapper:
-            1. Acquires lock for this entity instance (single-writer)
-            2. Creates Context with entity state
-            3. Executes method
-            4. Updates state from Context
-            """
-            state_key = object.__getattribute__(self, '_state_key')
-            entity_type = object.__getattribute__(self, '_entity_type')
-            key = object.__getattribute__(self, '_key')
-
-            # Get or create lock for this entity instance (single-writer guarantee)
-            if state_key not in _entity_locks:
-                _entity_locks[state_key] = asyncio.Lock()
-            lock = _entity_locks[state_key]
-
-            async with lock:
-                # Get or create state for this entity instance
-                if state_key not in _entity_states:
-                    _entity_states[state_key] = {}
-                state_dict = _entity_states[state_key]
-
-                # Create Context with entity state
-                ctx = Context(
-                    run_id=f"{entity_type}:{key}:{name}",
-                    component_type="entity",
-                    object_id=key,
-                    method_name=name
-                )
-
-                # Replace Context's internal state with entity state
-                ctx._state = state_dict
-
-                # Set context and state on instance for method access
-                object.__setattr__(self, '_context', ctx)
-                object.__setattr__(self, '_state', EntityState(ctx))
-
-                try:
-                    # Execute method
-                    logger.debug(f"Executing {entity_type}:{key}.{name}")
-                    result = await attr(*args, **kwargs)
-                    logger.debug(f"Completed {entity_type}:{key}.{name}")
-                    return result
-
-                except Exception as e:
-                    logger.error(
-                        f"Error in {entity_type}:{key}.{name}: {e}",
-                        exc_info=True
-                    )
-                    raise ExecutionError(
-                        f"Entity method {name} failed: {e}"
-                    ) from e
-                finally:
-                    # Clear context and state after execution
-                    object.__setattr__(self, '_context', None)
-                    object.__setattr__(self, '_state', None)
-
-        # Mark as wrapped to avoid double-wrapping
-        entity_method_wrapper._entity_wrapped = True
-        return entity_method_wrapper
-
-
     def __init_subclass__(cls, **kwargs):
         """
-        Auto-register Entity subclasses.
+        Auto-register Entity subclasses and wrap methods.
 
         This is called automatically when a class inherits from Entity.
+        It performs two tasks:
+        1. Wraps all public async methods with single-writer consistency
+        2. Registers the entity type with metadata for platform discovery
         """
         super().__init_subclass__(**kwargs)
 
@@ -356,25 +518,27 @@ class Entity:
             return
 
         # Don't register SDK's built-in base classes (these are meant to be extended by users)
-        if cls.__name__ in ('SessionEntity', 'MemoryEntity', 'WorkflowEntity'):
+        if cls.__name__ in ('SessionEntity', 'MemoryEntity'):
             return
 
         # Create an EntityType for this class, storing the class reference
         entity_type = EntityType(cls.__name__, entity_class=cls)
 
-        # Register all public async methods
+        # Wrap all public async methods and register them
         for name, method in inspect.getmembers(cls, predicate=inspect.iscoroutinefunction):
             if not name.startswith('_'):
                 # Extract schemas from the method
-                input_schema, output_schema = _extract_function_schemas(method)
-                method_metadata = _extract_function_metadata(method)
+                input_schema, output_schema = extract_function_schemas(method)
+                method_metadata = extract_function_metadata(method)
 
                 # Store in entity type
                 entity_type._method_schemas[name] = (input_schema, output_schema)
                 entity_type._method_metadata[name] = method_metadata
 
-                # Note: Actual method is not registered here
-                # Execution happens via Entity.__getattribute__
+                # Wrap the method with single-writer consistency
+                # This happens once at class definition time (not per-call)
+                wrapped_method = _create_entity_method_wrapper(cls.__name__, method)
+                setattr(cls, name, wrapped_method)
 
         # Register the entity type
         EntityRegistry.register(entity_type)

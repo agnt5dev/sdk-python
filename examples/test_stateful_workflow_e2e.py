@@ -97,7 +97,7 @@ def test_multi_stage_workflow():
 
 
 if __name__ == "__main__":
-    print("Testing Phase 6A: Stateful Workflows")
+    print("Testing Stateful Workflows - End-to-End")
     print("=" * 60 + "\n")
 
     # Test 1: Order fulfillment
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     if success1 and success2:
         print("✅ ALL TESTS PASSED")
-        print("\nPhase 6A Implementation Verified:")
+        print("\nStateful Workflow Implementation Verified:")
         print("  • ctx.state.get/set API working")
         print("  • Step recording functional")
         print("  • Events published to event store")

@@ -1,13 +1,15 @@
 """Schema conversion utilities for structured output support.
 
 This module provides utilities to convert Python dataclasses and Pydantic models
-to JSON Schema format for LLM structured output generation.
+to JSON Schema format for LLM structured output generation, function signatures,
+and tool definitions.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, Optional, Tuple, get_args, get_origin
+import inspect
+from typing import Any, Callable, Dict, Optional, Tuple, get_args, get_origin, get_type_hints
 
 try:
     from pydantic import BaseModel
@@ -52,6 +54,8 @@ def detect_format_type(response_format: Any) -> Tuple[str, Dict[str, Any]]:
 def pydantic_to_json_schema(model: type) -> Dict[str, Any]:
     """Convert Pydantic model to JSON schema.
 
+    Supports both Pydantic v1 and v2 APIs.
+
     Args:
         model: Pydantic BaseModel class
 
@@ -59,13 +63,24 @@ def pydantic_to_json_schema(model: type) -> Dict[str, Any]:
         JSON schema dictionary
     """
     if not PYDANTIC_AVAILABLE:
-        raise ImportError("Pydantic is not installed. Install with: pip install pydantic>=2.0")
+        raise ImportError("Pydantic is not installed. Install with: pip install pydantic")
 
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         raise ValueError(f"Expected Pydantic BaseModel class, got {type(model)}")
 
-    # Pydantic v2 has model_json_schema() method
-    schema = model.model_json_schema()
+    try:
+        # Try Pydantic v2 API first
+        if hasattr(model, 'model_json_schema'):
+            schema = model.model_json_schema()
+        # Fall back to Pydantic v1 API
+        elif hasattr(model, 'schema'):
+            schema = model.schema()
+        else:
+            # Fallback for edge cases
+            schema = {"type": "object"}
+    except Exception:
+        # If schema generation fails, return basic object schema
+        schema = {"type": "object"}
 
     # Ensure we have the required fields
     if "type" not in schema:
@@ -161,6 +176,10 @@ def _type_to_schema(python_type: Any) -> Dict[str, Any]:
         return {"type": "number"}
     elif python_type == bool:
         return {"type": "boolean"}
+    elif python_type == dict:
+        return {"type": "object"}
+    elif python_type == list:
+        return {"type": "array"}
     elif python_type == Any:
         return {}  # Any type - no restrictions
 
@@ -173,3 +192,121 @@ try:
     from typing import Union
 except ImportError:
     Union = None  # type: ignore
+
+
+def is_pydantic_model(type_hint: Any) -> bool:
+    """Check if a type hint is a Pydantic model.
+
+    Args:
+        type_hint: Type annotation to check
+
+    Returns:
+        True if type_hint is a Pydantic BaseModel subclass
+    """
+    if not PYDANTIC_AVAILABLE:
+        return False
+
+    try:
+        return isinstance(type_hint, type) and issubclass(type_hint, BaseModel)
+    except TypeError:
+        return False
+
+
+def extract_function_schemas(func: Callable[..., Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Extract input and output schemas from function type hints.
+
+    Supports both plain Python types and Pydantic models.
+    Pydantic models provide richer validation and schema generation.
+
+    Args:
+        func: Function to extract schemas from
+
+    Returns:
+        Tuple of (input_schema, output_schema) where each is a JSON Schema dict or None
+    """
+    try:
+        # Get type hints
+        hints = get_type_hints(func)
+        sig = inspect.signature(func)
+
+        # Build input schema from parameters (excluding 'ctx')
+        input_properties = {}
+        required_params = []
+
+        for param_name, param in sig.parameters.items():
+            if param_name == "ctx":
+                continue
+
+            # Get type hint for this parameter
+            if param_name in hints:
+                param_type = hints[param_name]
+
+                # Check if it's a Pydantic model
+                if is_pydantic_model(param_type):
+                    # Use Pydantic's schema generation
+                    input_properties[param_name] = pydantic_to_json_schema(param_type)
+                else:
+                    # Use basic type conversion
+                    input_properties[param_name] = _type_to_schema(param_type)
+            else:
+                # No type hint, use generic object
+                input_properties[param_name] = {"type": "object"}
+
+            # Check if parameter is required (no default value)
+            if param.default is inspect.Parameter.empty:
+                required_params.append(param_name)
+
+        input_schema = None
+        if input_properties:
+            input_schema = {
+                "type": "object",
+                "properties": input_properties,
+            }
+            if required_params:
+                input_schema["required"] = required_params
+
+            # Add description from docstring if available
+            if func.__doc__:
+                docstring = inspect.cleandoc(func.__doc__)
+                first_line = docstring.split('\n')[0].strip()
+                if first_line:
+                    input_schema["description"] = first_line
+
+        # Build output schema from return type hint
+        output_schema = None
+        if "return" in hints:
+            return_type = hints["return"]
+
+            # Check if return type is a Pydantic model
+            if is_pydantic_model(return_type):
+                output_schema = pydantic_to_json_schema(return_type)
+            else:
+                output_schema = _type_to_schema(return_type)
+
+        return input_schema, output_schema
+
+    except Exception:
+        # If schema extraction fails, return None schemas
+        return None, None
+
+
+def extract_function_metadata(func: Callable[..., Any]) -> Dict[str, str]:
+    """Extract metadata from function including description from docstring.
+
+    Args:
+        func: Function to extract metadata from
+
+    Returns:
+        Dictionary with metadata fields like 'description'
+    """
+    metadata = {}
+
+    # Extract description from docstring
+    if func.__doc__:
+        # Get first line of docstring as description
+        docstring = inspect.cleandoc(func.__doc__)
+        first_line = docstring.split('\n')[0].strip()
+        if first_line:
+            metadata["description"] = first_line
+
+    return metadata

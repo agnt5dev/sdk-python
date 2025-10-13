@@ -594,10 +594,15 @@ impl PyWorker {
                 );
                 Ok(None)
             }
-            Some(runtime_message::MessageData::RuntimeServiceResponse(_)) => {
+            Some(runtime_message::MessageData::RuntimeServiceResponse(response)) => {
+                // TODO: Route to EntityStateManager
+                // When EntityStateManager is wired up:
+                // if let Some(entity_manager) = &entity_state_manager {
+                //     entity_manager.handle_response(response).await;
+                // }
                 log::debug!(
-                    "Ignoring RuntimeServiceResponse message (type: {})",
-                    runtime_message.message_type as i32
+                    "Received RuntimeServiceResponse (request_id: {})",
+                    response.request_id
                 );
                 Ok(None)
             }

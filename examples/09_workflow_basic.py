@@ -6,7 +6,10 @@ This example demonstrates:
 - Sequential execution with await
 - Parallel execution with ctx.parallel() and ctx.gather()
 - Calling functions from workflows with ctx.task()
+  - Legacy: ctx.task("service", "function_name", input=data)
+  - Type-safe: ctx.task(function_ref, arg1, arg2, kwarg=value)
 - Using signals for coordination
+- State management with ctx.state.set() and ctx.state.get()
 """
 
 import asyncio
@@ -62,8 +65,7 @@ async def ship_order(ctx: Context, order_id: str) -> Dict:
 async def data_pipeline(ctx: Context, source: str) -> Dict:
     """Simple sequential data processing pipeline.
 
-    Phase 1: Each step runs sequentially using local function calls.
-    Phase 2: Will support distributed execution and durable checkpoints.
+    Each step runs sequentially with automatic durability tracking.
     """
     ctx.logger.info(f"Starting data pipeline for {source}")
 
@@ -152,14 +154,13 @@ async def order_processing(ctx: Context, order_id: str) -> Dict:
 async def approval_workflow(ctx: Context, request_id: str) -> Dict:
     """Workflow that waits for external approval signal.
 
-    Phase 1: Uses asyncio.Event for in-process signaling.
-    Phase 2: Will support durable cross-process signals.
+    Uses in-process signaling for coordination.
     """
     ctx.logger.info(f"Starting approval workflow for request {request_id}")
 
     # Prepare request
-    ctx.set("request_id", request_id)
-    ctx.set("status", "pending")
+    ctx.state.set("request_id", request_id)
+    ctx.state.set("status", "pending")
 
     # In a real scenario, this would trigger an external notification
     # For demo, we'll send signal after a short delay
@@ -175,14 +176,14 @@ async def approval_workflow(ctx: Context, request_id: str) -> Dict:
     approval = await ctx.signal("approval", timeout_ms=5000)
 
     if approval and approval.get("approved"):
-        ctx.set("status", "approved")
+        ctx.state.set("status", "approved")
         return {
             "request_id": request_id,
             "status": "approved",
             "reviewer": approval.get("reviewer"),
         }
     else:
-        ctx.set("status", "rejected")
+        ctx.state.set("status", "rejected")
         return {"request_id": request_id, "status": "rejected"}
 
 
@@ -191,8 +192,7 @@ async def approval_workflow(ctx: Context, request_id: str) -> Dict:
 async def scheduled_workflow(ctx: Context, task_name: str) -> Dict:
     """Workflow with delays using ctx.sleep() and ctx.timer().
 
-    Phase 1: Uses asyncio.sleep for delays.
-    Phase 2: Will support durable sleep that survives restarts.
+    Uses asyncio.sleep for delays between steps.
     """
     ctx.logger.info(f"Starting scheduled workflow: {task_name}")
 

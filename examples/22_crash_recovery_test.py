@@ -1,5 +1,5 @@
 """
-Phase 6B Test: Crash Recovery with Replay
+Example: Crash Recovery with Step Replay
 
 This example demonstrates workflow crash recovery using cached steps.
 The workflow simulates a crash after completing some steps, then resumes
@@ -170,7 +170,7 @@ async def multi_step_recovery(ctx: Context, job_id: str) -> Dict:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("Phase 6B: Crash Recovery Test Workflows")
+    print("Crash Recovery Test Workflows")
     print("=" * 70)
     print("Service: default-service")
     print()

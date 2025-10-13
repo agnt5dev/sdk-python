@@ -95,6 +95,10 @@ class Worker:
         # Create Rust worker instance
         self._rust_worker = self._PyWorker(self._rust_config)
 
+        # Create worker-scoped entity state manager
+        from .entity import EntityStateManager
+        self._entity_state_manager = EntityStateManager()
+
         logger.info(
             f"Worker initialized: {service_name} v{service_version} (runtime: {runtime})"
         )
@@ -424,7 +428,7 @@ class Worker:
             )
 
     async def _execute_workflow(self, config, input_data: bytes, request):
-        """Execute a workflow handler with replay support (Phase 6B)."""
+        """Execute a workflow handler with automatic replay support."""
         import json
         from .context import Context
         from ._core import PyExecuteComponentResponse
@@ -433,7 +437,7 @@ class Worker:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
 
-            # Phase 6B: Parse replay data from request metadata
+            # Parse replay data from request metadata for crash recovery
             completed_steps = {}
             initial_state = {}
 
@@ -476,7 +480,7 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
-            # Phase 6: Collect workflow execution metadata (similar to entity pattern)
+            # Collect workflow execution metadata for durability
             metadata = {}
 
             # Add step events to metadata (for workflow durability)
@@ -575,8 +579,11 @@ class Worker:
         """Execute an entity method."""
         import json
         from .context import Context
-        from .entity import EntityType, Entity, _entity_states
+        from .entity import EntityType, Entity, _entity_state_manager_ctx
         from ._core import PyExecuteComponentResponse
+
+        # Set entity state manager in context for Entity instances to access
+        _entity_state_manager_ctx.set(self._entity_state_manager)
 
         try:
             # Parse input data
@@ -590,6 +597,24 @@ class Worker:
                 raise ValueError("Entity invocation requires 'key' parameter")
             if not method_name:
                 raise ValueError("Entity invocation requires 'method' parameter")
+
+            # Load state from platform if provided in request metadata
+            state_key = (entity_type.name, entity_key)
+            if hasattr(request, 'metadata') and request.metadata:
+                if "entity_state" in request.metadata:
+                    platform_state_json = request.metadata["entity_state"]
+                    platform_version = int(request.metadata.get("state_version", "0"))
+
+                    # Load platform state into state manager
+                    self._entity_state_manager.load_state_from_platform(
+                        state_key,
+                        platform_state_json,
+                        platform_version
+                    )
+                    logger.info(
+                        f"Loaded entity state from platform: {entity_type.name}/{entity_key} "
+                        f"(version {platform_version})"
+                    )
 
             # Create entity instance using the stored class reference
             entity_instance = entity_type.entity_class(key=entity_key)
@@ -606,26 +631,32 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
-            # Phase 5B: Capture entity state after execution for persistence
-            state_key = (entity_type.name, entity_key)
+            # Capture entity state after execution with version tracking
+            state_dict, expected_version, new_version = \
+                self._entity_state_manager.get_state_for_persistence(state_key)
+
             metadata = {}
-            if state_key in _entity_states:
-                entity_state = _entity_states[state_key]
+            if state_dict:
                 # Serialize state as JSON string for platform persistence
-                state_json = json.dumps(entity_state)
+                state_json = json.dumps(state_dict)
                 # Pass in metadata for Worker Coordinator to publish
                 metadata = {
                     "entity_state": state_json,
                     "entity_type": entity_type.name,
                     "entity_key": entity_key,
+                    "expected_version": str(expected_version),
+                    "new_version": str(new_version),
                 }
-                logger.debug(f"Entity state update: {entity_type.name}:{entity_key}, state: {state_json}")
+                logger.info(
+                    f"Captured entity state: {entity_type.name}/{entity_key} "
+                    f"(version {expected_version} → {new_version})"
+                )
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
-                state_update=None,  # TODO: Phase 6 - Use structured StateUpdate object
+                state_update=None,  # TODO: Use structured StateUpdate object
                 error_message=None,
                 metadata=metadata,  # Include state in metadata for Worker Coordinator
                 is_chunk=False,

@@ -14,113 +14,95 @@ import asyncio
 
 import pytest
 
-from agnt5 import Context, entity
-from agnt5.entity import _clear_entity_state, _get_all_entity_keys, _get_entity_state
-from agnt5.exceptions import ConfigurationError, ExecutionError
+from agnt5 import Entity
+from agnt5.entity import EntityRegistry, EntityStateManager, create_entity_context, _entity_state_manager_ctx
+from agnt5.exceptions import ExecutionError
 
 
 @pytest.fixture(autouse=True)
-def clear_state():
-    """Clear entity state before each test."""
-    _clear_entity_state()
-    yield
-    _clear_entity_state()
+def entity_state_manager():
+    """Create and set EntityStateManager for each test."""
+    # Use the new helper function
+    manager, token = create_entity_context()
+
+    yield manager
+
+    # Cleanup
+    _entity_state_manager_ctx.reset(token)
+    manager.clear_all()
+    # Clear entity registry between tests to avoid conflicts
+    EntityRegistry.clear()
 
 
 # Test Entity Type Creation
 
 def test_entity_type_creation():
     """Test creating entity types."""
-    Counter = entity("Counter")
-    assert Counter.name == "Counter"
-    assert len(Counter._methods) == 0
+    class Counter(Entity):
+        pass
+
+    # Entity should be auto-registered
+    entity_type = EntityRegistry.get("Counter")
+    assert entity_type is not None
+    assert entity_type.name == "Counter"
 
 
 def test_entity_multiple_types():
     """Test creating multiple entity types."""
-    Counter = entity("Counter")
-    UserAccount = entity("UserAccount")
+    class Counter(Entity):
+        pass
 
-    assert Counter.name == "Counter"
-    assert UserAccount.name == "UserAccount"
-    assert Counter is not UserAccount
+    class UserAccount(Entity):
+        pass
+
+    counter_type = EntityRegistry.get("Counter")
+    account_type = EntityRegistry.get("UserAccount")
+
+    assert counter_type.name == "Counter"
+    assert account_type.name == "UserAccount"
+    assert counter_type is not account_type
 
 
 # Test Method Registration
 
 def test_register_async_method():
     """Test registering async method."""
-    Counter = entity("Counter")
+    class Counter(Entity):
+        async def increment(self, amount: int = 1) -> int:
+            current = self.state.get("count", 0)
+            new_count = current + amount
+            self.state.set("count", new_count)
+            return new_count
 
-    @Counter.method
-    async def increment(ctx: Context, amount: int = 1) -> int:
-        current = ctx.get("count", 0)
-        new_count = current + amount
-        ctx.set("count", new_count)
-        return new_count
+    entity_type = EntityRegistry.get("Counter")
+    assert "increment" in entity_type._method_schemas
 
-    assert "increment" in Counter._methods
-    assert asyncio.iscoroutinefunction(Counter._methods["increment"])
-
-
-def test_register_sync_method():
-    """Test registering sync method (auto-converted to async)."""
-    Calc = entity("Calc")
-
-    @Calc.method
-    def add(ctx: Context, a: int, b: int) -> int:
-        return a + b
-
-    assert "add" in Calc._methods
-    assert asyncio.iscoroutinefunction(Calc._methods["add"])
-
-
-def test_method_without_context_param_fails():
-    """Test that methods without Context parameter fail."""
-    Counter = entity("Counter")
-
-    with pytest.raises(ConfigurationError, match="must have at least one parameter"):
-
-        @Counter.method
-        async def bad_method():
-            pass
-
-
-def test_method_with_wrong_context_type_fails():
-    """Test that methods with wrong first parameter type fail."""
-    Counter = entity("Counter")
-
-    with pytest.raises(ConfigurationError, match="first parameter must be 'ctx: Context'"):
-
-        @Counter.method
-        async def bad_method(wrong_type: str):
-            pass
+    # Check that method is wrapped
+    counter = Counter(key="test")
+    assert asyncio.iscoroutinefunction(counter.increment)
 
 
 def test_multiple_methods_same_entity():
     """Test registering multiple methods on same entity."""
-    Counter = entity("Counter")
+    class Counter(Entity):
+        async def increment(self) -> int:
+            count = self.state.get("count", 0)
+            self.state.set("count", count + 1)
+            return count + 1
 
-    @Counter.method
-    async def increment(ctx: Context) -> int:
-        count = ctx.get("count", 0)
-        ctx.set("count", count + 1)
-        return count + 1
+        async def decrement(self) -> int:
+            count = self.state.get("count", 0)
+            self.state.set("count", count - 1)
+            return count - 1
 
-    @Counter.method
-    async def decrement(ctx: Context) -> int:
-        count = ctx.get("count", 0)
-        ctx.set("count", count - 1)
-        return count - 1
+        async def get_count(self) -> int:
+            return self.state.get("count", 0)
 
-    @Counter.method
-    async def get_count(ctx: Context) -> int:
-        return ctx.get("count", 0)
-
-    assert len(Counter._methods) == 3
-    assert "increment" in Counter._methods
-    assert "decrement" in Counter._methods
-    assert "get_count" in Counter._methods
+    entity_type = EntityRegistry.get("Counter")
+    assert len(entity_type._method_schemas) == 3
+    assert "increment" in entity_type._method_schemas
+    assert "decrement" in entity_type._method_schemas
+    assert "get_count" in entity_type._method_schemas
 
 
 # Test Entity Instance Creation and Invocation
@@ -128,11 +110,9 @@ def test_multiple_methods_same_entity():
 @pytest.mark.asyncio
 async def test_entity_instance_creation():
     """Test creating entity instances."""
-    Counter = entity("Counter")
-
-    @Counter.method
-    async def get_count(ctx: Context) -> int:
-        return ctx.get("count", 0)
+    class Counter(Entity):
+        async def get_count(self) -> int:
+            return self.state.get("count", 0)
 
     counter1 = Counter(key="counter-1")
     counter2 = Counter(key="counter-2")
@@ -146,14 +126,12 @@ async def test_entity_instance_creation():
 @pytest.mark.asyncio
 async def test_entity_method_invocation():
     """Test invoking entity methods."""
-    Counter = entity("Counter")
-
-    @Counter.method
-    async def increment(ctx: Context, amount: int = 1) -> int:
-        current = ctx.get("count", 0)
-        new_count = current + amount
-        ctx.set("count", new_count)
-        return new_count
+    class Counter(Entity):
+        async def increment(self, amount: int = 1) -> int:
+            current = self.state.get("count", 0)
+            new_count = current + amount
+            self.state.set("count", new_count)
+            return new_count
 
     counter = Counter(key="test-counter")
 
@@ -170,18 +148,15 @@ async def test_entity_method_invocation():
 @pytest.mark.asyncio
 async def test_entity_state_persistence():
     """Test that entity state persists across method calls."""
-    UserAccount = entity("UserAccount")
+    class UserAccount(Entity):
+        async def deposit(self, amount: float) -> float:
+            balance = self.state.get("balance", 0.0)
+            new_balance = balance + amount
+            self.state.set("balance", new_balance)
+            return new_balance
 
-    @UserAccount.method
-    async def deposit(ctx: Context, amount: float) -> float:
-        balance = ctx.get("balance", 0.0)
-        new_balance = balance + amount
-        ctx.set("balance", new_balance)
-        return new_balance
-
-    @UserAccount.method
-    async def get_balance(ctx: Context) -> float:
-        return ctx.get("balance", 0.0)
+        async def get_balance(self) -> float:
+            return self.state.get("balance", 0.0)
 
     account = UserAccount(key="user-123")
 
@@ -197,17 +172,14 @@ async def test_entity_state_persistence():
 @pytest.mark.asyncio
 async def test_state_isolation_between_keys():
     """Test that different keys have isolated state."""
-    Counter = entity("Counter")
+    class Counter(Entity):
+        async def increment(self) -> int:
+            count = self.state.get("count", 0)
+            self.state.set("count", count + 1)
+            return count + 1
 
-    @Counter.method
-    async def increment(ctx: Context) -> int:
-        count = ctx.get("count", 0)
-        ctx.set("count", count + 1)
-        return count + 1
-
-    @Counter.method
-    async def get_count(ctx: Context) -> int:
-        return ctx.get("count", 0)
+        async def get_count(self) -> int:
+            return self.state.get("count", 0)
 
     counter1 = Counter(key="counter-1")
     counter2 = Counter(key="counter-2")
@@ -226,15 +198,12 @@ async def test_state_isolation_between_keys():
 @pytest.mark.asyncio
 async def test_same_entity_type_different_keys():
     """Test multiple instances of same entity type with different keys."""
-    Account = entity("Account")
+    class Account(Entity):
+        async def set_balance(self, amount: float):
+            self.state.set("balance", amount)
 
-    @Account.method
-    async def set_balance(ctx: Context, amount: float):
-        ctx.set("balance", amount)
-
-    @Account.method
-    async def get_balance(ctx: Context) -> float:
-        return ctx.get("balance", 0.0)
+        async def get_balance(self) -> float:
+            return self.state.get("balance", 0.0)
 
     alice = Account(key="alice")
     bob = Account(key="bob")
@@ -252,16 +221,14 @@ async def test_same_entity_type_different_keys():
 # Test Single-Writer Consistency
 
 @pytest.mark.asyncio
-async def test_single_writer_consistency():
+async def test_single_writer_consistency(entity_state_manager):
     """Test that single-writer consistency prevents lost updates."""
-    Counter = entity("Counter")
-
-    @Counter.method
-    async def increment(ctx: Context):
-        # Simulate read-modify-write with delay
-        current = ctx.get("count", 0)
-        await asyncio.sleep(0.01)  # Allow time for race condition
-        ctx.set("count", current + 1)
+    class Counter(Entity):
+        async def increment(self):
+            # Simulate read-modify-write with delay
+            current = self.state.get("count", 0)
+            await asyncio.sleep(0.01)  # Allow time for race condition
+            self.state.set("count", current + 1)
 
     counter = Counter(key="test")
 
@@ -269,25 +236,23 @@ async def test_single_writer_consistency():
     await asyncio.gather(*[counter.increment() for _ in range(10)])
 
     # Verify count is exactly 10 (no lost updates)
-    final_state = _get_entity_state("Counter", "test")
+    final_state = entity_state_manager.get_state("Counter", "test")
     assert final_state["count"] == 10
 
 
 @pytest.mark.asyncio
 async def test_parallel_execution_different_keys():
     """Test that different keys execute in parallel."""
-    SlowCounter = entity("SlowCounter")
-
     execution_log = []
 
-    @SlowCounter.method
-    async def increment(ctx: Context, key_name: str):
-        execution_log.append(f"{key_name}_start")
-        await asyncio.sleep(0.05)
-        count = ctx.get("count", 0)
-        ctx.set("count", count + 1)
-        execution_log.append(f"{key_name}_end")
-        return count + 1
+    class SlowCounter(Entity):
+        async def increment(self, key_name: str):
+            execution_log.append(f"{key_name}_start")
+            await asyncio.sleep(0.05)
+            count = self.state.get("count", 0)
+            self.state.set("count", count + 1)
+            execution_log.append(f"{key_name}_end")
+            return count + 1
 
     counter1 = SlowCounter(key="counter-1")
     counter2 = SlowCounter(key="counter-2")
@@ -311,11 +276,9 @@ async def test_parallel_execution_different_keys():
 @pytest.mark.asyncio
 async def test_method_error_propagates():
     """Test that errors in methods propagate correctly."""
-    Faulty = entity("Faulty")
-
-    @Faulty.method
-    async def failing_method(ctx: Context):
-        raise ValueError("Something went wrong")
+    class Faulty(Entity):
+        async def failing_method(self):
+            raise ValueError("Something went wrong")
 
     instance = Faulty(key="test")
 
@@ -326,71 +289,44 @@ async def test_method_error_propagates():
 @pytest.mark.asyncio
 async def test_nonexistent_method_fails():
     """Test that calling non-existent method raises AttributeError."""
-    Counter = entity("Counter")
-
-    @Counter.method
-    async def increment(ctx: Context):
-        pass
+    class Counter(Entity):
+        async def increment(self):
+            pass
 
     counter = Counter(key="test")
 
-    with pytest.raises(AttributeError, match="has no method 'does_not_exist'"):
+    with pytest.raises(AttributeError):
         await counter.does_not_exist()
 
 
-# Test Context Integration
+# Test State Operations
 
 @pytest.mark.asyncio
-async def test_context_properties_in_entity():
-    """Test that Context has correct properties in entity methods."""
-    Tracker = entity("Tracker")
+async def test_state_operations():
+    """Test all state operations work in entities."""
+    class StateTest(Entity):
+        async def test_all_operations(self) -> dict:
+            # Set
+            self.state.set("key1", "value1")
+            self.state.set("key2", {"nested": "data"})
 
-    captured_context = {}
+            # Get
+            val1 = self.state.get("key1")
+            val2 = self.state.get("key2")
+            val3 = self.state.get("nonexistent", "default")
 
-    @Tracker.method
-    async def capture_context(ctx: Context):
-        captured_context["run_id"] = ctx.run_id
-        captured_context["component_type"] = ctx.component_type
-        captured_context["object_id"] = ctx.object_id
-        captured_context["method_name"] = ctx.method_name
+            # Delete
+            self.state.delete("key1")
 
-    tracker = Tracker(key="test-key")
-    await tracker.capture_context()
+            # Verify deleted
+            val4 = self.state.get("key1")  # Should be None
 
-    assert captured_context["run_id"] == "Tracker:test-key:capture_context"
-    assert captured_context["component_type"] == "entity"
-    assert captured_context["object_id"] == "test-key"
-    assert captured_context["method_name"] == "capture_context"
-
-
-@pytest.mark.asyncio
-async def test_context_state_operations():
-    """Test all Context state operations work in entities."""
-    StateTest = entity("StateTest")
-
-    @StateTest.method
-    async def test_all_operations(ctx: Context) -> dict:
-        # Set
-        ctx.set("key1", "value1")
-        ctx.set("key2", {"nested": "data"})
-
-        # Get
-        val1 = ctx.get("key1")
-        val2 = ctx.get("key2")
-        val3 = ctx.get("nonexistent", "default")
-
-        # Delete
-        ctx.delete("key1")
-
-        # Verify deleted
-        val4 = ctx.get("key1")  # Should be None
-
-        return {
-            "val1": val1,
-            "val2": val2,
-            "val3": val3,
-            "val4": val4,
-        }
+            return {
+                "val1": val1,
+                "val2": val2,
+                "val3": val3,
+                "val4": val4,
+            }
 
     instance = StateTest(key="test")
     result = await instance.test_all_operations()
@@ -406,21 +342,17 @@ async def test_context_state_operations():
 @pytest.mark.asyncio
 async def test_conversation_entity_pattern():
     """Test implementing conversation/session pattern with entity."""
-    Conversation = entity("Conversation")
+    class Conversation(Entity):
+        async def add_message(self, role: str, content: str):
+            messages = self.state.get("messages", [])
+            messages.append({"role": role, "content": content})
+            self.state.set("messages", messages)
 
-    @Conversation.method
-    async def add_message(ctx: Context, role: str, content: str):
-        messages = ctx.get("messages", [])
-        messages.append({"role": role, "content": content})
-        ctx.set("messages", messages)
+        async def get_messages(self) -> list:
+            return self.state.get("messages", [])
 
-    @Conversation.method
-    async def get_messages(ctx: Context) -> list:
-        return ctx.get("messages", [])
-
-    @Conversation.method
-    async def clear_history(ctx: Context):
-        ctx.set("messages", [])
+        async def clear_history(self):
+            self.state.set("messages", [])
 
     conv = Conversation(key="chat-123")
 
@@ -441,31 +373,26 @@ async def test_conversation_entity_pattern():
 @pytest.mark.asyncio
 async def test_workflow_state_pattern():
     """Test implementing workflow state tracking with entity."""
-    WorkflowState = entity("WorkflowState")
+    class WorkflowState(Entity):
+        async def start(self, workflow_type: str):
+            self.state.set("status", "running")
+            self.state.set("type", workflow_type)
+            self.state.set("steps_completed", [])
 
-    @WorkflowState.method
-    async def start(ctx: Context, workflow_type: str):
-        ctx.set("status", "running")
-        ctx.set("type", workflow_type)
-        ctx.set("steps_completed", [])
+        async def complete_step(self, step_name: str, result: any):
+            steps = self.state.get("steps_completed", [])
+            steps.append({"name": step_name, "result": result})
+            self.state.set("steps_completed", steps)
 
-    @WorkflowState.method
-    async def complete_step(ctx: Context, step_name: str, result: any):
-        steps = ctx.get("steps_completed", [])
-        steps.append({"name": step_name, "result": result})
-        ctx.set("steps_completed", steps)
+        async def finish(self):
+            self.state.set("status", "completed")
 
-    @WorkflowState.method
-    async def finish(ctx: Context):
-        ctx.set("status", "completed")
-
-    @WorkflowState.method
-    async def get_status(ctx: Context) -> dict:
-        return {
-            "status": ctx.get("status"),
-            "type": ctx.get("type"),
-            "steps": ctx.get("steps_completed", [])
-        }
+        async def get_status(self) -> dict:
+            return {
+                "status": self.state.get("status"),
+                "type": self.state.get("type"),
+                "steps": self.state.get("steps_completed", [])
+            }
 
     workflow = WorkflowState(key="workflow-789")
 
@@ -482,40 +409,65 @@ async def test_workflow_state_pattern():
 
 # Test Utility Functions
 
-def test_get_entity_state():
+@pytest.mark.asyncio
+async def test_get_entity_state(entity_state_manager):
     """Test getting entity state for debugging."""
-    Counter = entity("Counter")
-
-    @Counter.method
-    async def set_value(ctx: Context, value: int):
-        ctx.set("count", value)
+    class Counter(Entity):
+        async def set_value(self, value: int):
+            self.state.set("count", value)
 
     counter = Counter(key="test")
 
     # Initially no state
-    state = _get_entity_state("Counter", "test")
+    state = entity_state_manager.get_state("Counter", "test")
     assert state is None
 
     # After method call, state exists
-    asyncio.run(counter.set_value(value=42))
+    await counter.set_value(value=42)
 
-    state = _get_entity_state("Counter", "test")
+    state = entity_state_manager.get_state("Counter", "test")
     assert state is not None
     assert state["count"] == 42
 
 
-def test_get_all_entity_keys():
+@pytest.mark.asyncio
+async def test_get_all_entity_keys(entity_state_manager):
     """Test getting all keys for an entity type."""
-    Account = entity("Account")
-
-    @Account.method
-    async def init(ctx: Context):
-        ctx.set("initialized", True)
+    class Account(Entity):
+        async def init(self):
+            self.state.set("initialized", True)
 
     # Create multiple instances
-    asyncio.run(Account(key="alice").init())
-    asyncio.run(Account(key="bob").init())
-    asyncio.run(Account(key="charlie").init())
+    await Account(key="alice").init()
+    await Account(key="bob").init()
+    await Account(key="charlie").init()
 
-    keys = _get_all_entity_keys("Account")
+    keys = entity_state_manager.get_all_keys("Account")
     assert set(keys) == {"alice", "bob", "charlie"}
+
+
+# Test Shopping Cart Example (from docstring)
+
+@pytest.mark.asyncio
+async def test_shopping_cart_example():
+    """Test the shopping cart example from Entity docstring."""
+    class ShoppingCart(Entity):
+        async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
+            items = self.state.get("items", {})
+            items[item_id] = {"quantity": quantity, "price": price}
+            self.state.set("items", items)
+            return {"total_items": len(items)}
+
+        async def get_total(self) -> float:
+            items = self.state.get("items", {})
+            return sum(item["quantity"] * item["price"] for item in items.values())
+
+    cart = ShoppingCart(key="user-123")
+    result = await cart.add_item("item-abc", quantity=2, price=29.99)
+
+    assert result["total_items"] == 1
+
+    await cart.add_item("item-xyz", quantity=1, price=15.00)
+    total = await cart.get_total()
+
+    assert total == 2 * 29.99 + 1 * 15.00  # 74.98

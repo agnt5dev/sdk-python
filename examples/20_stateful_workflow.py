@@ -4,8 +4,7 @@ Example: Stateful Workflow with ctx.state
 This example demonstrates:
 - Using ctx.state.get/set for durable workflow state
 - Step-by-step state tracking
-- Recording workflow progress (Phase 6A)
-- Future: State persists across crashes and enables replay (Phase 6B)
+- Recording workflow progress with automatic durability
 """
 
 import asyncio
@@ -70,7 +69,7 @@ async def order_fulfillment(ctx: Context, order_id: str) -> Dict:
     - Progress monitoring
     - Retry logic
     - Debugging
-    - Future: Crash recovery (Phase 6B)
+    - Automatic crash recovery
     """
     ctx.logger.info(f"Starting order fulfillment for {order_id}")
 
@@ -244,7 +243,7 @@ async def multi_stage_pipeline(ctx: Context, job_id: str) -> Dict:
 
 
 async def main():
-    print("=== Stateful Workflow Examples (Phase 6A) ===\n")
+    print("=== Stateful Workflow Examples ===\n")
 
     # Example 1: Order fulfillment with state tracking
     print("1. Order Fulfillment with State Tracking:\n")
@@ -268,14 +267,13 @@ async def main():
     print()
 
     print("═" * 60)
-    print("Phase 6A: Stateful Workflows")
+    print("Stateful Workflows with Automatic Durability")
     print("═" * 60)
     print("✅ Steps recorded: Each ctx.task() call records result")
     print("✅ State tracked: ctx.state.set/get for workflow state")
     print("✅ Events published: workflow.step.completed + workflow.state.changed")
     print("✅ Persisted: Events → Projectors → Entity table")
-    print()
-    print("📊 Phase 6B (Future): Replay from recorded steps on crash")
+    print("✅ Crash recovery: Workflows replay from recorded steps")
     print()
 
 

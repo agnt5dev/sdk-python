@@ -1,0 +1,14 @@
+# Test Service Dependencies
+
+[project]
+name = "test-service"
+version = "0.1.0"
+description = "Integration test service for AGNT5 Python SDK"
+requires-python = ">=3.11"
+
+dependencies = [
+    "agnt5",  # Use local development version
+]
+
+[tool.uv]
+dev-dependencies = []

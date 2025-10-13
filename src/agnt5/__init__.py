@@ -9,10 +9,15 @@ from ._compat import _import_error, _rust_available
 from .agent import Agent, AgentRegistry, AgentResult, Handoff, agent, handoff
 from .client import Client, RunError
 from .context import Context
+from .function import FunctionContext
+from .workflow import WorkflowContext
 from .entity import (
     Entity,
     EntityRegistry,
+    EntityStateManager,
     EntityType,
+    create_entity_context,
+    with_entity_context,
 )
 from .exceptions import (
     AGNT5Error,
@@ -39,6 +44,8 @@ __all__ = [
     "__version__",
     # Core components
     "Context",
+    "FunctionContext",
+    "WorkflowContext",
     "Client",
     "Worker",
     "function",
@@ -46,6 +53,9 @@ __all__ = [
     "Entity",
     "EntityType",
     "EntityRegistry",
+    "EntityStateManager",
+    "with_entity_context",
+    "create_entity_context",
     "workflow",
     "WorkflowRegistry",
     "tool",

@@ -130,7 +130,7 @@ def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
         "required": required
     }
 
-    # Extract return type for output schema (optional, not strictly needed for Phase 1)
+    # Extract return type for output schema (optional for basic tool functionality)
     return_type = sig.return_annotation
     output_schema = None
     if return_type != inspect.Parameter.empty:
@@ -223,10 +223,10 @@ class Tool:
             ConfigurationError: If tool requires confirmation (not yet implemented)
         """
         if self.confirmation:
-            # In Phase 1, we can't implement actual confirmation
-            # Just log a warning
+            # TODO: Implement actual confirmation workflow
+            # For now, just log a warning
             logger.warning(
-                f"Tool '{self.name}' requires confirmation but confirmation is not implemented in Phase 1"
+                f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
             )
 
         # Create tool span via Rust FFI
@@ -374,7 +374,9 @@ def tool(
 
             @functools.wraps(original_func)
             async def async_wrapper(*args, **kwargs):
-                return original_func(*args, **kwargs)
+                # Run sync function in thread pool to prevent blocking event loop
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: original_func(*args, **kwargs))
 
             handler_func = async_wrapper
         else:
