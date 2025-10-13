@@ -1,14 +1,25 @@
-# Test Service Dependencies
-
 [project]
-name = "test-service"
-version = "0.1.0"
+name = "agnt5-test-service"
+version = "1.0.0"
 description = "Integration test service for AGNT5 Python SDK"
 requires-python = ">=3.11"
-
 dependencies = [
-    "agnt5",  # Use local development version
+    "agnt5>=0.2.2",
+    "python-dotenv>=1.0.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.uv]
 dev-dependencies = []
+
+[tool.uv.sources]
+agnt5 = { path = "../../../../", editable = true }
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agnt5_test_service"]

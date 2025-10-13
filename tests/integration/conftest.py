@@ -399,6 +399,8 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
     }
 
+    print(f"🔌 Worker connecting to coordinator: {env['AGNT5_COORDINATOR_ENDPOINT']}")
+
     worker = subprocess.Popen(
         ["uv", "run", "python", "app.py"],
         cwd=service_path,
@@ -407,17 +409,70 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         stderr=subprocess.PIPE,
     )
 
-    # Wait for worker to register
-    time.sleep(3)
+    # Wait for worker to register and become available
+    print(f"⏳ Waiting for worker to register...")
+    max_wait = 30  # seconds
+    start_time = time.time()
+    worker_registered = False
 
-    # Check if worker is still running
-    if worker.poll() is not None:
-        stdout, stderr = worker.communicate()
-        raise Exception(
-            f"Worker failed to start:\n"
-            f"STDOUT: {stdout.decode()}\n"
-            f"STDERR: {stderr.decode()}"
-        )
+    while (time.time() - start_time) < max_wait:
+        # Check if worker is still running
+        if worker.poll() is not None:
+            stdout, stderr = worker.communicate()
+            raise Exception(
+                f"Worker failed to start:\n"
+                f"STDOUT: {stdout.decode()}\n"
+                f"STDERR: {stderr.decode()}"
+            )
+
+        # Check if worker is registered
+        try:
+            # Query /v1/workers with default UUIDs that coordinator uses
+            # Coordinator converts non-UUID values to these defaults (see grpc_handlers.go:499-511)
+            response = requests.get(
+                f"{platform['gateway_url']}/v1/workers",
+                params={
+                    "tenant_id": "00000000-0000-0000-0000-000000000001",
+                    "deployment_id": "00000000-0000-0000-0000-000000000002"
+                },
+                timeout=2
+            )
+            print(f"   Worker check: status={response.status_code}")
+            if response.status_code == 200:
+                workers = response.json()
+                if workers and len(workers) > 0:
+                    print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
+
+                    # Print detailed worker information
+                    for idx, worker_info in enumerate(workers, 1):
+                        print(f"   Worker #{idx}:")
+                        print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
+                        print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
+                        print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
+
+                        # Print components grouped by type
+                        components = worker_info.get('components', {})
+                        if components:
+                            print(f"     • Components:")
+                            for comp_type, comp_list in components.items():
+                                if comp_list:
+                                    print(f"       - {comp_type}: {', '.join(comp_list)}")
+                        print()
+
+                    worker_registered = True
+                    break
+                else:
+                    print(f"   Empty workers list")
+            else:
+                print(f"   Worker check failed: {response.status_code} - {response.text[:200]}")
+        except Exception as e:
+            print(f"   Worker check error: {type(e).__name__}: {e}")
+            pass  # Keep waiting
+
+        time.sleep(1)
+
+    if not worker_registered:
+        print(f"⚠️  Worker process running but not registered after {max_wait}s")
 
     print(f"✅ Worker started (PID: {worker.pid})")
 
@@ -427,7 +482,15 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
     print(f"\n🧹 Stopping worker (PID: {worker.pid})...")
     worker.terminate()
     try:
-        worker.wait(timeout=5)
+        stdout, stderr = worker.communicate(timeout=5)
+        # Print worker logs for debugging (last 100 lines)
+        stderr_lines = stderr.decode('utf-8', errors='ignore').split('\n')
+        if len(stderr_lines) > 100:
+            print(f"\n📋 Worker logs (last 100 lines):")
+            print('\n'.join(stderr_lines[-100:]))
+        else:
+            print(f"\n📋 Worker logs (all):")
+            print('\n'.join(stderr_lines))
     except subprocess.TimeoutExpired:
         worker.kill()
         worker.wait()
@@ -500,7 +563,7 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
         stderr=subprocess.PIPE,
     )
 
-    # Wait for registration
-    time.sleep(3)
+    # Wait for registration (increased from 3s to 8s for reliable connection)
+    time.sleep(8)
 
     return new_worker
