@@ -114,10 +114,11 @@ def test_function_span_creation(client, worker_process, platform):
     time.sleep(3)
 
     # Query spans from observability database via MCP
+    # Note: Span names are prefixed with component type (e.g., "function.greet")
     traces = query_mcp_observability(
         platform['mcp_endpoint'],
         service="test-service",
-        name="greet"
+        name="function.greet"
     )
 
     # Verify function span was created
@@ -125,7 +126,7 @@ def test_function_span_creation(client, worker_process, platform):
 
     trace = traces[0]
     assert trace['Service'] == 'test-service'
-    assert trace['RootName'] == 'greet'
+    assert trace['RootName'] == 'function.greet'
     assert trace['StatusCode'] == 1  # OK status
 
 
@@ -151,10 +152,11 @@ def test_workflow_with_tools_span_hierarchy(client, worker_process, platform):
     time.sleep(3)
 
     # Query traces from observability database via MCP
+    # Note: Span names are prefixed with component type (e.g., "workflow.tool_orchestrated_workflow")
     traces = query_mcp_observability(
         platform['mcp_endpoint'],
         service="test-service",
-        name="tool_orchestrated_workflow"
+        name="workflow.tool_orchestrated_workflow"
     )
 
     # Verify workflow trace was created
@@ -162,7 +164,7 @@ def test_workflow_with_tools_span_hierarchy(client, worker_process, platform):
 
     workflow_trace = traces[0]
     assert workflow_trace['Service'] == 'test-service'
-    assert workflow_trace['RootName'] == 'tool_orchestrated_workflow'
+    assert workflow_trace['RootName'] == 'workflow.tool_orchestrated_workflow'
     assert workflow_trace['StatusCode'] == 1  # OK status
 
     # Verify trace has multiple spans (workflow + children)
@@ -184,7 +186,7 @@ def test_workflow_with_tools_span_hierarchy(client, worker_process, platform):
 
     assert root_span is not None, "No root span found"
     assert len(child_spans) > 0, "No child spans found"
-    assert root_span['Name'] == 'tool_orchestrated_workflow', "Root span is not the workflow"
+    assert root_span['Name'] == 'workflow.tool_orchestrated_workflow', "Root span is not the workflow"
 
     # Verify all spans completed successfully
     for span in spans:

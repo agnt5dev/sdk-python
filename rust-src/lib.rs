@@ -1,5 +1,5 @@
 use agnt5_sdk_core::telemetry::{
-    create_tool_execution_span, record_tool_error, record_tool_success,
+    create_tool_execution_span, flush_telemetry, record_tool_error, record_tool_success,
 };
 use agnt5_sdk_core::RuntimeContext;
 use opentelemetry::global::BoxedSpan;
@@ -265,6 +265,17 @@ fn create_span(
     })
 }
 
+/// Flush all pending telemetry data (spans and logs)
+///
+/// This should be called before worker shutdown to ensure batched spans are exported.
+/// The batch span processor buffers spans with a 5-second timeout by default.
+#[pyfunction]
+fn flush_telemetry_py() -> PyResult<()> {
+    flush_telemetry().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to flush telemetry: {}", e))
+    })
+}
+
 /// Forward Python logs to Rust tracing system for OpenTelemetry integration
 #[pyfunction]
 fn log_from_python(
@@ -347,6 +358,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
+    m.add_function(wrap_pyfunction!(flush_telemetry_py, m)?)?;
 
     Ok(())
 }

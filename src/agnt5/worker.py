@@ -343,7 +343,7 @@ class Worker:
             )
 
             # Create span for function execution with trace linking
-            from ._core import create_span
+            from ._core import create_span, flush_telemetry_py
 
             with create_span(
                 config.name,
@@ -362,6 +362,13 @@ class Worker:
 
                 # Debug: Log what type result is
                 logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
+
+            # Flush telemetry after span ends to ensure it's exported
+            try:
+                flush_telemetry_py()
+                logger.debug("Telemetry flushed after function execution")
+            except Exception as e:
+                logger.warning(f"Failed to flush telemetry: {e}")
 
             # Check if result is an async generator (streaming function)
             if inspect.isasyncgen(result):
@@ -496,7 +503,7 @@ class Worker:
             )
 
             # Create span for workflow execution with trace linking
-            from ._core import create_span
+            from ._core import create_span, flush_telemetry_py
 
             with create_span(
                 config.name,
@@ -512,6 +519,13 @@ class Worker:
                     result = await config.handler(ctx, **input_dict)
                 else:
                     result = await config.handler(ctx)
+
+            # Flush telemetry after span ends to ensure it's exported
+            try:
+                flush_telemetry_py()
+                logger.debug("Telemetry flushed after workflow execution")
+            except Exception as e:
+                logger.warning(f"Failed to flush telemetry: {e}")
 
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")

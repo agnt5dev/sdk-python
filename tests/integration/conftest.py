@@ -77,10 +77,27 @@ def runtime_mode(request) -> str:
     return "embedded"
 
 
+@pytest.fixture(scope="session")
+def persistent_data_dir(tmp_path_factory):
+    """
+    Create persistent directory for SQLite databases.
+
+    This directory persists for the entire test session, allowing:
+    - Database state to survive worker restarts
+    - Direct database inspection with MCP tools or sqlite3 CLI
+    - State verification across multiple test operations
+
+    The directory is automatically cleaned up after the test session.
+    """
+    data_dir = tmp_path_factory.mktemp("agnt5_data")
+    print(f"\n📁 Created persistent data directory: {data_dir}")
+    return str(data_dir)
+
+
 # ==================== Mode-Specific Setup Functions ====================
 
 
-def setup_embedded_mode() -> Dict[str, any]:
+def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
     """
     Set up Embedded mode (dev-server with SQLite + embedded journal).
 
@@ -90,6 +107,11 @@ def setup_embedded_mode() -> Dict[str, any]:
     - Journal: Embedded (in-memory event log)
     - State: SQLite (local file)
     - Containers: 1 (dev-server only)
+
+    Args:
+        data_dir: Optional host directory to mount as /data in container.
+                  If provided, SQLite databases will be persisted to this location
+                  and accessible from the host for inspection.
     """
     print("\n🔧 Setting up EMBEDDED mode (SQLite + embedded journal)")
 
@@ -104,8 +126,13 @@ def setup_embedded_mode() -> Dict[str, any]:
     dev_server.with_env("AGNT5_DISABLE_WORKER", "true")  # Disable worker for testing
     dev_server.with_env("AGNT5_VERBOSE", "true")  # Enable verbose logging for troubleshooting
 
-    # NOTE: Volume mounting causes issues with testcontainers
-    # The container will use its internal filesystem for /data
+    # Mount host directory to /data for persistent SQLite databases
+    if data_dir:
+        # Ensure directory exists
+        os.makedirs(data_dir, exist_ok=True)
+        # Mount with read-write access
+        dev_server.with_volume_mapping(data_dir, "/data", "rw")
+        print(f"   📂 Mounting host directory: {data_dir} → /data")
 
     dev_server.start()
 
@@ -134,13 +161,20 @@ def setup_embedded_mode() -> Dict[str, any]:
     # Wait for platform health with container reference for logging
     _wait_for_platform_health(gateway_url, container=dev_server)
 
-    # SQLite database path (inside container, not accessible from host)
-    sqlite_path = "/data/orchestration.db"
-    observability_path = "/data/observability.db"
+    # SQLite database paths
+    container_db_path = "/data/orchestration.db"
+    container_observability_path = "/data/observability.db"
 
     print(f"✅ Embedded mode ready")
-    print(f"   Orchestration DB: {sqlite_path} (inside container)")
-    print(f"   Observability DB: {observability_path} (inside container)")
+    if data_dir:
+        host_db_path = os.path.join(data_dir, "orchestration.db")
+        host_observability_path = os.path.join(data_dir, "observability.db")
+        print(f"   Orchestration DB (host): {host_db_path}")
+        print(f"   Observability DB (host): {host_observability_path}")
+        print(f"   💡 Access with: sqlite3 {host_db_path}")
+    else:
+        print(f"   Orchestration DB: {container_db_path} (inside container only)")
+        print(f"   Observability DB: {container_observability_path} (inside container only)")
 
     return {
         "mode": "embedded",
@@ -153,11 +187,14 @@ def setup_embedded_mode() -> Dict[str, any]:
         "coordinator_port": int(coordinator_port),
         "otlp_port": int(otlp_port),
         "mcp_port": int(mcp_port),
-        "db_url": sqlite_path,
-        "observability_db_url": observability_path,
+        "db_url": container_db_path,
+        "observability_db_url": container_observability_path,
         "db_type": "sqlite",
         "journal_backend": "embedded",
         "orchestration_backend": "sqlite",
+        "host_data_dir": data_dir,  # Host path for database inspection
+        "host_db_path": os.path.join(data_dir, "orchestration.db") if data_dir else None,
+        "host_observability_path": os.path.join(data_dir, "observability.db") if data_dir else None,
         "containers": {
             "dev-server": dev_server,
         }
@@ -364,19 +401,22 @@ def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=Non
 
 
 @pytest.fixture(scope="function")
-def platform(runtime_mode) -> Generator[Dict[str, any], None, None]:
+def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], None, None]:
     """
     Start AGNT5 platform in embedded mode.
 
     Uses function scope so each test gets a clean platform state.
+    However, the SQLite database is mounted to a persistent directory
+    (persistent_data_dir), allowing the database to survive worker restarts
+    and be inspected from the host.
 
     Currently supports:
     - embedded: SQLite + embedded journal (dev-server container)
 
     TODO: Add postgres and managed modes
     """
-    # Setup embedded mode
-    platform_config = setup_embedded_mode()
+    # Setup embedded mode with persistent data directory
+    platform_config = setup_embedded_mode(data_dir=persistent_data_dir)
 
     yield platform_config
 
