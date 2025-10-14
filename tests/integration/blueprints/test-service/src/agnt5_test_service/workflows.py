@@ -5,11 +5,13 @@ Provides multi-step workflows for testing durability and state management.
 """
 
 import asyncio
-from agnt5 import Context, workflow
+import os
+from agnt5 import Agent, Context, workflow
+from agnt5_test_service.tools import calculate_total, format_report, search_database, validate_data
 
 
 @workflow
-async def order_fulfillment(ctx: Context, order_id: str, items: list) -> dict:
+async def order_fulfillment(ctx: Context, order_id: str, items: list = None) -> dict:
     """
     Multi-step order processing workflow.
 
@@ -18,6 +20,9 @@ async def order_fulfillment(ctx: Context, order_id: str, items: list) -> dict:
     - State persistence across steps
     - Error handling in workflows
     """
+    if items is None:
+        items = []
+
     ctx.logger.info(f"Starting order fulfillment for order {order_id}")
 
     # Step 1: Validate order
@@ -27,6 +32,7 @@ async def order_fulfillment(ctx: Context, order_id: str, items: list) -> dict:
     # Step 2: Process payment
     ctx.logger.info("Step 2: Processing payment")
     await asyncio.sleep(0.1)  # Simulate payment processing
+    payment_id = f"pay_{order_id}"
 
     # Step 3: Reserve inventory
     ctx.logger.info("Step 3: Reserving inventory")
@@ -35,10 +41,13 @@ async def order_fulfillment(ctx: Context, order_id: str, items: list) -> dict:
     # Step 4: Ship order
     ctx.logger.info("Step 4: Shipping order")
     await asyncio.sleep(0.1)  # Simulate shipping
+    tracking_number = f"TRACK_{order_id}"
 
     return {
         "order_id": order_id,
         "status": "completed",
+        "payment_id": payment_id,
+        "tracking_number": tracking_number,
         "items_count": len(items),
         "steps_completed": 4
     }
@@ -65,6 +74,7 @@ async def long_workflow(ctx: Context, steps: int) -> dict:
     return {
         "status": "completed",
         "total_steps": steps,
+        "steps_completed": steps,
         "results": results
     }
 
@@ -106,4 +116,214 @@ async def data_pipeline(ctx: Context, dataset_id: str, transform: str) -> dict:
     }
 
 
-__all__ = ["order_fulfillment", "long_workflow", "data_pipeline"]
+@workflow
+async def tool_orchestrated_workflow(ctx: Context, numbers: list[float], query: str) -> dict:
+    """
+    Workflow that directly invokes tools for processing.
+
+    Tests:
+    - Direct tool invocation in workflows
+    - Tool result handling
+    - Multiple tool coordination
+    """
+    ctx.logger.info(f"Starting tool orchestrated workflow")
+
+    # Step 1: Validate input data
+    ctx.logger.info("Step 1: Validating input data")
+    validation_result = await validate_data(ctx, data={"numbers": numbers, "query": query}, required_fields=["numbers", "query"])
+
+    if not validation_result["is_valid"]:
+        return {
+            "status": "failed",
+            "error": validation_result["message"],
+        }
+
+    # Step 2: Calculate statistics
+    ctx.logger.info("Step 2: Calculating statistics")
+    sum_result = await calculate_total(ctx, numbers=numbers, operation="sum")
+    avg_result = await calculate_total(ctx, numbers=numbers, operation="average")
+
+    # Step 3: Search database
+    ctx.logger.info("Step 3: Searching database")
+    search_results = await search_database(ctx, query=query, limit=3)
+
+    # Step 4: Format report
+    ctx.logger.info("Step 4: Formatting report")
+    report_data = {
+        "total_sum": sum_result["result"],
+        "average": avg_result["result"],
+        "count": len(numbers),
+        "search_results_count": len(search_results),
+    }
+    report = await format_report(ctx, data=report_data, format_style="summary")
+
+    return {
+        "status": "completed",
+        "validation": validation_result,
+        "statistics": {
+            "sum": sum_result["result"],
+            "average": avg_result["result"],
+            "count": len(numbers),
+        },
+        "search_results": search_results,
+        "report": report,
+    }
+
+
+@workflow
+async def agent_research_workflow(ctx: Context, research_topic: str) -> dict:
+    """
+    Workflow using an agent with tools to perform research.
+
+    Tests:
+    - Agent integration in workflows
+    - Agent tool orchestration
+    - LLM-driven tool selection
+    """
+    ctx.logger.info(f"Starting agent research workflow for: {research_topic}")
+
+    # Check if API key is available
+    if not os.getenv("OPENAI_API_KEY"):
+        ctx.logger.warning("OPENAI_API_KEY not set, skipping agent execution")
+        return {
+            "status": "skipped",
+            "reason": "OPENAI_API_KEY not configured",
+            "research_topic": research_topic,
+        }
+
+    # Step 1: Create research agent with tools
+    ctx.logger.info("Step 1: Creating research agent")
+    research_agent = Agent(
+        name="researcher",
+        model="openai/gpt-4o-mini",
+        instructions="""You are a research assistant. You MUST use the search_database tool to find information.
+
+        Required steps:
+        1. ALWAYS call search_database tool first to find relevant information
+        2. Use calculate_total if you need statistics
+        3. Use format_report to format your findings
+
+        Do not answer from your own knowledge - you must use the tools provided.""",
+        tools=[search_database, calculate_total, format_report],
+        temperature=0.7,
+        max_iterations=5,
+    )
+
+    # Step 2: Execute research task
+    ctx.logger.info("Step 2: Agent executing research")
+    result = await research_agent.run(
+        f"Research the topic: {research_topic}. Search for information and provide a summary.",
+        context=ctx,
+    )
+
+    # Step 3: Process results
+    ctx.logger.info("Step 3: Processing research results")
+
+    return {
+        "status": "completed",
+        "research_topic": research_topic,
+        "agent_output": result.output,
+        "tool_calls_made": len(result.tool_calls),
+        "tools_used": [tc["name"] for tc in result.tool_calls],
+    }
+
+
+@workflow
+async def agent_multi_step_workflow(ctx: Context, task: str, data_points: list[float]) -> dict:
+    """
+    Complex workflow with agent using multiple tools across steps.
+
+    Tests:
+    - Multi-step agent workflows
+    - Agent state across workflow steps
+    - Complex tool orchestration
+    """
+    ctx.logger.info(f"Starting multi-step agent workflow: {task}")
+
+    # Check if API key is available
+    if not os.getenv("OPENAI_API_KEY"):
+        ctx.logger.warning("OPENAI_API_KEY not set, skipping agent execution")
+        return {
+            "status": "skipped",
+            "reason": "OPENAI_API_KEY not configured",
+            "task": task,
+        }
+
+    # Step 1: Data analysis phase
+    ctx.logger.info("Step 1: Data analysis phase")
+    analyst_agent = Agent(
+        name="analyst",
+        model="openai/gpt-4o-mini",
+        instructions="""You are a data analyst. You MUST use the calculate_total tool to analyze data.
+
+        Required: Call calculate_total tool multiple times with different operations (sum, average, min, max).
+        Do not calculate manually - always use the tool.""",
+        tools=[calculate_total],
+        temperature=0.5,
+    )
+
+    analysis_result = await analyst_agent.run(
+        f"Analyze these data points: {data_points}. Calculate sum, average, and provide insights.",
+        context=ctx,
+    )
+
+    # Step 2: Research phase
+    ctx.logger.info("Step 2: Research phase")
+    researcher_agent = Agent(
+        name="researcher",
+        model="openai/gpt-4o-mini",
+        instructions="""You are a researcher. You MUST use the search_database tool to find information.
+        Always call search_database before answering.""",
+        tools=[search_database],
+        temperature=0.7,
+    )
+
+    # Extract keywords from task for search
+    search_query = task.split()[0] if task else "analytics"
+    research_result = await researcher_agent.run(
+        f"Search for information about: {search_query}",
+        context=ctx,
+    )
+
+    # Step 3: Report generation phase
+    ctx.logger.info("Step 3: Report generation phase")
+    report_agent = Agent(
+        name="report_writer",
+        model="openai/gpt-4o-mini",
+        instructions="""You are a report writer. Create a comprehensive report combining:
+        1. Data analysis findings
+        2. Research findings
+
+        Format it clearly and professionally.""",
+        tools=[format_report],
+        temperature=0.6,
+    )
+
+    final_result = await report_agent.run(
+        f"Create a report about '{task}' combining:\n"
+        f"Analysis: {analysis_result.output}\n"
+        f"Research: {research_result.output}",
+        context=ctx,
+    )
+
+    return {
+        "status": "completed",
+        "task": task,
+        "data_points_count": len(data_points),
+        "analysis_output": analysis_result.output,
+        "research_output": research_result.output,
+        "final_report": final_result.output,
+        "total_tool_calls": (
+            len(analysis_result.tool_calls) + len(research_result.tool_calls) + len(final_result.tool_calls)
+        ),
+    }
+
+
+__all__ = [
+    "order_fulfillment",
+    "long_workflow",
+    "data_pipeline",
+    "tool_orchestrated_workflow",
+    "agent_research_workflow",
+    "agent_multi_step_workflow",
+]

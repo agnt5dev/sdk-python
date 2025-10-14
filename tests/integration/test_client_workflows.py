@@ -29,7 +29,7 @@ def test_workflow_basic_execution(client, worker_process):
 
     This should PASS - validates basic workflow orchestration.
     """
-    result = client.run("order_fulfillment", {"order_id": "order-123"})
+    result = client.run("order_fulfillment", {"order_id": "order-123"}, component_type="workflow")
 
     assert result["status"] == "completed"
     assert result["order_id"] == "order-123"
@@ -46,7 +46,7 @@ def test_workflow_with_state_management(client, worker_process):
 
     This should PASS - validates ctx.state API works.
     """
-    result = client.run("order_fulfillment", {"order_id": "order-456"})
+    result = client.run("order_fulfillment", {"order_id": "order-456"}, component_type="workflow")
 
     # Workflow should complete successfully
     assert result["status"] == "completed"
@@ -71,7 +71,7 @@ def test_workflow_resumes_after_crash(client, worker_process, platform):
     This test drives implementation of workflow checkpointing in Week 2.
     """
     # 1. Submit long workflow
-    run_id = client.submit("long_workflow", {"steps": 5})
+    run_id = client.submit("long_workflow", {"steps": 5}, component_type="workflow")
 
     # 2. Wait for partial completion (step 2)
     time.sleep(2.5)
@@ -117,7 +117,7 @@ def test_workflow_idempotency(client, worker_process, platform):
     from tests.integration.utils import get_step_execution_count
 
     # 1. Submit workflow
-    run_id = client.submit("long_workflow", {"steps": 5})
+    run_id = client.submit("long_workflow", {"steps": 5}, component_type="workflow")
 
     # 2. Wait for partial completion
     time.sleep(2.5)
@@ -156,7 +156,7 @@ def test_workflow_async_submit_and_wait(client, worker_process):
     This should PASS - validates client.submit() and client.wait_for_result().
     """
     # Submit workflow asynchronously
-    run_id = client.submit("order_fulfillment", {"order_id": "order-789"})
+    run_id = client.submit("order_fulfillment", {"order_id": "order-789"}, component_type="workflow")
 
     assert run_id is not None
     assert isinstance(run_id, str)
@@ -178,7 +178,7 @@ def test_workflow_parallel_execution(client, worker_process):
     # Submit multiple workflows
     run_ids = []
     for i in range(5):
-        run_id = client.submit("order_fulfillment", {"order_id": f"order-{i}"})
+        run_id = client.submit("order_fulfillment", {"order_id": f"order-{i}"}, component_type="workflow")
         run_ids.append(run_id)
 
     # Wait for all to complete
@@ -210,7 +210,7 @@ def test_workflow_state_query(client, worker_process, platform):
     from tests.integration.utils import get_workflow_run_status
 
     # Submit long workflow
-    run_id = client.submit("long_workflow", {"steps": 5})
+    run_id = client.submit("long_workflow", {"steps": 5}, component_type="workflow")
 
     # Query state mid-execution
     time.sleep(2)

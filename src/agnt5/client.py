@@ -42,6 +42,7 @@ class Client:
         self,
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
     ) -> Dict[str, Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -50,6 +51,7 @@ class Client:
         Args:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
+            component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
 
         Returns:
             Dictionary containing the component's output
@@ -60,8 +62,11 @@ class Client:
 
         Example:
             ```python
-            # Simple function call
+            # Simple function call (default)
             result = client.run("greet", {"name": "Alice"})
+
+            # Workflow execution (explicit)
+            result = client.run("order_fulfillment", {"order_id": "123"}, component_type="workflow")
 
             # No input data
             result = client.run("get_status")
@@ -70,8 +75,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL
-        url = urljoin(self.gateway_url + "/", f"v1/run/{component}")
+        # Build URL with component type
+        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
 
         # Make request
         response = self._client.post(
@@ -138,6 +143,7 @@ class Client:
         self,
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
     ) -> str:
         """Submit a component for async execution and return immediately.
 
@@ -147,6 +153,7 @@ class Client:
         Args:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
+            component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
 
         Returns:
             String containing the run ID
@@ -156,9 +163,12 @@ class Client:
 
         Example:
             ```python
-            # Submit async task
+            # Submit async function (default)
             run_id = client.submit("process_video", {"url": "https://..."})
             print(f"Submitted: {run_id}")
+
+            # Submit workflow
+            run_id = client.submit("order_fulfillment", {"order_id": "123"}, component_type="workflow")
 
             # Check status later
             status = client.get_status(run_id)
@@ -169,8 +179,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL
-        url = urljoin(self.gateway_url + "/", f"v1/submit/{component}")
+        # Build URL with component type
+        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
 
         # Make request
         response = self._client.post(
@@ -522,10 +532,11 @@ class EntityProxy:
             Callable that executes the entity method
         """
 
-        def method_caller(**kwargs) -> Any:
+        def method_caller(*args, **kwargs) -> Any:
             """Call an entity method with the given parameters.
 
             Args:
+                *args: Positional arguments (not recommended, use kwargs)
                 **kwargs: Method parameters as keyword arguments
 
             Returns:
@@ -533,7 +544,23 @@ class EntityProxy:
 
             Raises:
                 RunError: If the method execution fails
+                ValueError: If both positional and keyword arguments are provided
             """
+            # Convert positional args to kwargs if provided
+            if args and kwargs:
+                raise ValueError(
+                    f"Cannot mix positional and keyword arguments when calling entity method '{method_name}'. "
+                    "Please use keyword arguments only."
+                )
+
+            # If positional args provided, we can't convert them without knowing parameter names
+            # Raise helpful error
+            if args:
+                raise ValueError(
+                    f"Entity method '{method_name}' requires keyword arguments, but got {len(args)} positional arguments. "
+                    f"Example: .{method_name}(param1=value1, param2=value2)"
+                )
+
             # Build URL: /v1/entity/:entityType/:key/:method
             url = urljoin(
                 self._client.gateway_url + "/",

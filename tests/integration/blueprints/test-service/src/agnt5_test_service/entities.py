@@ -20,8 +20,6 @@ class ShoppingCart(Entity):
 
     async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
         """Add item to cart."""
-        self.ctx.logger.info(f"Adding item {item_id} to cart")
-
         items = self.state.get("items", {})
         items[item_id] = {"quantity": quantity, "price": price}
         self.state.set("items", items)

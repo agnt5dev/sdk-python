@@ -229,20 +229,21 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
             )
 
-        # Create tool span via Rust FFI
+        # Create span for tool execution with trace linking
         from ._core import create_span
 
+        logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
+
+        # Create span with runtime_context for parent-child span linking
         with create_span(
             self.name,
             "tool",
+            ctx._runtime_context if hasattr(ctx, "_runtime_context") else None,
             {
                 "tool.name": self.name,
                 "tool.args": ",".join(kwargs.keys()),
             },
         ) as span:
-            # Execute handler
-            logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
-
             # Handler is already async (validated in tool() decorator)
             result = await self.handler(ctx, **kwargs)
 

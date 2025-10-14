@@ -37,6 +37,16 @@ from agnt5_test_service.workflows import (
     order_fulfillment,
     long_workflow,
     data_pipeline,
+    tool_orchestrated_workflow,
+    agent_research_workflow,
+    agent_multi_step_workflow,
+)
+
+from agnt5_test_service.tools import (
+    calculate_total,
+    search_database,
+    format_report,
+    validate_data,
 )
 
 __all__ = [
@@ -68,6 +78,14 @@ __all__ = [
     "order_fulfillment",
     "long_workflow",
     "data_pipeline",
+    "tool_orchestrated_workflow",
+    "agent_research_workflow",
+    "agent_multi_step_workflow",
+    # Tools
+    "calculate_total",
+    "search_database",
+    "format_report",
+    "validate_data",
 ]
 
 __version__ = "1.0.0"

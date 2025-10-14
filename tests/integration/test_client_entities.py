@@ -200,9 +200,9 @@ def test_entity_multiple_method_calls(client, worker_process):
     This should PASS - validates state is maintained across method calls.
     """
     # Multiple operations on same cart
-    client.entity("ShoppingCart", "user-456").add_item("item-1", 1, 10.0)
-    client.entity("ShoppingCart", "user-456").add_item("item-2", 2, 20.0)
-    client.entity("ShoppingCart", "user-456").add_item("item-3", 3, 30.0)
+    client.entity("ShoppingCart", "user-456").add_item(item_id="item-1", quantity=1, price=10.0)
+    client.entity("ShoppingCart", "user-456").add_item(item_id="item-2", quantity=2, price=20.0)
+    client.entity("ShoppingCart", "user-456").add_item(item_id="item-3", quantity=3, price=30.0)
 
     # Check total
     total = client.entity("ShoppingCart", "user-456").get_total()

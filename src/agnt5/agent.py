@@ -452,12 +452,13 @@ class Agent:
                 component_type="agent",
             )
 
-        # Create agent span via Rust FFI
+        # Create span for agent execution with trace linking
         from ._core import create_span
 
         with create_span(
             self.name,
             "agent",
+            context._runtime_context if hasattr(context, "_runtime_context") else None,
             {
                 "agent.name": self.name,
                 "agent.model": self.model,

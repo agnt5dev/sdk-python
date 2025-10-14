@@ -36,6 +36,7 @@ from ._core import create_span as _create_span
 def span(
     name: Optional[str] = None,
     component_type: str = "function",
+    runtime_context: Optional[Any] = None,
     **attributes: str
 ):
     """
@@ -44,6 +45,7 @@ def span(
     Args:
         name: Span name (defaults to function name)
         component_type: Component type (default: "function")
+        runtime_context: Optional RuntimeContext for trace linking
         **attributes: Additional span attributes
 
     Example:
@@ -59,7 +61,14 @@ def span(
         if inspect.iscoroutinefunction(func):
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
-                with _create_span(span_name, component_type, attributes) as s:
+                # Try to extract runtime_context from first arg if it's a Context
+                ctx = runtime_context
+                if ctx is None and args:
+                    from .context import Context
+                    if isinstance(args[0], Context):
+                        ctx = args[0]._runtime_context
+
+                with _create_span(span_name, component_type, ctx, attributes) as s:
                     try:
                         result = await func(*args, **kwargs)
                         # Span automatically marked as OK on success
@@ -71,7 +80,14 @@ def span(
         else:
             @functools.wraps(func)
             def sync_wrapper(*args, **kwargs):
-                with _create_span(span_name, component_type, attributes) as s:
+                # Try to extract runtime_context from first arg if it's a Context
+                ctx = runtime_context
+                if ctx is None and args:
+                    from .context import Context
+                    if isinstance(args[0], Context):
+                        ctx = args[0]._runtime_context
+
+                with _create_span(span_name, component_type, ctx, attributes) as s:
                     try:
                         result = func(*args, **kwargs)
                         return result
@@ -86,6 +102,7 @@ def span(
 def span_context(
     name: str,
     component_type: str = "operation",
+    runtime_context: Optional[Any] = None,
     **attributes: str
 ):
     """
@@ -94,6 +111,7 @@ def span_context(
     Args:
         name: Span name
         component_type: Component type (default: "operation")
+        runtime_context: Optional RuntimeContext for trace linking
         **attributes: Span attributes
 
     Yields:
@@ -101,12 +119,12 @@ def span_context(
 
     Example:
         ```python
-        with span_context("db_query", table="users") as s:
+        with span_context("db_query", runtime_context=ctx._runtime_context, table="users") as s:
             results = query_database()
             s.set_attribute("result_count", str(len(results)))
         ```
     """
-    s = _create_span(name, component_type, attributes)
+    s = _create_span(name, component_type, runtime_context, attributes)
     try:
         yield s
         # Context manager automatically calls s.__exit__ which sets status
@@ -118,12 +136,13 @@ def span_context(
         pass
 
 
-def create_task_span(name: str, **attributes: str):
+def create_task_span(name: str, runtime_context: Optional[Any] = None, **attributes: str):
     """
     Create a span for task execution.
 
     Args:
         name: Task name
+        runtime_context: Optional RuntimeContext for trace linking
         **attributes: Task attributes
 
     Returns:
@@ -131,39 +150,41 @@ def create_task_span(name: str, **attributes: str):
 
     Example:
         ```python
-        with create_task_span("process_data", batch_size="100") as s:
+        with create_task_span("process_data", runtime_context=ctx._runtime_context, batch_size="100") as s:
             result = await process()
         ```
     """
-    return _create_span(name, "task", attributes)
+    return _create_span(name, "task", runtime_context, attributes)
 
 
-def create_workflow_span(name: str, **attributes: str):
+def create_workflow_span(name: str, runtime_context: Optional[Any] = None, **attributes: str):
     """
     Create a span for workflow execution.
 
     Args:
         name: Workflow name
+        runtime_context: Optional RuntimeContext for trace linking
         **attributes: Workflow attributes
 
     Returns:
         PySpan object to use as context manager
     """
-    return _create_span(name, "workflow", attributes)
+    return _create_span(name, "workflow", runtime_context, attributes)
 
 
-def create_agent_span(name: str, **attributes: str):
+def create_agent_span(name: str, runtime_context: Optional[Any] = None, **attributes: str):
     """
     Create a span for agent execution.
 
     Args:
         name: Agent name
+        runtime_context: Optional RuntimeContext for trace linking
         **attributes: Agent attributes
 
     Returns:
         PySpan object to use as context manager
     """
-    return _create_span(name, "agent", attributes)
+    return _create_span(name, "agent", runtime_context, attributes)
 
 
 __all__ = [

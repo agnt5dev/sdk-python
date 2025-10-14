@@ -342,14 +342,26 @@ class Worker:
                 runtime_context=request.runtime_context,
             )
 
-            # Execute function
-            if input_dict:
-                result = config.handler(ctx, **input_dict)
-            else:
-                result = config.handler(ctx)
+            # Create span for function execution with trace linking
+            from ._core import create_span
 
-            # Debug: Log what type result is
-            logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
+            with create_span(
+                config.name,
+                "function",
+                request.runtime_context,
+                {
+                    "function.name": config.name,
+                    "service.name": self.service_name,
+                },
+            ) as span:
+                # Execute function
+                if input_dict:
+                    result = config.handler(ctx, **input_dict)
+                else:
+                    result = config.handler(ctx)
+
+                # Debug: Log what type result is
+                logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
 
             # Check if result is an async generator (streaming function)
             if inspect.isasyncgen(result):
@@ -483,11 +495,23 @@ class Worker:
                 runtime_context=request.runtime_context,
             )
 
-            # Execute workflow
-            if input_dict:
-                result = await config.handler(ctx, **input_dict)
-            else:
-                result = await config.handler(ctx)
+            # Create span for workflow execution with trace linking
+            from ._core import create_span
+
+            with create_span(
+                config.name,
+                "workflow",
+                request.runtime_context,
+                {
+                    "workflow.name": config.name,
+                    "service.name": self.service_name,
+                },
+            ) as span:
+                # Execute workflow
+                if input_dict:
+                    result = await config.handler(ctx, **input_dict)
+                else:
+                    result = await config.handler(ctx)
 
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
@@ -496,17 +520,21 @@ class Worker:
             metadata = {}
 
             # Add step events to metadata (for workflow durability)
-            if ctx._step_events:
-                metadata["step_events"] = json.dumps(ctx._step_events)
-                logger.debug(f"Workflow has {len(ctx._step_events)} recorded steps")
+            # Access _step_events from the workflow entity, not the context
+            step_events = ctx._workflow_entity._step_events
+            if step_events:
+                metadata["step_events"] = json.dumps(step_events)
+                logger.debug(f"Workflow has {len(step_events)} recorded steps")
 
             # Add final state snapshot to metadata (if state was used)
-            if hasattr(ctx, '_state_client') and ctx.state.has_changes():
-                state_snapshot = ctx.state.get_state_snapshot()
-                metadata["workflow_state"] = json.dumps(state_snapshot)
-                logger.debug(f"Workflow state snapshot: {state_snapshot}")
+            # Check if _state was initialized without triggering property getter
+            if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
+                if ctx._workflow_entity._state.has_changes():
+                    state_snapshot = ctx._workflow_entity._state.get_state_snapshot()
+                    metadata["workflow_state"] = json.dumps(state_snapshot)
+                    logger.debug(f"Workflow state snapshot: {state_snapshot}")
 
-            logger.info(f"Workflow completed successfully with {len(ctx._step_events)} steps")
+            logger.info(f"Workflow completed successfully with {len(step_events)} steps")
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,

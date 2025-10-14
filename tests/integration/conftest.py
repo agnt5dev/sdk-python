@@ -95,7 +95,7 @@ def setup_embedded_mode() -> Dict[str, any]:
 
     # Start dev-server container
     dev_server = DockerContainer("agnt5/dev-server:latest")
-    dev_server.with_exposed_ports(34181, 34182, 34186)  # HTTP, gRPC, Coordinator
+    dev_server.with_exposed_ports(34181, 34182, 34186, 4317, 34180)  # HTTP, gRPC, Coordinator, OTLP, MCP
 
     # Configure for embedded mode (SQLite + embedded journal)
     dev_server.with_env("AGNT5_DATA_DIR", "/data")
@@ -117,31 +117,44 @@ def setup_embedded_mode() -> Dict[str, any]:
     gateway_http_port = dev_server.get_exposed_port(34181)
     gateway_grpc_port = dev_server.get_exposed_port(34182)
     coordinator_port = dev_server.get_exposed_port(34186)
+    otlp_port = dev_server.get_exposed_port(4317)
+    mcp_port = dev_server.get_exposed_port(34180)
 
     gateway_url = f"http://{gateway_host}:{gateway_http_port}"
+    otlp_endpoint = f"http://{gateway_host}:{otlp_port}"
+    mcp_endpoint = f"http://{gateway_host}:{mcp_port}"
 
     print(f"✅ Dev-server container started")
     print(f"   Gateway HTTP: {gateway_url}")
     print(f"   Gateway gRPC: {gateway_host}:{gateway_grpc_port}")
     print(f"   Coordinator: {gateway_host}:{coordinator_port}")
+    print(f"   OTLP Endpoint: {otlp_endpoint}")
+    print(f"   MCP Endpoint: {mcp_endpoint}")
 
     # Wait for platform health with container reference for logging
     _wait_for_platform_health(gateway_url, container=dev_server)
 
     # SQLite database path (inside container, not accessible from host)
     sqlite_path = "/data/orchestration.db"
+    observability_path = "/data/observability.db"
 
     print(f"✅ Embedded mode ready")
-    print(f"   Database: {sqlite_path} (inside container)")
+    print(f"   Orchestration DB: {sqlite_path} (inside container)")
+    print(f"   Observability DB: {observability_path} (inside container)")
 
     return {
         "mode": "embedded",
         "gateway_url": gateway_url,
         "coordinator_url": f"http://{gateway_host}:{coordinator_port}",
+        "otlp_endpoint": otlp_endpoint,
+        "mcp_endpoint": mcp_endpoint,
         "gateway_http_port": int(gateway_http_port),
         "gateway_grpc_port": int(gateway_grpc_port),
         "coordinator_port": int(coordinator_port),
+        "otlp_port": int(otlp_port),
+        "mcp_port": int(mcp_port),
         "db_url": sqlite_path,
+        "observability_db_url": observability_path,
         "db_type": "sqlite",
         "journal_backend": "embedded",
         "orchestration_backend": "sqlite",
@@ -397,9 +410,11 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         "AGNT5_SERVICE_NAME": "test-service",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],
     }
 
     print(f"🔌 Worker connecting to coordinator: {env['AGNT5_COORDINATOR_ENDPOINT']}")
+    print(f"📊 Worker telemetry exporting to: {env['OTEL_EXPORTER_OTLP_ENDPOINT']}")
 
     worker = subprocess.Popen(
         ["uv", "run", "python", "app.py"],
@@ -553,6 +568,7 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
         "AGNT5_SERVICE_NAME": "test-service",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],
     }
 
     new_worker = subprocess.Popen(
