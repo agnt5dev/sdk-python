@@ -377,13 +377,16 @@ class Agent:
             if handoff_config.pass_full_history:
                 # Get current conversation from the agent's run loop
                 # (This will be set when we detect the handoff in run())
-                conversation_history = ctx.get("_current_conversation", [])
+                conversation_history = getattr(ctx, '_agent_data', {}).get("_current_conversation", [])
+
                 if conversation_history:
                     ctx.logger.info(
                         f"Passing {len(conversation_history)} messages to target agent"
                     )
                     # Store in context for target agent to optionally use
-                    ctx.set("_handoff_conversation_history", conversation_history)
+                    if not hasattr(ctx, '_agent_data'):
+                        ctx._agent_data = {}
+                    ctx._agent_data["_handoff_conversation_history"] = conversation_history
 
             # Execute target agent with the message and shared context
             result = await target_agent.run(message, context=ctx)
@@ -398,7 +401,9 @@ class Agent:
                 "tool_calls": result.tool_calls,
             }
 
-            ctx.set("_handoff_result", handoff_data)
+            if not hasattr(ctx, '_agent_data'):
+                ctx._agent_data = {}
+            ctx._agent_data["_handoff_result"] = handoff_data
 
             # Return the handoff data (will be detected in run() loop)
             return handoff_data
@@ -449,7 +454,6 @@ class Agent:
 
             context = Context(
                 run_id=f"agent-{self.name}-{uuid.uuid4().hex[:8]}",
-                component_type="agent",
             )
 
         # Create span for agent execution with trace linking
@@ -471,8 +475,6 @@ class Agent:
 
             # Reasoning loop
             for iteration in range(self.max_iterations):
-                self.logger.info(f"Agent iteration {iteration + 1}/{self.max_iterations}")
-
                 # Build tool definitions for LLM
                 tool_defs = [
                     ToolDefinition(
@@ -517,10 +519,13 @@ class Agent:
 
                 # Check if LLM wants to use tools
                 if response.tool_calls:
-                    self.logger.info(f"Agent calling {len(response.tool_calls)} tool(s)")
+                    self.logger.debug(f"Agent calling {len(response.tool_calls)} tool(s)")
 
                     # Store current conversation in context for potential handoffs
-                    context.set("_current_conversation", messages)
+                    # Use a simple dict attribute since we don't need full state persistence for this
+                    if not hasattr(context, '_agent_data'):
+                        context._agent_data = {}
+                    context._agent_data["_current_conversation"] = messages
 
                     # Execute tool calls
                     tool_results = []
@@ -586,13 +591,13 @@ class Agent:
                             for tr in tool_results
                         ]
                     )
-                    messages.append(Message.user(f"Tool results:\n{results_text}"))
+                    messages.append(Message.user(f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."))
 
                     # Continue loop for agent to process results
 
                 else:
                     # No tool calls - agent is done
-                    self.logger.info(f"Agent completed after {iteration + 1} iterations")
+                    self.logger.debug(f"Agent completed after {iteration + 1} iterations")
                     return AgentResult(
                         output=response.text,
                         tool_calls=all_tool_calls,
@@ -636,7 +641,6 @@ class Agent:
 
             context = Context(
                 run_id=f"agent-chat-{self.name}-{uuid.uuid4().hex[:8]}",
-                component_type="agent",
             )
 
         # Add user message

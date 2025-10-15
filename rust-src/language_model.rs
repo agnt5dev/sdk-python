@@ -751,6 +751,24 @@ impl PyResponse {
     }
 
     #[getter]
+    fn tool_calls(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        // Convert tool_calls from Rust to Python list of dicts
+        if let Some(ref tool_calls) = self.inner.tool_calls {
+            let py_list = pyo3::types::PyList::empty(py);
+            for tool_call in tool_calls {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("id", &tool_call.id)?;
+                dict.set_item("name", &tool_call.name)?;
+                dict.set_item("arguments", &tool_call.arguments)?;
+                py_list.append(dict)?;
+            }
+            Ok(Some(py_list.into()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[getter]
     fn object(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         self.inner
             .object

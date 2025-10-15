@@ -312,11 +312,23 @@ class _LanguageModel:
         if request.response_schema is not None:
             kwargs["response_schema_kw"] = request.response_schema
 
-        # TODO: Add tools and tool_choice support when needed
-        # if request.tools:
-        #     kwargs["tools"] = self._serialize_tools(request.tools)
-        # if request.tool_choice:
-        #     kwargs["tool_choice"] = request.tool_choice.value
+        # Pass tools and tool_choice to Rust
+        if request.tools:
+            # Serialize tools to JSON for Rust
+            tools_list = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+            tools_json = json.dumps(tools_list)
+            kwargs["tools"] = tools_json
+
+        if request.tool_choice:
+            # Serialize tool_choice to JSON for Rust
+            kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
         # Call Rust implementation - it returns a proper Python coroutine now
         # Using pyo3-async-runtimes for truly async HTTP calls without blocking
@@ -362,11 +374,22 @@ class _LanguageModel:
         if request.config.top_p is not None:
             kwargs["top_p"] = request.config.top_p
 
-        # TODO: Add tools and tool_choice support when needed
-        # if request.tools:
-        #     kwargs["tools"] = self._serialize_tools(request.tools)
-        # if request.tool_choice:
-        #     kwargs["tool_choice"] = request.tool_choice.value
+        # Pass tools and tool_choice to Rust
+        if request.tools:
+            # Serialize tools to JSON for Rust
+            tools_list = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+            kwargs["tools"] = json.dumps(tools_list)
+
+        if request.tool_choice:
+            # Serialize tool_choice to JSON for Rust
+            kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
         # Call Rust implementation - it returns a proper Python coroutine now
         # Using pyo3-async-runtimes for truly async streaming without blocking
@@ -416,11 +439,16 @@ class _LanguageModel:
                 total_tokens=rust_response.usage.total_tokens,
             )
 
+        # Extract tool_calls from Rust response
+        tool_calls = None
+        if hasattr(rust_response, 'tool_calls') and rust_response.tool_calls:
+            tool_calls = rust_response.tool_calls
+
         return GenerateResponse(
             text=rust_response.content,
             usage=usage,
             finish_reason=None,  # TODO: Add finish_reason to Rust response
-            tool_calls=None,  # TODO: Add tool calls support
+            tool_calls=tool_calls,
             _rust_response=rust_response,  # Store for .structured_output access
         )
 
