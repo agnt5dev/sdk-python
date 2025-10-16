@@ -32,7 +32,7 @@ from .tool import Tool, ToolRegistry, tool
 from .types import BackoffPolicy, BackoffType, FunctionConfig, RetryPolicy, WorkflowConfig
 from .version import _get_version
 from .worker import Worker
-from .workflow import WorkflowRegistry, chatflow, workflow
+from .workflow import WorkflowRegistry, workflow
 
 # Expose simplified language model API (recommended)
 from . import lm
@@ -57,7 +57,6 @@ __all__ = [
     "with_entity_context",
     "create_entity_context",
     "workflow",
-    "chatflow",
     "WorkflowRegistry",
     "tool",
     "Tool",

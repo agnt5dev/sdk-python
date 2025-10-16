@@ -463,6 +463,7 @@ def workflow(
     _func: Optional[Callable[..., Any]] = None,
     *,
     name: Optional[str] = None,
+    chat: bool = False,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as an AGNT5 durable workflow.
@@ -472,8 +473,9 @@ def workflow(
 
     Args:
         name: Custom workflow name (default: function's __name__)
+        chat: Enable chat mode for multi-turn conversation workflows (default: False)
 
-    Example:
+    Example (standard workflow):
         @workflow
         async def process_order(ctx: WorkflowContext, order_id: str) -> dict:
             # Durable state - survives crashes
@@ -491,6 +493,27 @@ def workflow(
 
             ctx.state.set("status", "completed")
             return {"status": ctx.state.get("status")}
+
+    Example (chat workflow):
+        @workflow(chat=True)
+        async def customer_support(ctx: WorkflowContext, message: str) -> dict:
+            # Initialize conversation state
+            if not ctx.state.get("messages"):
+                ctx.state.set("messages", [])
+
+            # Add user message
+            messages = ctx.state.get("messages")
+            messages.append({"role": "user", "content": message})
+            ctx.state.set("messages", messages)
+
+            # Generate AI response
+            response = await ctx.task(generate_response, messages=messages)
+
+            # Add assistant response
+            messages.append({"role": "assistant", "content": response})
+            ctx.state.set("messages", messages)
+
+            return {"response": response, "turn_count": len(messages) // 2}
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -522,6 +545,10 @@ def workflow(
 
         # Extract metadata (description, etc.)
         metadata = extract_function_metadata(func)
+
+        # Add chat metadata if chat mode is enabled
+        if chat:
+            metadata["chat"] = "true"
 
         # Register workflow
         config = WorkflowConfig(
@@ -567,119 +594,3 @@ def workflow(
         return decorator(_func)
 
 
-def chatflow(
-    _func: Optional[Callable[..., Any]] = None,
-    *,
-    name: Optional[str] = None,
-) -> Callable[..., Any]:
-    """
-    Decorator to mark a function as an AGNT5 chat-enabled workflow.
-
-    Identical to @workflow but adds metadata {"chat": "true"} to indicate
-    this workflow is designed for multi-turn conversation scenarios.
-
-    The platform can use this metadata to:
-    - Enable session affinity and sticky routing
-    - Apply conversation-specific optimizations
-    - Track chat-specific metrics (turn count, conversation length)
-
-    Args:
-        name: Custom workflow name (default: function's __name__)
-
-    Example:
-        @chatflow
-        async def customer_support_chat(ctx: WorkflowContext, message: str) -> dict:
-            # Initialize conversation state
-            if not ctx.state.get("messages"):
-                ctx.state.set("messages", [])
-
-            # Add user message
-            messages = ctx.state.get("messages")
-            messages.append({"role": "user", "content": message})
-            ctx.state.set("messages", messages)
-
-            # Generate AI response
-            response = await ctx.task(generate_response, messages=messages)
-
-            # Add assistant response
-            messages.append({"role": "assistant", "content": response})
-            ctx.state.set("messages", messages)
-
-            return {"response": response, "turn_count": len(messages) // 2}
-    """
-
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        # Get workflow name
-        workflow_name = name or func.__name__
-
-        # Validate function signature
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-
-        if not params or params[0].name != "ctx":
-            raise ValueError(
-                f"Chatflow '{workflow_name}' must have 'ctx: WorkflowContext' as first parameter"
-            )
-
-        # Convert sync to async if needed
-        if inspect.iscoroutinefunction(func):
-            handler_func = cast(HandlerFunc, func)
-        else:
-            # Wrap sync function in async
-            @functools.wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                return func(*args, **kwargs)
-
-            handler_func = cast(HandlerFunc, async_wrapper)
-
-        # Extract schemas from type hints
-        input_schema, output_schema = extract_function_schemas(func)
-
-        # Extract metadata (description, etc.)
-        metadata = extract_function_metadata(func)
-
-        # Add chat metadata - THIS IS THE KEY DIFFERENCE FROM @workflow
-        metadata["chat"] = "true"
-
-        # Register as workflow (chatflows are workflows with chat metadata)
-        config = WorkflowConfig(
-            name=workflow_name,
-            handler=handler_func,
-            input_schema=input_schema,
-            output_schema=output_schema,
-            metadata=metadata,
-        )
-        WorkflowRegistry.register(config)
-
-        # Create wrapper that provides context
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # Create WorkflowEntity and WorkflowContext if not provided
-            if not args or not isinstance(args[0], WorkflowContext):
-                # Auto-create workflow entity and context for direct chatflow calls
-                run_id = f"chatflow-{uuid.uuid4().hex[:8]}"
-
-                # Create WorkflowEntity to manage state
-                workflow_entity = WorkflowEntity(run_id=run_id)
-
-                # Create WorkflowContext that wraps the entity
-                ctx = WorkflowContext(
-                    workflow_entity=workflow_entity,
-                    run_id=run_id,
-                )
-
-                # Execute chatflow
-                return await handler_func(ctx, *args, **kwargs)
-            else:
-                # WorkflowContext provided - use it
-                return await handler_func(*args, **kwargs)
-
-        # Store config on wrapper for introspection
-        wrapper._agnt5_config = config  # type: ignore
-        return wrapper
-
-    # Handle both @chatflow and @chatflow(...) syntax
-    if _func is None:
-        return decorator
-    else:
-        return decorator(_func)

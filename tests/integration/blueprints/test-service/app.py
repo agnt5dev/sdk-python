@@ -36,11 +36,6 @@ except ImportError:
     logging.warning("⚠️  python-dotenv not installed - .env files will not be loaded")
     logging.info("   Install with: pip install python-dotenv")
 
-# Import component modules so decorators register on import
-import agnt5_test_service.functions
-import agnt5_test_service.entities
-import agnt5_test_service.workflows
-
 # Configure logging (this will also control Rust log levels via PyO3-log)
 logging.basicConfig(
     level=logging.DEBUG,  # Use DEBUG to see all Rust logs
@@ -58,16 +53,21 @@ async def main():
     coordinator_endpoint = os.getenv("AGNT5_COORDINATOR_ENDPOINT", "http://localhost:34186")
 
     try:
-        # Create worker with correct API
+        # Get the package source directory
+        package_dir = Path(__file__).parent / "src" / "agnt5_test_service"
+
+        # Create worker with auto-registration enabled
         worker = Worker(
             service_name=SERVICE_NAME,
             service_version="1.0.0",
             coordinator_endpoint=coordinator_endpoint,
-            runtime="standalone"
+            runtime="standalone",
+            auto_register=True,
+            auto_register_paths=[str(package_dir)]
         )
 
-        # Components are automatically registered through decorators
-        logger.info("Worker created successfully. Components loaded from agnt5_test_service modules")
+        # Components are automatically discovered and registered
+        logger.info("Worker created successfully with auto-registration from: %s", package_dir)
 
         # Start the worker (this is async and will block until shutdown)
         logger.info("Starting worker and registering with coordinator...")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .function import FunctionRegistry
 from .workflow import WorkflowRegistry
@@ -57,8 +57,29 @@ class Worker:
         coordinator_endpoint: Optional[str] = None,
         runtime: str = "standalone",
         metadata: Optional[Dict[str, str]] = None,
+        # Explicit component registration (hybrid approach)
+        functions: Optional[List] = None,
+        workflows: Optional[List] = None,
+        entities: Optional[List] = None,
+        agents: Optional[List] = None,
+        tools: Optional[List] = None,
+        # Auto-registration (development mode)
+        auto_register: bool = False,
+        auto_register_paths: Optional[List[str]] = None,
+        pyproject_path: Optional[str] = None,
     ):
-        """Initialize a new Worker.
+        """Initialize a new Worker with explicit or automatic component registration.
+
+        The Worker supports two registration modes:
+
+        **Explicit Mode (default, production):**
+        - Register workflows/agents explicitly, their dependencies are auto-included
+        - Optionally register standalone functions/tools for direct API invocation
+
+        **Auto-Registration Mode (development):**
+        - Automatically discovers all decorated components in source paths
+        - Reads source paths from pyproject.toml or uses explicit paths
+        - No need to maintain import lists
 
         Args:
             service_name: Unique name for this service
@@ -66,6 +87,40 @@ class Worker:
             coordinator_endpoint: Coordinator endpoint URL (default: from env AGNT5_COORDINATOR_ENDPOINT)
             runtime: Runtime type - "standalone", "docker", "kubernetes", etc.
             metadata: Optional service-level metadata
+            functions: List of @function decorated handlers (explicit mode)
+            workflows: List of @workflow decorated handlers (explicit mode)
+            entities: List of Entity classes (explicit mode)
+            agents: List of Agent instances (explicit mode)
+            tools: List of Tool instances (explicit mode)
+            auto_register: Enable automatic component discovery (default: False)
+            auto_register_paths: Explicit source paths to scan (overrides pyproject.toml discovery)
+            pyproject_path: Path to pyproject.toml (default: current directory)
+
+        Example (explicit mode - production):
+            ```python
+            from agnt5 import Worker
+            from my_service import greet_user, order_fulfillment, ShoppingCart, analyst_agent
+
+            worker = Worker(
+                service_name="my-service",
+                workflows=[order_fulfillment],
+                entities=[ShoppingCart],
+                agents=[analyst_agent],
+                functions=[greet_user],
+            )
+            await worker.run()
+            ```
+
+        Example (auto-register mode - development):
+            ```python
+            from agnt5 import Worker
+
+            worker = Worker(
+                service_name="my-service",
+                auto_register=True,  # Discovers from pyproject.toml
+            )
+            await worker.run()
+            ```
         """
         self.service_name = service_name
         self.service_version = service_version
@@ -99,36 +154,298 @@ class Worker:
         from .entity import EntityStateManager
         self._entity_state_manager = EntityStateManager()
 
+        # Component registration: auto-discover or explicit
+        if auto_register:
+            # Auto-registration mode: discover from source paths
+            if auto_register_paths:
+                source_paths = auto_register_paths
+                logger.info(f"Auto-registration with explicit paths: {source_paths}")
+            else:
+                source_paths = self._discover_source_paths(pyproject_path)
+                logger.info(f"Auto-registration with discovered paths: {source_paths}")
+
+            # Auto-discover components (will populate _explicit_components)
+            self._auto_discover_components(source_paths)
+        else:
+            # Explicit registration from constructor kwargs
+            self._explicit_components = {
+                'functions': list(functions or []),
+                'workflows': list(workflows or []),
+                'entities': list(entities or []),
+                'agents': list(agents or []),
+                'tools': list(tools or []),
+            }
+
+            # Count explicitly registered components
+            total_explicit = sum(len(v) for v in self._explicit_components.values())
+            logger.info(
+                f"Worker initialized: {service_name} v{service_version} (runtime: {runtime}), "
+                f"{total_explicit} components explicitly registered"
+            )
+
+    def register_components(
+        self,
+        functions=None,
+        workflows=None,
+        entities=None,
+        agents=None,
+        tools=None,
+    ):
+        """Register additional components after Worker initialization.
+
+        This method allows incremental registration of components after the Worker
+        has been created. Useful for conditional or dynamic component registration.
+
+        Args:
+            functions: List of functions decorated with @function
+            workflows: List of workflows decorated with @workflow
+            entities: List of entity classes
+            agents: List of agent instances
+            tools: List of tool instances
+
+        Example:
+            ```python
+            worker = Worker(service_name="my-service")
+
+            # Register conditionally
+            if feature_enabled:
+                worker.register_components(workflows=[advanced_workflow])
+            ```
+        """
+        if functions:
+            self._explicit_components['functions'].extend(functions)
+            logger.debug(f"Incrementally registered {len(functions)} functions")
+
+        if workflows:
+            self._explicit_components['workflows'].extend(workflows)
+            logger.debug(f"Incrementally registered {len(workflows)} workflows")
+
+        if entities:
+            self._explicit_components['entities'].extend(entities)
+            logger.debug(f"Incrementally registered {len(entities)} entities")
+
+        if agents:
+            self._explicit_components['agents'].extend(agents)
+            logger.debug(f"Incrementally registered {len(agents)} agents")
+
+        if tools:
+            self._explicit_components['tools'].extend(tools)
+            logger.debug(f"Incrementally registered {len(tools)} tools")
+
+        total = sum(len(v) for v in self._explicit_components.values())
+        logger.info(f"Total components now registered: {total}")
+
+    def _discover_source_paths(self, pyproject_path: Optional[str] = None) -> List[str]:
+        """Discover source paths from pyproject.toml.
+
+        Reads pyproject.toml to find package source directories using:
+        - Hatch: [tool.hatch.build.targets.wheel] packages
+        - Maturin: [tool.maturin] python-source
+        - Fallback: ["src"] if not found
+
+        Args:
+            pyproject_path: Path to pyproject.toml (default: current directory)
+
+        Returns:
+            List of directory paths to scan (e.g., ["src/agnt5_benchmark"])
+        """
+        from pathlib import Path
+
+        # Python 3.11+ has tomllib in stdlib
+        try:
+            import tomllib
+        except ImportError:
+            logger.error("tomllib not available (Python 3.11+ required for auto-registration)")
+            return ["src"]
+
+        # Determine pyproject.toml location
+        if pyproject_path:
+            pyproject_file = Path(pyproject_path)
+        else:
+            # Look in current directory
+            pyproject_file = Path.cwd() / "pyproject.toml"
+
+        if not pyproject_file.exists():
+            logger.warning(
+                f"pyproject.toml not found at {pyproject_file}, "
+                f"defaulting to 'src/' directory"
+            )
+            return ["src"]
+
+        # Parse pyproject.toml
+        try:
+            with open(pyproject_file, "rb") as f:
+                config = tomllib.load(f)
+        except Exception as e:
+            logger.error(f"Failed to parse pyproject.toml: {e}")
+            return ["src"]
+
+        # Extract source paths based on build system
+        source_paths = []
+
+        # Try Hatch configuration
+        if "tool" in config and "hatch" in config["tool"]:
+            hatch_config = config["tool"]["hatch"]
+            if "build" in hatch_config and "targets" in hatch_config["build"]:
+                wheel_config = hatch_config["build"]["targets"].get("wheel", {})
+                packages = wheel_config.get("packages", [])
+                source_paths.extend(packages)
+
+        # Try Maturin configuration
+        if not source_paths and "tool" in config and "maturin" in config["tool"]:
+            maturin_config = config["tool"]["maturin"]
+            python_source = maturin_config.get("python-source")
+            if python_source:
+                source_paths.append(python_source)
+
+        # Fallback to src/
+        if not source_paths:
+            logger.info("No source paths in pyproject.toml, defaulting to 'src/'")
+            source_paths = ["src"]
+
+        logger.info(f"Discovered source paths from pyproject.toml: {source_paths}")
+        return source_paths
+
+    def _auto_discover_components(self, source_paths: List[str]) -> None:
+        """Auto-discover components by importing all Python files in source paths.
+
+        Args:
+            source_paths: List of directory paths to scan
+        """
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        logger.info(f"Auto-discovering components in paths: {source_paths}")
+
+        total_modules = 0
+
+        for source_path in source_paths:
+            path = Path(source_path)
+
+            if not path.exists():
+                logger.warning(f"Source path does not exist: {source_path}")
+                continue
+
+            # Recursively find all .py files
+            for py_file in path.rglob("*.py"):
+                # Skip __pycache__ and test files
+                if "__pycache__" in str(py_file) or py_file.name.startswith("test_"):
+                    continue
+
+                # Convert path to module name
+                # e.g., src/agnt5_benchmark/functions.py -> agnt5_benchmark.functions
+                relative_path = py_file.relative_to(path.parent)
+                module_parts = list(relative_path.parts[:-1])  # Remove .py extension part
+                module_parts.append(relative_path.stem)  # Add filename without .py
+                module_name = ".".join(module_parts)
+
+                # Import module (triggers decorators)
+                try:
+                    if module_name in sys.modules:
+                        logger.debug(f"Module already imported: {module_name}")
+                    else:
+                        spec = importlib.util.spec_from_file_location(module_name, py_file)
+                        if spec and spec.loader:
+                            module = importlib.util.module_from_spec(spec)
+                            sys.modules[module_name] = module
+                            spec.loader.exec_module(module)
+                            logger.debug(f"Auto-imported: {module_name}")
+                            total_modules += 1
+                except Exception as e:
+                    logger.warning(f"Failed to import {module_name}: {e}")
+
+        logger.info(f"Auto-imported {total_modules} modules")
+
+        # Collect components from registries
+        from .agent import AgentRegistry
+        from .entity import EntityRegistry
+        from .tool import ToolRegistry
+
+        # Extract actual objects from registries
+        functions = [cfg.handler for cfg in FunctionRegistry.all().values()]
+        workflows = [cfg.handler for cfg in WorkflowRegistry.all().values()]
+        entities = [et.entity_class for et in EntityRegistry.all().values()]
+        agents = list(AgentRegistry.all().values())
+        tools = list(ToolRegistry.all().values())
+
+        self._explicit_components = {
+            'functions': functions,
+            'workflows': workflows,
+            'entities': entities,
+            'agents': agents,
+            'tools': tools,
+        }
+
         logger.info(
-            f"Worker initialized: {service_name} v{service_version} (runtime: {runtime})"
+            f"Auto-discovered components: "
+            f"{len(functions)} functions, "
+            f"{len(workflows)} workflows, "
+            f"{len(entities)} entities, "
+            f"{len(agents)} agents, "
+            f"{len(tools)} tools"
         )
 
     def _discover_components(self):
-        """Discover all registered components across all registries."""
+        """Discover explicit components and auto-include their dependencies.
+
+        Hybrid approach:
+        - Explicitly registered workflows/agents are processed
+        - Functions called by workflows are auto-included (TODO: implement)
+        - Tools used by agents are auto-included
+        - Standalone functions/tools can be explicitly registered
+
+        Returns:
+            List of PyComponentInfo instances for all components
+        """
         components = []
-
-        # Import all registries
-        from .tool import ToolRegistry
-        from .entity import EntityRegistry
-        from .agent import AgentRegistry
-
-        # Discover functions
         import json
-        for name, config in FunctionRegistry.all().items():
-            # Serialize schemas to JSON strings
-            input_schema_str = None
-            if config.input_schema:
-                input_schema_str = json.dumps(config.input_schema)
 
-            output_schema_str = None
-            if config.output_schema:
-                output_schema_str = json.dumps(config.output_schema)
+        # Import registries
+        from .entity import EntityRegistry
+        from .tool import ToolRegistry
 
-            # Get metadata with description
+        # Track all components (explicit + auto-included)
+        all_functions = set(self._explicit_components['functions'])
+        all_tools = set(self._explicit_components['tools'])
+
+        # Auto-include agent tool dependencies
+        for agent in self._explicit_components['agents']:
+            if hasattr(agent, 'tools') and agent.tools:
+                # Agent.tools is a dict of {tool_name: tool_instance}
+                all_tools.update(agent.tools.values())
+                logger.debug(
+                    f"Auto-included {len(agent.tools)} tools from agent '{agent.name}'"
+                )
+
+        # Log registration summary
+        explicit_func_count = len(self._explicit_components['functions'])
+        explicit_tool_count = len(self._explicit_components['tools'])
+        auto_func_count = len(all_functions) - explicit_func_count
+        auto_tool_count = len(all_tools) - explicit_tool_count
+
+        logger.info(
+            f"Component registration summary: "
+            f"{len(all_functions)} functions ({explicit_func_count} explicit, {auto_func_count} auto-included), "
+            f"{len(self._explicit_components['workflows'])} workflows, "
+            f"{len(self._explicit_components['entities'])} entities, "
+            f"{len(self._explicit_components['agents'])} agents, "
+            f"{len(all_tools)} tools ({explicit_tool_count} explicit, {auto_tool_count} auto-included)"
+        )
+
+        # Process functions (explicit + auto-included)
+        for func in all_functions:
+            config = FunctionRegistry.get(func.__name__)
+            if not config:
+                logger.warning(f"Function '{func.__name__}' not found in FunctionRegistry")
+                continue
+
+            input_schema_str = json.dumps(config.input_schema) if config.input_schema else None
+            output_schema_str = json.dumps(config.output_schema) if config.output_schema else None
             metadata = config.metadata if config.metadata else {}
 
             component_info = self._PyComponentInfo(
-                name=name,
+                name=config.name,
                 component_type="function",
                 metadata=metadata,
                 config={},
@@ -137,24 +454,20 @@ class Worker:
                 definition=None,
             )
             components.append(component_info)
-            logger.debug(f"Discovered function: {name}")
 
-        # Discover workflows
-        for name, config in WorkflowRegistry.all().items():
-            # Serialize schemas to JSON strings
-            input_schema_str = None
-            if config.input_schema:
-                input_schema_str = json.dumps(config.input_schema)
+        # Process workflows
+        for workflow in self._explicit_components['workflows']:
+            config = WorkflowRegistry.get(workflow.__name__)
+            if not config:
+                logger.warning(f"Workflow '{workflow.__name__}' not found in WorkflowRegistry")
+                continue
 
-            output_schema_str = None
-            if config.output_schema:
-                output_schema_str = json.dumps(config.output_schema)
-
-            # Get metadata with description
+            input_schema_str = json.dumps(config.input_schema) if config.input_schema else None
+            output_schema_str = json.dumps(config.output_schema) if config.output_schema else None
             metadata = config.metadata if config.metadata else {}
 
             component_info = self._PyComponentInfo(
-                name=name,
+                name=config.name,
                 component_type="workflow",
                 metadata=metadata,
                 config={},
@@ -163,34 +476,14 @@ class Worker:
                 definition=None,
             )
             components.append(component_info)
-            logger.debug(f"Discovered workflow: {name}")
 
-        # Discover tools
-        for name, tool in ToolRegistry.all().items():
-            # Serialize schemas to JSON strings
-            input_schema_str = None
-            if hasattr(tool, 'input_schema') and tool.input_schema:
-                input_schema_str = json.dumps(tool.input_schema)
+        # Process entities
+        for entity_class in self._explicit_components['entities']:
+            entity_type = EntityRegistry.get(entity_class.__name__)
+            if not entity_type:
+                logger.warning(f"Entity '{entity_class.__name__}' not found in EntityRegistry")
+                continue
 
-            output_schema_str = None
-            if hasattr(tool, 'output_schema') and tool.output_schema:
-                output_schema_str = json.dumps(tool.output_schema)
-
-            component_info = self._PyComponentInfo(
-                name=name,
-                component_type="tool",
-                metadata={},
-                config={},
-                input_schema=input_schema_str,
-                output_schema=output_schema_str,
-                definition=None,
-            )
-            components.append(component_info)
-            logger.debug(f"Discovered tool: {name}")
-
-        # Discover entities
-        for name, entity_type in EntityRegistry.all().items():
-            # Build method schemas and metadata for each method
             method_schemas = {}
             for method_name, (input_schema, output_schema) in entity_type._method_schemas.items():
                 method_metadata = entity_type._method_metadata.get(method_name, {})
@@ -200,43 +493,33 @@ class Worker:
                     "metadata": method_metadata
                 }
 
-            # Build metadata dict with methods list and schemas
             metadata_dict = {
                 "methods": json.dumps(list(entity_type._method_schemas.keys())),
                 "method_schemas": json.dumps(method_schemas)
             }
 
             component_info = self._PyComponentInfo(
-                name=name,
+                name=entity_type.name,
                 component_type="entity",
                 metadata=metadata_dict,
                 config={},
-                input_schema=None,  # Entities have per-method schemas in metadata
+                input_schema=None,
                 output_schema=None,
                 definition=None,
             )
             components.append(component_info)
-            logger.debug(f"Discovered entity: {name} with methods: {list(entity_type._method_schemas.keys())}")
 
-        # Discover agents
-        for name, agent in AgentRegistry.all().items():
-            # Serialize schemas to JSON strings
-            input_schema_str = None
-            if hasattr(agent, 'input_schema') and agent.input_schema:
-                input_schema_str = json.dumps(agent.input_schema)
+        # Process agents
+        for agent in self._explicit_components['agents']:
+            input_schema_str = json.dumps(agent.input_schema) if hasattr(agent, 'input_schema') and agent.input_schema else None
+            output_schema_str = json.dumps(agent.output_schema) if hasattr(agent, 'output_schema') and agent.output_schema else None
 
-            output_schema_str = None
-            if hasattr(agent, 'output_schema') and agent.output_schema:
-                output_schema_str = json.dumps(agent.output_schema)
-
-            # Get metadata (includes description and model info)
             metadata_dict = agent.metadata if hasattr(agent, 'metadata') else {}
-            # Add tools list to metadata
             if hasattr(agent, 'tools'):
                 metadata_dict["tools"] = json.dumps(list(agent.tools.keys()))
 
             component_info = self._PyComponentInfo(
-                name=name,
+                name=agent.name,
                 component_type="agent",
                 metadata=metadata_dict,
                 config={},
@@ -245,9 +528,24 @@ class Worker:
                 definition=None,
             )
             components.append(component_info)
-            logger.debug(f"Discovered agent: {name}")
 
-        logger.info(f"Discovered {len(components)} components")
+        # Process tools (explicit + auto-included)
+        for tool in all_tools:
+            input_schema_str = json.dumps(tool.input_schema) if hasattr(tool, 'input_schema') and tool.input_schema else None
+            output_schema_str = json.dumps(tool.output_schema) if hasattr(tool, 'output_schema') and tool.output_schema else None
+
+            component_info = self._PyComponentInfo(
+                name=tool.name,
+                component_type="tool",
+                metadata={},
+                config={},
+                input_schema=input_schema_str,
+                output_schema=output_schema_str,
+                definition=None,
+            )
+            components.append(component_info)
+
+        logger.info(f"Discovered {len(components)} total components")
         return components
 
     def _create_message_handler(self):
