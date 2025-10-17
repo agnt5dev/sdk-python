@@ -116,7 +116,7 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
     print("\n🔧 Setting up EMBEDDED mode (SQLite + embedded journal)")
 
     # Start dev-server container
-    dev_server = DockerContainer("agnt5/dev-server:latest")
+    dev_server = DockerContainer("ghcr.io/agnt5dev/agnt5-dev-server:latest")
     dev_server.with_exposed_ports(34181, 34182, 34186, 4317, 34180)  # HTTP, gRPC, Coordinator, OTLP, MCP
 
     # Configure for embedded mode (SQLite + embedded journal)
