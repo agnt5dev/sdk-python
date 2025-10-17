@@ -1,19 +1,37 @@
 """Tests for Function decorator and retry logic."""
 
 import asyncio
+import time
 
 import pytest
 
 from agnt5 import BackoffPolicy, BackoffType, FunctionContext, FunctionRegistry, RetryPolicy, function
 from agnt5.exceptions import RetryError
 
+# Test constants
+MAX_TEST_RETRIES = 3
+TEST_INTERVAL_MS = 10
+BACKOFF_INTERVAL_MS = 100
+BACKOFF_MAX_INTERVAL_MS = 1000
+
+
+# Module-level fixtures
+@pytest.fixture(autouse=True)
+def clear_registry():
+    """Clear function registry before and after each test."""
+    FunctionRegistry.clear()
+    yield
+    FunctionRegistry.clear()
+
+
+@pytest.fixture
+def test_context():
+    """Reusable test context."""
+    return FunctionContext(run_id="test-123")
+
 
 class TestFunctionDecorator:
     """Test @function decorator."""
-
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
 
     def test_function_basic(self) -> None:
         @function
@@ -134,10 +152,6 @@ class TestFunctionDecorator:
 class TestFunctionExecution:
     """Test function execution."""
 
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
-
     @pytest.mark.asyncio
     async def test_basic_execution_with_context(self) -> None:
         @function
@@ -201,10 +215,6 @@ class TestFunctionExecution:
 class TestRetryLogic:
     """Test retry behavior."""
 
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
-
     @pytest.mark.asyncio
     async def test_successful_execution_no_retry(self) -> None:
         call_count = 0
@@ -225,7 +235,7 @@ class TestRetryLogic:
     async def test_retry_until_success(self) -> None:
         call_count = 0
 
-        @function(retries={"max_attempts": 3, "initial_interval_ms": 10})
+        @function(retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": TEST_INTERVAL_MS})
         async def flaky_func(ctx: FunctionContext) -> str:
             nonlocal call_count
             call_count += 1
@@ -244,7 +254,7 @@ class TestRetryLogic:
     async def test_retry_exceeds_max_attempts(self) -> None:
         call_count = 0
 
-        @function(retries=3)  # Simple form
+        @function(retries=MAX_TEST_RETRIES)  # Simple form
         async def always_fails(ctx: FunctionContext) -> str:
             nonlocal call_count
             call_count += 1
@@ -255,15 +265,15 @@ class TestRetryLogic:
         with pytest.raises(RetryError) as exc_info:
             await always_fails(ctx)
 
-        assert call_count == 3
-        assert exc_info.value.attempts == 3
+        assert call_count == MAX_TEST_RETRIES
+        assert exc_info.value.attempts == MAX_TEST_RETRIES
         assert "Permanent error" in str(exc_info.value.last_error)
 
     @pytest.mark.asyncio
     async def test_context_attempt_increments(self) -> None:
         attempts_seen = []
 
-        @function(retries={"max_attempts": 3, "initial_interval_ms": 10})
+        @function(retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": TEST_INTERVAL_MS})
         async def track_attempts(ctx: FunctionContext) -> str:
             attempts_seen.append(ctx.attempt)
             if ctx.attempt < 2:
@@ -280,7 +290,7 @@ class TestRetryLogic:
         """Test retry logic works for functions without context."""
         call_count = 0
 
-        @function(retries=3)
+        @function(retries=MAX_TEST_RETRIES)
         async def flaky_add(a: int, b: int) -> int:
             nonlocal call_count
             call_count += 1
@@ -296,16 +306,10 @@ class TestRetryLogic:
 class TestBackoffCalculation:
     """Test backoff delay calculation."""
 
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
-
     @pytest.mark.asyncio
     async def test_exponential_backoff(self) -> None:
-        import time
-
         @function(
-            retries={"max_attempts": 3, "initial_interval_ms": 100, "max_interval_ms": 1000},
+            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS, "max_interval_ms": BACKOFF_MAX_INTERVAL_MS},
             backoff="exponential",  # Simple string form
         )
         async def exponential_func(ctx: FunctionContext) -> str:
@@ -324,10 +328,8 @@ class TestBackoffCalculation:
 
     @pytest.mark.asyncio
     async def test_linear_backoff(self) -> None:
-        import time
-
         @function(
-            retries={"max_attempts": 3, "initial_interval_ms": 100},
+            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS},
             backoff={"type": "linear", "multiplier": 1.0},  # Dict form
         )
         async def linear_func(ctx: FunctionContext) -> str:
@@ -346,10 +348,8 @@ class TestBackoffCalculation:
 
     @pytest.mark.asyncio
     async def test_constant_backoff(self) -> None:
-        import time
-
         @function(
-            retries={"max_attempts": 3, "initial_interval_ms": 100},
+            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS},
             backoff="constant",  # Simple string form
         )
         async def constant_func(ctx: FunctionContext) -> str:
@@ -443,10 +443,6 @@ class TestFunctionRegistry:
 class TestPydanticIntegration:
     """Test Pydantic model support."""
 
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
-
     @pytest.mark.asyncio
     async def test_function_with_pydantic_input(self) -> None:
         """Test functions can use Pydantic models for input."""
@@ -506,10 +502,6 @@ class TestPydanticIntegration:
 
 class TestSchemaExtraction:
     """Test automatic schema extraction from type hints."""
-
-    def setup_method(self) -> None:
-        """Clear registry before each test."""
-        FunctionRegistry.clear()
 
     def test_basic_type_hints_extracted(self) -> None:
         """Test that basic Python type hints are extracted."""

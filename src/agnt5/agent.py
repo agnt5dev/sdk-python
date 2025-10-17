@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .context import Context
 from . import lm
-from .lm import GenerateRequest, GenerateResponse, Message, ModelConfig, ToolDefinition
+from .lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
 from .tool import Tool, ToolRegistry
 from ._telemetry import setup_module_logger
 
@@ -201,7 +201,7 @@ class Agent:
     def __init__(
         self,
         name: str,
-        model: str,
+        model: Any,  # Can be string like "openai/gpt-4o-mini" OR LanguageModel instance
         instructions: str,
         tools: Optional[List[Any]] = None,
         handoffs: Optional[List[Handoff]] = None,
@@ -210,12 +210,13 @@ class Agent:
         top_p: Optional[float] = None,
         model_config: Optional[ModelConfig] = None,
         max_iterations: int = 10,
+        model_name: Optional[str] = None,  # For backwards compatibility with tests
     ):
         """Initialize agent.
 
         Args:
             name: Agent name/identifier
-            model: Model string with provider prefix (e.g., "openai/gpt-4o-mini")
+            model: Model string with provider prefix (e.g., "openai/gpt-4o-mini") OR LanguageModel instance
             instructions: System instructions for the agent
             tools: List of tools available to the agent (functions, Tool instances, or Agent instances)
             handoffs: List of Handoff configurations for agent-to-agent delegation
@@ -224,15 +225,29 @@ class Agent:
             top_p: Nucleus sampling parameter
             model_config: Optional advanced configuration (custom endpoints, headers, etc.)
             max_iterations: Maximum reasoning iterations
+            model_name: Optional model name (for backwards compatibility, used when model is a LanguageModel instance)
         """
         self.name = name
-        self.model = model
         self.instructions = instructions
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.top_p = top_p
         self.model_config = model_config
         self.max_iterations = max_iterations
+
+        # Support both string model names and LanguageModel instances
+        if isinstance(model, str):
+            # New API: model is a string like "openai/gpt-4o-mini"
+            self.model = model
+            self.model_name = model_name or model
+            self._language_model = None  # Will create on demand
+        elif isinstance(model, LanguageModel):
+            # Old API (for tests): model is a LanguageModel instance
+            self._language_model = model
+            self.model = model  # Keep for backwards compatibility
+            self.model_name = model_name or "mock-model"
+        else:
+            raise TypeError(f"model must be a string or LanguageModel instance, got {type(model)}")
 
         # Store handoffs for building handoff tools
         self.handoffs = handoffs or []

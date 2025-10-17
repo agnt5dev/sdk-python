@@ -33,6 +33,7 @@ Supported Providers (via model prefix):
 from __future__ import annotations
 
 import json
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -211,9 +212,44 @@ class GenerateRequest:
     response_schema: Optional[str] = None  # JSON-encoded schema for structured output
 
 
+# Abstract base class for language models
+# This exists primarily for testing/mocking purposes
+class LanguageModel(ABC):
+    """Abstract base class for language model implementations.
+
+    This class defines the interface that all language models must implement.
+    It's primarily used for testing and mocking, as production code should use
+    the module-level generate() and stream() functions instead.
+    """
+
+    @abstractmethod
+    async def generate(self, request: GenerateRequest) -> GenerateResponse:
+        """Generate completion from LLM.
+
+        Args:
+            request: Generation request with model, messages, and configuration
+
+        Returns:
+            GenerateResponse with text, usage, and optional tool calls
+        """
+        pass
+
+    @abstractmethod
+    async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
+        """Stream completion from LLM.
+
+        Args:
+            request: Generation request with model, messages, and configuration
+
+        Yields:
+            Text chunks as they are generated
+        """
+        pass
+
+
 # Internal wrapper for the Rust-backed implementation
 # Users should use the module-level generate() and stream() functions instead
-class _LanguageModel:
+class _LanguageModel(LanguageModel):
     """Internal Language Model wrapper using Rust SDK core.
 
     This class is for internal use only. Users should use the module-level
