@@ -592,6 +592,7 @@ impl From<PyComponentInfo> for ComponentInfo {
             output_schema,
             config: comp.config,
             metadata: comp.metadata,
+            definition: comp.definition,
         }
     }
 }

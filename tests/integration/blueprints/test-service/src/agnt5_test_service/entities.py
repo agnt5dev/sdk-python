@@ -18,6 +18,26 @@ class ShoppingCart(Entity):
     - Concurrent updates don't cause lost writes
     """
 
+    # Define state schema for platform registration and introspection
+    _state_schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "object",
+                "description": "Map of item_id to item details",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "quantity": {"type": "integer", "description": "Number of items"},
+                        "price": {"type": "number", "description": "Price per item"}
+                    },
+                    "required": ["quantity", "price"]
+                }
+            }
+        },
+        "description": "Shopping cart state with items and their quantities/prices"
+    }
+
     async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
         """Add item to cart."""
         items = self.state.get("items", {})
@@ -54,6 +74,19 @@ class Counter(Entity):
     - Single-writer guarantee works across multiple requests
     """
 
+    # Define state schema for platform registration and introspection
+    _state_schema = {
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "description": "Current counter value",
+                "default": 0
+            }
+        },
+        "description": "Counter state with single integer value"
+    }
+
     async def increment(self) -> int:
         """Increment counter."""
         count = self.state.get("count", 0)
@@ -84,6 +117,39 @@ class BankAccount(Entity):
     - Balance survives worker crashes
     - Transaction history is preserved
     """
+
+    # Define state schema for platform registration and introspection
+    _state_schema = {
+        "type": "object",
+        "properties": {
+            "balance": {
+                "type": "number",
+                "description": "Current account balance",
+                "default": 0.0
+            },
+            "transactions": {
+                "type": "array",
+                "description": "Transaction history",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["deposit", "withdraw"],
+                            "description": "Transaction type"
+                        },
+                        "amount": {
+                            "type": "number",
+                            "description": "Transaction amount"
+                        }
+                    },
+                    "required": ["type", "amount"]
+                },
+                "default": []
+            }
+        },
+        "description": "Bank account state with balance and transaction history"
+    }
 
     async def deposit(self, amount: float) -> dict:
         """Deposit money into account."""

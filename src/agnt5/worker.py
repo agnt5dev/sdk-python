@@ -484,18 +484,13 @@ class Worker:
                 logger.warning(f"Entity '{entity_class.__name__}' not found in EntityRegistry")
                 continue
 
-            method_schemas = {}
-            for method_name, (input_schema, output_schema) in entity_type._method_schemas.items():
-                method_metadata = entity_type._method_metadata.get(method_name, {})
-                method_schemas[method_name] = {
-                    "input_schema": input_schema,
-                    "output_schema": output_schema,
-                    "metadata": method_metadata
-                }
+            # Build complete entity definition with state schema and method schemas
+            entity_definition = entity_type.build_entity_definition()
+            definition_str = json.dumps(entity_definition)
 
+            # Keep minimal metadata for backward compatibility
             metadata_dict = {
                 "methods": json.dumps(list(entity_type._method_schemas.keys())),
-                "method_schemas": json.dumps(method_schemas)
             }
 
             component_info = self._PyComponentInfo(
@@ -503,14 +498,21 @@ class Worker:
                 component_type="entity",
                 metadata=metadata_dict,
                 config={},
-                input_schema=None,
+                input_schema=None,  # Entities don't have single input/output schemas
                 output_schema=None,
-                definition=None,
+                definition=definition_str,  # Complete entity definition with state and methods
             )
             components.append(component_info)
+            logger.debug(f"Registered entity '{entity_type.name}' with definition")
 
         # Process agents
+        from .agent import AgentRegistry
+
         for agent in self._explicit_components['agents']:
+            # Register agent in AgentRegistry for execution lookup
+            AgentRegistry.register(agent)
+            logger.debug(f"Registered agent '{agent.name}' in AgentRegistry for execution")
+
             input_schema_str = json.dumps(agent.input_schema) if hasattr(agent, 'input_schema') and agent.input_schema else None
             output_schema_str = json.dumps(agent.output_schema) if hasattr(agent, 'output_schema') and agent.output_schema else None
 

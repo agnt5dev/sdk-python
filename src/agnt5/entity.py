@@ -6,7 +6,8 @@ import asyncio
 import contextvars
 import functools
 import inspect
-from typing import Any, Dict, Optional, Tuple
+import json
+from typing import Any, Dict, Optional, Tuple, get_type_hints
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .exceptions import ExecutionError
@@ -230,6 +231,108 @@ def create_entity_context():
     return manager, token
 
 
+def extract_state_schema(entity_class: type) -> Optional[Dict[str, Any]]:
+    """
+    Extract JSON schema from entity class for state structure documentation.
+
+    The schema can be provided in multiple ways (in order of preference):
+    1. Explicit _state_schema class attribute (most explicit)
+    2. Docstring with state description
+    3. Type annotations on __init__ method (least explicit, basic types only)
+
+    Args:
+        entity_class: The Entity subclass to extract schema from
+
+    Returns:
+        JSON schema dict or None if no schema could be extracted
+
+    Examples:
+        # Option 1: Explicit schema (recommended)
+        class ShoppingCart(Entity):
+            _state_schema = {
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array", "description": "Cart items"},
+                    "total": {"type": "number", "description": "Cart total"}
+                },
+                "description": "Shopping cart state"
+            }
+
+        # Option 2: Docstring
+        class ShoppingCart(Entity):
+            '''
+            Shopping cart entity.
+
+            State:
+                items (list): List of cart items
+                total (float): Total cart value
+            '''
+
+        # Option 3: Type hints (basic extraction)
+        class ShoppingCart(Entity):
+            def __init__(self, key: str):
+                super().__init__(key)
+                self.items: list = []
+                self.total: float = 0.0
+    """
+    # Option 1: Check for explicit _state_schema attribute
+    if hasattr(entity_class, '_state_schema'):
+        schema = entity_class._state_schema
+        logger.debug(f"Found explicit _state_schema for {entity_class.__name__}")
+        return schema
+
+    # Option 2: Extract from docstring (basic parsing)
+    if entity_class.__doc__:
+        doc = entity_class.__doc__.strip()
+        if "State:" in doc or "state:" in doc.lower():
+            # Found state documentation - create basic schema
+            logger.debug(f"Found state documentation in docstring for {entity_class.__name__}")
+            return {
+                "type": "object",
+                "description": f"State structure for {entity_class.__name__} (see docstring for details)"
+            }
+
+    # Option 3: Try to extract from __init__ type hints (very basic)
+    try:
+        init_method = entity_class.__init__
+        type_hints = get_type_hints(init_method)
+        # Remove 'key' and 'return' from hints
+        state_hints = {k: v for k, v in type_hints.items() if k not in ('key', 'return')}
+
+        if state_hints:
+            logger.debug(f"Extracted type hints from __init__ for {entity_class.__name__}")
+            properties = {}
+            for name, type_hint in state_hints.items():
+                # Basic type mapping
+                if type_hint == str:
+                    properties[name] = {"type": "string"}
+                elif type_hint == int:
+                    properties[name] = {"type": "integer"}
+                elif type_hint == float:
+                    properties[name] = {"type": "number"}
+                elif type_hint == bool:
+                    properties[name] = {"type": "boolean"}
+                elif type_hint == list or str(type_hint).startswith('list'):
+                    properties[name] = {"type": "array"}
+                elif type_hint == dict or str(type_hint).startswith('dict'):
+                    properties[name] = {"type": "object"}
+                else:
+                    properties[name] = {"type": "object", "description": str(type_hint)}
+
+            if properties:
+                return {
+                    "type": "object",
+                    "properties": properties,
+                    "description": f"State structure inferred from type hints for {entity_class.__name__}"
+                }
+    except Exception as e:
+        logger.debug(f"Could not extract type hints from {entity_class.__name__}: {e}")
+
+    # No schema could be extracted
+    logger.debug(f"No state schema found for {entity_class.__name__}")
+    return None
+
+
 class EntityRegistry:
     """Registry for entity types."""
 
@@ -262,7 +365,7 @@ class EntityType:
     """
     Metadata about an Entity class.
 
-    Stores entity name, method schemas, and metadata for Worker auto-discovery
+    Stores entity name, method schemas, state schema, and metadata for Worker auto-discovery
     and platform integration. Created automatically when Entity subclasses are defined.
     """
 
@@ -278,7 +381,49 @@ class EntityType:
         self.entity_class = entity_class
         self._method_schemas: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = {}
         self._method_metadata: Dict[str, Dict[str, str]] = {}
+        self._state_schema: Optional[Dict[str, Any]] = None
         logger.debug("Created entity type: %s", name)
+
+    def set_state_schema(self, schema: Optional[Dict[str, Any]]) -> None:
+        """
+        Set the state schema for this entity type.
+
+        Args:
+            schema: JSON schema describing the entity's state structure
+        """
+        self._state_schema = schema
+        if schema:
+            logger.debug(f"Set state schema for {self.name}")
+
+    def build_entity_definition(self) -> Dict[str, Any]:
+        """
+        Build complete entity definition for platform registration.
+
+        Returns:
+            Dictionary with entity name, state schema, and method schemas
+        """
+        # Build method schemas dict
+        method_schemas = {}
+        for method_name, (input_schema, output_schema) in self._method_schemas.items():
+            method_metadata = self._method_metadata.get(method_name, {})
+            method_schemas[method_name] = {
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "description": method_metadata.get("description", ""),
+                "metadata": method_metadata
+            }
+
+        # Build complete definition
+        definition = {
+            "entity_name": self.name,
+            "methods": method_schemas
+        }
+
+        # Add state schema if available
+        if self._state_schema:
+            definition["state_schema"] = self._state_schema
+
+        return definition
 
 
 # ============================================================================
@@ -507,9 +652,10 @@ class Entity:
         Auto-register Entity subclasses and wrap methods.
 
         This is called automatically when a class inherits from Entity.
-        It performs two tasks:
-        1. Wraps all public async methods with single-writer consistency
-        2. Registers the entity type with metadata for platform discovery
+        It performs three tasks:
+        1. Extracts state schema from the class
+        2. Wraps all public async methods with single-writer consistency
+        3. Registers the entity type with metadata for platform discovery
         """
         super().__init_subclass__(**kwargs)
 
@@ -523,6 +669,12 @@ class Entity:
 
         # Create an EntityType for this class, storing the class reference
         entity_type = EntityType(cls.__name__, entity_class=cls)
+
+        # Extract and set state schema
+        state_schema = extract_state_schema(cls)
+        if state_schema:
+            entity_type.set_state_schema(state_schema)
+            logger.debug(f"Extracted state schema for {cls.__name__}")
 
         # Wrap all public async methods and register them
         for name, method in inspect.getmembers(cls, predicate=inspect.iscoroutinefunction):

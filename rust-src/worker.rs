@@ -204,14 +204,17 @@ impl PyWorker {
             };
 
             // Create message handler that calls Python callback
-            let message_handler =
+            // Now uses `Fn + Clone` to support concurrent execution
+            let message_handler = {
+                let handler_arc_clone = handler_arc.clone();
                 move |runtime_message: RuntimeMessage,
                       tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
-                    let handler_arc_inner = handler_arc.clone();
+                    let handler_arc_inner = handler_arc_clone.clone();
                     async move {
                         Self::handle_runtime_message(handler_arc_inner, runtime_message, tx).await
                     }
-                };
+                }
+            };
 
             log::info!("Starting worker event loop for service: {}", service_name);
 
