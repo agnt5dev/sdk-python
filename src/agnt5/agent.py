@@ -23,6 +23,175 @@ logger = setup_module_logger(__name__)
 _AGENT_REGISTRY: Dict[str, "Agent"] = {}
 
 
+class AgentContext(Context):
+    """
+    Context for agent execution with conversation state management.
+
+    Extends base Context with:
+    - State management via EntityStateManager
+    - Conversation history persistence
+    - Context inheritance (child agents share parent's state)
+
+    Three initialization modes:
+    1. Standalone: Creates own state manager (playground testing)
+    2. Inherit WorkflowContext: Shares parent's state manager
+    3. Inherit parent AgentContext: Shares parent's state manager
+
+    Example:
+        ```python
+        # Standalone agent with conversation history
+        ctx = AgentContext(run_id="session-1", agent_name="tutor")
+        result = await agent.run("Hello", context=ctx)
+        result = await agent.run("Continue", context=ctx)  # Remembers previous message
+
+        # Agent in workflow - shares workflow state
+        @workflow
+        async def research_workflow(ctx: WorkflowContext):
+            agent_result = await research_agent.run("Find AI trends", context=ctx)
+            # Agent has access to workflow state via inherited context
+        ```
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        agent_name: str,
+        session_id: Optional[str] = None,
+        state_manager: Optional[Any] = None,
+        parent_context: Optional[Context] = None,
+        attempt: int = 0,
+        runtime_context: Optional[Any] = None,
+    ):
+        """
+        Initialize agent context.
+
+        Args:
+            run_id: Unique execution identifier
+            agent_name: Name of the agent
+            session_id: Session identifier for conversation history (default: run_id)
+            state_manager: Optional state manager (for context inheritance)
+            parent_context: Parent context to inherit state from
+            attempt: Retry attempt number
+            runtime_context: RuntimeContext for trace correlation
+        """
+        super().__init__(run_id, attempt, runtime_context)
+
+        self._agent_name = agent_name
+        self._session_id = session_id or run_id
+
+        # Determine state manager based on parent context
+        from .entity import EntityStateManager, _get_state_manager
+
+        if state_manager:
+            # Explicit state manager provided
+            self._state_manager = state_manager
+            logger.debug(f"AgentContext using provided state manager")
+        elif parent_context:
+            # Try to inherit state manager from parent
+            try:
+                # Check if parent is WorkflowContext or AgentContext
+                if hasattr(parent_context, '_workflow_entity'):
+                    # WorkflowContext - get state manager from worker context
+                    self._state_manager = _get_state_manager()
+                    logger.debug(f"AgentContext inheriting state from WorkflowContext")
+                elif hasattr(parent_context, '_state_manager'):
+                    # Parent AgentContext - share state manager
+                    self._state_manager = parent_context._state_manager
+                    logger.debug(f"AgentContext inheriting state from parent AgentContext")
+                else:
+                    # FunctionContext or base Context - create new state manager
+                    self._state_manager = EntityStateManager()
+                    logger.debug(f"AgentContext created new state manager (parent has no state)")
+            except RuntimeError:
+                # _get_state_manager() failed (not in worker context) - create standalone
+                self._state_manager = EntityStateManager()
+                logger.debug(f"AgentContext created standalone state manager")
+        else:
+            # Standalone - create new state manager
+            self._state_manager = EntityStateManager()
+            logger.debug(f"AgentContext created standalone state manager")
+
+        # Conversation key for state storage
+        self._conversation_key = f"agent:{agent_name}:{self._session_id}:messages"
+
+    @property
+    def state(self):
+        """
+        Get state interface for agent state management.
+
+        Returns:
+            EntityState instance for state operations
+
+        Example:
+            # Store conversation history
+            messages = ctx.state.get(f"agent:{agent_name}:{session_id}:messages", [])
+            messages.append({"role": "user", "content": "Hello"})
+            ctx.state.set(f"agent:{agent_name}:{session_id}:messages", messages)
+
+            # Store agent-specific data
+            ctx.state.set("research_results", data)
+        """
+        from .entity import EntityState
+
+        # Use agent's conversation key as the state key
+        state_key = ("agent", self._conversation_key)
+        state_dict = self._state_manager.get_or_create_state(state_key)
+        return EntityState(state_dict)
+
+    @property
+    def session_id(self) -> str:
+        """Get session identifier for this agent context."""
+        return self._session_id
+
+    def get_conversation_history(self) -> List[Message]:
+        """
+        Retrieve conversation history from state.
+
+        Returns:
+            List of Message objects from conversation history
+        """
+        messages_data = self.state.get(self._conversation_key, [])
+
+        # Convert dict representations back to Message objects
+        messages = []
+        for msg_dict in messages_data:
+            if isinstance(msg_dict, dict):
+                role = msg_dict.get("role", "user")
+                content = msg_dict.get("content", "")
+                if role == "user":
+                    messages.append(Message.user(content))
+                elif role == "assistant":
+                    messages.append(Message.assistant(content))
+                else:
+                    # Generic message - create with MessageRole enum
+                    from .lm import MessageRole
+                    msg_role = MessageRole(role) if role in ("user", "assistant", "system") else MessageRole.USER
+                    msg = Message(role=msg_role, content=content)
+                    messages.append(msg)
+            else:
+                # Already a Message object
+                messages.append(msg_dict)
+
+        return messages
+
+    def save_conversation_history(self, messages: List[Message]) -> None:
+        """
+        Save conversation history to state.
+
+        Args:
+            messages: List of Message objects to persist
+        """
+        # Convert Message objects to dict for JSON serialization
+        messages_data = []
+        for msg in messages:
+            messages_data.append({
+                "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
+                "content": msg.content
+            })
+
+        self.state.set(self._conversation_key, messages_data)
+
+
 class Handoff:
     """Configuration for agent-to-agent handoff.
 
@@ -463,13 +632,47 @@ class Agent:
             print(result.output)
             ```
         """
-        # Create context if not provided
+        # Create or adapt context
         if context is None:
+            # Standalone execution - create AgentContext
             import uuid
-
-            context = Context(
-                run_id=f"agent-{self.name}-{uuid.uuid4().hex[:8]}",
+            run_id = f"agent-{self.name}-{uuid.uuid4().hex[:8]}"
+            context = AgentContext(
+                run_id=run_id,
+                agent_name=self.name,
             )
+        elif isinstance(context, AgentContext):
+            # Already AgentContext - use as-is
+            pass
+        elif hasattr(context, '_workflow_entity'):
+            # WorkflowContext - create AgentContext that inherits state
+            import uuid
+            run_id = f"{context.run_id}:agent:{self.name}"
+            context = AgentContext(
+                run_id=run_id,
+                agent_name=self.name,
+                session_id=context.run_id,  # Share workflow's session
+                parent_context=context,
+            )
+        else:
+            # FunctionContext or other - create new AgentContext
+            import uuid
+            run_id = f"{context.run_id}:agent:{self.name}"
+            context = AgentContext(
+                run_id=run_id,
+                agent_name=self.name,
+            )
+
+        # Load conversation history from state (if AgentContext)
+        if isinstance(context, AgentContext):
+            messages: List[Message] = context.get_conversation_history()
+            # Add new user message
+            messages.append(Message.user(user_message))
+            # Save updated conversation
+            context.save_conversation_history(messages)
+        else:
+            # Fallback for non-AgentContext (shouldn't happen with code above)
+            messages = [Message.user(user_message)]
 
         # Create span for agent execution with trace linking
         from ._core import create_span
@@ -480,12 +683,10 @@ class Agent:
             context._runtime_context if hasattr(context, "_runtime_context") else None,
             {
                 "agent.name": self.name,
-                "agent.model": self.model,
+                "agent.model": self.model_name,  # Use model_name (always a string)
                 "agent.max_iterations": str(self.max_iterations),
             },
         ) as span:
-            # Initialize conversation
-            messages: List[Message] = [Message.user(user_message)]
             all_tool_calls: List[Dict[str, Any]] = []
 
             # Reasoning loop
@@ -508,26 +709,42 @@ class Agent:
                         "content": msg.content
                     })
 
-                # Call LLM using simplified API
-                # TODO: Support tools in lm.generate() - for now using GenerateRequest internally
-                request = GenerateRequest(
-                    model=self.model,
-                    system_prompt=self.instructions,
-                    messages=messages,
-                    tools=tool_defs if tool_defs else [],
-                )
-                request.config.temperature = self.temperature
-                if self.max_tokens:
-                    request.config.max_tokens = self.max_tokens
-                if self.top_p:
-                    request.config.top_p = self.top_p
+                # Call LLM
+                # Check if we have a legacy LanguageModel instance or need to create one
+                if self._language_model is not None:
+                    # Legacy API: use provided LanguageModel instance
+                    request = GenerateRequest(
+                        model="mock-model",  # Not used by MockLanguageModel
+                        system_prompt=self.instructions,
+                        messages=messages,
+                        tools=tool_defs if tool_defs else [],
+                    )
+                    request.config.temperature = self.temperature
+                    if self.max_tokens:
+                        request.config.max_tokens = self.max_tokens
+                    if self.top_p:
+                        request.config.top_p = self.top_p
+                    response = await self._language_model.generate(request)
+                else:
+                    # New API: model is a string, create internal LM instance
+                    request = GenerateRequest(
+                        model=self.model,
+                        system_prompt=self.instructions,
+                        messages=messages,
+                        tools=tool_defs if tool_defs else [],
+                    )
+                    request.config.temperature = self.temperature
+                    if self.max_tokens:
+                        request.config.max_tokens = self.max_tokens
+                    if self.top_p:
+                        request.config.top_p = self.top_p
 
-                # Create internal LM instance for generation
-                # TODO: Use model_config when provided
-                from .lm import _LanguageModel
-                provider, model_name = self.model.split('/', 1)
-                internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                response = await internal_lm.generate(request)
+                    # Create internal LM instance for generation
+                    # TODO: Use model_config when provided
+                    from .lm import _LanguageModel
+                    provider, model_name = self.model.split('/', 1)
+                    internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+                    response = await internal_lm.generate(request)
 
                 # Add assistant response to messages
                 messages.append(Message.assistant(response.text))
@@ -576,6 +793,9 @@ class Agent:
                                         f"Handoff detected to '{result['to_agent']}', "
                                         f"terminating current agent"
                                     )
+                                    # Save conversation before returning
+                                    if isinstance(context, AgentContext):
+                                        context.save_conversation_history(messages)
                                     # Return immediately with handoff result
                                     return AgentResult(
                                         output=result["output"],
@@ -613,6 +833,9 @@ class Agent:
                 else:
                     # No tool calls - agent is done
                     self.logger.debug(f"Agent completed after {iteration + 1} iterations")
+                    # Save conversation before returning
+                    if isinstance(context, AgentContext):
+                        context.save_conversation_history(messages)
                     return AgentResult(
                         output=response.text,
                         tool_calls=all_tool_calls,
@@ -622,67 +845,14 @@ class Agent:
             # Max iterations reached
             self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
             final_output = messages[-1].content if messages else "No output generated"
+            # Save conversation before returning
+            if isinstance(context, AgentContext):
+                context.save_conversation_history(messages)
             return AgentResult(
                 output=final_output,
                 tool_calls=all_tool_calls,
                 context=context,
             )
-
-    async def chat(
-        self,
-        user_message: str,
-        messages: List[Message],
-        context: Optional[Context] = None,
-    ) -> tuple[str, List[Message]]:
-        """Continue multi-turn conversation.
-
-        Args:
-            user_message: New user message
-            messages: Previous conversation messages
-            context: Optional context
-
-        Returns:
-            Tuple of (assistant_response, updated_messages)
-
-        Example:
-            ```python
-            messages = []
-            response, messages = await agent.chat("Hello", messages)
-            response, messages = await agent.chat("Tell me more", messages)
-            ```
-        """
-        if context is None:
-            import uuid
-
-            context = Context(
-                run_id=f"agent-chat-{self.name}-{uuid.uuid4().hex[:8]}",
-            )
-
-        # Add user message
-        conversation = messages + [Message.user(user_message)]
-
-        # Build request (no tools for simple chat)
-        request = GenerateRequest(
-            model=self.model,
-            system_prompt=self.instructions,
-            messages=conversation,
-        )
-        request.config.temperature = self.temperature
-        if self.max_tokens:
-            request.config.max_tokens = self.max_tokens
-        if self.top_p:
-            request.config.top_p = self.top_p
-
-        # Create internal LM instance for generation
-        from .lm import _LanguageModel
-        provider, model_name = self.model.split('/', 1)
-        internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-        response = await internal_lm.generate(request)
-
-        # Add assistant response
-        conversation.append(Message.assistant(response.text))
-
-        return response.text, conversation
 
 
 def agent(
