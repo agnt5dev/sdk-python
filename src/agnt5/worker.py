@@ -57,13 +57,11 @@ class Worker:
         coordinator_endpoint: Optional[str] = None,
         runtime: str = "standalone",
         metadata: Optional[Dict[str, str]] = None,
-        # Explicit component registration (hybrid approach)
         functions: Optional[List] = None,
         workflows: Optional[List] = None,
         entities: Optional[List] = None,
         agents: Optional[List] = None,
         tools: Optional[List] = None,
-        # Auto-registration (development mode)
         auto_register: bool = False,
         auto_register_paths: Optional[List[str]] = None,
         pyproject_path: Optional[str] = None,
@@ -621,9 +619,11 @@ class Worker:
         """Execute a function handler (supports both regular and streaming functions)."""
         import json
         import inspect
+        import time
         from .context import Context
         from ._core import PyExecuteComponentResponse
 
+        exec_start = time.time()
         logger.info(f"🔥 WORKER: Executing function {config.name}")
 
         try:
@@ -643,7 +643,7 @@ class Worker:
             )
 
             # Create span for function execution with trace linking
-            from ._core import create_span, flush_telemetry_py
+            from ._core import create_span
 
             with create_span(
                 config.name,
@@ -663,12 +663,9 @@ class Worker:
                 # Debug: Log what type result is
                 logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
 
-            # Flush telemetry after span ends to ensure it's exported
-            try:
-                flush_telemetry_py()
-                logger.debug("Telemetry flushed after function execution")
-            except Exception as e:
-                logger.warning(f"Failed to flush telemetry: {e}")
+            # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
+            # The batch span processor handles flushing automatically with 5s timeout
+            # We only need to flush on worker shutdown, not after each function execution
 
             # Check if result is an async generator (streaming function)
             if inspect.isasyncgen(result):
@@ -803,7 +800,7 @@ class Worker:
             )
 
             # Create span for workflow execution with trace linking
-            from ._core import create_span, flush_telemetry_py
+            from ._core import create_span
 
             with create_span(
                 config.name,
@@ -820,12 +817,8 @@ class Worker:
                 else:
                     result = await config.handler(ctx)
 
-            # Flush telemetry after span ends to ensure it's exported
-            try:
-                flush_telemetry_py()
-                logger.debug("Telemetry flushed after workflow execution")
-            except Exception as e:
-                logger.warning(f"Failed to flush telemetry: {e}")
+            # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
+            # The batch span processor handles flushing automatically with 5s timeout
 
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
@@ -1116,8 +1109,9 @@ class Worker:
         This method will:
         1. Discover all registered @function and @workflow handlers
         2. Register with the coordinator
-        3. Enter the message processing loop
-        4. Block until shutdown
+        3. Create a shared Python event loop for all function executions
+        4. Enter the message processing loop
+        5. Block until shutdown
 
         This is the main entry point for your worker service.
         """
@@ -1132,6 +1126,15 @@ class Worker:
         # Set metadata
         if self.metadata:
             self._rust_worker.set_service_metadata(self.metadata)
+
+        # Get the current event loop to pass to Rust for concurrent Python async execution
+        # This allows Rust to execute Python async functions on the same event loop
+        # without spawn_blocking overhead, enabling true concurrency
+        loop = asyncio.get_running_loop()
+        logger.info("Passing Python event loop to Rust worker for concurrent execution")
+
+        # Set event loop on Rust worker
+        self._rust_worker.set_event_loop(loop)
 
         # Set message handler
         handler = self._create_message_handler()
