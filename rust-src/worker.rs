@@ -422,7 +422,7 @@ impl PyWorker {
                                     agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                                 })?;
 
-                            // Check if result is a coroutine (async function)
+                            // Check if result is an awaitable (coroutine, Task, Future, or any __await__)
                             let inspect = py.import("inspect")
                                 .map_err(|e| {
                                     let err_msg = format!("Failed to import inspect: {}", e);
@@ -430,13 +430,13 @@ impl PyWorker {
                                     agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                                 })?;
 
-                            let is_coroutine = inspect.call_method1("iscoroutine", (&py_result,))
+                            let is_awaitable = inspect.call_method1("isawaitable", (&py_result,))
                                 .and_then(|result| result.extract::<bool>())
                                 .unwrap_or(false);
 
-                            if is_coroutine {
-                                // It's a coroutine - run it with asyncio.run()
-                                log::debug!("Handler returned coroutine, running with asyncio.run()");
+                            if is_awaitable {
+                                // It's an awaitable (coroutine, Task, Future, etc.) - run it with asyncio.run()
+                                log::debug!("Handler returned awaitable, running with asyncio.run()");
                                 let asyncio = py.import("asyncio")
                                     .map_err(|e| {
                                         let err_msg = format!("Failed to import asyncio: {}", e);
@@ -453,8 +453,8 @@ impl PyWorker {
                                         agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                                     })
                             } else {
-                                // It's a regular return value - just return it
-                                log::debug!("Handler returned regular value (not a coroutine)");
+                                // It's a regular return value (not awaitable) - just return it
+                                log::debug!("Handler returned regular value (not awaitable)");
                                 Ok(py_result.into())
                             }
                         })
