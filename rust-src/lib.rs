@@ -331,7 +331,8 @@ fn log_from_python(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize PyO3-log to bridge Rust logs to Python
-    pyo3_log::init();
+    // TODO: Re-enable once pyo3-log supports pyo3 0.27
+    // pyo3_log::init();
 
     // Worker-related classes
     m.add_class::<PyWorkerConfig>()?;

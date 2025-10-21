@@ -135,7 +135,7 @@ impl PyLanguageModel {
     fn generate<'py>(
         &self,
         py: Python<'py>,
-        prompt: PyObject,
+        prompt: Py<PyAny>,
         kwargs: Option<Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kwargs_ref = kwargs.as_ref();
@@ -201,7 +201,7 @@ impl PyLanguageModel {
     fn stream<'py>(
         &self,
         py: Python<'py>,
-        prompt: PyObject,
+        prompt: Py<PyAny>,
         kwargs: Option<Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kwargs_ref = kwargs.as_ref();
@@ -387,7 +387,7 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
 fn build_request(
     py: Python<'_>,
     model: &str,
-    prompt: &PyObject,
+    prompt: &Py<PyAny>,
     system_prompt_kw: Option<String>,
     temperature: Option<f32>,
     top_p: Option<f32>,
@@ -447,15 +447,15 @@ fn build_request(
     Ok(request)
 }
 
-fn parse_prompt(py: Python<'_>, prompt: &PyObject) -> PyResult<Vec<(MessageRole, String)>> {
+fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<(MessageRole, String)>> {
     if let Ok(text) = prompt.extract::<String>(py) {
         return Ok(vec![(MessageRole::User, text)]);
     }
 
-    if let Ok(list) = prompt.downcast_bound::<PyList>(py) {
+    if let Ok(list) = prompt.cast_bound::<PyList>(py) {
         let mut messages = Vec::with_capacity(list.len());
         for item in list {
-            if let Ok(dict) = item.downcast::<PyDict>() {
+            if let Ok(dict) = item.cast::<PyDict>() {
                 let role_value = dict
                     .get_item("role")?
                     .ok_or_else(|| PyValueError::new_err("Chat message missing 'role' field"))?;
@@ -751,7 +751,7 @@ impl PyResponse {
     }
 
     #[getter]
-    fn tool_calls(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn tool_calls(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         // Convert tool_calls from Rust to Python list of dicts
         if let Some(ref tool_calls) = self.inner.tool_calls {
             let py_list = pyo3::types::PyList::empty(py);
@@ -769,7 +769,7 @@ impl PyResponse {
     }
 
     #[getter]
-    fn object(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn object(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .object
             .as_ref()
@@ -778,7 +778,7 @@ impl PyResponse {
     }
 
     #[getter]
-    fn raw(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn raw(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .raw
             .as_ref()
@@ -855,7 +855,7 @@ impl PyStreamChunk {
     }
 
     #[getter]
-    fn object(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn object(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.object
             .as_ref()
             .map(|value| json_to_py(py, value))
@@ -863,7 +863,7 @@ impl PyStreamChunk {
     }
 
     #[getter]
-    fn raw(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn raw(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.raw
             .as_ref()
             .map(|value| json_to_py(py, value))
@@ -948,7 +948,7 @@ pub fn register_language_model(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
+fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let json_module = py.import("json")?;
     let serialized = serde_json::to_string(value)
         .map_err(|err| PyValueError::new_err(format!("Failed to serialize JSON value: {err}")))?;

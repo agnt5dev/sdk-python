@@ -7,6 +7,7 @@ use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
+use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 use std::sync::{Arc, Mutex};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::global;
@@ -48,9 +49,12 @@ impl From<PyWorkerConfig> for WorkerConfig {
 pub struct PyWorker {
     config: PyWorkerConfig,
     worker: Arc<Mutex<Option<Worker>>>,
-    message_handler: Arc<Mutex<Option<PyObject>>>,
+    message_handler: Arc<Mutex<Option<Py<PyAny>>>>,
     components: Arc<Mutex<Vec<ComponentInfo>>>,
     service_metadata: Arc<Mutex<HashMap<String, String>>>,
+    // TaskLocals stores reference to Python event loop for concurrent async execution
+    // This enables using into_future_with_locals instead of spawn_blocking + asyncio.run()
+    event_loop_locals: Arc<Mutex<Option<TaskLocals>>>,
 }
 
 #[pymethods]
@@ -65,11 +69,12 @@ impl PyWorker {
             message_handler: Arc::new(Mutex::new(None)),
             components: Arc::new(Mutex::new(Vec::new())),
             service_metadata: Arc::new(Mutex::new(HashMap::new())),
+            event_loop_locals: Arc::new(Mutex::new(None)),
         })
     }
 
     /// Set the message handler callback
-    fn set_message_handler(&self, handler: PyObject) -> PyResult<()> {
+    fn set_message_handler(&self, handler: Py<PyAny>) -> PyResult<()> {
         log::info!("Setting message handler for PyWorker");
 
         let mut handler_guard = self.message_handler.lock().map_err(|e| {
@@ -123,6 +128,37 @@ impl PyWorker {
                 worker.set_metadata(metadata);
             }
         }
+        Ok(())
+    }
+
+    /// Set the Python event loop for concurrent async execution
+    ///
+    /// This method stores a reference to the Python event loop via TaskLocals.
+    /// The stored event loop will be used to execute Python async functions
+    /// concurrently without the overhead of spawn_blocking + asyncio.run().
+    ///
+    /// This enables true concurrent execution of Python async functions on the
+    /// same event loop, allowing 100+ concurrent requests without thread pool
+    /// bottlenecks.
+    ///
+    /// # Arguments
+    /// * `event_loop` - The Python asyncio event loop object
+    fn set_event_loop(&self, py: Python, event_loop: Py<PyAny>) -> PyResult<()> {
+        log::info!("Setting Python event loop for concurrent async execution");
+
+        // Create TaskLocals from the event loop
+        // TaskLocals stores a reference to the Python event loop that can be
+        // used across Rust async tasks via into_future_with_locals()
+        let task_locals = TaskLocals::new(event_loop.bind(py).clone());
+
+        let mut guard = self.event_loop_locals.lock().map_err(|e| {
+            let err_msg = format!("Failed to lock event loop locals: {}", e);
+            log::error!("{}", err_msg);
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
+        })?;
+        *guard = Some(task_locals);
+
+        log::info!("Event loop set successfully - concurrent Python async execution enabled");
         Ok(())
     }
 
@@ -183,6 +219,7 @@ impl PyWorker {
 
         let worker_arc = self.worker.clone();
         let handler_arc = self.message_handler.clone();
+        let event_loop_locals_arc = self.event_loop_locals.clone();
         let service_name = self.config.service_name.clone();
 
         future_into_py(py, async move {
@@ -205,11 +242,13 @@ impl PyWorker {
             // Now uses `Fn + Clone` to support concurrent execution
             let message_handler = {
                 let handler_arc_clone = handler_arc.clone();
+                let event_loop_locals_clone = event_loop_locals_arc.clone();
                 move |runtime_message: RuntimeMessage,
                       tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
                     let handler_arc_inner = handler_arc_clone.clone();
+                    let event_loop_locals_inner = event_loop_locals_clone.clone();
                     async move {
-                        Self::handle_runtime_message(handler_arc_inner, runtime_message, tx).await
+                        Self::handle_runtime_message(handler_arc_inner, event_loop_locals_inner, runtime_message, tx).await
                     }
                 }
             };
@@ -237,7 +276,8 @@ impl PyWorker {
 impl PyWorker {
     /// Handle runtime message by calling Python callback
     async fn handle_runtime_message(
-        handler_arc: Arc<Mutex<Option<PyObject>>>,
+        handler_arc: Arc<Mutex<Option<Py<PyAny>>>>,
+        event_loop_locals_arc: Arc<Mutex<Option<TaskLocals>>>,
         runtime_message: RuntimeMessage,
         tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
@@ -250,7 +290,7 @@ impl PyWorker {
             })?;
 
             if let Some(handler) = handler_guard.as_ref() {
-                Python::with_gil(|py| handler.clone_ref(py))
+                Python::attach(|py| handler.clone_ref(py))
             } else {
                 log::error!("No message handler set");
                 return Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(
@@ -272,8 +312,9 @@ impl PyWorker {
                 );
                 let _guard = invocation_span.enter();
 
+                let request_start = std::time::Instant::now();
                 log::info!(
-                    "Received function invocation request - Data size: {} bytes",
+                    "🔥 RUST: Received function invocation request - Data size: {} bytes",
                     invoke_request.input_data.len()
                 );
                 log::debug!("Request metadata: {:?}", invoke_request.metadata);
@@ -400,75 +441,108 @@ impl PyWorker {
                 let tx_clone = tx.clone();
                 let worker_id = runtime_message.worker_id.clone();
 
-                // Execute Python handler - spawn blocking to handle async Python code
-                // We need to run Python async code in a blocking context because pyo3-async-runtimes
-                // requires the asyncio event loop to be on the current thread
+                // Execute Python handler using shared event loop for concurrent execution
+                // This approach uses into_future_with_locals() to execute Python async functions
+                // on the same event loop that was created at worker startup, enabling true
+                // concurrent execution without spawn_blocking overhead.
+                //
+                // Benefits over spawn_blocking + asyncio.run():
+                // - No thread pool bottleneck (was limited to ~8-16 concurrent executions)
+                // - Lower overhead (no need to create new event loop per request)
+                // - True concurrency (100+ async functions on same event loop)
                 let result = {
-                    // Attach span context before spawning blocking task
-                    // Note: Can't hold the guard across await, so we attach/detach immediately
-                    {
-                        let _span_guard = cx.clone().attach();
-                    }
+                    // Get TaskLocals with the shared event loop
+                    let task_locals: TaskLocals = Python::attach(|_py| -> Result<_, agnt5_sdk_core::error::SdkError> {
+                        let guard = event_loop_locals_arc.lock().map_err(|e| {
+                            let err_msg = format!("Failed to lock event loop locals: {}", e);
+                            log::error!("{}", err_msg);
+                            agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                        })?;
 
-                    // Spawn a blocking task to run the Python handler
-                    // This gives us a dedicated thread where we can set up asyncio properly
-                    tokio::task::spawn_blocking(move || {
-                        Python::with_gil(|py| -> Result<Py<PyAny>, agnt5_sdk_core::error::SdkError> {
-                            // Call the Python handler
-                            let py_result = handler.call1(py, (py_request,))
+                        Ok(guard.as_ref().ok_or_else(|| {
+                            let err_msg = "Event loop not initialized. Call set_event_loop() first.";
+                            log::error!("{}", err_msg);
+                            agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                        })?.clone())
+                    })?;
+
+                    // Call Python handler and execute on shared event loop
+                    let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
+                        let python_call_start = std::time::Instant::now();
+                        // Call the Python handler
+                        let py_result = handler.call1(py, (py_request,))
+                            .map_err(|e| {
+                                let err_msg = format!("Failed to call Python handler: {}", e);
+                                log::error!("{}", err_msg);
+                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                            })?;
+                        log::info!("🔥 RUST: Python handler.call1() took: {:?}", python_call_start.elapsed());
+
+                        // Check if result is an awaitable (coroutine, Task, Future, or any __await__)
+                        let inspect = py.import("inspect")
+                            .map_err(|e| {
+                                let err_msg = format!("Failed to import inspect: {}", e);
+                                log::error!("{}", err_msg);
+                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                            })?;
+
+                        let is_awaitable = inspect.call_method1("isawaitable", (&py_result,))
+                            .and_then(|result| result.extract::<bool>())
+                            .unwrap_or(false);
+
+                        let awaitable: Bound<PyAny> = if is_awaitable {
+                            // It's an awaitable - use it directly
+                            log::info!("🔥 RUST: Handler returned awaitable, will execute on shared event loop");
+                            py_result.bind(py).clone()
+                        } else {
+                            // It's a regular return value (not awaitable)
+                            // This shouldn't happen for async functions, but handle it gracefully
+                            log::warn!("🔥 RUST: Handler returned NON-awaitable value (unexpected for async functions)");
+
+                            // Wrap in a coroutine using asyncio.ensure_future with a coroutine wrapper
+                            let asyncio = py.import("asyncio")
                                 .map_err(|e| {
-                                    let err_msg = format!("Failed to call Python handler: {}", e);
+                                    let err_msg = format!("Failed to import asyncio: {}", e);
                                     log::error!("{}", err_msg);
                                     agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                                 })?;
 
-                            // Check if result is an awaitable (coroutine, Task, Future, or any __await__)
-                            let inspect = py.import("inspect")
+                            // Create a coroutine that returns the value
+                            let coroutine = asyncio.call_method1("coroutine", (py_result,))
                                 .map_err(|e| {
-                                    let err_msg = format!("Failed to import inspect: {}", e);
+                                    let err_msg = format!("Failed to wrap in coroutine: {}", e);
                                     log::error!("{}", err_msg);
                                     agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                                 })?;
 
-                            let is_awaitable = inspect.call_method1("isawaitable", (&py_result,))
-                                .and_then(|result| result.extract::<bool>())
-                                .unwrap_or(false);
+                            coroutine
+                        };
 
-                            if is_awaitable {
-                                // It's an awaitable (coroutine, Task, Future, etc.) - run it with asyncio.run()
-                                log::debug!("Handler returned awaitable, running with asyncio.run()");
-                                let asyncio = py.import("asyncio")
-                                    .map_err(|e| {
-                                        let err_msg = format!("Failed to import asyncio: {}", e);
-                                        log::error!("{}", err_msg);
-                                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                                    })?;
+                        // Convert Python awaitable to Rust Future using shared event loop
+                        let future = into_future_with_locals(&task_locals, awaitable)
+                            .map_err(|e| {
+                                let err_msg = format!("Failed to convert Python awaitable to Rust Future: {}", e);
+                                log::error!("{}", err_msg);
+                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                            })?;
+                        Ok(future)
+                    })?;
 
-                                // Use asyncio.run() to execute the coroutine
-                                asyncio.call_method1("run", (py_result,))
-                                    .map(|result| result.into())
-                                    .map_err(|e| {
-                                        let err_msg = format!("Asyncio.run() failed: {}", e);
-                                        log::error!("{}", err_msg);
-                                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                                    })
-                            } else {
-                                // It's a regular return value (not awaitable) - just return it
-                                log::debug!("Handler returned regular value (not awaitable)");
-                                Ok(py_result.into())
-                            }
-                        })
-                    })
-                    .await
-                    .map_err(|e| {
-                        let err_msg = format!("Blocking task failed: {}", e);
-                        log::error!("{}", err_msg);
-                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                    })??
+                    let await_start = std::time::Instant::now();
+                    let result = rust_future
+                        .await
+                        .map_err(|e| {
+                            let err_msg = format!("Python async execution failed: {}", e);
+                            log::error!("{}", err_msg);
+                            agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                        })?;
+                    log::info!("🔥 RUST: Awaiting Python coroutine took: {:?}", await_start.elapsed());
+                    log::info!("🔥 RUST: Total request processing time: {:?}", request_start.elapsed());
+                    result
                 };
 
                 // Process the result
-                let result = Python::with_gil(
+                let result = Python::attach(
                     |py| -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
                         let py_result = result.bind(py);
                         // Try to extract as list first (streaming case)
