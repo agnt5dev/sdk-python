@@ -115,8 +115,20 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
     """
     print("\n🔧 Setting up EMBEDDED mode (SQLite + embedded journal)")
 
+    # Pull latest image to ensure we have the most recent version
+    import docker
+    image_name = "ghcr.io/agnt5dev/agnt5-dev-server:latest"
+    print(f"📥 Pulling latest image: {image_name}")
+    try:
+        docker_client = docker.from_env()
+        docker_client.images.pull(image_name)
+        print(f"✅ Image pulled successfully")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not pull image: {e}")
+        print(f"   Proceeding with local image if available")
+
     # Start dev-server container
-    dev_server = DockerContainer("ghcr.io/agnt5dev/agnt5-dev-server:latest")
+    dev_server = DockerContainer(image_name)
     dev_server.with_exposed_ports(34181, 34182, 34186, 4317, 34180)  # HTTP, gRPC, Coordinator, OTLP, MCP
 
     # Configure for embedded mode (SQLite + embedded journal)
