@@ -5,10 +5,8 @@ use agnt5_sdk_core::pb::{
 };
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
-use futures::future::poll_fn;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::global;
@@ -402,57 +400,72 @@ impl PyWorker {
                 let tx_clone = tx.clone();
                 let worker_id = runtime_message.worker_id.clone();
 
-                // Get Python coroutine and convert to future within context guard
-                let py_future = {
-                    let _span_guard = cx.clone().attach();
+                // Execute Python handler - spawn blocking to handle async Python code
+                // We need to run Python async code in a blocking context because pyo3-async-runtimes
+                // requires the asyncio event loop to be on the current thread
+                let result = {
+                    // Attach span context before spawning blocking task
+                    // Note: Can't hold the guard across await, so we attach/detach immediately
+                    {
+                        let _span_guard = cx.clone().attach();
+                    }
 
-                    // Get Python coroutine
-                    let py_coroutine = Python::with_gil(|py| {
-                        handler.call1(py, (py_request,))
+                    // Spawn a blocking task to run the Python handler
+                    // This gives us a dedicated thread where we can set up asyncio properly
+                    tokio::task::spawn_blocking(move || {
+                        Python::with_gil(|py| -> Result<Py<PyAny>, agnt5_sdk_core::error::SdkError> {
+                            // Call the Python handler
+                            let py_result = handler.call1(py, (py_request,))
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to call Python handler: {}", e);
+                                    log::error!("{}", err_msg);
+                                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                                })?;
+
+                            // Check if result is a coroutine (async function)
+                            let inspect = py.import("inspect")
+                                .map_err(|e| {
+                                    let err_msg = format!("Failed to import inspect: {}", e);
+                                    log::error!("{}", err_msg);
+                                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                                })?;
+
+                            let is_coroutine = inspect.call_method1("iscoroutine", (&py_result,))
+                                .and_then(|result| result.extract::<bool>())
+                                .unwrap_or(false);
+
+                            if is_coroutine {
+                                // It's a coroutine - run it with asyncio.run()
+                                log::debug!("Handler returned coroutine, running with asyncio.run()");
+                                let asyncio = py.import("asyncio")
+                                    .map_err(|e| {
+                                        let err_msg = format!("Failed to import asyncio: {}", e);
+                                        log::error!("{}", err_msg);
+                                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                                    })?;
+
+                                // Use asyncio.run() to execute the coroutine
+                                asyncio.call_method1("run", (py_result,))
+                                    .map(|result| result.into())
+                                    .map_err(|e| {
+                                        let err_msg = format!("Asyncio.run() failed: {}", e);
+                                        log::error!("{}", err_msg);
+                                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
+                                    })
+                            } else {
+                                // It's a regular return value - just return it
+                                log::debug!("Handler returned regular value (not a coroutine)");
+                                Ok(py_result.into())
+                            }
+                        })
                     })
+                    .await
                     .map_err(|e| {
-                        let err_msg = format!("Failed to call Python handler: {}", e);
+                        let err_msg = format!("Blocking task failed: {}", e);
                         log::error!("{}", err_msg);
                         agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                    })?;
-
-                    // Convert Python coroutine to Rust future
-                    Python::with_gil(|py| {
-                        pyo3_async_runtimes::tokio::into_future(py_coroutine.bind(py).clone())
-                    })
-                    .map_err(|e| {
-                        let err_msg = format!("Failed to convert Python coroutine to future: {}", e);
-                        log::error!("{}", err_msg);
-                        agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                    })?
-                    // _span_guard is dropped here before the await; we reattach below
+                    })??
                 };
-
-                // Await the Python coroutine while reattaching context on each poll
-                let result_future = {
-                    let mut py_future = Box::pin(py_future);
-                    let cx_for_future = cx.clone();
-                    poll_fn(move |task_cx| {
-                        let _span_guard = cx_for_future.clone().attach();
-                        {
-                            let span_ref = cx_for_future.span();
-                            let span_ctx = span_ref.span_context();
-                            log::debug!(
-                                "Trace propagation: INSIDE attach trace_id={}, span_id={}, valid={}",
-                                span_ctx.trace_id().to_string(),
-                                span_ctx.span_id().to_string(),
-                                span_ctx.is_valid()
-                            );
-                        }
-                        py_future.as_mut().poll(task_cx)
-                    })
-                };
-
-                let result = result_future.await.map_err(|e| {
-                    let err_msg = format!("Python handler execution failed: {}", e);
-                    log::error!("{}", err_msg);
-                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                })?;
 
                 // Process the result
                 let result = Python::with_gil(
