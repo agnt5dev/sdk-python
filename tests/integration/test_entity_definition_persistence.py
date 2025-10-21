@@ -24,7 +24,7 @@ def test_entity_definition_persisted(worker_process, platform):
     conn = sqlite3.connect(db_path)
     cursor = conn.execute("""
         SELECT
-            name,
+            component_name,
             component_type,
             component_definition
         FROM components
@@ -80,7 +80,7 @@ def test_entity_method_schemas_captured(worker_process, platform):
         SELECT component_definition
         FROM components
         WHERE component_type = 'COMPONENT_TYPE_ENTITY'
-        AND name = 'ShoppingCart'
+        AND component_name = 'ShoppingCart'
     """)
 
     row = cursor.fetchone()
@@ -113,7 +113,7 @@ def test_entity_state_schemas_captured(worker_process, platform):
 
     conn = sqlite3.connect(db_path)
     cursor = conn.execute("""
-        SELECT name, component_definition
+        SELECT component_name, component_definition
         FROM components
         WHERE component_type = 'COMPONENT_TYPE_ENTITY'
         AND component_definition IS NOT NULL
@@ -154,10 +154,10 @@ def test_entity_definition_structure(worker_process, platform):
 
     conn = sqlite3.connect(db_path)
     cursor = conn.execute("""
-        SELECT name, component_definition
+        SELECT component_name, component_definition
         FROM components
         WHERE component_type = 'COMPONENT_TYPE_ENTITY'
-        AND name = 'BankAccount'
+        AND component_name = 'BankAccount'
     """)
 
     row = cursor.fetchone()
@@ -208,7 +208,7 @@ def test_counter_state_schema_details(worker_process, platform):
         SELECT component_definition
         FROM components
         WHERE component_type = 'COMPONENT_TYPE_ENTITY'
-        AND name = 'Counter'
+        AND component_name = 'Counter'
     """)
 
     row = cursor.fetchone()
