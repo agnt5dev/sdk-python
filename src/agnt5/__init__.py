@@ -7,6 +7,7 @@ with built-in durability guarantees and state management.
 
 from ._compat import _import_error, _rust_available
 from .agent import Agent, AgentContext, AgentRegistry, AgentResult, Handoff, agent, handoff
+from .agent_session import AgentSession
 from .client import Client, RunError
 from .context import Context
 from .function import FunctionContext
@@ -66,6 +67,7 @@ __all__ = [
     "Agent",
     "AgentRegistry",
     "AgentResult",
+    "AgentSession",
     "Handoff",
     "handoff",
     # Types

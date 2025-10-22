@@ -128,10 +128,11 @@ class Worker:
 
         # Import Rust worker
         try:
-            from ._core import PyWorker, PyWorkerConfig, PyComponentInfo
+            from ._core import PyWorker, PyWorkerConfig, PyComponentInfo, EntityStateManager as RustEntityStateManager
             self._PyWorker = PyWorker
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
+            self._RustEntityStateManager = RustEntityStateManager
         except ImportError as e:
             raise ImportError(
                 f"Failed to import Rust core worker: {e}. "
@@ -148,9 +149,16 @@ class Worker:
         # Create Rust worker instance
         self._rust_worker = self._PyWorker(self._rust_config)
 
-        # Create worker-scoped entity state manager
+        # Get tenant_id for entity state manager
+        import os
+        tenant_id = os.getenv("AGNT5_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+
+        # Create Rust entity state manager
+        self._rust_entity_state_manager = self._RustEntityStateManager(tenant_id)
+
+        # Create worker-scoped entity state manager with Rust manager
         from .entity import EntityStateManager
-        self._entity_state_manager = EntityStateManager()
+        self._entity_state_manager = EntityStateManager(rust_entity_state_manager=self._rust_entity_state_manager)
 
         # Component registration: auto-discover or explicit
         if auto_register:
@@ -1027,10 +1035,15 @@ class Worker:
             )
 
     async def _execute_agent(self, agent, input_data: bytes, request):
-        """Execute an agent."""
+        """Execute an agent with session support for multi-turn conversations."""
         import json
-        from .context import Context
+        import uuid
+        from .agent import AgentContext
+        from .entity import _entity_state_manager_ctx
         from ._core import PyExecuteComponentResponse
+
+        # Set entity state manager in context so AgentContext can access it
+        _entity_state_manager_ctx.set(self._entity_state_manager)
 
         try:
             # Parse input data
@@ -1041,16 +1054,30 @@ class Worker:
             if not user_message:
                 raise ValueError("Agent invocation requires 'message' parameter")
 
-            # Create context with runtime_context for trace correlation
-            ctx = Context(
-                run_id=f"{self.service_name}:{agent.name}",
+            # Extract or generate session_id for multi-turn conversation support
+            # If session_id is provided, the agent will load previous conversation history
+            # If not provided, a new session is created with auto-generated ID
+            session_id = input_dict.get("session_id")
+
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                logger.info(f"Created new agent session: {session_id}")
+            else:
+                logger.info(f"Using existing agent session: {session_id}")
+
+            # Create AgentContext with session support for conversation persistence
+            # AgentContext automatically loads/saves conversation history based on session_id
+            ctx = AgentContext(
+                run_id=request.invocation_id,
+                agent_name=agent.name,
+                session_id=session_id,
                 runtime_context=request.runtime_context,
             )
 
-            # Execute agent
+            # Execute agent - conversation history is automatically included
             agent_result = await agent.run(user_message, context=ctx)
 
-            # Build response
+            # Build response with agent output and tool calls
             result = {
                 "output": agent_result.output,
                 "tool_calls": agent_result.tool_calls,
@@ -1059,13 +1086,16 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
+            # Return session_id in metadata so UI can persist it
+            metadata = {"session_id": session_id}
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
                 state_update=None,
                 error_message=None,
-                metadata=None,
+                metadata=metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
@@ -1126,6 +1156,10 @@ class Worker:
         # Set metadata
         if self.metadata:
             self._rust_worker.set_service_metadata(self.metadata)
+
+        # Set entity state manager on Rust worker for database persistence
+        logger.info("Configuring entity state manager for database persistence")
+        self._rust_worker.set_entity_state_manager(self._rust_entity_state_manager)
 
         # Get the current event loop to pass to Rust for concurrent Python async execution
         # This allows Rust to execute Python async functions on the same event loop

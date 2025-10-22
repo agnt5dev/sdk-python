@@ -9,9 +9,11 @@ use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
 
 mod adk;
+mod entity_state;
 mod language_model;
 mod types;
 mod worker;
+use entity_state::EntityStateManager;
 use types::{
     PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse, PyStateTransition,
     PyStateUpdate, PyStepCheckpoint,
@@ -343,6 +345,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStepCheckpoint>()?;
     m.add_class::<PyStateTransition>()?;
     m.add_class::<PyStateUpdate>()?;
+
+    // Entity state management
+    m.add_class::<EntityStateManager>()?;
 
     // Language Model classes
     language_model::register_language_model(m)?;

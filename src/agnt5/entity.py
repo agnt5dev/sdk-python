@@ -497,15 +497,25 @@ def _create_entity_method_wrapper(entity_type: str, method):
         lock = state_manager.get_or_create_lock(state_key)
 
         async with lock:
-            # TODO: Load state from platform if not in memory
-            # if state_key not in state_manager._states and state_manager._rust_manager:
-            #     result = await state_manager._rust_manager.load_state(
-            #         tenant_id, entity_type, self._key
-            #     )
-            #     if result.found:
-            #         state_manager.load_state_from_platform(
-            #             state_key, result.state_json, result.version
-            #         )
+            # Load state from platform if not in memory
+            if state_key not in state_manager._states and state_manager._rust_manager:
+                try:
+                    # Call Rust manager to load state from platform
+                    result = await state_manager._rust_manager.py_load_state(
+                        entity_type, self._key
+                    )
+                    # result is a tuple: (found, state_json, version)
+                    found, state_json_bytes, version = result
+                    if found:
+                        # Decode and load state
+                        state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
+                        state_manager.load_state_from_platform(
+                            state_key, state_json, version
+                        )
+                        logger.info(f"Loaded entity state from platform: {entity_type}:{self._key} (version {version})")
+                except Exception as e:
+                    logger.warning(f"Failed to load entity state from platform: {e}")
+                    # Continue with empty state
 
             # Get or create state for this entity instance
             state_dict = state_manager.get_or_create_state(state_key)
@@ -519,16 +529,25 @@ def _create_entity_method_wrapper(entity_type: str, method):
                 result = await method(self, *args, **kwargs)
                 logger.debug("Completed %s:%s.%s", entity_type, self._key, method.__name__)
 
-                # TODO: Save state to platform after successful execution
-                # if state_manager._rust_manager:
-                #     state_dict, expected_version, new_version = \
-                #         state_manager.get_state_for_persistence(state_key)
-                #     import json
-                #     state_json = json.dumps(state_dict).encode('utf-8')
-                #     save_result = await state_manager._rust_manager.save_state(
-                #         tenant_id, entity_type, self._key, state_json, expected_version
-                #     )
-                #     state_manager._versions[state_key] = save_result.new_version
+                # Save state to platform after successful execution
+                if state_manager._rust_manager:
+                    try:
+                        import json
+                        # Get current version
+                        expected_version = state_manager._versions.get(state_key, 0)
+                        # Serialize state
+                        state_json = json.dumps(state_dict).encode('utf-8')
+                        # Call Rust manager to save state
+                        new_version = await state_manager._rust_manager.py_save_state(
+                            entity_type, self._key, state_json, expected_version
+                        )
+                        # Update version
+                        state_manager._versions[state_key] = new_version
+                        logger.info(f"Saved entity state to platform: {entity_type}:{self._key} (version {expected_version} -> {new_version})")
+                    except Exception as e:
+                        logger.error(f"Failed to save entity state to platform: {e}")
+                        # Don't fail the method execution just because persistence failed
+                        # The state is still in memory
 
                 return result
 

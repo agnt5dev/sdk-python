@@ -102,17 +102,25 @@ class AgentContext(Context):
                     # FunctionContext or base Context - create new state manager
                     self._state_manager = EntityStateManager()
                     logger.debug(f"AgentContext created new state manager (parent has no state)")
-            except RuntimeError:
+            except RuntimeError as e:
                 # _get_state_manager() failed (not in worker context) - create standalone
                 self._state_manager = EntityStateManager()
-                logger.debug(f"AgentContext created standalone state manager")
+                logger.debug(f"AgentContext created standalone state manager (not in worker context)")
         else:
-            # Standalone - create new state manager
-            self._state_manager = EntityStateManager()
-            logger.debug(f"AgentContext created standalone state manager")
+            # Try to get from worker context first
+            try:
+                self._state_manager = _get_state_manager()
+                logger.debug(f"AgentContext got state manager from worker context")
+            except RuntimeError as e:
+                # Standalone - create new state manager
+                self._state_manager = EntityStateManager()
+                logger.debug(f"AgentContext created standalone state manager")
 
-        # Conversation key for state storage
+        # Conversation key for state storage (used for in-memory state)
         self._conversation_key = f"agent:{agent_name}:{self._session_id}:messages"
+        # Entity key for database persistence (without :messages suffix to match API expectations)
+        self._entity_key = f"agent:{agent_name}:{self._session_id}"
+        logger.debug(f"AgentContext initialized - session_id={self._session_id}")
 
     @property
     def state(self):
@@ -143,14 +151,49 @@ class AgentContext(Context):
         """Get session identifier for this agent context."""
         return self._session_id
 
-    def get_conversation_history(self) -> List[Message]:
+    async def get_conversation_history(self) -> List[Message]:
         """
-        Retrieve conversation history from state.
+        Retrieve conversation history from state, loading from database if needed.
 
         Returns:
             List of Message objects from conversation history
         """
+        # Try to load from database first if not in memory
+        entity_type = "AgentSession"
+        entity_key = self._entity_key  # Use entity_key without :messages suffix
+        state_key = (entity_type, entity_key)
+
+        # Check if we need to load from platform
+        if state_key not in self._state_manager._states and self._state_manager._rust_manager:
+            try:
+                result = await self._state_manager._rust_manager.py_load_state(
+                    entity_type, entity_key
+                )
+                found, state_json_bytes, version = result
+                if found:
+                    import json
+                    state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
+                    session_data = json.loads(state_json)
+
+                    # Extract messages from session object (might be old format or new format)
+                    if isinstance(session_data, dict) and "messages" in session_data:
+                        # New format with session metadata
+                        messages_data = session_data["messages"]
+                    elif isinstance(session_data, list):
+                        # Old format - just messages array
+                        messages_data = session_data
+                    else:
+                        messages_data = []
+
+                    # Load messages into in-memory state (store just messages, not full session object)
+                    self._state_manager.load_state_from_platform(state_key, json.dumps(messages_data), version)
+                    logger.info(f"Loaded conversation history from database: {entity_key} (version {version})")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history from database: {e}")
+
+        # Get from in-memory state
         messages_data = self.state.get(self._conversation_key, [])
+        logger.debug(f"Loaded {len(messages_data)} messages from conversation history")
 
         # Convert dict representations back to Message objects
         messages = []
@@ -174,13 +217,15 @@ class AgentContext(Context):
 
         return messages
 
-    def save_conversation_history(self, messages: List[Message]) -> None:
+    async def save_conversation_history(self, messages: List[Message]) -> None:
         """
-        Save conversation history to state.
+        Save conversation history to state and persist to database.
 
         Args:
             messages: List of Message objects to persist
         """
+        logger.debug(f"Saving {len(messages)} messages to conversation history")
+
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:
@@ -189,7 +234,46 @@ class AgentContext(Context):
                 "content": msg.content
             })
 
+        # Save to in-memory state
         self.state.set(self._conversation_key, messages_data)
+
+        # Persist to database via Rust EntityStateManager
+        if self._state_manager._rust_manager:
+            try:
+                import json
+                import time
+                entity_type = "AgentSession"
+                entity_key = self._entity_key  # Use entity_key without :messages suffix
+                state_key = (entity_type, entity_key)
+
+                # Get current version
+                expected_version = self._state_manager._versions.get(state_key, 0)
+
+                # Build session object with metadata for the sessions API
+                now = time.time()
+                session_data = {
+                    "session_id": self._session_id,
+                    "agent_name": self._agent_name,
+                    "created_at": now if expected_version == 0 else None,  # Only set on first save
+                    "last_message_time": now,
+                    "message_count": len(messages_data),
+                    "messages": messages_data,
+                    "metadata": {}
+                }
+
+                # Serialize to JSON bytes
+                state_json = json.dumps(session_data).encode('utf-8')
+
+                # Save to platform
+                new_version = await self._state_manager._rust_manager.py_save_state(
+                    entity_type, entity_key, state_json, expected_version
+                )
+
+                # Update version tracking
+                self._state_manager._versions[state_key] = new_version
+                logger.info(f"Persisted conversation history to database: {entity_key} (version {expected_version} -> {new_version})")
+            except Exception as e:
+                logger.error(f"Failed to persist conversation history to database: {e}")
 
 
 class Handoff:
@@ -665,11 +749,11 @@ class Agent:
 
         # Load conversation history from state (if AgentContext)
         if isinstance(context, AgentContext):
-            messages: List[Message] = context.get_conversation_history()
+            messages: List[Message] = await context.get_conversation_history()
             # Add new user message
             messages.append(Message.user(user_message))
             # Save updated conversation
-            context.save_conversation_history(messages)
+            await context.save_conversation_history(messages)
         else:
             # Fallback for non-AgentContext (shouldn't happen with code above)
             messages = [Message.user(user_message)]
@@ -795,7 +879,7 @@ class Agent:
                                     )
                                     # Save conversation before returning
                                     if isinstance(context, AgentContext):
-                                        context.save_conversation_history(messages)
+                                        await context.save_conversation_history(messages)
                                     # Return immediately with handoff result
                                     return AgentResult(
                                         output=result["output"],
@@ -835,7 +919,7 @@ class Agent:
                     self.logger.debug(f"Agent completed after {iteration + 1} iterations")
                     # Save conversation before returning
                     if isinstance(context, AgentContext):
-                        context.save_conversation_history(messages)
+                        await context.save_conversation_history(messages)
                     return AgentResult(
                         output=response.text,
                         tool_calls=all_tool_calls,
@@ -847,7 +931,7 @@ class Agent:
             final_output = messages[-1].content if messages else "No output generated"
             # Save conversation before returning
             if isinstance(context, AgentContext):
-                context.save_conversation_history(messages)
+                await context.save_conversation_history(messages)
             return AgentResult(
                 output=final_output,
                 tool_calls=all_tool_calls,
