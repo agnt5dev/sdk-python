@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Integration test service for AGNT5 Python SDK"
 requires-python = ">=3.11"
 dependencies = [
-    "agnt5>=0.2.2",
+    "agnt5>=0.2.8a3",
     "python-dotenv>=1.0.0",
 ]
 

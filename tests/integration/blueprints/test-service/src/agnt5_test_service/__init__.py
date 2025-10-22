@@ -49,6 +49,10 @@ from agnt5_test_service.tools import (
     validate_data,
 )
 
+from agnt5_test_service.agents import (
+    chat_agent,
+)
+
 __all__ = [
     # Simple functions
     "greet",
@@ -86,6 +90,8 @@ __all__ = [
     "search_database",
     "format_report",
     "validate_data",
+    # Agents
+    "chat_agent",
 ]
 
 __version__ = "1.0.0"

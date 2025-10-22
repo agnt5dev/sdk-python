@@ -117,7 +117,8 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
 
     # Pull latest image to ensure we have the most recent version
     import docker
-    image_name = "ghcr.io/agnt5dev/agnt5-dev-server:latest"
+    image_name = "ghcr.io/agnt5dev/agnt5-dev-server:develop"
+    # image_name = "agnt5/dev-server:latest"  # Use Docker Hub mirror for CI speed
     print(f"📥 Pulling latest image: {image_name}")
     try:
         docker_client = docker.from_env()

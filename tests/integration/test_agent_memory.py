@@ -59,7 +59,7 @@ async def test_agent_conversation_history_persistence(memory_agent):
         assert result1.output  # Got a response
 
         # Verify history was saved
-        history1 = ctx1.get_conversation_history()
+        history1 = await ctx1.get_conversation_history()
         assert len(history1) == 2  # User message + assistant response
         assert "Alice" in history1[0].content
 
@@ -72,14 +72,14 @@ async def test_agent_conversation_history_persistence(memory_agent):
         )
 
         # History should be loaded automatically
-        loaded_history = ctx2.get_conversation_history()
+        loaded_history = await ctx2.get_conversation_history()
         assert len(loaded_history) == 2  # Previous conversation loaded
         assert "Alice" in loaded_history[0].content
 
         result2 = await memory_agent.run("What's my name?", context=ctx2)
 
         # After second run, should have 4 messages total
-        history2 = ctx2.get_conversation_history()
+        history2 = await ctx2.get_conversation_history()
         assert len(history2) == 4  # Previous 2 + new user + new assistant
 
         # Agent should remember the name from previous conversation
@@ -121,7 +121,7 @@ async def test_agent_different_sessions_isolated(memory_agent):
         )
 
         # Should NOT have session A's history
-        history = ctx2.get_conversation_history()
+        history = await ctx2.get_conversation_history()
         assert len(history) == 0  # No history from session-A
 
         await memory_agent.run("My favorite color is red.", context=ctx2)
@@ -133,7 +133,7 @@ async def test_agent_different_sessions_isolated(memory_agent):
             session_id="session-A",
             state_manager=shared_state_manager,
         )
-        history_a = ctx1_reload.get_conversation_history()
+        history_a = await ctx1_reload.get_conversation_history()
         assert len(history_a) == 2  # Only session A's messages
         assert "blue" in history_a[0].content.lower()
 

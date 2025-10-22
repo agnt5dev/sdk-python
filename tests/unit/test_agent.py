@@ -228,7 +228,7 @@ async def test_agent_run_with_agent_context(mock_lm):
         result2 = await agent.run("Do you remember?", context=ctx2)
 
         # Check that conversation history was loaded
-        history = ctx2.get_conversation_history()
+        history = await ctx2.get_conversation_history()
         assert len(history) >= 2  # At least user + assistant from first turn
 
     finally:
@@ -549,7 +549,7 @@ def test_agent_context_with_session_id():
         manager.clear_all()
 
 
-def test_agent_context_conversation_history():
+async def test_agent_context_conversation_history():
     """Test AgentContext conversation history management."""
     from agnt5.entity import create_entity_context
 
@@ -559,7 +559,7 @@ def test_agent_context_conversation_history():
         ctx = AgentContext(run_id="test-123", agent_name="test_agent")
 
         # Initially empty
-        history = ctx.get_conversation_history()
+        history = await ctx.get_conversation_history()
         assert len(history) == 0
 
         # Save some messages
@@ -567,10 +567,10 @@ def test_agent_context_conversation_history():
             Message.user("Hello"),
             Message.assistant("Hi there!"),
         ]
-        ctx.save_conversation_history(messages)
+        await ctx.save_conversation_history(messages)
 
         # Retrieve
-        retrieved = ctx.get_conversation_history()
+        retrieved = await ctx.get_conversation_history()
         assert len(retrieved) == 2
         assert retrieved[0].content == "Hello"
         assert retrieved[1].content == "Hi there!"

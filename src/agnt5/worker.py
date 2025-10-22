@@ -128,11 +128,10 @@ class Worker:
 
         # Import Rust worker
         try:
-            from ._core import PyWorker, PyWorkerConfig, PyComponentInfo, EntityStateManager as RustEntityStateManager
+            from ._core import PyWorker, PyWorkerConfig, PyComponentInfo
             self._PyWorker = PyWorker
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
-            self._RustEntityStateManager = RustEntityStateManager
         except ImportError as e:
             raise ImportError(
                 f"Failed to import Rust core worker: {e}. "
@@ -149,16 +148,10 @@ class Worker:
         # Create Rust worker instance
         self._rust_worker = self._PyWorker(self._rust_config)
 
-        # Get tenant_id for entity state manager
-        import os
-        tenant_id = os.getenv("AGNT5_TENANT_ID", "00000000-0000-0000-0000-000000000001")
-
-        # Create Rust entity state manager
-        self._rust_entity_state_manager = self._RustEntityStateManager(tenant_id)
-
-        # Create worker-scoped entity state manager with Rust manager
+        # Create worker-scoped entity state manager (pure Python for now)
+        # TODO: Integrate with Rust EntityStateManager once implemented
         from .entity import EntityStateManager
-        self._entity_state_manager = EntityStateManager(rust_entity_state_manager=self._rust_entity_state_manager)
+        self._entity_state_manager = EntityStateManager()
 
         # Component registration: auto-discover or explicit
         if auto_register:
@@ -1157,9 +1150,10 @@ class Worker:
         if self.metadata:
             self._rust_worker.set_service_metadata(self.metadata)
 
-        # Set entity state manager on Rust worker for database persistence
-        logger.info("Configuring entity state manager for database persistence")
-        self._rust_worker.set_entity_state_manager(self._rust_entity_state_manager)
+        # TODO: Set entity state manager on Rust worker for database persistence
+        # Once Rust EntityStateManager is implemented, uncomment:
+        # logger.info("Configuring entity state manager for database persistence")
+        # self._rust_worker.set_entity_state_manager(self._rust_entity_state_manager)
 
         # Get the current event loop to pass to Rust for concurrent Python async execution
         # This allows Rust to execute Python async functions on the same event loop
