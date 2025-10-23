@@ -12,9 +12,6 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
-
 [tool.uv.sources]
 agnt5 = { path = "../../../../", editable = true }
 

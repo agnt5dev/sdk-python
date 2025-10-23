@@ -54,9 +54,6 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
 ]
 
-[package.metadata.requires-dev]
-dev = []
-
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
