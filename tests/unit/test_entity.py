@@ -15,20 +15,20 @@ import asyncio
 import pytest
 
 from agnt5 import Entity
-from agnt5.entity import EntityRegistry, EntityStateManager, create_entity_context, _entity_state_manager_ctx
+from agnt5.entity import EntityRegistry, EntityStateAdapter, create_entity_context, _entity_state_adapter_ctx
 from agnt5.exceptions import ExecutionError
 
 
 @pytest.fixture(autouse=True)
 def entity_state_manager():
-    """Create and set EntityStateManager for each test."""
+    """Create and set EntityStateAdapter for each test."""
     # Use the new helper function
     manager, token = create_entity_context()
 
     yield manager
 
     # Cleanup
-    _entity_state_manager_ctx.reset(token)
+    _entity_state_adapter_ctx.reset(token)
     manager.clear_all()
     # Clear entity registry between tests to avoid conflicts
     EntityRegistry.clear()

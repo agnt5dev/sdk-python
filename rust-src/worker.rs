@@ -84,8 +84,11 @@ impl PyWorker {
             let manager_ref = manager.borrow(py);
             Ok(Arc::new(EntityStateManager {
                 tenant_id: manager_ref.tenant_id.clone(),
+                cache: manager_ref.cache.clone(),
                 pending_requests: manager_ref.pending_requests.clone(),
                 request_sender: manager_ref.request_sender.clone(),
+                max_retries: manager_ref.max_retries,
+                base_delay_ms: manager_ref.base_delay_ms,
             }))
         })?;
 

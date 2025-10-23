@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .context import Context
-from .entity import Entity, EntityState, _get_state_manager
+from .entity import Entity, EntityState, _get_state_adapter
 from .function import FunctionContext
 from .types import HandlerFunc, WorkflowConfig
 from ._telemetry import setup_module_logger
@@ -346,10 +346,8 @@ class WorkflowEntity(Entity):
         for debugging and replay of AI workflows.
         """
         if self._state is None:
-            # Get state dict from state manager
-            state_manager = _get_state_manager()
-            state_dict = state_manager.get_or_create_state(self._state_key)
-            self._state = WorkflowState(state_dict, self)
+            # Initialize with empty state dict - will be populated by entity system
+            self._state = WorkflowState({}, self)
         return self._state
 
 

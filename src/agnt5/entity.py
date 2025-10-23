@@ -15,156 +15,230 @@ from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
 
-# Context variable for worker-scoped state manager
+# Context variable for worker-scoped state adapter
 # This is set by Worker before entity execution and accessed by Entity instances
-_entity_state_manager_ctx: contextvars.ContextVar[Optional["EntityStateManager"]] = \
-    contextvars.ContextVar('_entity_state_manager', default=None)
+_entity_state_adapter_ctx: contextvars.ContextVar[Optional["EntityStateAdapter"]] = \
+    contextvars.ContextVar('_entity_state_adapter', default=None)
 
 # Global entity registry
 _ENTITY_REGISTRY: Dict[str, "EntityType"] = {}
 
 
-class EntityStateManager:
+class EntityStateAdapter:
     """
-    Worker-scoped state and lock management for entities.
+    Thin Python adapter providing Pythonic interface to Rust EntityStateManager core.
 
-    This class provides isolated state management per Worker instance,
-    replacing the global dict approach. Each Worker gets its own state manager,
-    which provides:
-    - State storage per entity (type, key)
-    - Single-writer locks per entity
-    - Version tracking for optimistic locking
-    - Platform state loading/saving via Rust EntityStateManager
+    This adapter provides language-specific concerns only:
+    - Worker-local asyncio.Lock for coarse-grained coordination
+    - Type conversions between Python dict and JSON bytes
+    - Pythonic async/await API over Rust core
+
+    All business logic (caching, version tracking, retry logic, gRPC) lives in the Rust core.
+    This keeps the Python layer simple (~150 LOC) and enables sharing business logic across SDKs.
     """
 
-    def __init__(self, rust_entity_state_manager=None):
+    def __init__(self, rust_core=None):
         """
-        Initialize empty state manager.
+        Initialize entity state adapter.
 
         Args:
-            rust_entity_state_manager: Optional Rust EntityStateManager for gRPC communication.
-                                      TODO: Wire this up once PyO3 bindings are complete.
+            rust_core: Rust EntityStateManager instance (from _core module).
+                      If None, operates in standalone/testing mode with in-memory state.
         """
-        self._states: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
-        self._versions: Dict[Tuple[str, str], int] = {}
-        self._rust_manager = rust_entity_state_manager  # TODO: Use for load/save
-        logger.debug("Created EntityStateManager")
+        self._rust_core = rust_core
+        # Worker-local locks for coarse-grained coordination within this worker
+        self._local_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
 
-    def get_or_create_state(self, state_key: Tuple[str, str]) -> Dict[str, Any]:
+        # Standalone mode: in-memory state storage when no Rust core
+        # This enables testing without the full platform stack
+        if rust_core is None:
+            self._standalone_states: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            self._standalone_versions: Dict[Tuple[str, str], int] = {}
+            logger.debug("Created EntityStateAdapter in standalone mode (in-memory state)")
+        else:
+            logger.debug("Created EntityStateAdapter with Rust core")
+
+    def get_local_lock(self, state_key: Tuple[str, str]) -> asyncio.Lock:
         """
-        Get or create state dict for entity instance.
+        Get worker-local asyncio.Lock for single-writer guarantee within this worker.
+
+        This provides coarse-grained coordination for operations within the same worker.
+        Cross-worker conflicts are handled by the Rust core via optimistic concurrency.
 
         Args:
             state_key: Tuple of (entity_type, entity_key)
 
         Returns:
-            State dict for the entity instance
+            asyncio.Lock for this worker-local operation
         """
-        if state_key not in self._states:
-            self._states[state_key] = {}
-        return self._states[state_key]
+        if state_key not in self._local_locks:
+            self._local_locks[state_key] = asyncio.Lock()
+        return self._local_locks[state_key]
 
-    def get_or_create_lock(self, state_key: Tuple[str, str]) -> asyncio.Lock:
+    async def load_state(self, entity_type: str, entity_key: str) -> Dict[str, Any]:
         """
-        Get or create async lock for entity instance.
+        Load entity state (Rust handles cache-first logic and platform load).
+
+        In standalone mode (no Rust core), uses in-memory state storage.
 
         Args:
-            state_key: Tuple of (entity_type, entity_key)
+            entity_type: Type of entity (e.g., "ShoppingCart", "AgentSession")
+            entity_key: Unique key for entity instance
 
         Returns:
-            Async lock for single-writer guarantee
+            State dictionary (empty dict if not found)
         """
-        if state_key not in self._locks:
-            self._locks[state_key] = asyncio.Lock()
-        return self._locks[state_key]
+        if not self._rust_core:
+            # Standalone mode - return from in-memory storage
+            state_key = (entity_type, entity_key)
+            return self._standalone_states.get(state_key, {}).copy()
 
-    def load_state_from_platform(
-        self,
-        state_key: Tuple[str, str],
-        platform_state_json: str,
-        version: int = 0
-    ) -> None:
-        """
-        Load state from platform for entity persistence.
-
-        Args:
-            state_key: Tuple of (entity_type, entity_key)
-            platform_state_json: JSON string of state from platform
-            version: Current version from platform
-        """
-        import json
         try:
-            state = json.loads(platform_state_json)
-            self._states[state_key] = state
-            self._versions[state_key] = version
-            logger.debug(
-                f"Loaded platform state: {state_key[0]}/{state_key[1]} (version {version})"
-            )
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse platform state: {e}")
-            self._states[state_key] = {}
-            self._versions[state_key] = 0
+            # Rust checks cache first, loads from platform if needed
+            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(entity_type, entity_key)
 
-    def get_state_for_persistence(
+            # Convert bytes to dict
+            if state_json_bytes:
+                state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
+                return json.loads(state_json)
+            else:
+                return {}
+        except Exception as e:
+            logger.warning(f"Failed to load state for {entity_type}:{entity_key}: {e}")
+            return {}
+
+    async def save_state(
         self,
-        state_key: Tuple[str, str]
-    ) -> tuple[Dict[str, Any], int, int]:
+        entity_type: str,
+        entity_key: str,
+        state: Dict[str, Any],
+        expected_version: int
+    ) -> int:
         """
-        Get state and version info for platform persistence.
+        Save entity state (Rust handles version check and platform save).
+
+        In standalone mode (no Rust core), stores in-memory with version tracking.
 
         Args:
-            state_key: Tuple of (entity_type, entity_key)
+            entity_type: Type of entity
+            entity_key: Unique key for entity instance
+            state: State dictionary to save
+            expected_version: Expected current version (for optimistic locking)
 
         Returns:
-            Tuple of (state_dict, expected_version, new_version)
+            New version number after save
+
+        Raises:
+            RuntimeError: If version conflict or platform error
         """
-        state_dict = self._states.get(state_key, {})
-        expected_version = self._versions.get(state_key, 0)
-        new_version = expected_version + 1
+        if not self._rust_core:
+            # Standalone mode - store in memory with version tracking
+            state_key = (entity_type, entity_key)
+            current_version = self._standalone_versions.get(state_key, 0)
 
-        # Update version for next execution
-        self._versions[state_key] = new_version
+            # Optimistic locking check (even in standalone mode for consistency)
+            if current_version != expected_version:
+                raise RuntimeError(
+                    f"Version conflict: expected {expected_version}, got {current_version}"
+                )
 
-        return state_dict, expected_version, new_version
+            # Store state and increment version
+            new_version = expected_version + 1
+            self._standalone_states[state_key] = state.copy()
+            self._standalone_versions[state_key] = new_version
+            return new_version
+
+        # Convert dict to JSON bytes
+        state_json = json.dumps(state).encode('utf-8')
+
+        # Rust handles optimistic locking and platform save
+        new_version = await self._rust_core.py_save_state(
+            entity_type,
+            entity_key,
+            state_json,
+            expected_version
+        )
+
+        return new_version
+
+    async def load_with_version(self, entity_type: str, entity_key: str) -> Tuple[Dict[str, Any], int]:
+        """
+        Load entity state with version (for update operations).
+
+        In standalone mode (no Rust core), loads from in-memory storage with version.
+
+        Args:
+            entity_type: Type of entity
+            entity_key: Unique key for entity instance
+
+        Returns:
+            Tuple of (state_dict, version)
+        """
+        if not self._rust_core:
+            # Standalone mode - return from in-memory storage with version
+            state_key = (entity_type, entity_key)
+            state = self._standalone_states.get(state_key, {}).copy()
+            version = self._standalone_versions.get(state_key, 0)
+            return state, version
+
+        try:
+            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(entity_type, entity_key)
+
+            if state_json_bytes:
+                state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
+                state = json.loads(state_json)
+            else:
+                state = {}
+
+            return state, version
+        except Exception as e:
+            logger.warning(f"Failed to load state with version for {entity_type}:{entity_key}: {e}")
+            return {}, 0
+
+    async def invalidate_cache(self, entity_type: str, entity_key: str) -> None:
+        """
+        Invalidate cache entry for specific entity.
+
+        Args:
+            entity_type: Type of entity
+            entity_key: Unique key for entity instance
+        """
+        if self._rust_core:
+            await self._rust_core.py_invalidate_cache(entity_type, entity_key)
+
+    async def clear_cache(self) -> None:
+        """Clear entire cache (useful for testing)."""
+        if self._rust_core:
+            await self._rust_core.py_clear_cache()
 
     def clear_all(self) -> None:
-        """Clear all state, locks, and versions (for testing)."""
-        self._states.clear()
-        self._locks.clear()
-        self._versions.clear()
-        logger.debug("Cleared EntityStateManager")
+        """Clear all local locks (for testing)."""
+        self._local_locks.clear()
+        logger.debug("Cleared EntityStateAdapter local locks")
 
-    def get_state(self, entity_type: str, key: str) -> Optional[Dict[str, Any]]:
+    async def get_state(self, entity_type: str, key: str) -> Optional[Dict[str, Any]]:
         """Get state for debugging/testing."""
-        state_key = (entity_type, key)
-        return self._states.get(state_key)
-
-    def get_all_keys(self, entity_type: str) -> list[str]:
-        """Get all keys for entity type (for debugging/testing)."""
-        return [
-            key for (etype, key) in self._states.keys()
-            if etype == entity_type
-        ]
+        state, _ = await self.load_with_version(entity_type, key)
+        return state if state else None
 
 
-def _get_state_manager() -> EntityStateManager:
+def _get_state_adapter() -> EntityStateAdapter:
     """
-    Get the current entity state manager from context.
+    Get the current entity state adapter from context.
 
-    The state manager must be set by Worker before entity execution.
+    The state adapter must be set by Worker before entity execution.
     This ensures proper worker-scoped state isolation.
 
     Returns:
-        EntityStateManager instance
+        EntityStateAdapter instance
 
     Raises:
-        RuntimeError: If called outside of Worker context (state manager not set)
+        RuntimeError: If called outside of Worker context (state adapter not set)
     """
-    manager = _entity_state_manager_ctx.get()
-    if manager is None:
+    adapter = _entity_state_adapter_ctx.get()
+    if adapter is None:
         raise RuntimeError(
-            "Entity requires state manager context.\n\n"
+            "Entity requires state adapter context.\n\n"
             "In production:\n"
             "  Entities run automatically through Worker.\n\n"
             "In tests, use one of:\n"
@@ -179,7 +253,9 @@ def _get_state_manager() -> EntityStateManager:
             "        await cart.add_item(...)\n\n"
             "See: https://docs.agnt5.dev/sdk/entities#testing"
         )
-    return manager
+    return adapter
+
+
 
 
 # ============================================================================
@@ -188,7 +264,7 @@ def _get_state_manager() -> EntityStateManager:
 
 def with_entity_context(func):
     """
-    Decorator that sets up entity state manager for tests.
+    Decorator that sets up entity state adapter for tests.
 
     Usage:
         @with_entity_context
@@ -199,13 +275,13 @@ def with_entity_context(func):
     """
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        manager = EntityStateManager()
-        token = _entity_state_manager_ctx.set(manager)
+        adapter = EntityStateAdapter()
+        token = _entity_state_adapter_ctx.set(adapter)
         try:
             return await func(*args, **kwargs)
         finally:
-            _entity_state_manager_ctx.reset(token)
-            manager.clear_all()
+            _entity_state_adapter_ctx.reset(token)
+            adapter.clear_all()
     return wrapper
 
 
@@ -219,16 +295,16 @@ def create_entity_context():
 
         @pytest.fixture
         def entity_context():
-            manager, token = create_entity_context()
-            yield manager
+            adapter, token = create_entity_context()
+            yield adapter
             # Cleanup happens automatically
 
     Returns:
-        Tuple of (EntityStateManager, context_token)
+        Tuple of (EntityStateAdapter, context_token)
     """
-    manager = EntityStateManager()
-    token = _entity_state_manager_ctx.set(manager)
-    return manager, token
+    adapter = EntityStateAdapter()
+    token = _entity_state_adapter_ctx.set(adapter)
+    return adapter, token
 
 
 def extract_state_schema(entity_class: type) -> Optional[Dict[str, Any]]:
@@ -473,12 +549,12 @@ def _create_entity_method_wrapper(entity_type: str, method):
     """
     Create a wrapper for an entity method that provides single-writer consistency.
 
-    This wrapper:
-    1. Acquires a lock for the entity instance (single-writer guarantee)
-    2. Sets up EntityState with the state dict
-    3. Executes the method
-    4. Cleans up state reference
-    5. Handles errors appropriately
+    This wrapper implements hybrid locking:
+    1. Local lock (asyncio.Lock) for worker-scoped single-writer guarantee
+    2. Optimistic concurrency (via Rust) for cross-worker conflicts
+    3. Loads state via adapter (Rust handles cache + platform)
+    4. Executes the method with clean EntityState interface
+    5. Saves state via adapter (Rust handles version check + retry)
 
     Args:
         entity_type: Name of the entity type (class name)
@@ -489,36 +565,23 @@ def _create_entity_method_wrapper(entity_type: str, method):
     """
     @functools.wraps(method)
     async def entity_method_wrapper(self, *args, **kwargs):
-        """Execute entity method with single-writer guarantee."""
+        """Execute entity method with hybrid locking (local + optimistic)."""
         state_key = (entity_type, self._key)
 
-        # Get state manager and lock (single-writer guarantee)
-        state_manager = _get_state_manager()
-        lock = state_manager.get_or_create_lock(state_key)
+        # Get state adapter
+        adapter = _get_state_adapter()
+
+        # Local lock for worker-scoped single-writer guarantee
+        lock = adapter.get_local_lock(state_key)
 
         async with lock:
-            # Load state from platform if not in memory
-            if state_key not in state_manager._states and state_manager._rust_manager:
-                try:
-                    # Call Rust manager to load state from platform
-                    result = await state_manager._rust_manager.py_load_state(
-                        entity_type, self._key
-                    )
-                    # result is a tuple: (found, state_json, version)
-                    found, state_json_bytes, version = result
-                    if found:
-                        # Decode and load state
-                        state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
-                        state_manager.load_state_from_platform(
-                            state_key, state_json, version
-                        )
-                        logger.info(f"Loaded entity state from platform: {entity_type}:{self._key} (version {version})")
-                except Exception as e:
-                    logger.warning(f"Failed to load entity state from platform: {e}")
-                    # Continue with empty state
+            # Load state with version (Rust handles cache-first + platform load)
+            state_dict, current_version = await adapter.load_with_version(entity_type, self._key)
 
-            # Get or create state for this entity instance
-            state_dict = state_manager.get_or_create_state(state_key)
+            logger.debug(
+                "Loaded state for %s:%s (version %d)",
+                entity_type, self._key, current_version
+            )
 
             # Set up EntityState on instance for method access
             self._state = EntityState(state_dict)
@@ -529,25 +592,26 @@ def _create_entity_method_wrapper(entity_type: str, method):
                 result = await method(self, *args, **kwargs)
                 logger.debug("Completed %s:%s.%s", entity_type, self._key, method.__name__)
 
-                # Save state to platform after successful execution
-                if state_manager._rust_manager:
-                    try:
-                        import json
-                        # Get current version
-                        expected_version = state_manager._versions.get(state_key, 0)
-                        # Serialize state
-                        state_json = json.dumps(state_dict).encode('utf-8')
-                        # Call Rust manager to save state
-                        new_version = await state_manager._rust_manager.py_save_state(
-                            entity_type, self._key, state_json, expected_version
-                        )
-                        # Update version
-                        state_manager._versions[state_key] = new_version
-                        logger.info(f"Saved entity state to platform: {entity_type}:{self._key} (version {expected_version} -> {new_version})")
-                    except Exception as e:
-                        logger.error(f"Failed to save entity state to platform: {e}")
-                        # Don't fail the method execution just because persistence failed
-                        # The state is still in memory
+                # Save state after successful execution
+                # Rust handles optimistic locking (version check)
+                try:
+                    new_version = await adapter.save_state(
+                        entity_type,
+                        self._key,
+                        state_dict,
+                        current_version
+                    )
+                    logger.info(
+                        "Saved state for %s:%s (version %d -> %d)",
+                        entity_type, self._key, current_version, new_version
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to save state for %s:%s: %s",
+                        entity_type, self._key, e
+                    )
+                    # Don't fail the method execution just because persistence failed
+                    # The state is still in the local dict for this execution
 
                 return result
 

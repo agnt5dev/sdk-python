@@ -11,7 +11,7 @@ These tests verify that:
 import os
 import pytest
 from agnt5 import Agent, AgentContext, AgentSession
-from agnt5.entity import create_entity_context, EntityStateManager
+from agnt5.entity import create_entity_context, EntityStateAdapter
 
 
 # Test fixtures
@@ -40,10 +40,10 @@ def chat_agent():
 @pytest.mark.asyncio
 async def test_agent_session_auto_creation(chat_agent):
     """Test that agent session is created automatically without session_id."""
-    from agnt5.entity import EntityStateManager
+    from agnt5.entity import EntityStateAdapter
 
     # Create shared state manager
-    shared_state_manager = EntityStateManager()
+    shared_state_adapter = EntityStateAdapter()
 
     # First message - no session_id provided
     # Should create AgentContext with auto-generated session_id
@@ -51,7 +51,7 @@ async def test_agent_session_auto_creation(chat_agent):
         run_id="run-1",
         agent_name="chat_agent",
         session_id=None,  # Will default to run_id
-        state_manager=shared_state_manager,
+        state_manager=shared_state_adapter,
     )
 
     result1 = await chat_agent.run("Hello! My name is Bob.", context=ctx1)
@@ -66,10 +66,10 @@ async def test_agent_session_auto_creation(chat_agent):
 @pytest.mark.asyncio
 async def test_agent_session_with_explicit_session_id(chat_agent):
     """Test multi-turn conversation with explicit session_id."""
-    from agnt5.entity import EntityStateManager
+    from agnt5.entity import EntityStateAdapter
 
     # Create shared state manager
-    shared_state_manager = EntityStateManager()
+    shared_state_adapter = EntityStateAdapter()
 
     session_id = "test-session-123"
 
@@ -78,7 +78,7 @@ async def test_agent_session_with_explicit_session_id(chat_agent):
         run_id="run-1",
         agent_name="chat_agent",
         session_id=session_id,
-        state_manager=shared_state_manager,
+        state_manager=shared_state_adapter,
     )
 
     result1 = await chat_agent.run("Hello! My name is Charlie.", context=ctx1)
@@ -94,7 +94,7 @@ async def test_agent_session_with_explicit_session_id(chat_agent):
         run_id="run-2",
         agent_name="chat_agent",
         session_id=session_id,
-        state_manager=shared_state_manager,
+        state_manager=shared_state_adapter,
     )
 
     # History should be loaded
@@ -141,16 +141,16 @@ async def test_agent_session_entity():
         assert summary["last_message_time"] > summary["created_at"]
 
     finally:
-        from agnt5.entity import _entity_state_manager_ctx
+        from agnt5.entity import _entity_state_adapter_ctx
 
-        _entity_state_manager_ctx.reset(token)
+        _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
 @pytest.mark.asyncio
 async def test_agent_session_different_agents_isolated(chat_agent):
     """Test that different agents don't share session state."""
-    from agnt5.entity import EntityStateManager
+    from agnt5.entity import EntityStateAdapter
 
     # Skip if no API key
     if not os.getenv("OPENAI_API_KEY"):
@@ -164,7 +164,7 @@ async def test_agent_session_different_agents_isolated(chat_agent):
         temperature=0.7,
     )
 
-    shared_state_manager = EntityStateManager()
+    shared_state_adapter = EntityStateAdapter()
     session_id = "shared-session-id"
 
     # chat_agent with session
@@ -172,7 +172,7 @@ async def test_agent_session_different_agents_isolated(chat_agent):
         run_id="run-1",
         agent_name="chat_agent",
         session_id=session_id,
-        state_manager=shared_state_manager,
+        state_manager=shared_state_adapter,
     )
     await chat_agent.run("I like blue", context=ctx1)
 
@@ -182,7 +182,7 @@ async def test_agent_session_different_agents_isolated(chat_agent):
         run_id="run-2",
         agent_name="agent2",
         session_id=session_id,
-        state_manager=shared_state_manager,
+        state_manager=shared_state_adapter,
     )
 
     # Should have no history (different agent_name in conversation key)

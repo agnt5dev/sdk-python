@@ -15,7 +15,7 @@ from .workflow import WorkflowContext
 from .entity import (
     Entity,
     EntityRegistry,
-    EntityStateManager,
+    EntityStateAdapter,
     EntityType,
     create_entity_context,
     with_entity_context,
@@ -55,7 +55,7 @@ __all__ = [
     "Entity",
     "EntityType",
     "EntityRegistry",
-    "EntityStateManager",
+    "EntityStateAdapter",
     "with_entity_context",
     "create_entity_context",
     "workflow",
