@@ -235,6 +235,10 @@ class AgentContext(Context):
 
         # Build session object with metadata
         now = time.time()
+
+        # Get custom metadata from instance variable or preserve from loaded state
+        custom_metadata = getattr(self, '_custom_metadata', current_state.get("metadata", {}))
+
         session_data = {
             "session_id": self._session_id,
             "agent_name": self._agent_name,
@@ -242,7 +246,7 @@ class AgentContext(Context):
             "last_message_time": now,
             "message_count": len(messages_data),
             "messages": messages_data,
-            "metadata": current_state.get("metadata", {})  # Preserve existing metadata
+            "metadata": custom_metadata  # Save custom metadata
         }
 
         # Save to platform via adapter (Rust handles optimistic locking)
@@ -259,6 +263,87 @@ class AgentContext(Context):
         except Exception as e:
             logger.error(f"Failed to persist conversation history to database: {e}")
             # Don't fail - conversation is still in memory for this execution
+
+    async def get_metadata(self) -> Dict[str, Any]:
+        """
+        Get conversation session metadata.
+
+        Returns session metadata including:
+        - created_at: Timestamp of first message (float, Unix timestamp)
+        - last_activity: Timestamp of last message (float, Unix timestamp)
+        - message_count: Number of messages in conversation (int)
+        - custom: Dict of user-provided custom metadata
+
+        Returns:
+            Dictionary with metadata. If no conversation exists yet, returns defaults.
+
+        Example:
+            ```python
+            metadata = await context.get_metadata()
+            print(f"Session created: {metadata['created_at']}")
+            print(f"User ID: {metadata['custom'].get('user_id')}")
+            ```
+        """
+        entity_type = "AgentSession"
+        entity_key = self._entity_key
+
+        # Load session data
+        session_data = await self._state_adapter.load_state(entity_type, entity_key)
+
+        if not session_data:
+            # No conversation exists yet - return defaults
+            return {
+                "created_at": None,
+                "last_activity": None,
+                "message_count": 0,
+                "custom": getattr(self, '_custom_metadata', {})
+            }
+
+        messages = session_data.get("messages", [])
+
+        # Derive timestamps from messages if available
+        created_at = session_data.get("created_at")
+        last_activity = session_data.get("last_message_time")
+
+        return {
+            "created_at": created_at,
+            "last_activity": last_activity,
+            "message_count": len(messages),
+            "custom": session_data.get("metadata", {})
+        }
+
+    def update_metadata(self, **kwargs) -> None:
+        """
+        Update custom session metadata.
+
+        Metadata will be persisted alongside conversation history on next save.
+        Use this to store application-specific data like user_id, preferences, etc.
+
+        Args:
+            **kwargs: Key-value pairs to store as metadata
+
+        Example:
+            ```python
+            # Store user identification and preferences
+            context.update_metadata(
+                user_id="user-123",
+                subscription_tier="premium",
+                preferences={"theme": "dark", "language": "en"}
+            )
+
+            # Later retrieve it
+            metadata = await context.get_metadata()
+            user_id = metadata["custom"]["user_id"]
+            ```
+
+        Note:
+            - Metadata is merged with existing metadata (doesn't replace)
+            - Changes persist on next save_conversation_history() call
+            - Use simple JSON-serializable types (str, int, float, dict, list)
+        """
+        if not hasattr(self, '_custom_metadata'):
+            self._custom_metadata = {}
+        self._custom_metadata.update(kwargs)
 
 
 class Handoff:

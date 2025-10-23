@@ -126,6 +126,10 @@ class Worker:
         self.runtime = runtime
         self.metadata = metadata or {}
 
+        # Get tenant_id from environment (required for entity state management)
+        import os
+        self._tenant_id = os.getenv("AGNT5_TENANT_ID", "default-tenant")
+
         # Import Rust worker
         try:
             from ._core import PyWorker, PyWorkerConfig, PyComponentInfo

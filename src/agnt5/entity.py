@@ -82,7 +82,7 @@ class EntityStateAdapter:
         In standalone mode (no Rust core), uses in-memory state storage.
 
         Args:
-            entity_type: Type of entity (e.g., "ShoppingCart", "AgentSession")
+            entity_type: Type of entity (e.g., "ShoppingCart", "Counter")
             entity_key: Unique key for entity instance
 
         Returns:
@@ -220,6 +220,21 @@ class EntityStateAdapter:
         """Get state for debugging/testing."""
         state, _ = await self.load_with_version(entity_type, key)
         return state if state else None
+
+    def get_all_keys(self, entity_type: str) -> list[str]:
+        """
+        Get all keys for an entity type (testing/debugging only).
+
+        Only works in standalone mode. Returns empty list in production mode.
+        """
+        if not hasattr(self, '_standalone_states'):
+            return []
+
+        keys = []
+        for (etype, ekey) in self._standalone_states.keys():
+            if etype == entity_type:
+                keys.append(ekey)
+        return keys
 
 
 def _get_state_adapter() -> EntityStateAdapter:

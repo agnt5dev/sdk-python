@@ -232,8 +232,8 @@ async def test_agent_run_with_agent_context(mock_lm):
         assert len(history) >= 2  # At least user + assistant from first turn
 
     finally:
-        from agnt5.entity import _entity_state_manager_ctx
-        _entity_state_manager_ctx.reset(token)
+        from agnt5.entity import _entity_state_adapter_ctx
+        _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
@@ -522,8 +522,8 @@ def test_agent_context_creation():
         assert hasattr(ctx, 'state')
 
     finally:
-        from agnt5.entity import _entity_state_manager_ctx
-        _entity_state_manager_ctx.reset(token)
+        from agnt5.entity import _entity_state_adapter_ctx
+        _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
@@ -544,8 +544,8 @@ def test_agent_context_with_session_id():
         assert ctx.session_id == "custom-session"
 
     finally:
-        from agnt5.entity import _entity_state_manager_ctx
-        _entity_state_manager_ctx.reset(token)
+        from agnt5.entity import _entity_state_adapter_ctx
+        _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
@@ -576,8 +576,8 @@ async def test_agent_context_conversation_history():
         assert retrieved[1].content == "Hi there!"
 
     finally:
-        from agnt5.entity import _entity_state_manager_ctx
-        _entity_state_manager_ctx.reset(token)
+        from agnt5.entity import _entity_state_adapter_ctx
+        _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 

@@ -6,11 +6,12 @@ These tests verify that:
 2. session_id is returned in response metadata
 3. Subsequent messages with session_id load conversation history
 4. Agent maintains conversation context across multiple turns
+5. AgentContext provides unified API for conversation + metadata
 """
 
 import os
 import pytest
-from agnt5 import Agent, AgentContext, AgentSession
+from agnt5 import Agent, AgentContext
 from agnt5.entity import create_entity_context, EntityStateAdapter
 
 
@@ -113,32 +114,57 @@ async def test_agent_session_with_explicit_session_id(chat_agent):
 
 
 @pytest.mark.asyncio
-async def test_agent_session_entity():
-    """Test AgentSession entity for metadata tracking."""
-    from agnt5.entity import create_entity_context
+async def test_agent_context_metadata():
+    """Test AgentContext unified metadata API."""
+    from agnt5.entity import create_entity_context, EntityStateAdapter
+    from agnt5.lm import Message
 
     manager, token = create_entity_context()
 
     try:
-        # Create session entity
-        session = AgentSession("session-456")
-        session.create(agent_name="test_agent", metadata={"user_id": "user-789"})
+        # Create shared state adapter
+        shared_state_adapter = EntityStateAdapter()
 
-        # Verify initial state
-        summary = session.get_summary()
-        assert summary["session_id"] == "session-456"
-        assert summary["agent_name"] == "test_agent"
-        assert summary["message_count"] == 0
-        assert summary["metadata"]["user_id"] == "user-789"
+        # Create AgentContext with metadata
+        ctx = AgentContext(
+            run_id="run-456",
+            agent_name="test_agent",
+            session_id="session-456",
+            state_manager=shared_state_adapter,
+        )
 
-        # Add messages
-        session.add_message()
-        session.add_message()
+        # Update custom metadata
+        ctx.update_metadata(user_id="user-789", preferences={"theme": "dark"})
 
-        # Verify updated state
-        summary = session.get_summary()
-        assert summary["message_count"] == 2
-        assert summary["last_message_time"] > summary["created_at"]
+        # Save some conversation messages
+        messages = [
+            Message(role="user", content="Hello"),
+            Message(role="assistant", content="Hi there!"),
+        ]
+        await ctx.save_conversation_history(messages)
+
+        # Get metadata - should include timestamps, message count, and custom metadata
+        metadata = await ctx.get_metadata()
+
+        assert metadata["message_count"] == 2
+        assert metadata["custom"]["user_id"] == "user-789"
+        assert metadata["custom"]["preferences"]["theme"] == "dark"
+        assert metadata["created_at"] is not None
+        assert metadata["last_activity"] is not None
+        assert metadata["last_activity"] >= metadata["created_at"]
+
+        # Add more messages and verify metadata updates
+        messages.append(Message(role="user", content="How are you?"))
+        messages.append(Message(role="assistant", content="I'm great!"))
+        await ctx.save_conversation_history(messages)
+
+        # Update metadata
+        updated_metadata = await ctx.get_metadata()
+        assert updated_metadata["message_count"] == 4
+        assert updated_metadata["last_activity"] > metadata["last_activity"]
+
+        # Custom metadata should persist
+        assert updated_metadata["custom"]["user_id"] == "user-789"
 
     finally:
         from agnt5.entity import _entity_state_adapter_ctx

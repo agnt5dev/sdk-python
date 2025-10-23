@@ -211,6 +211,53 @@ result = await agent.run("Help me understand the epsilon-delta definition")
 # Agent maintains conversation in session
 ```
 
+### Managing Session Metadata with AgentContext
+
+AgentContext provides a unified API for both conversation history and session metadata:
+
+```python
+from agnt5 import Agent, AgentContext
+
+# Create agent
+agent = Agent(
+    name="tutor",
+    model="openai/gpt-4o-mini",
+    instructions="You are a helpful tutor.",
+    temperature=0.7
+)
+
+# Create context with session tracking
+context = AgentContext(
+    agent_name="tutor",
+    session_id="session-123",
+    run_id="run-456"
+)
+
+# Store custom metadata
+context.update_metadata(
+    user_id="user-789",
+    preferences={"theme": "dark", "language": "en"},
+    subscription_tier="premium"
+)
+
+# Run agent with context
+result = await agent.run("Explain quantum computing", context=context)
+
+# Retrieve session metadata
+metadata = await context.get_metadata()
+print(f"Messages: {metadata['message_count']}")
+print(f"Created: {metadata['created_at']}")
+print(f"Last activity: {metadata['last_activity']}")
+print(f"User ID: {metadata['custom']['user_id']}")
+print(f"Subscription: {metadata['custom']['subscription_tier']}")
+```
+
+**Key Features:**
+- **Automatic Timestamps**: `created_at` and `last_activity` tracked automatically
+- **Message Counting**: `message_count` updated with each conversation turn
+- **Custom Metadata**: Store any application-specific data (user IDs, preferences, etc.)
+- **Unified Storage**: Metadata persisted alongside conversation history
+
 ### Streaming Agent Responses
 
 ```python
@@ -609,8 +656,7 @@ Agent
 
 ## See Also
 
-- [Session Component](session.md) - Agent conversation context
+- [Context API](context.md) - Agent execution context and session management
 - [Tool Component](tool.md) - Agent capabilities
-- [Memory Component](memory.md) - Agent long-term knowledge
 - [Workflow Component](workflow.md) - Orchestration patterns
-- [Context API](context.md) - Agent execution context
+- [Entity Component](entity.md) - Stateful primitives for session storage
