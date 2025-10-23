@@ -126,6 +126,10 @@ class Worker:
         self.runtime = runtime
         self.metadata = metadata or {}
 
+        # Get tenant_id from environment (required for entity state management)
+        import os
+        self._tenant_id = os.getenv("AGNT5_TENANT_ID", "default-tenant")
+
         # Import Rust worker
         try:
             from ._core import PyWorker, PyWorkerConfig, PyComponentInfo
@@ -148,9 +152,17 @@ class Worker:
         # Create Rust worker instance
         self._rust_worker = self._PyWorker(self._rust_config)
 
-        # Create worker-scoped entity state manager
-        from .entity import EntityStateManager
-        self._entity_state_manager = EntityStateManager()
+        # Create worker-scoped entity state adapter with Rust core
+        from .entity import EntityStateAdapter
+        from ._core import EntityStateManager as RustEntityStateManager
+
+        # Create Rust core for entity state management
+        rust_core = RustEntityStateManager(tenant_id=self._tenant_id)
+
+        # Create Python adapter (thin wrapper around Rust core)
+        self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
+
+        logger.info("Created EntityStateAdapter with Rust core for state management")
 
         # Component registration: auto-discover or explicit
         if auto_register:
@@ -746,7 +758,7 @@ class Worker:
         """Execute a workflow handler with automatic replay support."""
         import json
         from .workflow import WorkflowEntity, WorkflowContext
-        from .entity import _get_state_manager
+        from .entity import _get_state_adapter
         from ._core import PyExecuteComponentResponse
 
         try:
@@ -787,10 +799,15 @@ class Worker:
                 logger.debug(f"Loaded {len(completed_steps)} completed steps into workflow entity")
 
             if initial_state:
-                # Load initial state into entity's state manager
-                state_manager = _get_state_manager()
-                state_manager._states[workflow_entity._state_key] = initial_state
-                logger.debug(f"Loaded initial state with {len(initial_state)} keys into workflow entity")
+                # Load initial state into entity's state adapter
+                state_adapter = _get_state_adapter()
+                if hasattr(state_adapter, '_standalone_states'):
+                    # Standalone mode - set state directly
+                    state_adapter._standalone_states[workflow_entity._state_key] = initial_state
+                    logger.debug(f"Loaded initial state with {len(initial_state)} keys into workflow entity (standalone)")
+                else:
+                    # Production mode - state is managed by Rust core
+                    logger.debug(f"Initial state will be loaded from platform (production mode)")
 
             # Create WorkflowContext with entity and runtime_context for trace correlation
             ctx = WorkflowContext(
@@ -925,11 +942,11 @@ class Worker:
         """Execute an entity method."""
         import json
         from .context import Context
-        from .entity import EntityType, Entity, _entity_state_manager_ctx
+        from .entity import EntityType, Entity, _entity_state_adapter_ctx
         from ._core import PyExecuteComponentResponse
 
-        # Set entity state manager in context for Entity instances to access
-        _entity_state_manager_ctx.set(self._entity_state_manager)
+        # Set entity state adapter in context for Entity instances to access
+        _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         try:
             # Parse input data
@@ -944,23 +961,8 @@ class Worker:
             if not method_name:
                 raise ValueError("Entity invocation requires 'method' parameter")
 
-            # Load state from platform if provided in request metadata
-            state_key = (entity_type.name, entity_key)
-            if hasattr(request, 'metadata') and request.metadata:
-                if "entity_state" in request.metadata:
-                    platform_state_json = request.metadata["entity_state"]
-                    platform_version = int(request.metadata.get("state_version", "0"))
-
-                    # Load platform state into state manager
-                    self._entity_state_manager.load_state_from_platform(
-                        state_key,
-                        platform_state_json,
-                        platform_version
-                    )
-                    logger.info(
-                        f"Loaded entity state from platform: {entity_type.name}/{entity_key} "
-                        f"(version {platform_version})"
-                    )
+            # Note: State loading is now handled automatically by the entity method wrapper
+            # via EntityStateAdapter which uses the Rust core for cache + platform persistence
 
             # Create entity instance using the stored class reference
             entity_instance = entity_type.entity_class(key=entity_key)
@@ -971,32 +973,15 @@ class Worker:
 
             method = getattr(entity_instance, method_name)
 
-            # Execute method
+            # Execute method (entity method wrapper handles state load/save automatically)
             result = await method(**input_dict)
 
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
-            # Capture entity state after execution with version tracking
-            state_dict, expected_version, new_version = \
-                self._entity_state_manager.get_state_for_persistence(state_key)
-
+            # Note: State persistence is now handled automatically by the entity method wrapper
+            # via EntityStateAdapter which uses Rust core for optimistic locking + version tracking
             metadata = {}
-            if state_dict:
-                # Serialize state as JSON string for platform persistence
-                state_json = json.dumps(state_dict)
-                # Pass in metadata for Worker Coordinator to publish
-                metadata = {
-                    "entity_state": state_json,
-                    "entity_type": entity_type.name,
-                    "entity_key": entity_key,
-                    "expected_version": str(expected_version),
-                    "new_version": str(new_version),
-                }
-                logger.info(
-                    f"Captured entity state: {entity_type.name}/{entity_key} "
-                    f"(version {expected_version} → {new_version})"
-                )
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -1027,10 +1012,15 @@ class Worker:
             )
 
     async def _execute_agent(self, agent, input_data: bytes, request):
-        """Execute an agent."""
+        """Execute an agent with session support for multi-turn conversations."""
         import json
-        from .context import Context
+        import uuid
+        from .agent import AgentContext
+        from .entity import _entity_state_adapter_ctx
         from ._core import PyExecuteComponentResponse
+
+        # Set entity state adapter in context so AgentContext can access it
+        _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         try:
             # Parse input data
@@ -1041,16 +1031,30 @@ class Worker:
             if not user_message:
                 raise ValueError("Agent invocation requires 'message' parameter")
 
-            # Create context with runtime_context for trace correlation
-            ctx = Context(
-                run_id=f"{self.service_name}:{agent.name}",
+            # Extract or generate session_id for multi-turn conversation support
+            # If session_id is provided, the agent will load previous conversation history
+            # If not provided, a new session is created with auto-generated ID
+            session_id = input_dict.get("session_id")
+
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                logger.info(f"Created new agent session: {session_id}")
+            else:
+                logger.info(f"Using existing agent session: {session_id}")
+
+            # Create AgentContext with session support for conversation persistence
+            # AgentContext automatically loads/saves conversation history based on session_id
+            ctx = AgentContext(
+                run_id=request.invocation_id,
+                agent_name=agent.name,
+                session_id=session_id,
                 runtime_context=request.runtime_context,
             )
 
-            # Execute agent
+            # Execute agent - conversation history is automatically included
             agent_result = await agent.run(user_message, context=ctx)
 
-            # Build response
+            # Build response with agent output and tool calls
             result = {
                 "output": agent_result.output,
                 "tool_calls": agent_result.tool_calls,
@@ -1059,13 +1063,16 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
+            # Return session_id in metadata so UI can persist it
+            metadata = {"session_id": session_id}
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
                 state_update=None,
                 error_message=None,
-                metadata=None,
+                metadata=metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
@@ -1126,6 +1133,13 @@ class Worker:
         # Set metadata
         if self.metadata:
             self._rust_worker.set_service_metadata(self.metadata)
+
+        # Configure entity state manager on Rust worker for database persistence
+        logger.info("Configuring Rust EntityStateManager for database persistence")
+        # Access the Rust core from the adapter
+        if hasattr(self._entity_state_adapter, '_rust_core') and self._entity_state_adapter._rust_core:
+            self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
+            logger.info("Successfully configured Rust EntityStateManager")
 
         # Get the current event loop to pass to Rust for concurrent Python async execution
         # This allows Rust to execute Python async functions on the same event loop

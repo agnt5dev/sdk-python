@@ -1,3 +1,4 @@
+use crate::entity_state::EntityStateManager;
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::pb::{
     runtime_message, ComponentInfo, ComponentType, ExecuteComponentResponse, RuntimeMessage,
@@ -9,6 +10,7 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::global;
 use tracing;
@@ -55,6 +57,8 @@ pub struct PyWorker {
     // TaskLocals stores reference to Python event loop for concurrent async execution
     // This enables using into_future_with_locals instead of spawn_blocking + asyncio.run()
     event_loop_locals: Arc<Mutex<Option<TaskLocals>>>,
+    // Entity state manager for database persistence
+    entity_state_manager: Arc<AsyncMutex<Option<Arc<EntityStateManager>>>>,
 }
 
 #[pymethods]
@@ -70,7 +74,38 @@ impl PyWorker {
             components: Arc::new(Mutex::new(Vec::new())),
             service_metadata: Arc::new(Mutex::new(HashMap::new())),
             event_loop_locals: Arc::new(Mutex::new(None)),
+            entity_state_manager: Arc::new(AsyncMutex::new(None)),
         })
+    }
+
+    /// Set entity state manager for database persistence
+    fn set_entity_state_manager(&self, manager: Py<EntityStateManager>) -> PyResult<()> {
+        let rust_manager = Python::attach(|py| -> PyResult<Arc<EntityStateManager>> {
+            let manager_ref = manager.borrow(py);
+            Ok(Arc::new(EntityStateManager {
+                tenant_id: manager_ref.tenant_id.clone(),
+                cache: manager_ref.cache.clone(),
+                pending_requests: manager_ref.pending_requests.clone(),
+                request_sender: manager_ref.request_sender.clone(),
+                max_retries: manager_ref.max_retries,
+                base_delay_ms: manager_ref.base_delay_ms,
+            }))
+        })?;
+
+        // Store manager - use try_lock since we're not in async context
+        // This is safe because we're called during initialization before any concurrent access
+        match self.entity_state_manager.try_lock() {
+            Ok(mut manager_guard) => {
+                *manager_guard = Some(rust_manager);
+                log::info!("Entity state manager configured for worker");
+                Ok(())
+            }
+            Err(_) => {
+                let err_msg = "Failed to set entity state manager: lock already held";
+                log::error!("{}", err_msg);
+                Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg))
+            }
+        }
     }
 
     /// Set the message handler callback
@@ -220,6 +255,7 @@ impl PyWorker {
         let worker_arc = self.worker.clone();
         let handler_arc = self.message_handler.clone();
         let event_loop_locals_arc = self.event_loop_locals.clone();
+        let entity_state_manager_arc = self.entity_state_manager.clone();
         let service_name = self.config.service_name.clone();
 
         future_into_py(py, async move {
@@ -243,12 +279,20 @@ impl PyWorker {
             let message_handler = {
                 let handler_arc_clone = handler_arc.clone();
                 let event_loop_locals_clone = event_loop_locals_arc.clone();
+                let entity_state_manager_clone = entity_state_manager_arc.clone();
                 move |runtime_message: RuntimeMessage,
                       tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
                     let handler_arc_inner = handler_arc_clone.clone();
                     let event_loop_locals_inner = event_loop_locals_clone.clone();
+                    let entity_state_manager_inner = entity_state_manager_clone.clone();
                     async move {
-                        Self::handle_runtime_message(handler_arc_inner, event_loop_locals_inner, runtime_message, tx).await
+                        Self::handle_runtime_message(
+                            handler_arc_inner,
+                            event_loop_locals_inner,
+                            entity_state_manager_inner,
+                            runtime_message,
+                            tx
+                        ).await
                     }
                 }
             };
@@ -278,9 +322,23 @@ impl PyWorker {
     async fn handle_runtime_message(
         handler_arc: Arc<Mutex<Option<Py<PyAny>>>>,
         event_loop_locals_arc: Arc<Mutex<Option<TaskLocals>>>,
+        entity_state_manager_arc: Arc<AsyncMutex<Option<Arc<EntityStateManager>>>>,
         runtime_message: RuntimeMessage,
         tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
+        // On first message, set the sender on EntityStateManager if it exists
+        {
+            let manager_guard = entity_state_manager_arc.lock().await;
+            if let Some(ref manager) = *manager_guard {
+                // Check if sender is not already set
+                let sender_guard = manager.request_sender.lock().await;
+                if sender_guard.is_none() {
+                    drop(sender_guard); // Release lock before calling set_request_sender
+                    manager.set_request_sender(tx.clone()).await;
+                    log::info!("Entity state manager connected to worker stream");
+                }
+            }
+        }
         // Get the Python handler by cloning it properly
         let handler = {
             let handler_guard = handler_arc.lock().map_err(|e| {
@@ -685,15 +743,22 @@ impl PyWorker {
                 Ok(None)
             }
             Some(runtime_message::MessageData::RuntimeServiceResponse(response)) => {
-                // TODO: Route to EntityStateManager
-                // When EntityStateManager is wired up:
-                // if let Some(entity_manager) = &entity_state_manager {
-                //     entity_manager.handle_response(response).await;
-                // }
-                log::debug!(
-                    "Received RuntimeServiceResponse (request_id: {})",
-                    response.request_id
-                );
+                // Route to EntityStateManager
+                {
+                    let manager_guard = entity_state_manager_arc.lock().await;
+                    if let Some(ref manager) = *manager_guard {
+                        log::debug!(
+                            "Routing RuntimeServiceResponse to EntityStateManager (request_id: {})",
+                            response.request_id
+                        );
+                        manager.handle_response(response).await;
+                    } else {
+                        log::debug!(
+                            "Received RuntimeServiceResponse but no EntityStateManager configured (request_id: {})",
+                            response.request_id
+                        );
+                    }
+                }
                 Ok(None)
             }
             Some(runtime_message::MessageData::HealthResponse(_)) => Ok(None),

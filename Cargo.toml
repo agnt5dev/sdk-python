@@ -1,6 +1,6 @@
 [package]
 name = "agnt5-sdk-python"
-version = "0.2.8-alpha.2"
+version = "0.2.8-alpha.4"
 edition = "2021"
 authors = ["AGNT5 Team"]
 
@@ -39,6 +39,9 @@ tracing = "0.1"
 
 # Error handling
 anyhow = "1.0"
+
+# UUID generation
+uuid = { version = "1.18.1", features = ["v4"] }
 
 [build-dependencies]
 pyo3-build-config = "0.27"

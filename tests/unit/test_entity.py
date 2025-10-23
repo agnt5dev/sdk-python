@@ -15,20 +15,20 @@ import asyncio
 import pytest
 
 from agnt5 import Entity
-from agnt5.entity import EntityRegistry, EntityStateManager, create_entity_context, _entity_state_manager_ctx
+from agnt5.entity import EntityRegistry, EntityStateAdapter, create_entity_context, _entity_state_adapter_ctx
 from agnt5.exceptions import ExecutionError
 
 
 @pytest.fixture(autouse=True)
 def entity_state_manager():
-    """Create and set EntityStateManager for each test."""
+    """Create and set EntityStateAdapter for each test."""
     # Use the new helper function
     manager, token = create_entity_context()
 
     yield manager
 
     # Cleanup
-    _entity_state_manager_ctx.reset(token)
+    _entity_state_adapter_ctx.reset(token)
     manager.clear_all()
     # Clear entity registry between tests to avoid conflicts
     EntityRegistry.clear()
@@ -236,7 +236,7 @@ async def test_single_writer_consistency(entity_state_manager):
     await asyncio.gather(*[counter.increment() for _ in range(10)])
 
     # Verify count is exactly 10 (no lost updates)
-    final_state = entity_state_manager.get_state("Counter", "test")
+    final_state = await entity_state_manager.get_state("Counter", "test")
     assert final_state["count"] == 10
 
 
@@ -419,13 +419,13 @@ async def test_get_entity_state(entity_state_manager):
     counter = Counter(key="test")
 
     # Initially no state
-    state = entity_state_manager.get_state("Counter", "test")
+    state = await entity_state_manager.get_state("Counter", "test")
     assert state is None
 
     # After method call, state exists
     await counter.set_value(value=42)
 
-    state = entity_state_manager.get_state("Counter", "test")
+    state = await entity_state_manager.get_state("Counter", "test")
     assert state is not None
     assert state["count"] == 42
 
@@ -699,7 +699,7 @@ async def test_concurrent_updates_same_key_serialized(entity_state_manager):
     )
 
     # Verify count is correct (no lost updates)
-    final_state = entity_state_manager.get_state("OrderTracker", "shared")
+    final_state = await entity_state_manager.get_state("OrderTracker", "shared")
     assert final_state["count"] == 3
 
     # Verify operations were serialized (no interleaving of start/end for same operation)

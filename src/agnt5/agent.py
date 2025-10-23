@@ -79,78 +79,109 @@ class AgentContext(Context):
         self._agent_name = agent_name
         self._session_id = session_id or run_id
 
-        # Determine state manager based on parent context
-        from .entity import EntityStateManager, _get_state_manager
+        # Determine state adapter based on parent context
+        from .entity import EntityStateAdapter, _get_state_adapter
 
         if state_manager:
-            # Explicit state manager provided
-            self._state_manager = state_manager
-            logger.debug(f"AgentContext using provided state manager")
+            # Explicit state adapter provided (parameter name kept for backward compat)
+            self._state_adapter = state_manager
+            logger.debug(f"AgentContext using provided state adapter")
         elif parent_context:
-            # Try to inherit state manager from parent
+            # Try to inherit state adapter from parent
             try:
                 # Check if parent is WorkflowContext or AgentContext
                 if hasattr(parent_context, '_workflow_entity'):
-                    # WorkflowContext - get state manager from worker context
-                    self._state_manager = _get_state_manager()
+                    # WorkflowContext - get state adapter from worker context
+                    self._state_adapter = _get_state_adapter()
                     logger.debug(f"AgentContext inheriting state from WorkflowContext")
-                elif hasattr(parent_context, '_state_manager'):
-                    # Parent AgentContext - share state manager
-                    self._state_manager = parent_context._state_manager
+                elif hasattr(parent_context, '_state_adapter'):
+                    # Parent AgentContext - share state adapter
+                    self._state_adapter = parent_context._state_adapter
                     logger.debug(f"AgentContext inheriting state from parent AgentContext")
+                elif hasattr(parent_context, '_state_manager'):
+                    # Backward compatibility: parent has old _state_manager
+                    self._state_adapter = parent_context._state_manager
+                    logger.debug(f"AgentContext inheriting state from parent (legacy)")
                 else:
-                    # FunctionContext or base Context - create new state manager
-                    self._state_manager = EntityStateManager()
-                    logger.debug(f"AgentContext created new state manager (parent has no state)")
-            except RuntimeError:
-                # _get_state_manager() failed (not in worker context) - create standalone
-                self._state_manager = EntityStateManager()
-                logger.debug(f"AgentContext created standalone state manager")
+                    # FunctionContext or base Context - create new state adapter
+                    self._state_adapter = EntityStateAdapter()
+                    logger.debug(f"AgentContext created new state adapter (parent has no state)")
+            except RuntimeError as e:
+                # _get_state_adapter() failed (not in worker context) - create standalone
+                self._state_adapter = EntityStateAdapter()
+                logger.debug(f"AgentContext created standalone state adapter (not in worker context)")
         else:
-            # Standalone - create new state manager
-            self._state_manager = EntityStateManager()
-            logger.debug(f"AgentContext created standalone state manager")
+            # Try to get from worker context first
+            try:
+                self._state_adapter = _get_state_adapter()
+                logger.debug(f"AgentContext got state adapter from worker context")
+            except RuntimeError as e:
+                # Standalone - create new state adapter
+                self._state_adapter = EntityStateAdapter()
+                logger.debug(f"AgentContext created standalone state adapter")
 
-        # Conversation key for state storage
+        # Conversation key for state storage (used for in-memory state)
         self._conversation_key = f"agent:{agent_name}:{self._session_id}:messages"
+        # Entity key for database persistence (without :messages suffix to match API expectations)
+        self._entity_key = f"agent:{agent_name}:{self._session_id}"
+        logger.debug(f"AgentContext initialized - session_id={self._session_id}")
 
     @property
     def state(self):
         """
         Get state interface for agent state management.
 
+        Note: This is a simplified in-memory state interface for agent-specific data.
+        Conversation history is managed separately via get_conversation_history() and
+        save_conversation_history() which use the Rust-backed persistence layer.
+
         Returns:
-            EntityState instance for state operations
+            Dict-like object for state operations
 
         Example:
-            # Store conversation history
-            messages = ctx.state.get(f"agent:{agent_name}:{session_id}:messages", [])
-            messages.append({"role": "user", "content": "Hello"})
-            ctx.state.set(f"agent:{agent_name}:{session_id}:messages", messages)
-
-            # Store agent-specific data
-            ctx.state.set("research_results", data)
+            # Store agent-specific data (in-memory only)
+            ctx.state["research_results"] = data
+            ctx.state["iteration_count"] = 5
         """
-        from .entity import EntityState
-
-        # Use agent's conversation key as the state key
-        state_key = ("agent", self._conversation_key)
-        state_dict = self._state_manager.get_or_create_state(state_key)
-        return EntityState(state_dict)
+        # Simple dict-based state for agent-specific data
+        # This is in-memory only and not persisted to platform
+        if not hasattr(self, '_agent_state'):
+            self._agent_state = {}
+        return self._agent_state
 
     @property
     def session_id(self) -> str:
         """Get session identifier for this agent context."""
         return self._session_id
 
-    def get_conversation_history(self) -> List[Message]:
+    async def get_conversation_history(self) -> List[Message]:
         """
-        Retrieve conversation history from state.
+        Retrieve conversation history from state, loading from database if needed.
+
+        Uses the EntityStateAdapter which delegates to Rust core for cache-first loading.
 
         Returns:
             List of Message objects from conversation history
         """
-        messages_data = self.state.get(self._conversation_key, [])
+        entity_type = "AgentSession"
+        entity_key = self._entity_key
+
+        # Load session data via adapter (Rust handles cache + platform load)
+        session_data = await self._state_adapter.load_state(entity_type, entity_key)
+
+        # Extract messages from session object
+        if isinstance(session_data, dict) and "messages" in session_data:
+            # New format with session metadata
+            messages_data = session_data["messages"]
+            logger.debug(f"Loaded {len(messages_data)} messages from session {entity_key}")
+        elif isinstance(session_data, list):
+            # Old format - just messages array
+            messages_data = session_data
+            logger.debug(f"Loaded {len(messages_data)} messages (legacy format)")
+        else:
+            # No messages found
+            messages_data = []
+            logger.debug(f"No conversation history found for {entity_key}")
 
         # Convert dict representations back to Message objects
         messages = []
@@ -174,13 +205,17 @@ class AgentContext(Context):
 
         return messages
 
-    def save_conversation_history(self, messages: List[Message]) -> None:
+    async def save_conversation_history(self, messages: List[Message]) -> None:
         """
-        Save conversation history to state.
+        Save conversation history to state and persist to database.
+
+        Uses the EntityStateAdapter which delegates to Rust core for version-checked saves.
 
         Args:
             messages: List of Message objects to persist
         """
+        logger.debug(f"Saving {len(messages)} messages to conversation history")
+
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:
@@ -189,7 +224,126 @@ class AgentContext(Context):
                 "content": msg.content
             })
 
-        self.state.set(self._conversation_key, messages_data)
+        import time
+        entity_type = "AgentSession"
+        entity_key = self._entity_key
+
+        # Load current state with version for optimistic locking
+        current_state, current_version = await self._state_adapter.load_with_version(
+            entity_type, entity_key
+        )
+
+        # Build session object with metadata
+        now = time.time()
+
+        # Get custom metadata from instance variable or preserve from loaded state
+        custom_metadata = getattr(self, '_custom_metadata', current_state.get("metadata", {}))
+
+        session_data = {
+            "session_id": self._session_id,
+            "agent_name": self._agent_name,
+            "created_at": current_state.get("created_at", now),  # Preserve existing or set new
+            "last_message_time": now,
+            "message_count": len(messages_data),
+            "messages": messages_data,
+            "metadata": custom_metadata  # Save custom metadata
+        }
+
+        # Save to platform via adapter (Rust handles optimistic locking)
+        try:
+            new_version = await self._state_adapter.save_state(
+                entity_type,
+                entity_key,
+                session_data,
+                current_version
+            )
+            logger.info(
+                f"Persisted conversation history: {entity_key} (version {current_version} -> {new_version})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to persist conversation history to database: {e}")
+            # Don't fail - conversation is still in memory for this execution
+
+    async def get_metadata(self) -> Dict[str, Any]:
+        """
+        Get conversation session metadata.
+
+        Returns session metadata including:
+        - created_at: Timestamp of first message (float, Unix timestamp)
+        - last_activity: Timestamp of last message (float, Unix timestamp)
+        - message_count: Number of messages in conversation (int)
+        - custom: Dict of user-provided custom metadata
+
+        Returns:
+            Dictionary with metadata. If no conversation exists yet, returns defaults.
+
+        Example:
+            ```python
+            metadata = await context.get_metadata()
+            print(f"Session created: {metadata['created_at']}")
+            print(f"User ID: {metadata['custom'].get('user_id')}")
+            ```
+        """
+        entity_type = "AgentSession"
+        entity_key = self._entity_key
+
+        # Load session data
+        session_data = await self._state_adapter.load_state(entity_type, entity_key)
+
+        if not session_data:
+            # No conversation exists yet - return defaults
+            return {
+                "created_at": None,
+                "last_activity": None,
+                "message_count": 0,
+                "custom": getattr(self, '_custom_metadata', {})
+            }
+
+        messages = session_data.get("messages", [])
+
+        # Derive timestamps from messages if available
+        created_at = session_data.get("created_at")
+        last_activity = session_data.get("last_message_time")
+
+        return {
+            "created_at": created_at,
+            "last_activity": last_activity,
+            "message_count": len(messages),
+            "custom": session_data.get("metadata", {})
+        }
+
+    def update_metadata(self, **kwargs) -> None:
+        """
+        Update custom session metadata.
+
+        Metadata will be persisted alongside conversation history on next save.
+        Use this to store application-specific data like user_id, preferences, etc.
+
+        Args:
+            **kwargs: Key-value pairs to store as metadata
+
+        Example:
+            ```python
+            # Store user identification and preferences
+            context.update_metadata(
+                user_id="user-123",
+                subscription_tier="premium",
+                preferences={"theme": "dark", "language": "en"}
+            )
+
+            # Later retrieve it
+            metadata = await context.get_metadata()
+            user_id = metadata["custom"]["user_id"]
+            ```
+
+        Note:
+            - Metadata is merged with existing metadata (doesn't replace)
+            - Changes persist on next save_conversation_history() call
+            - Use simple JSON-serializable types (str, int, float, dict, list)
+        """
+        if not hasattr(self, '_custom_metadata'):
+            self._custom_metadata = {}
+        self._custom_metadata.update(kwargs)
 
 
 class Handoff:
@@ -665,11 +819,11 @@ class Agent:
 
         # Load conversation history from state (if AgentContext)
         if isinstance(context, AgentContext):
-            messages: List[Message] = context.get_conversation_history()
+            messages: List[Message] = await context.get_conversation_history()
             # Add new user message
             messages.append(Message.user(user_message))
             # Save updated conversation
-            context.save_conversation_history(messages)
+            await context.save_conversation_history(messages)
         else:
             # Fallback for non-AgentContext (shouldn't happen with code above)
             messages = [Message.user(user_message)]
@@ -795,7 +949,7 @@ class Agent:
                                     )
                                     # Save conversation before returning
                                     if isinstance(context, AgentContext):
-                                        context.save_conversation_history(messages)
+                                        await context.save_conversation_history(messages)
                                     # Return immediately with handoff result
                                     return AgentResult(
                                         output=result["output"],
@@ -835,7 +989,7 @@ class Agent:
                     self.logger.debug(f"Agent completed after {iteration + 1} iterations")
                     # Save conversation before returning
                     if isinstance(context, AgentContext):
-                        context.save_conversation_history(messages)
+                        await context.save_conversation_history(messages)
                     return AgentResult(
                         output=response.text,
                         tool_calls=all_tool_calls,
@@ -847,7 +1001,7 @@ class Agent:
             final_output = messages[-1].content if messages else "No output generated"
             # Save conversation before returning
             if isinstance(context, AgentContext):
-                context.save_conversation_history(messages)
+                await context.save_conversation_history(messages)
             return AgentResult(
                 output=final_output,
                 tool_calls=all_tool_calls,
