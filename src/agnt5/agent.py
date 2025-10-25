@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from .context import Context
@@ -221,10 +222,10 @@ class AgentContext(Context):
         for msg in messages:
             messages_data.append({
                 "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
-                "content": msg.content
+                "content": msg.content,
+                "timestamp": time.time()  # Add timestamp for each message
             })
 
-        import time
         entity_type = "AgentSession"
         entity_key = self._entity_key
 
