@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from .function import FunctionRegistry
@@ -758,12 +759,25 @@ class Worker:
         """Execute a workflow handler with automatic replay support."""
         import json
         from .workflow import WorkflowEntity, WorkflowContext
-        from .entity import _get_state_adapter
+        from .entity import _get_state_adapter, _entity_state_adapter_ctx
         from ._core import PyExecuteComponentResponse
+
+        # Set entity state adapter in context so workflows can use Entities
+        _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         try:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
+
+            # Extract or generate session_id for multi-turn conversation support (for chat workflows)
+            # If session_id is provided, the workflow can maintain conversation context
+            session_id = input_dict.get("session_id")
+
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                logger.info(f"Created new workflow session: {session_id}")
+            else:
+                logger.info(f"Using existing workflow session: {session_id}")
 
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
@@ -860,13 +874,16 @@ class Worker:
 
             logger.info(f"Workflow completed successfully with {len(step_events)} steps")
 
+            # Add session_id to metadata for multi-turn conversation support
+            metadata["session_id"] = session_id
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=output_data,
                 state_update=None,  # Not used for workflows (use metadata instead)
                 error_message=None,
-                metadata=metadata if metadata else None,  # Include step events + state
+                metadata=metadata if metadata else None,  # Include step events + state + session_id
                 is_chunk=False,
                 done=True,
                 chunk_index=0,

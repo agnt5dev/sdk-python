@@ -408,6 +408,14 @@ class WorkflowState(EntityState):
             "deleted": True
         })
 
+    def has_changes(self) -> bool:
+        """Check if any state changes have been tracked."""
+        return len(self._workflow_entity._state_changes) > 0
+
+    def get_state_snapshot(self) -> Dict[str, Any]:
+        """Get current state as a snapshot dictionary."""
+        return dict(self._state)
+
 
 class WorkflowRegistry:
     """Registry for workflow handlers."""
