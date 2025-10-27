@@ -303,8 +303,6 @@ fn log_from_python(
     // The key difference: we DON'T create a span just for logging. We emit the log
     // in the current span context, and OpenTelemetry handles the rest.
 
-    let current_span = tracing::Span::current();
-
     // CRITICAL FIX: If we have trace_id and span_id from Python, create an OpenTelemetry
     // context and attach it so the opentelemetry_appender_tracing layer can extract it
     let _cx_guard = if let (Some(tid_str), Some(sid_str)) = (&trace_id, &span_id) {
