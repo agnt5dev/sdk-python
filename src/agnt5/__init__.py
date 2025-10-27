@@ -29,7 +29,7 @@ from .exceptions import (
     WaitingForUserInputException,
 )
 from .function import FunctionRegistry, function
-from .tool import Tool, ToolRegistry, tool
+from .tool import AskUserTool, RequestApprovalTool, Tool, ToolRegistry, tool
 from .types import BackoffPolicy, BackoffType, FunctionConfig, RetryPolicy, WorkflowConfig
 from .version import _get_version
 from .worker import Worker
@@ -63,6 +63,8 @@ __all__ = [
     "tool",
     "Tool",
     "ToolRegistry",
+    "AskUserTool",
+    "RequestApprovalTool",
     "agent",
     "Agent",
     "AgentRegistry",

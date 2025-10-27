@@ -416,3 +416,152 @@ def tool(
     if _func is None:
         return decorator
     return decorator(_func)
+
+
+# ============================================================================
+# Built-in Human-in-the-Loop Tools
+# ============================================================================
+
+class AskUserTool(Tool):
+    """
+    Built-in tool that agents can use to request text input from users.
+
+    This tool pauses the workflow execution and waits for the user to provide
+    a text response. The workflow resumes when the user submits their input.
+
+    Example:
+        ```python
+        from agnt5 import Agent, workflow, WorkflowContext
+        from agnt5.tool import AskUserTool
+
+        @workflow(chat=True)
+        async def agent_with_hitl(ctx: WorkflowContext, query: str) -> dict:
+            agent = Agent(
+                name="research_agent",
+                model="openai/gpt-4o-mini",
+                instructions="You are a research assistant.",
+                tools=[AskUserTool(ctx)]
+            )
+
+            result = await agent.run(query, context=ctx)
+            return {"response": result.output}
+        ```
+    """
+
+    def __init__(self, context: "WorkflowContext"):  # type: ignore
+        """
+        Initialize AskUserTool.
+
+        Args:
+            context: Workflow context with wait_for_user capability
+        """
+        # Import here to avoid circular dependency
+        from .workflow import WorkflowContext
+
+        if not isinstance(context, WorkflowContext):
+            raise ConfigurationError(
+                "AskUserTool requires a WorkflowContext. "
+                "This tool can only be used within workflows."
+            )
+
+        super().__init__(
+            name="ask_user",
+            description="Ask the user a question and wait for their text response",
+            handler=self._handler,
+            auto_schema=True
+        )
+        self.context = context
+
+    async def _handler(self, ctx: Context, question: str) -> str:
+        """
+        Ask user a question and wait for their response.
+
+        Args:
+            ctx: Execution context (unused, required by Tool signature)
+            question: Question to ask the user
+
+        Returns:
+            User's text response
+        """
+        return await self.context.wait_for_user(question, input_type="text")
+
+
+class RequestApprovalTool(Tool):
+    """
+    Built-in tool that agents can use to request approval from users.
+
+    This tool pauses the workflow execution and presents an approval request
+    to the user with approve/reject options. The workflow resumes when the
+    user makes a decision.
+
+    Example:
+        ```python
+        from agnt5 import Agent, workflow, WorkflowContext
+        from agnt5.tool import RequestApprovalTool
+
+        @workflow(chat=True)
+        async def deployment_agent(ctx: WorkflowContext, changes: dict) -> dict:
+            agent = Agent(
+                name="deploy_agent",
+                model="openai/gpt-4o-mini",
+                instructions="You help deploy code changes safely.",
+                tools=[RequestApprovalTool(ctx)]
+            )
+
+            result = await agent.run(
+                f"Review and deploy these changes: {changes}",
+                context=ctx
+            )
+            return {"response": result.output}
+        ```
+    """
+
+    def __init__(self, context: "WorkflowContext"):  # type: ignore
+        """
+        Initialize RequestApprovalTool.
+
+        Args:
+            context: Workflow context with wait_for_user capability
+        """
+        # Import here to avoid circular dependency
+        from .workflow import WorkflowContext
+
+        if not isinstance(context, WorkflowContext):
+            raise ConfigurationError(
+                "RequestApprovalTool requires a WorkflowContext. "
+                "This tool can only be used within workflows."
+            )
+
+        super().__init__(
+            name="request_approval",
+            description="Request user approval for an action before proceeding",
+            handler=self._handler,
+            auto_schema=True
+        )
+        self.context = context
+
+    async def _handler(self, ctx: Context, action: str, details: str = "") -> str:
+        """
+        Request approval from user for an action.
+
+        Args:
+            ctx: Execution context (unused, required by Tool signature)
+            action: The action requiring approval
+            details: Additional details about the action
+
+        Returns:
+            "approve" or "reject" based on user's decision
+        """
+        question = f"Action: {action}"
+        if details:
+            question += f"\n\nDetails:\n{details}"
+        question += "\n\nDo you approve?"
+
+        return await self.context.wait_for_user(
+            question,
+            input_type="approval",
+            options=[
+                {"id": "approve", "label": "Approve"},
+                {"id": "reject", "label": "Reject"}
+            ]
+        )
