@@ -86,7 +86,6 @@ class AgentContext(Context):
         if state_manager:
             # Explicit state adapter provided (parameter name kept for backward compat)
             self._state_adapter = state_manager
-            logger.debug(f"AgentContext using provided state adapter")
         elif parent_context:
             # Try to inherit state adapter from parent
             try:
@@ -94,38 +93,30 @@ class AgentContext(Context):
                 if hasattr(parent_context, '_workflow_entity'):
                     # WorkflowContext - get state adapter from worker context
                     self._state_adapter = _get_state_adapter()
-                    logger.debug(f"AgentContext inheriting state from WorkflowContext")
                 elif hasattr(parent_context, '_state_adapter'):
                     # Parent AgentContext - share state adapter
                     self._state_adapter = parent_context._state_adapter
-                    logger.debug(f"AgentContext inheriting state from parent AgentContext")
                 elif hasattr(parent_context, '_state_manager'):
                     # Backward compatibility: parent has old _state_manager
                     self._state_adapter = parent_context._state_manager
-                    logger.debug(f"AgentContext inheriting state from parent (legacy)")
                 else:
                     # FunctionContext or base Context - create new state adapter
                     self._state_adapter = EntityStateAdapter()
-                    logger.debug(f"AgentContext created new state adapter (parent has no state)")
             except RuntimeError as e:
                 # _get_state_adapter() failed (not in worker context) - create standalone
                 self._state_adapter = EntityStateAdapter()
-                logger.debug(f"AgentContext created standalone state adapter (not in worker context)")
         else:
             # Try to get from worker context first
             try:
                 self._state_adapter = _get_state_adapter()
-                logger.debug(f"AgentContext got state adapter from worker context")
             except RuntimeError as e:
                 # Standalone - create new state adapter
                 self._state_adapter = EntityStateAdapter()
-                logger.debug(f"AgentContext created standalone state adapter")
 
         # Conversation key for state storage (used for in-memory state)
         self._conversation_key = f"agent:{agent_name}:{self._session_id}:messages"
         # Entity key for database persistence (without :messages suffix to match API expectations)
         self._entity_key = f"agent:{agent_name}:{self._session_id}"
-        logger.debug(f"AgentContext initialized - session_id={self._session_id}")
 
     @property
     def state(self):
@@ -174,15 +165,12 @@ class AgentContext(Context):
         if isinstance(session_data, dict) and "messages" in session_data:
             # New format with session metadata
             messages_data = session_data["messages"]
-            logger.debug(f"Loaded {len(messages_data)} messages from session {entity_key}")
         elif isinstance(session_data, list):
             # Old format - just messages array
             messages_data = session_data
-            logger.debug(f"Loaded {len(messages_data)} messages (legacy format)")
         else:
             # No messages found
             messages_data = []
-            logger.debug(f"No conversation history found for {entity_key}")
 
         # Convert dict representations back to Message objects
         messages = []
@@ -215,8 +203,6 @@ class AgentContext(Context):
         Args:
             messages: List of Message objects to persist
         """
-        logger.debug(f"Saving {len(messages)} messages to conversation history")
-
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:
@@ -454,7 +440,6 @@ class AgentRegistry:
         if agent.name in _AGENT_REGISTRY:
             logger.warning(f"Overwriting existing agent '{agent.name}'")
         _AGENT_REGISTRY[agent.name] = agent
-        logger.debug(f"Registered agent '{agent.name}'")
 
     @staticmethod
     def get(name: str) -> Optional["Agent"]:
@@ -470,7 +455,6 @@ class AgentRegistry:
     def clear() -> None:
         """Clear all registered agents."""
         _AGENT_REGISTRY.clear()
-        logger.debug("Cleared agent registry")
 
 
 class AgentResult:
