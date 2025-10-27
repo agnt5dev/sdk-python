@@ -477,6 +477,82 @@ def test_handoff_configuration():
     assert h.pass_full_history is True
 
 
+def test_handoff_agent_direct_pass():
+    """Test that agents can be passed directly to handoffs parameter (auto-wrapped)."""
+    mock_lm = MockLanguageModel()
+
+    technical = Agent(name="technical", model=mock_lm, instructions="Technical specialist")
+    business = Agent(name="business", model=mock_lm, instructions="Business specialist")
+
+    # Pass agents directly - should be auto-wrapped in Handoff
+    coordinator = Agent(
+        name="coordinator",
+        model=mock_lm,
+        instructions="Route requests",
+        handoffs=[technical, business]  # Pass Agent instances directly
+    )
+
+    # Verify handoffs were created and normalized
+    assert len(coordinator.handoffs) == 2
+    assert all(isinstance(h, Handoff) for h in coordinator.handoffs)
+
+    # Check first handoff (technical)
+    assert coordinator.handoffs[0].agent is technical
+    assert coordinator.handoffs[0].tool_name == "transfer_to_technical"
+    assert coordinator.handoffs[0].description == "Technical specialist"  # Uses agent instructions
+    assert coordinator.handoffs[0].pass_full_history is True  # Default
+
+    # Check second handoff (business)
+    assert coordinator.handoffs[1].agent is business
+    assert coordinator.handoffs[1].tool_name == "transfer_to_business"
+
+    # Verify handoff tools were created
+    assert "transfer_to_technical" in coordinator.tools
+    assert "transfer_to_business" in coordinator.tools
+
+
+def test_handoff_mixed_agent_and_handoff_instances():
+    """Test that handoffs parameter can accept mix of Agent and Handoff instances."""
+    mock_lm = MockLanguageModel()
+
+    technical = Agent(name="technical", model=mock_lm, instructions="Technical specialist")
+    business = Agent(name="business", model=mock_lm, instructions="Business specialist")
+
+    # Mix direct agents and Handoff configurations
+    coordinator = Agent(
+        name="coordinator",
+        model=mock_lm,
+        instructions="Route requests",
+        handoffs=[
+            technical,  # Direct agent - uses defaults
+            Handoff(  # Custom handoff configuration
+                agent=business,
+                description="Custom business description",
+                tool_name="escalate_to_business",
+                pass_full_history=False
+            )
+        ]
+    )
+
+    # Verify both handoffs exist
+    assert len(coordinator.handoffs) == 2
+
+    # First handoff (auto-wrapped)
+    assert coordinator.handoffs[0].agent is technical
+    assert coordinator.handoffs[0].tool_name == "transfer_to_technical"
+    assert coordinator.handoffs[0].pass_full_history is True
+
+    # Second handoff (custom config)
+    assert coordinator.handoffs[1].agent is business
+    assert coordinator.handoffs[1].tool_name == "escalate_to_business"
+    assert coordinator.handoffs[1].description == "Custom business description"
+    assert coordinator.handoffs[1].pass_full_history is False
+
+    # Verify tools
+    assert "transfer_to_technical" in coordinator.tools
+    assert "escalate_to_business" in coordinator.tools
+
+
 # Test Agent Registry
 
 

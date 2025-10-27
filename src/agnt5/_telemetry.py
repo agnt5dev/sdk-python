@@ -73,10 +73,17 @@ class OpenTelemetryHandler(logging.Handler):
                 exc_text = self.formatException(record.exc_info)
                 message = f"{message}\n{exc_text}"
 
+            # Extract correlation IDs from LogRecord attributes (added by _CorrelationFilter)
+            # These ensure logs can be correlated with distributed traces in observability backends
+            trace_id = getattr(record, 'trace_id', None)
+            span_id = getattr(record, 'span_id', None)
+            run_id = getattr(record, 'run_id', None)
+
             # Forward to Rust tracing system
             # Rust side will:
             # - Add to current span context (inherits invocation.id)
-            # - Send to OTLP exporter
+            # - Attach correlation IDs as span attributes for OTLP export
+            # - Send to OTLP exporter with trace context
             # - Print to console via fmt layer
             self._log_from_python(
                 level=record.levelname,
@@ -84,7 +91,10 @@ class OpenTelemetryHandler(logging.Handler):
                 target=record.name,
                 module_path=record.module,
                 filename=record.pathname,
-                line=record.lineno
+                line=record.lineno,
+                trace_id=trace_id,
+                span_id=span_id,
+                run_id=run_id,
             )
         except Exception:
             # Don't let logging errors crash the application

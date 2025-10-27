@@ -10,7 +10,7 @@ import functools
 import json
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .context import Context
 from . import lm
@@ -360,16 +360,23 @@ class Handoff:
         ```python
         specialist = Agent(name="specialist", ...)
 
-        # Create handoff configuration
-        handoff_to_specialist = Handoff(
-            agent=specialist,
-            description="Transfer to specialist for detailed analysis"
-        )
-
-        # Use in coordinator agent
+        # Simple: Pass agent directly (auto-wrapped with defaults)
         coordinator = Agent(
             name="coordinator",
-            handoffs=[handoff_to_specialist]
+            handoffs=[specialist]  # Agent auto-converted to Handoff
+        )
+
+        # Advanced: Use Handoff for custom configuration
+        coordinator = Agent(
+            name="coordinator",
+            handoffs=[
+                Handoff(
+                    agent=specialist,
+                    description="Custom description for LLM",
+                    tool_name="custom_transfer_name",
+                    pass_full_history=False
+                )
+            ]
         )
         ```
     """
@@ -528,7 +535,7 @@ class Agent:
         model: Any,  # Can be string like "openai/gpt-4o-mini" OR LanguageModel instance
         instructions: str,
         tools: Optional[List[Any]] = None,
-        handoffs: Optional[List[Handoff]] = None,
+        handoffs: Optional[List[Union["Agent", Handoff]]] = None,  # Accept Agent or Handoff instances
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -543,7 +550,7 @@ class Agent:
             model: Model string with provider prefix (e.g., "openai/gpt-4o-mini") OR LanguageModel instance
             instructions: System instructions for the agent
             tools: List of tools available to the agent (functions, Tool instances, or Agent instances)
-            handoffs: List of Handoff configurations for agent-to-agent delegation
+            handoffs: List of handoff configurations - can be Agent instances (auto-wrapped) or Handoff instances for custom config
             temperature: LLM temperature (0.0 to 1.0)
             max_tokens: Maximum tokens to generate
             top_p: Nucleus sampling parameter
@@ -573,8 +580,18 @@ class Agent:
         else:
             raise TypeError(f"model must be a string or LanguageModel instance, got {type(model)}")
 
-        # Store handoffs for building handoff tools
-        self.handoffs = handoffs or []
+        # Normalize handoffs: convert Agent instances to Handoff instances
+        self.handoffs: List[Handoff] = []
+        if handoffs:
+            for handoff_item in handoffs:
+                if isinstance(handoff_item, Agent):
+                    # Auto-wrap Agent in Handoff with sensible defaults
+                    self.handoffs.append(Handoff(agent=handoff_item))
+                    logger.info(f"Auto-wrapped agent '{handoff_item.name}' in Handoff for '{self.name}'")
+                elif isinstance(handoff_item, Handoff):
+                    self.handoffs.append(handoff_item)
+                else:
+                    raise TypeError(f"handoffs must contain Agent or Handoff instances, got {type(handoff_item)}")
 
         # Build tool registry (includes regular tools, agent-as-tools, and handoff tools)
         self.tools: Dict[str, Tool] = {}

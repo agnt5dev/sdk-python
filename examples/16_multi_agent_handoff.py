@@ -152,6 +152,9 @@ async def example_explicit_handoffs():
     )
 
     # Create triage agent that routes to specialists via handoffs
+    # Two ways to configure handoffs:
+
+    # 1. Simple: Pass agents directly (auto-wrapped with defaults)
     triage_agent = Agent(
         name="triage",
         model="openai/gpt-4o-mini",
@@ -165,12 +168,26 @@ async def example_explicit_handoffs():
         Analyze the user's request and transfer to the appropriate specialist using
         the transfer_to_{specialist_name} tools. Only handle simple general questions yourself.""",
         handoffs=[
-            handoff(technical_specialist, "Transfer to technical specialist"),
-            handoff(business_specialist, "Transfer to business specialist"),
-            handoff(writing_specialist, "Transfer to writing specialist"),
+            technical_specialist,  # Simple: Just pass the agent directly!
+            business_specialist,   # AGNT5 auto-wraps with sensible defaults
+            writing_specialist,
         ],
         temperature=0.7,
     )
+
+    # 2. Advanced: Use handoff() for custom descriptions (optional)
+    # Uncomment to try this alternative approach:
+    # triage_agent = Agent(
+    #     name="triage",
+    #     model="openai/gpt-4o-mini",
+    #     instructions="...",
+    #     handoffs=[
+    #         handoff(technical_specialist, "Transfer to technical specialist"),
+    #         handoff(business_specialist, "Transfer to business specialist"),
+    #         handoff(writing_specialist, "Transfer to writing specialist"),
+    #     ],
+    #     temperature=0.7,
+    # )
 
     # Test different types of requests
     test_cases = [
