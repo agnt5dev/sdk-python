@@ -924,17 +924,6 @@ fn extract_context_from_python(py: Python<'_>) -> PyResult<OtelContext> {
     // Use the sdk-core function to extract context from metadata
     let ctx = agnt5_sdk_core::extract_context_from_runtime_message(&metadata);
 
-    // Log for debugging
-    use opentelemetry::trace::TraceContextExt;
-    let span = ctx.span();
-    let span_ctx = span.span_context();
-    log::info!(
-        "Trace propagation: Extracted from Python contextvar - trace_id={}, span_id={}, valid={}",
-        span_ctx.trace_id().to_string(),
-        span_ctx.span_id().to_string(),
-        span_ctx.is_valid()
-    );
-
     Ok(ctx)
 }
 

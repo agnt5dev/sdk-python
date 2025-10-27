@@ -10,7 +10,7 @@ import functools
 import json
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .context import Context
 from . import lm
@@ -86,7 +86,6 @@ class AgentContext(Context):
         if state_manager:
             # Explicit state adapter provided (parameter name kept for backward compat)
             self._state_adapter = state_manager
-            logger.debug(f"AgentContext using provided state adapter")
         elif parent_context:
             # Try to inherit state adapter from parent
             try:
@@ -94,38 +93,30 @@ class AgentContext(Context):
                 if hasattr(parent_context, '_workflow_entity'):
                     # WorkflowContext - get state adapter from worker context
                     self._state_adapter = _get_state_adapter()
-                    logger.debug(f"AgentContext inheriting state from WorkflowContext")
                 elif hasattr(parent_context, '_state_adapter'):
                     # Parent AgentContext - share state adapter
                     self._state_adapter = parent_context._state_adapter
-                    logger.debug(f"AgentContext inheriting state from parent AgentContext")
                 elif hasattr(parent_context, '_state_manager'):
                     # Backward compatibility: parent has old _state_manager
                     self._state_adapter = parent_context._state_manager
-                    logger.debug(f"AgentContext inheriting state from parent (legacy)")
                 else:
                     # FunctionContext or base Context - create new state adapter
                     self._state_adapter = EntityStateAdapter()
-                    logger.debug(f"AgentContext created new state adapter (parent has no state)")
             except RuntimeError as e:
                 # _get_state_adapter() failed (not in worker context) - create standalone
                 self._state_adapter = EntityStateAdapter()
-                logger.debug(f"AgentContext created standalone state adapter (not in worker context)")
         else:
             # Try to get from worker context first
             try:
                 self._state_adapter = _get_state_adapter()
-                logger.debug(f"AgentContext got state adapter from worker context")
             except RuntimeError as e:
                 # Standalone - create new state adapter
                 self._state_adapter = EntityStateAdapter()
-                logger.debug(f"AgentContext created standalone state adapter")
 
         # Conversation key for state storage (used for in-memory state)
         self._conversation_key = f"agent:{agent_name}:{self._session_id}:messages"
         # Entity key for database persistence (without :messages suffix to match API expectations)
         self._entity_key = f"agent:{agent_name}:{self._session_id}"
-        logger.debug(f"AgentContext initialized - session_id={self._session_id}")
 
     @property
     def state(self):
@@ -174,15 +165,12 @@ class AgentContext(Context):
         if isinstance(session_data, dict) and "messages" in session_data:
             # New format with session metadata
             messages_data = session_data["messages"]
-            logger.debug(f"Loaded {len(messages_data)} messages from session {entity_key}")
         elif isinstance(session_data, list):
             # Old format - just messages array
             messages_data = session_data
-            logger.debug(f"Loaded {len(messages_data)} messages (legacy format)")
         else:
             # No messages found
             messages_data = []
-            logger.debug(f"No conversation history found for {entity_key}")
 
         # Convert dict representations back to Message objects
         messages = []
@@ -215,8 +203,6 @@ class AgentContext(Context):
         Args:
             messages: List of Message objects to persist
         """
-        logger.debug(f"Saving {len(messages)} messages to conversation history")
-
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:
@@ -360,16 +346,23 @@ class Handoff:
         ```python
         specialist = Agent(name="specialist", ...)
 
-        # Create handoff configuration
-        handoff_to_specialist = Handoff(
-            agent=specialist,
-            description="Transfer to specialist for detailed analysis"
-        )
-
-        # Use in coordinator agent
+        # Simple: Pass agent directly (auto-wrapped with defaults)
         coordinator = Agent(
             name="coordinator",
-            handoffs=[handoff_to_specialist]
+            handoffs=[specialist]  # Agent auto-converted to Handoff
+        )
+
+        # Advanced: Use Handoff for custom configuration
+        coordinator = Agent(
+            name="coordinator",
+            handoffs=[
+                Handoff(
+                    agent=specialist,
+                    description="Custom description for LLM",
+                    tool_name="custom_transfer_name",
+                    pass_full_history=False
+                )
+            ]
         )
         ```
     """
@@ -447,7 +440,6 @@ class AgentRegistry:
         if agent.name in _AGENT_REGISTRY:
             logger.warning(f"Overwriting existing agent '{agent.name}'")
         _AGENT_REGISTRY[agent.name] = agent
-        logger.debug(f"Registered agent '{agent.name}'")
 
     @staticmethod
     def get(name: str) -> Optional["Agent"]:
@@ -463,7 +455,6 @@ class AgentRegistry:
     def clear() -> None:
         """Clear all registered agents."""
         _AGENT_REGISTRY.clear()
-        logger.debug("Cleared agent registry")
 
 
 class AgentResult:
@@ -528,7 +519,7 @@ class Agent:
         model: Any,  # Can be string like "openai/gpt-4o-mini" OR LanguageModel instance
         instructions: str,
         tools: Optional[List[Any]] = None,
-        handoffs: Optional[List[Handoff]] = None,
+        handoffs: Optional[List[Union["Agent", Handoff]]] = None,  # Accept Agent or Handoff instances
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
@@ -543,7 +534,7 @@ class Agent:
             model: Model string with provider prefix (e.g., "openai/gpt-4o-mini") OR LanguageModel instance
             instructions: System instructions for the agent
             tools: List of tools available to the agent (functions, Tool instances, or Agent instances)
-            handoffs: List of Handoff configurations for agent-to-agent delegation
+            handoffs: List of handoff configurations - can be Agent instances (auto-wrapped) or Handoff instances for custom config
             temperature: LLM temperature (0.0 to 1.0)
             max_tokens: Maximum tokens to generate
             top_p: Nucleus sampling parameter
@@ -573,8 +564,18 @@ class Agent:
         else:
             raise TypeError(f"model must be a string or LanguageModel instance, got {type(model)}")
 
-        # Store handoffs for building handoff tools
-        self.handoffs = handoffs or []
+        # Normalize handoffs: convert Agent instances to Handoff instances
+        self.handoffs: List[Handoff] = []
+        if handoffs:
+            for handoff_item in handoffs:
+                if isinstance(handoff_item, Agent):
+                    # Auto-wrap Agent in Handoff with sensible defaults
+                    self.handoffs.append(Handoff(agent=handoff_item))
+                    logger.info(f"Auto-wrapped agent '{handoff_item.name}' in Handoff for '{self.name}'")
+                elif isinstance(handoff_item, Handoff):
+                    self.handoffs.append(handoff_item)
+                else:
+                    raise TypeError(f"handoffs must contain Agent or Handoff instances, got {type(handoff_item)}")
 
         # Build tool registry (includes regular tools, agent-as-tools, and handoff tools)
         self.tools: Dict[str, Tool] = {}

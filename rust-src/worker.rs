@@ -14,6 +14,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::global;
 use tracing;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 // Removed baggage import - using span inheritance instead
 use std::collections::HashMap;
 
@@ -370,13 +372,6 @@ impl PyWorker {
                 );
                 let _guard = invocation_span.enter();
 
-                let request_start = std::time::Instant::now();
-                log::info!(
-                    "🔥 RUST: Received function invocation request - Data size: {} bytes",
-                    invoke_request.input_data.len()
-                );
-                log::debug!("Request metadata: {:?}", invoke_request.metadata);
-
                 // Extract trace context from request metadata
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
@@ -392,13 +387,6 @@ impl PyWorker {
                     invoke_request.metadata.clone(),
                     parent_context.clone(),
                     std::sync::Arc::new(agnt5_sdk_core::DummyStateManager),
-                );
-
-                log::info!(
-                    "Created RuntimeContext with run_id={}, trace_id={:?}, span_id={:?}",
-                    runtime_context.run_id,
-                    runtime_context.trace_id,
-                    runtime_context.span_id
                 );
 
                 // Note: invocation.id will be handled by tracing span and Python log forwarding
@@ -437,28 +425,11 @@ impl PyWorker {
                 // and maintains the distributed trace link to the gateway/coordinator
                 // Using parent_context.with_span() instead of Context::current_with_span()
                 // is critical - it preserves the extracted trace context from the gateway
-                {
-                    let parent_span_ref = parent_context.span();
-                    let parent_span_ctx = parent_span_ref.span_context();
-                    log::info!(
-                        "Trace propagation: BEFORE attach trace_id={}, span_id={}, valid={}",
-                        parent_span_ctx.trace_id().to_string(),
-                        parent_span_ctx.span_id().to_string(),
-                        parent_span_ctx.is_valid()
-                    );
-                }
                 let cx = parent_context.with_span(otel_span);
 
-                {
-                    let span_ref = cx.span();
-                    let span_ctx = span_ref.span_context();
-                    log::info!(
-                        "Trace propagation: AFTER attach trace_id={}, span_id={}, valid={}",
-                        span_ctx.trace_id().to_string(),
-                        span_ctx.span_id().to_string(),
-                        span_ctx.is_valid()
-                    );
-                }
+                // Clone fields needed for span before moving invoke_request
+                let component_name = invoke_request.component_name.clone();
+                let invocation_id = invoke_request.invocation_id.clone();
 
                 // Convert to Python types
                 let mut py_request = PyExecuteComponentRequest::from(invoke_request);
@@ -480,11 +451,6 @@ impl PyWorker {
                     global::get_text_map_propagator(|propagator| {
                         propagator.inject_context(&cx, &mut injector);
                     });
-
-                    log::info!(
-                        "Trace propagation: Injected into metadata - traceparent: {:?}",
-                        py_request.metadata.get("traceparent")
-                    );
                 }
 
                 // Attach RuntimeContext to request for Python access to correlation IDs
@@ -492,12 +458,31 @@ impl PyWorker {
                     inner: std::sync::Arc::new(runtime_context),
                 });
 
-                log::info!("Attached RuntimeContext to Python request");
-
                 // Call Python handler and get coroutine
                 // Clone tx for potential use inside async context
                 let tx_clone = tx.clone();
                 let worker_id = runtime_message.worker_id.clone();
+
+                // Create a tracing span for this execution
+                // CRITICAL: Use OpenTelemetrySpanExt to explicitly set the OpenTelemetry context
+                // This ensures logs emitted within this span have the correct trace_id/span_id
+                let execution_span = tracing::info_span!(
+                    "python_component_execution",
+                    component.name = %component_name,
+                    component.type = component_type_str,
+                    run.id = %invocation_id
+                );
+
+                // CRITICAL: Set the OpenTelemetry context on the tracing span
+                // This makes the OTel context available when the span is entered
+                execution_span.set_parent(cx.clone());
+
+                // Debug: Check if the OpenTelemetry span has trace_id
+                let otel_span = cx.span();
+                tracing::info!(
+                    "Created execution span with OTel trace_id: {:?}",
+                    otel_span.span_context().trace_id()
+                );
 
                 // Execute Python handler using shared event loop for concurrent execution
                 // This approach uses into_future_with_locals() to execute Python async functions
@@ -508,7 +493,9 @@ impl PyWorker {
                 // - No thread pool bottleneck (was limited to ~8-16 concurrent executions)
                 // - Lower overhead (no need to create new event loop per request)
                 // - True concurrency (100+ async functions on same event loop)
-                let result = {
+                //
+                // Use async move block and instrument it with the span to propagate trace context
+                let result = async move {
                     // Get TaskLocals with the shared event loop
                     let task_locals: TaskLocals = Python::attach(|_py| -> Result<_, agnt5_sdk_core::error::SdkError> {
                         let guard = event_loop_locals_arc.lock().map_err(|e| {
@@ -526,7 +513,6 @@ impl PyWorker {
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
-                        let python_call_start = std::time::Instant::now();
                         // Call the Python handler
                         let py_result = handler.call1(py, (py_request,))
                             .map_err(|e| {
@@ -534,7 +520,6 @@ impl PyWorker {
                                 log::error!("{}", err_msg);
                                 agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                             })?;
-                        log::info!("🔥 RUST: Python handler.call1() took: {:?}", python_call_start.elapsed());
 
                         // Check if result is an awaitable (coroutine, Task, Future, or any __await__)
                         let inspect = py.import("inspect")
@@ -550,7 +535,6 @@ impl PyWorker {
 
                         let awaitable: Bound<PyAny> = if is_awaitable {
                             // It's an awaitable - use it directly
-                            log::info!("🔥 RUST: Handler returned awaitable, will execute on shared event loop");
                             py_result.bind(py).clone()
                         } else {
                             // It's a regular return value (not awaitable)
@@ -586,18 +570,16 @@ impl PyWorker {
                         Ok(future)
                     })?;
 
-                    let await_start = std::time::Instant::now();
-                    let result = rust_future
+                    rust_future
                         .await
                         .map_err(|e| {
                             let err_msg = format!("Python async execution failed: {}", e);
                             log::error!("{}", err_msg);
                             agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                        })?;
-                    log::info!("🔥 RUST: Awaiting Python coroutine took: {:?}", await_start.elapsed());
-                    log::info!("🔥 RUST: Total request processing time: {:?}", request_start.elapsed());
-                    result
-                };
+                        })
+                }
+                .instrument(execution_span)
+                .await?;
 
                 // Process the result
                 let result = Python::attach(
@@ -605,17 +587,8 @@ impl PyWorker {
                         let py_result = result.bind(py);
                         // Try to extract as list first (streaming case)
                         if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>() {
-                                    log::info!(
-                                        "🔥 STREAMING: Python returned {} chunks",
-                                        py_list.len()
-                                    );
-
                                     // Send each response via tx
-                                    for (idx, py_response) in py_list.into_iter().enumerate() {
-                                        log::info!(
-                                            "🔥 STREAMING: Sending chunk {} to coordinator",
-                                            idx
-                                        );
+                                    for py_response in py_list.into_iter() {
 
                                         // Convert to Rust types
                                         let rust_response: ExecuteComponentResponse =
@@ -631,11 +604,7 @@ impl PyWorker {
 
                                         // Send via channel (blocking send)
                                         if let Err(e) = tx_clone.send(service_message) {
-                                            log::error!(
-                                                "Failed to send streaming chunk {}: {}",
-                                                idx,
-                                                e
-                                            );
+                                            log::error!("Failed to send streaming chunk: {}", e);
                                             return Err(agnt5_sdk_core::error::SdkError::Other(
                                                 anyhow::anyhow!(
                                                     "Failed to send streaming chunk: {}",
@@ -646,15 +615,12 @@ impl PyWorker {
                                     }
 
                                     // Return None to indicate we handled sending ourselves
-                                    log::debug!("All streaming chunks sent successfully");
                                     return Ok(None);
                         }
 
                         // Not a list, try single response (non-streaming case)
                         match py_result.extract::<PyExecuteComponentResponse>() {
                                     Ok(py_response) => {
-                                        log::debug!("Python handler returned single response");
-
                                         // Record span result based on success/error
                                         let span = cx.span();
                                         if py_response.success {
