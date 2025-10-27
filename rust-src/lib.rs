@@ -291,87 +291,112 @@ fn log_from_python(
     span_id: Option<String>,
     run_id: Option<String>,
 ) -> PyResult<()> {
-    // Create a span with Python metadata, inheriting from current span if available
-    // Include correlation IDs (trace_id, span_id, run_id) as span attributes for OTLP export
+    // When there's an active span, emit logs within that span's context.
+    // The tracing_opentelemetry layer will automatically extract the OpenTelemetry
+    // trace context from the active span and populate the OTLP log record's trace_id/span_id.
+    //
+    // We still include trace_id/span_id/run_id as log attributes for:
+    // 1. Backwards compatibility with existing observability queries
+    // 2. Additional correlation context in log viewers
+    // 3. Cases where the span context might not be available
+    //
+    // The key difference: we DON'T create a span just for logging. We emit the log
+    // in the current span context, and OpenTelemetry handles the rest.
+
     let current_span = tracing::Span::current();
-    let span = if current_span.is_none() || current_span == tracing::Span::none() {
-        // No current span, create standalone span with correlation attributes
-        tracing::info_span!(
-            "python_log",
-            python.module = module_path.as_deref(),
-            python.filename = filename.as_deref(),
-            python.line = line,
-            python.target = target.as_deref(),
-            message = %message,
-            otel.trace_id = trace_id.as_deref(),
-            otel.span_id = span_id.as_deref(),
-            run.id = run_id.as_deref(),
-        )
+
+    // CRITICAL FIX: If we have trace_id and span_id from Python, create an OpenTelemetry
+    // context and attach it so the opentelemetry_appender_tracing layer can extract it
+    let _cx_guard = if let (Some(tid_str), Some(sid_str)) = (&trace_id, &span_id) {
+        use opentelemetry::trace::{TraceId, SpanId, SpanContext, TraceFlags, TraceContextExt};
+
+        // Parse hex strings to bytes
+        if let (Ok(tid_bytes), Ok(sid_bytes)) = (hex::decode(tid_str), hex::decode(sid_str)) {
+            if tid_bytes.len() == 16 && sid_bytes.len() == 8 {
+                let trace_id = TraceId::from_bytes(tid_bytes.try_into().unwrap());
+                let span_id = SpanId::from_bytes(sid_bytes.try_into().unwrap());
+
+                let span_context = SpanContext::new(
+                    trace_id,
+                    span_id,
+                    TraceFlags::SAMPLED,
+                    false,
+                    Default::default(),
+                );
+
+                // Create a minimal context with this span
+                let cx = opentelemetry::Context::current().with_remote_span_context(span_context);
+                Some(cx.attach())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
-        // Create child span that inherits fields from current span (including invocation.id)
-        tracing::info_span!(
-            parent: &current_span,
-            "python_log",
-            python.module = module_path.as_deref(),
-            python.filename = filename.as_deref(),
-            python.line = line,
-            python.target = target.as_deref(),
-            message = %message,
-            otel.trace_id = trace_id.as_deref(),
-            otel.span_id = span_id.as_deref(),
-            run.id = run_id.as_deref(),
-        )
+        None
     };
-    let _enter = span.enter();
 
     // Emit log at appropriate level through Rust tracing
-    // Use agnt5_sdk_python target to ensure logs match the agnt5=info filter
-    // Include correlation IDs as log event fields (not span fields) so they appear in OTLP log records
+    // The opentelemetry_appender_tracing layer will now extract trace_id/span_id
+    // from the attached OpenTelemetry context above
     match level.to_uppercase().as_str() {
         "DEBUG" => tracing::debug!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "{}",
             message
         ),
         "INFO" => tracing::info!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "{}",
             message
         ),
         "WARNING" | "WARN" => tracing::warn!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "{}",
             message
         ),
         "ERROR" => tracing::error!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "{}",
             message
         ),
         "CRITICAL" => tracing::error!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "[CRITICAL] {}",
             message
         ),
         _ => tracing::info!(
             target: "agnt5_sdk_python",
-            trace_id = trace_id.as_deref(),
-            span_id = span_id.as_deref(),
+            python_module = module_path.as_deref(),
+            python_filename = filename.as_deref(),
+            python_line = line,
+            python_target = target.as_deref(),
             run_id = run_id.as_deref(),
             "[{}] {}",
             level,
