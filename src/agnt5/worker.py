@@ -612,7 +612,6 @@ class Worker:
             elif component_type == "function":
                 function_config = FunctionRegistry.get(component_name)
                 if function_config:
-                    logger.info(f"🔥 WORKER: Received request for function: {component_name}")
                     # Return coroutine, don't await it
                     return self._execute_function(function_config, input_data, request)
 
@@ -637,7 +636,6 @@ class Worker:
         from ._core import PyExecuteComponentResponse
 
         exec_start = time.time()
-        logger.info(f"🔥 WORKER: Executing function {config.name}")
 
         try:
             # Parse input data
@@ -655,26 +653,15 @@ class Worker:
                 runtime_context=request.runtime_context,
             )
 
-            # Create span for function execution with trace linking
-            from ._core import create_span
-
-            with create_span(
-                config.name,
-                "function",
-                request.runtime_context,
-                {
-                    "function.name": config.name,
-                    "service.name": self.service_name,
-                },
-            ) as span:
-                # Execute function
-                if input_dict:
-                    result = config.handler(ctx, **input_dict)
-                else:
-                    result = config.handler(ctx)
-
-                # Debug: Log what type result is
-                logger.info(f"🔥 WORKER: Function result type: {type(result).__name__}, isasyncgen: {inspect.isasyncgen(result)}, iscoroutine: {inspect.iscoroutine(result)}")
+            # Execute function directly - Rust bridge handles tracing
+            # Note: Removed Python-level span creation to avoid duplicate spans.
+            # The Rust worker bridge (sdk-python/rust-src/worker.rs:413-659) already
+            # creates a comprehensive OpenTelemetry span with all necessary attributes.
+            # See DUPLICATE_SPANS_FIX.md for details.
+            if input_dict:
+                result = config.handler(ctx, **input_dict)
+            else:
+                result = config.handler(ctx)
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout
@@ -842,23 +829,14 @@ class Worker:
                 runtime_context=request.runtime_context,
             )
 
-            # Create span for workflow execution with trace linking
-            from ._core import create_span
-
-            with create_span(
-                config.name,
-                "workflow",
-                request.runtime_context,
-                {
-                    "workflow.name": config.name,
-                    "service.name": self.service_name,
-                },
-            ) as span:
-                # Execute workflow
-                if input_dict:
-                    result = await config.handler(ctx, **input_dict)
-                else:
-                    result = await config.handler(ctx)
+            # Execute workflow directly - Rust bridge handles tracing
+            # Note: Removed Python-level span creation to avoid duplicate spans.
+            # The Rust worker bridge creates comprehensive OpenTelemetry spans.
+            # See DUPLICATE_SPANS_FIX.md for details.
+            if input_dict:
+                result = await config.handler(ctx, **input_dict)
+            else:
+                result = await config.handler(ctx)
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout
