@@ -760,6 +760,7 @@ class Worker:
         import json
         from .workflow import WorkflowEntity, WorkflowContext
         from .entity import _get_state_adapter, _entity_state_adapter_ctx
+        from .exceptions import WaitingForUserInputException
         from ._core import PyExecuteComponentResponse
 
         # Set entity state adapter in context so workflows can use Entities
@@ -782,6 +783,7 @@ class Worker:
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
             initial_state = {}
+            user_response = None
 
             if hasattr(request, 'metadata') and request.metadata:
                 # Parse completed steps for replay
@@ -804,6 +806,11 @@ class Worker:
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse workflow_state from metadata")
 
+                # Check for user response (workflow resume after pause)
+                if "user_response" in request.metadata:
+                    user_response = request.metadata["user_response"]
+                    logger.info(f"▶️  Resuming workflow with user response: {user_response}")
+
             # Create WorkflowEntity for state management
             workflow_entity = WorkflowEntity(run_id=f"{self.service_name}:{config.name}")
 
@@ -811,6 +818,11 @@ class Worker:
             if completed_steps:
                 workflow_entity._completed_steps = completed_steps
                 logger.debug(f"Loaded {len(completed_steps)} completed steps into workflow entity")
+
+            # Inject user response if resuming from pause
+            if user_response:
+                workflow_entity.inject_user_response(user_response)
+                logger.debug(f"Injected user response into workflow entity")
 
             if initial_state:
                 # Load initial state into entity's state adapter
@@ -884,6 +896,60 @@ class Worker:
                 state_update=None,  # Not used for workflows (use metadata instead)
                 error_message=None,
                 metadata=metadata if metadata else None,  # Include step events + state + session_id
+                is_chunk=False,
+                done=True,
+                chunk_index=0,
+            )
+
+        except WaitingForUserInputException as e:
+            # Workflow paused for user input
+            logger.info(f"⏸️  Workflow paused waiting for user input: {e.question}")
+
+            # Collect metadata for pause state
+            # Note: All metadata values must be strings for Rust FFI
+            pause_metadata = {
+                "status": "awaiting_user_input",
+                "question": e.question,
+                "input_type": e.input_type,
+            }
+
+            # Add optional fields only if they exist
+            if e.options:
+                pause_metadata["options"] = json.dumps(e.options)
+            if e.checkpoint_state:
+                pause_metadata["checkpoint_state"] = json.dumps(e.checkpoint_state)
+            if session_id:
+                pause_metadata["session_id"] = session_id
+
+            # Add step events to pause metadata for durability
+            step_events = ctx._workflow_entity._step_events
+            if step_events:
+                pause_metadata["step_events"] = json.dumps(step_events)
+                logger.debug(f"Paused workflow has {len(step_events)} recorded steps")
+
+            # Add current workflow state to pause metadata
+            if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
+                if ctx._workflow_entity._state.has_changes():
+                    state_snapshot = ctx._workflow_entity._state.get_state_snapshot()
+                    pause_metadata["workflow_state"] = json.dumps(state_snapshot)
+                    logger.debug(f"Paused workflow state snapshot: {state_snapshot}")
+
+            # Return "success" with awaiting_user_input metadata
+            # The output contains the question details for the client
+            output = {
+                "question": e.question,
+                "input_type": e.input_type,
+                "options": e.options,
+            }
+            output_data = json.dumps(output).encode("utf-8")
+
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,  # This is a valid pause state, not an error
+                output_data=output_data,
+                state_update=None,
+                error_message=None,
+                metadata=pause_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,

@@ -26,6 +26,7 @@ from .exceptions import (
     ExecutionError,
     RetryError,
     StateError,
+    WaitingForUserInputException,
 )
 from .function import FunctionRegistry, function
 from .tool import Tool, ToolRegistry, tool
@@ -81,6 +82,7 @@ __all__ = [
     "RetryError",
     "StateError",
     "CheckpointError",
+    "WaitingForUserInputException",
     "RunError",
     # Language Model (Simplified API)
     "lm",

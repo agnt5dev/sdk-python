@@ -1,5 +1,7 @@
 """AGNT5 SDK exceptions and error types."""
 
+from typing import Dict, List, Optional
+
 
 class AGNT5Error(Exception):
     """Base exception for all AGNT5 SDK errors."""
@@ -44,3 +46,44 @@ class NotImplementedError(AGNT5Error):
     """Raised when a feature is not yet implemented."""
 
     pass
+
+
+class WaitingForUserInputException(AGNT5Error):
+    """Raised when workflow needs to pause for user input.
+
+    This exception is used internally by ctx.wait_for_user() to signal
+    that a workflow execution should pause and wait for user input.
+
+    The platform catches this exception and:
+    1. Saves the workflow checkpoint state
+    2. Returns awaiting_user_input status to the client
+    3. Presents the question and options to the user
+    4. Resumes execution when user responds
+
+    Attributes:
+        question: The question to ask the user
+        input_type: Type of input ("text", "approval", or "choice")
+        options: List of options for approval/choice inputs
+        checkpoint_state: Current workflow state for resume
+    """
+
+    def __init__(
+        self,
+        question: str,
+        input_type: str,
+        options: Optional[List[Dict]],
+        checkpoint_state: Dict,
+    ) -> None:
+        """Initialize WaitingForUserInputException.
+
+        Args:
+            question: Question to ask the user
+            input_type: Type of input - "text", "approval", or "choice"
+            options: List of option dicts (for approval/choice)
+            checkpoint_state: Workflow state snapshot for resume
+        """
+        super().__init__(f"Waiting for user input: {question}")
+        self.question = question
+        self.input_type = input_type
+        self.options = options or []
+        self.checkpoint_state = checkpoint_state

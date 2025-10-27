@@ -6,7 +6,7 @@ Provides multi-step workflows for testing durability and state management.
 
 import asyncio
 import os
-from agnt5 import Agent, Context, workflow
+from agnt5 import Agent, Context, WorkflowContext, workflow
 from agnt5_test_service.tools import calculate_total, format_report, search_database, validate_data
 
 
@@ -319,6 +319,129 @@ async def agent_multi_step_workflow(ctx: Context, task: str, data_points: list[f
     }
 
 
+@workflow(chat=True)
+async def approval_workflow_hitl(ctx: WorkflowContext, message: str) -> dict:
+    """
+    Human-in-the-loop workflow with approval step.
+
+    Tests:
+    - Workflow pauses for user input
+    - User approval/rejection flow
+    - Workflow resumes after user response
+    - State persistence during pause
+    """
+    ctx.logger.info(f"Starting approval workflow with message: {message}")
+
+    # Step 1: Process the message
+    ctx.logger.info("Step 1: Processing message")
+    processed = message.upper()
+    await asyncio.sleep(0.1)  # Simulate processing
+
+    # Step 2: Ask for user approval (PAUSES HERE)
+    ctx.logger.info("Step 2: Requesting user approval")
+    decision = await ctx.wait_for_user(
+        f"Approve processing result: '{processed}'?",
+        input_type="approval",
+        options=[
+            {"id": "yes", "label": "Approve"},
+            {"id": "no", "label": "Reject"}
+        ]
+    )
+
+    # Step 3: Handle decision
+    ctx.logger.info(f"Step 3: User decision received: {decision}")
+    if decision == "yes":
+        # Continue with approval path
+        await asyncio.sleep(0.1)
+        return {
+            "status": "approved",
+            "message": message,
+            "processed": processed,
+            "decision": decision
+        }
+    else:
+        # Rejection path
+        return {
+            "status": "rejected",
+            "message": message,
+            "processed": processed,
+            "decision": decision
+        }
+
+
+@workflow(chat=True)
+async def multi_choice_workflow(ctx: WorkflowContext, task: str) -> dict:
+    """
+    Workflow with multiple choice input.
+
+    Tests:
+    - Choice input type
+    - Multiple options handling
+    - Workflow branching based on choice
+    """
+    ctx.logger.info(f"Starting multi-choice workflow: {task}")
+
+    # Step 1: Process task
+    await asyncio.sleep(0.1)
+
+    # Step 2: Ask user to choose processing method
+    method = await ctx.wait_for_user(
+        "Which processing method?",
+        input_type="choice",
+        options=[
+            {"id": "fast", "label": "Fast (low quality)"},
+            {"id": "standard", "label": "Standard (balanced)"},
+            {"id": "thorough", "label": "Thorough (high quality)"}
+        ]
+    )
+
+    # Step 3: Process based on choice
+    ctx.logger.info(f"Processing with {method} method")
+    await asyncio.sleep(0.1)
+
+    return {
+        "status": "completed",
+        "task": task,
+        "method": method,
+        "quality": {"fast": "low", "standard": "balanced", "thorough": "high"}[method]
+    }
+
+
+@workflow(chat=True)
+async def text_input_workflow(ctx: WorkflowContext) -> dict:
+    """
+    Workflow with text input.
+
+    Tests:
+    - Text input type
+    - Free-form user responses
+    - Multiple text inputs in sequence
+    """
+    ctx.logger.info("Starting text input workflow")
+
+    # Step 1: Ask for name
+    name = await ctx.wait_for_user(
+        "What is your name?",
+        input_type="text"
+    )
+
+    # Step 2: Ask for city
+    city = await ctx.wait_for_user(
+        "Which city are you from?",
+        input_type="text"
+    )
+
+    # Step 3: Generate personalized result
+    await asyncio.sleep(0.1)
+
+    return {
+        "status": "completed",
+        "greeting": f"Hello {name} from {city}!",
+        "name": name,
+        "city": city
+    }
+
+
 __all__ = [
     "order_fulfillment",
     "long_workflow",
@@ -326,4 +449,7 @@ __all__ = [
     "tool_orchestrated_workflow",
     "agent_research_workflow",
     "agent_multi_step_workflow",
+    "approval_workflow_hitl",
+    "multi_choice_workflow",
+    "text_input_workflow",
 ]

@@ -7,7 +7,7 @@ import functools
 import inspect
 import logging
 import uuid
-from typing import Any, Callable, Dict, Optional, TypeVar, cast
+from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .context import Context
@@ -254,6 +254,86 @@ class WorkflowContext(Context):
 
         return result
 
+    async def wait_for_user(
+        self,
+        question: str,
+        input_type: str = "text",
+        options: Optional[List[Dict]] = None
+    ) -> str:
+        """
+        Pause workflow execution and wait for user input.
+
+        On replay (even after worker crash), resumes from this point
+        with the user's response. This method enables human-in-the-loop
+        workflows by pausing execution and waiting for user interaction.
+
+        Args:
+            question: Question to ask the user
+            input_type: Type of input - "text", "approval", or "choice"
+            options: For approval/choice, list of option dicts with 'id' and 'label'
+
+        Returns:
+            User's response string
+
+        Raises:
+            WaitingForUserInputException: When no cached response exists (first call)
+
+        Example (text input):
+            ```python
+            city = await ctx.wait_for_user("Which city?")
+            ```
+
+        Example (approval):
+            ```python
+            decision = await ctx.wait_for_user(
+                "Approve this action?",
+                input_type="approval",
+                options=[
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "reject", "label": "Reject"}
+                ]
+            )
+            ```
+
+        Example (choice):
+            ```python
+            model = await ctx.wait_for_user(
+                "Which model?",
+                input_type="choice",
+                options=[
+                    {"id": "gpt4", "label": "GPT-4"},
+                    {"id": "claude", "label": "Claude"}
+                ]
+            )
+            ```
+        """
+        from .exceptions import WaitingForUserInputException
+
+        # Generate unique step name for this user input request
+        # Using run_id ensures uniqueness across workflow execution
+        response_key = f"user_response:{self.run_id}"
+
+        # Check if we already have the user's response (replay scenario)
+        if self._workflow_entity.has_completed_step(response_key):
+            response = self._workflow_entity.get_completed_step(response_key)
+            self._logger.info("🔄 Replaying user response from checkpoint")
+            return response
+
+        # No response yet - pause execution
+        # Collect current workflow state for checkpoint
+        checkpoint_state = {}
+        if hasattr(self._workflow_entity, '_state') and self._workflow_entity._state is not None:
+            checkpoint_state = self._workflow_entity._state.get_state_snapshot()
+
+        self._logger.info(f"⏸️  Pausing workflow for user input: {question}")
+
+        raise WaitingForUserInputException(
+            question=question,
+            input_type=input_type,
+            options=options,
+            checkpoint_state=checkpoint_state
+        )
+
 
 # ============================================================================
 # WorkflowEntity: Entity specialized for workflow execution state
@@ -336,6 +416,26 @@ class WorkflowEntity(Entity):
     def has_completed_step(self, step_name: str) -> bool:
         """Check if step has been completed."""
         return step_name in self._completed_steps
+
+    def inject_user_response(self, response: str) -> None:
+        """
+        Inject user response as a completed step for workflow resume.
+
+        This method is called by the worker when resuming a paused workflow
+        with the user's response. It stores the response as if it was a
+        completed step, allowing wait_for_user() to retrieve it on replay.
+
+        Args:
+            response: User's response to inject
+
+        Example:
+            # Platform resumes workflow with user response
+            workflow_entity.inject_user_response("yes")
+            # On replay, wait_for_user() returns "yes" from cache
+        """
+        response_key = f"user_response:{self.run_id}"
+        self._completed_steps[response_key] = response
+        logger.info(f"Injected user response for {self.run_id}: {response}")
 
     @property
     def state(self) -> "WorkflowState":
