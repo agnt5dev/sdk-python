@@ -11,7 +11,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
-use opentelemetry::trace::TraceContextExt;
+use opentelemetry::trace::{TraceContextExt, Span};
 use opentelemetry::global;
 use tracing;
 use tracing::Instrument;
@@ -376,14 +376,27 @@ impl PyWorker {
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
 
+                // Extract tenant_id and deployment_id from request metadata
+                // These are set by the Gateway and passed through Worker Coordinator
+                let tenant_id = invoke_request
+                    .metadata
+                    .get("tenant_id")
+                    .cloned()
+                    .unwrap_or_default();
+                let deployment_id = invoke_request
+                    .metadata
+                    .get("deployment_id")
+                    .cloned()
+                    .unwrap_or_default();
+
                 // Create RuntimeContext with extracted OTel context for Python access
-                // This provides Python with run_id, trace_id, span_id for logging correlation
+                // This provides Python with run_id, trace_id, span_id, tenant_id, deployment_id for logging correlation
                 let runtime_context = agnt5_sdk_core::RuntimeContext::with_trace_context(
                     invoke_request.invocation_id.clone(), // run_id
                     invoke_request.service_name.clone(),
                     invoke_request.component_name.clone(),
-                    String::new(), // tenant_id - not available in this message, TODO: pass from worker registration
-                    String::new(), // deployment_id - not available in this message, TODO: pass from worker registration
+                    tenant_id,
+                    deployment_id,
                     invoke_request.metadata.clone(),
                     parent_context.clone(),
                     std::sync::Arc::new(agnt5_sdk_core::DummyStateManager),
@@ -410,7 +423,7 @@ impl PyWorker {
 
                 // Create OpenTelemetry span for component execution
                 // Clone parent_context since we need it both for span creation and context attachment
-                let otel_span = agnt5_sdk_core::create_component_span(
+                let mut otel_span = agnt5_sdk_core::create_component_span(
                     &invoke_request.component_name,
                     component_type_str,
                     &invoke_request.service_name,
@@ -419,6 +432,12 @@ impl PyWorker {
                     Some(parent_context.clone()),
                     Some(&invoke_request.metadata),
                 );
+
+                // Add input.data attribute before moving span into context
+                otel_span.set_attribute(opentelemetry::KeyValue::new(
+                    "input.data",
+                    String::from_utf8_lossy(&invoke_request.input_data).to_string(),
+                ));
 
                 // IMPORTANT: Attach the span to the parent context so Python code executes inside it
                 // This ensures Python logs and operations are children of this span
@@ -483,6 +502,9 @@ impl PyWorker {
                     "Created execution span with OTel trace_id: {:?}",
                     otel_span.span_context().trace_id()
                 );
+
+                // Track execution start time for duration metrics
+                let execution_start = std::time::Instant::now();
 
                 // Execute Python handler using shared event loop for concurrent execution
                 // This approach uses into_future_with_locals() to execute Python async functions
@@ -621,8 +643,22 @@ impl PyWorker {
                         // Not a list, try single response (non-streaming case)
                         match py_result.extract::<PyExecuteComponentResponse>() {
                                     Ok(py_response) => {
+                                        // Calculate execution duration
+                                        let execution_duration_ms = execution_start.elapsed().as_millis() as i64;
+
                                         // Record span result based on success/error
                                         let span = cx.span();
+
+                                        // Always add execution duration and output data
+                                        span.set_attribute(opentelemetry::KeyValue::new(
+                                            "component.execution_ms",
+                                            execution_duration_ms,
+                                        ));
+                                        span.set_attribute(opentelemetry::KeyValue::new(
+                                            "output.data",
+                                            String::from_utf8_lossy(&py_response.output_data).to_string(),
+                                        ));
+
                                         if py_response.success {
                                             span.set_attribute(opentelemetry::KeyValue::new(
                                                 "function.status",
