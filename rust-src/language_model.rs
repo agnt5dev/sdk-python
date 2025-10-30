@@ -181,16 +181,20 @@ impl PyLanguageModel {
         let provider = self.get_or_init_provider(&provider_name)?;
 
         // IMPORTANT: Extract trace context from Python's contextvar
-        // The Rust worker injects traceparent into request.metadata, and Python worker
-        // stores it in a contextvar. We read it here and reconstruct the OtelContext
-        // to enable proper trace propagation across the async boundary.
-        let otel_context = extract_context_from_python(py)?;
+        // The contextvar system provides automatic context propagation from workflow/agent/tool
+        // to enable proper parent-child span linking in distributed traces.
+        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+            otel_ctx
+        } else {
+            // Fallback to old trace metadata contextvar for backwards compatibility
+            extract_context_from_python(py).ok()
+        };
 
         // Use pyo3-async-runtimes with proper runtime context
         let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
             let mut request = request;
-            request.otel_context = Some(otel_context);
+            request.otel_context = otel_context;
 
             let response = provider.generate(request).await.map_err(sdk_error_to_py)?;
             Ok(PyResponse { inner: response })
@@ -248,16 +252,20 @@ impl PyLanguageModel {
         let model_for_delta = model.clone();
 
         // IMPORTANT: Extract trace context from Python's contextvar
-        // The Rust worker injects traceparent into request.metadata, and Python worker
-        // stores it in a contextvar. We read it here and reconstruct the OtelContext
-        // to enable proper trace propagation across the async boundary.
-        let otel_context = extract_context_from_python(py)?;
+        // The contextvar system provides automatic context propagation from workflow/agent/tool
+        // to enable proper parent-child span linking in distributed traces.
+        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+            otel_ctx
+        } else {
+            // Fallback to old trace metadata contextvar for backwards compatibility
+            extract_context_from_python(py).ok()
+        };
 
         // Use pyo3-async-runtimes with proper runtime context for streaming
         let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
             let mut request = request;
-            request.otel_context = Some(otel_context);
+            request.otel_context = otel_context;
 
             let mut handle = provider.stream(request).await.map_err(sdk_error_to_py)?;
             let mut chunks = Vec::new();

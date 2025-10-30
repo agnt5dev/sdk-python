@@ -7,10 +7,10 @@ import functools
 import inspect
 import logging
 import uuid
-from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
-from .context import Context
+from .context import Context, set_current_context
 from .entity import Entity, EntityState, _get_state_adapter
 from .function import FunctionContext
 from .types import HandlerFunc, WorkflowConfig
@@ -43,6 +43,7 @@ class WorkflowContext(Context):
         run_id: str,
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
+        checkpoint_callback: Optional[Callable[[dict], None]] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -52,12 +53,32 @@ class WorkflowContext(Context):
             run_id: Unique workflow run identifier
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
+            checkpoint_callback: Optional callback for sending real-time checkpoints
         """
         super().__init__(run_id, attempt, runtime_context)
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
+        self._sequence_number: int = 0  # Global sequence for checkpoints
+        self._checkpoint_callback = checkpoint_callback
 
     # === State Management ===
+
+    def _send_checkpoint(self, checkpoint_type: str, checkpoint_data: dict) -> None:
+        """
+        Send a checkpoint via the checkpoint callback.
+
+        Args:
+            checkpoint_type: Type of checkpoint (e.g., "workflow.state.changed")
+            checkpoint_data: Checkpoint payload
+        """
+        if self._checkpoint_callback:
+            self._sequence_number += 1
+            checkpoint = {
+                "checkpoint_type": checkpoint_type,
+                "checkpoint_data": checkpoint_data,
+                "sequence_number": self._sequence_number,
+            }
+            self._checkpoint_callback(checkpoint)
 
     @property
     def state(self):
@@ -71,7 +92,11 @@ class WorkflowContext(Context):
             ctx.state.set("status", "processing")
             status = ctx.state.get("status")
         """
-        return self._workflow_entity.state
+        state = self._workflow_entity.state
+        # Pass checkpoint callback to state for real-time streaming
+        if hasattr(state, '_set_checkpoint_callback'):
+            state._set_checkpoint_callback(self._send_checkpoint)
+        return state
 
     # === Orchestration ===
 
@@ -147,32 +172,71 @@ class WorkflowContext(Context):
             self._logger.info(f"🔄 Replaying cached step: {step_name}")
             return result
 
-        # Execute function
+        # Emit workflow.step.started checkpoint
+        self._send_checkpoint("workflow.step.started", {
+            "step_name": step_name,
+            "handler_name": handler_name,
+        })
+
+        # Execute function with OpenTelemetry span
         self._logger.info(f"▶️  Executing new step: {step_name}")
         func_config = FunctionRegistry.get(handler_name)
         if func_config is None:
             raise ValueError(f"Function '{handler_name}' not found in registry")
 
-        # Create FunctionContext for the function execution
-        func_ctx = FunctionContext(
-            run_id=f"{self.run_id}:task:{handler_name}",
-            runtime_context=self._runtime_context,
-        )
+        # Import span creation utility and JSON serialization
+        from ._core import create_span
+        import json
 
-        # Execute function with arguments
-        # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
-        if len(args) == 0 and "input" in kwargs:
-            # Legacy pattern - single input parameter
-            input_data = kwargs.pop("input")  # Remove from kwargs
-            result = await func_config.handler(func_ctx, input_data, **kwargs)
-        else:
-            # Type-safe pattern - pass all args/kwargs
-            result = await func_config.handler(func_ctx, *args, **kwargs)
+        # Serialize input data for span attributes
+        input_repr = json.dumps({"args": args, "kwargs": kwargs}) if args or kwargs else "{}"
 
-        # Record step completion in WorkflowEntity
-        self._workflow_entity.record_step_completion(step_name, handler_name, args or kwargs, result)
+        # Create span for task execution
+        with create_span(
+            f"workflow.task.{handler_name}",
+            "function",
+            self._runtime_context,
+            {
+                "step_name": step_name,
+                "handler_name": handler_name,
+                "run_id": self.run_id,
+                "input.data": input_repr,
+            }
+        ) as span:
+            # Create FunctionContext for the function execution
+            func_ctx = FunctionContext(
+                run_id=f"{self.run_id}:task:{handler_name}",
+                runtime_context=self._runtime_context,
+            )
 
-        return result
+            # Execute function with arguments
+            # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
+            if len(args) == 0 and "input" in kwargs:
+                # Legacy pattern - single input parameter
+                input_data = kwargs.pop("input")  # Remove from kwargs
+                result = await func_config.handler(func_ctx, input_data, **kwargs)
+            else:
+                # Type-safe pattern - pass all args/kwargs
+                result = await func_config.handler(func_ctx, *args, **kwargs)
+
+            # Add output data to span
+            try:
+                output_repr = json.dumps(result)
+                span.set_attribute("output.data", output_repr)
+            except (TypeError, ValueError):
+                # If result is not JSON serializable, use repr
+                span.set_attribute("output.data", repr(result))
+
+            # Record step completion in WorkflowEntity
+            self._workflow_entity.record_step_completion(step_name, handler_name, args or kwargs, result)
+
+            # Emit workflow.step.completed checkpoint
+            self._send_checkpoint("workflow.step.completed", {
+                "step_name": step_name,
+                "handler_name": handler_name,
+            })
+
+            return result
 
     async def parallel(self, *tasks: Awaitable[T]) -> List[T]:
         """
@@ -471,42 +535,76 @@ class WorkflowState(EntityState):
         """
         super().__init__(state_dict)
         self._workflow_entity = workflow_entity
+        self._checkpoint_callback: Optional[Callable[[str, dict], None]] = None
+
+    def _set_checkpoint_callback(self, callback: Callable[[str, dict], None]) -> None:
+        """
+        Set the checkpoint callback for real-time state change streaming.
+
+        Args:
+            callback: Function to call when state changes
+        """
+        self._checkpoint_callback = callback
 
     def set(self, key: str, value: Any) -> None:
         """Set value and track change."""
         super().set(key, value)
         # Track change for debugging/audit
         import time
-        self._workflow_entity._state_changes.append({
+        change_record = {
             "key": key,
             "value": value,
             "timestamp": time.time(),
             "deleted": False
-        })
+        }
+        self._workflow_entity._state_changes.append(change_record)
+
+        # Emit checkpoint for real-time state streaming
+        if self._checkpoint_callback:
+            self._checkpoint_callback("workflow.state.changed", {
+                "key": key,
+                "value": value,
+                "operation": "set"
+            })
 
     def delete(self, key: str) -> None:
         """Delete key and track change."""
         super().delete(key)
         # Track deletion
         import time
-        self._workflow_entity._state_changes.append({
+        change_record = {
             "key": key,
             "value": None,
             "timestamp": time.time(),
             "deleted": True
-        })
+        }
+        self._workflow_entity._state_changes.append(change_record)
+
+        # Emit checkpoint for real-time state streaming
+        if self._checkpoint_callback:
+            self._checkpoint_callback("workflow.state.changed", {
+                "key": key,
+                "operation": "delete"
+            })
 
     def clear(self) -> None:
         """Clear all state and track change."""
         super().clear()
         # Track clear operation
         import time
-        self._workflow_entity._state_changes.append({
+        change_record = {
             "key": "__clear__",
             "value": None,
             "timestamp": time.time(),
             "deleted": True
-        })
+        }
+        self._workflow_entity._state_changes.append(change_record)
+
+        # Emit checkpoint for real-time state streaming
+        if self._checkpoint_callback:
+            self._checkpoint_callback("workflow.state.changed", {
+                "operation": "clear"
+            })
 
     def has_changes(self) -> bool:
         """Check if any state changes have been tracked."""
@@ -683,11 +781,25 @@ def workflow(
                     run_id=run_id,
                 )
 
-                # Execute workflow
-                return await handler_func(ctx, *args, **kwargs)
+                # Set context in task-local storage for automatic propagation
+                token = set_current_context(ctx)
+                try:
+                    # Execute workflow
+                    return await handler_func(ctx, *args, **kwargs)
+                finally:
+                    # Always reset context to prevent leakage
+                    from .context import _current_context
+                    _current_context.reset(token)
             else:
-                # WorkflowContext provided - use it
-                return await handler_func(*args, **kwargs)
+                # WorkflowContext provided - use it and set in contextvar
+                ctx = args[0]
+                token = set_current_context(ctx)
+                try:
+                    return await handler_func(*args, **kwargs)
+                finally:
+                    # Always reset context to prevent leakage
+                    from .context import _current_context
+                    _current_context.reset(token)
 
         # Store config on wrapper for introspection
         wrapper._agnt5_config = config  # type: ignore

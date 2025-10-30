@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar, Union, cas
 
 from ._retry_utils import execute_with_retry, parse_backoff_policy, parse_retry_policy
 from ._schema_utils import extract_function_metadata, extract_function_schemas
-from .context import Context
+from .context import Context, set_current_context
 from .exceptions import RetryError
 from .types import BackoffPolicy, BackoffType, FunctionConfig, HandlerFunc, RetryPolicy
 
@@ -292,16 +292,23 @@ def function(
                     )
                     func_args = args
 
-            # Execute with retry
-            return await execute_with_retry(
-                handler_func,
-                ctx,
-                config.retries or RetryPolicy(),
-                config.backoff or BackoffPolicy(),
-                needs_context,
-                *func_args,
-                **kwargs,
-            )
+            # Set context in task-local storage for automatic propagation
+            token = set_current_context(ctx)
+            try:
+                # Execute with retry
+                return await execute_with_retry(
+                    handler_func,
+                    ctx,
+                    config.retries or RetryPolicy(),
+                    config.backoff or BackoffPolicy(),
+                    needs_context,
+                    *func_args,
+                    **kwargs,
+                )
+            finally:
+                # Always reset context to prevent leakage
+                from .context import _current_context
+                _current_context.reset(token)
 
         # Store config on wrapper for introspection
         wrapper._agnt5_config = config  # type: ignore

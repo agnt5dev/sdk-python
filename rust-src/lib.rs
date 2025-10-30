@@ -218,22 +218,79 @@ fn create_tool_span(
     })
 }
 
+/// Helper function to get runtime context data from Python's contextvar
+///
+/// Attempts to retrieve the current context from the _current_context contextvar
+/// and extract trace context information from its _runtime_context attribute.
+///
+/// # Arguments
+/// * `py` - Python GIL token
+///
+/// # Returns
+/// Tuple of (otel_context Option, service_name String, run_id String) or None
+pub(crate) fn get_runtime_context_from_contextvar(py: Python) -> PyResult<Option<(Option<opentelemetry::Context>, String, String)>> {
+    // Import the context module
+    let context_module = py.import("agnt5.context")?;
+
+    // Get the get_current_context function
+    let get_current_context = context_module.getattr("get_current_context")?;
+
+    // Call get_current_context() to get the current Context object
+    let current_context = get_current_context.call0()?;
+
+    // Check if we got None
+    if current_context.is_none() {
+        return Ok(None);
+    }
+
+    // Try to get _runtime_context attribute (which is a PyRuntimeContext)
+    if let Ok(runtime_context_obj) = current_context.getattr("_runtime_context") {
+        if !runtime_context_obj.is_none() {
+            // Try to extract as PyRuntimeContext to get full OpenTelemetry context
+            if let Ok(py_runtime_ctx) = runtime_context_obj.extract::<Py<PyRuntimeContext>>() {
+                let runtime_ctx = py_runtime_ctx.borrow(py);
+
+                // Extract OpenTelemetry context for proper parent-child span linking
+                let otel_ctx = runtime_ctx.get_otel_context();
+                let service_name = runtime_ctx.inner.service_name.clone();
+                let run_id = runtime_ctx.inner.run_id.clone();
+
+                return Ok(Some((otel_ctx, service_name, run_id)));
+            }
+
+            // Fallback: If extraction fails, try accessing attributes directly
+            let service_name: String = runtime_context_obj.getattr("service_name")?.extract()?;
+            let run_id: String = runtime_context_obj.getattr("run_id")?.extract()?;
+
+            // No OpenTelemetry context available in fallback path
+            return Ok(Some((None, service_name, run_id)));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Create a generic span for any component type (task, workflow, agent, etc.)
 ///
 /// This is the main span creation function that Python code should use for
 /// instrumentation. It creates spans via the Rust OpenTelemetry system with
 /// proper parent-child span relationships when RuntimeContext is provided.
 ///
+/// If runtime_context is not provided, this function will attempt to retrieve
+/// it from the Python context variable (_current_context) for automatic trace linking.
+///
 /// # Arguments
 /// * `name` - Span name (e.g., "fetch_data")
 /// * `component_type` - Component type (e.g., "task", "workflow", "agent", "function")
 /// * `runtime_context` - Optional RuntimeContext providing trace context for span linkage
 /// * `attributes` - Optional key-value attributes for the span
+/// * `py` - Python GIL token (automatically provided by PyO3)
 ///
 /// # Returns
 /// A PySpan that can be used as a context manager in Python
 #[pyfunction]
 fn create_span(
+    py: Python,
     name: String,
     component_type: String,
     runtime_context: Option<&PyRuntimeContext>,
@@ -241,13 +298,29 @@ fn create_span(
 ) -> PyResult<PySpan> {
     let metadata = attributes.unwrap_or_default();
 
-    // Extract parent context and metadata from RuntimeContext if available
+    // Extract parent context and metadata from RuntimeContext
+    // If not provided, try to get from Python contextvar
+    // We need to bind contextvar result to ensure strings live long enough
+    let contextvar_result = if runtime_context.is_none() {
+        match get_runtime_context_from_contextvar(py) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Warning: Failed to get runtime_context from contextvar: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let (parent_context, service_name, run_id) = if let Some(ctx) = runtime_context {
         (
             ctx.get_otel_context(),
             ctx.inner.service_name.as_str(),
             ctx.inner.run_id.as_str(),
         )
+    } else if let Some((otel_ctx, ref svc_name, ref run_id_str)) = contextvar_result {
+        (otel_ctx, svc_name.as_str(), run_id_str.as_str())
     } else {
         (None, "", "")
     };
@@ -405,7 +478,6 @@ fn log_from_python(
     Ok(())
 }
 
-/// The Python module
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize PyO3-log to bridge Rust logs to Python

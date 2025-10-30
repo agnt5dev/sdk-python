@@ -627,6 +627,23 @@ class Worker:
 
         return handle_message
 
+    def _extract_critical_metadata(self, request) -> dict:
+        """
+        Extract critical metadata from request that MUST be propagated to response.
+
+        This ensures journal events are written to the correct tenant partition
+        and can be properly replayed. Missing tenant_id causes catastrophic
+        event sourcing corruption where events are split across partitions.
+        """
+        metadata = {}
+        if hasattr(request, 'metadata') and request.metadata:
+            # CRITICAL: Propagate tenant_id to prevent journal corruption
+            if "tenant_id" in request.metadata:
+                metadata["tenant_id"] = request.metadata["tenant_id"]
+            if "deployment_id" in request.metadata:
+                metadata["deployment_id"] = request.metadata["deployment_id"]
+        return metadata
+
     async def _execute_function(self, config, input_data: bytes, request):
         """Execute a function handler (supports both regular and streaming functions)."""
         import json
@@ -714,13 +731,16 @@ class Worker:
                 # Serialize result
                 output_data = json.dumps(result).encode("utf-8")
 
+                # Extract critical metadata for journal event correlation
+                response_metadata = self._extract_critical_metadata(request)
+
                 return PyExecuteComponentResponse(
                     invocation_id=request.invocation_id,
                     success=True,
                     output_data=output_data,
                     state_update=None,
                     error_message=None,
-                    metadata=None,
+                    metadata=response_metadata if response_metadata else None,
                     is_chunk=False,
                     done=True,
                     chunk_index=0,
@@ -822,21 +842,53 @@ class Worker:
                     # Production mode - state is managed by Rust core
                     logger.debug(f"Initial state will be loaded from platform (production mode)")
 
-            # Create WorkflowContext with entity and runtime_context for trace correlation
+            # Create checkpoint callback for real-time streaming
+            def checkpoint_callback(checkpoint: dict) -> None:
+                """Send checkpoint to Rust worker queue."""
+                try:
+                    # Extract critical metadata for checkpoint routing
+                    metadata = self._extract_critical_metadata(request)
+
+                    # Queue checkpoint via Rust FFI
+                    self._rust_worker.queue_workflow_checkpoint(
+                        invocation_id=request.invocation_id,
+                        checkpoint_type=checkpoint["checkpoint_type"],
+                        checkpoint_data=json.dumps(checkpoint["checkpoint_data"]),
+                        sequence_number=checkpoint["sequence_number"],
+                        metadata=metadata,
+                    )
+                    logger.debug(
+                        f"Queued checkpoint: type={checkpoint['checkpoint_type']} "
+                        f"seq={checkpoint['sequence_number']}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to queue checkpoint: {e}", exc_info=True)
+
+            # Create WorkflowContext with entity, runtime_context, and checkpoint callback
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
                 run_id=f"{self.service_name}:{config.name}",
                 runtime_context=request.runtime_context,
+                checkpoint_callback=checkpoint_callback,
             )
 
             # Execute workflow directly - Rust bridge handles tracing
             # Note: Removed Python-level span creation to avoid duplicate spans.
             # The Rust worker bridge creates comprehensive OpenTelemetry spans.
             # See DUPLICATE_SPANS_FIX.md for details.
-            if input_dict:
-                result = await config.handler(ctx, **input_dict)
-            else:
-                result = await config.handler(ctx)
+
+            # CRITICAL: Set context in contextvar so LM/Agent/Tool calls can access it
+            from .context import set_current_context
+            token = set_current_context(ctx)
+            try:
+                if input_dict:
+                    result = await config.handler(ctx, **input_dict)
+                else:
+                    result = await config.handler(ctx)
+            finally:
+                # Always reset context to prevent leakage
+                from .context import _current_context
+                _current_context.reset(token)
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout
@@ -846,6 +898,11 @@ class Worker:
 
             # Collect workflow execution metadata for durability
             metadata = {}
+
+            # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
+            # Missing tenant_id causes events to be written to wrong partition
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
 
             # Add step events to metadata (for workflow durability)
             # Access _step_events from the workflow entity, not the context
@@ -862,10 +919,30 @@ class Worker:
                     metadata["workflow_state"] = json.dumps(state_snapshot)
                     logger.debug(f"Workflow state snapshot: {state_snapshot}")
 
+                    # AUDIT TRAIL: Serialize complete state change history for replay and debugging
+                    # This captures all intermediate state mutations, not just final snapshot
+                    state_changes = ctx._workflow_entity._state_changes
+                    logger.info(f"🔍 DEBUG: _state_changes list has {len(state_changes)} entries")
+                    if state_changes:
+                        metadata["state_changes"] = json.dumps(state_changes)
+                        logger.info(f"✅ Serialized {len(state_changes)} state changes to metadata")
+                    else:
+                        logger.warning("⚠️  _state_changes list is empty - no state change history captured")
+
             logger.info(f"Workflow completed successfully with {len(step_events)} steps")
 
             # Add session_id to metadata for multi-turn conversation support
             metadata["session_id"] = session_id
+
+            # CRITICAL: Flush all buffered checkpoints before returning response
+            # This ensures checkpoints arrive at platform BEFORE run.completed event
+            try:
+                flushed_count = self._rust_worker.flush_workflow_checkpoints()
+                if flushed_count > 0:
+                    logger.info(f"✅ Flushed {flushed_count} checkpoints before completion")
+            except Exception as flush_error:
+                logger.error(f"Failed to flush checkpoints: {flush_error}", exc_info=True)
+                # Continue anyway - checkpoint flushing is best-effort
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -891,6 +968,10 @@ class Worker:
                 "input_type": e.input_type,
             }
 
+            # CRITICAL: Propagate tenant_id even when pausing
+            critical_metadata = self._extract_critical_metadata(request)
+            pause_metadata.update(critical_metadata)
+
             # Add optional fields only if they exist
             if e.options:
                 pause_metadata["options"] = json.dumps(e.options)
@@ -911,6 +992,12 @@ class Worker:
                     state_snapshot = ctx._workflow_entity._state.get_state_snapshot()
                     pause_metadata["workflow_state"] = json.dumps(state_snapshot)
                     logger.debug(f"Paused workflow state snapshot: {state_snapshot}")
+
+                    # AUDIT TRAIL: Also include state change history for paused workflows
+                    state_changes = ctx._workflow_entity._state_changes
+                    if state_changes:
+                        pause_metadata["state_changes"] = json.dumps(state_changes)
+                        logger.debug(f"Paused workflow has {len(state_changes)} state changes in history")
 
             # Return "success" with awaiting_user_input metadata
             # The output contains the question details for the client
@@ -1042,7 +1129,9 @@ class Worker:
 
             # Note: State persistence is now handled automatically by the entity method wrapper
             # via EntityStateAdapter which uses Rust core for optimistic locking + version tracking
-            metadata = {}
+
+            # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
+            metadata = self._extract_critical_metadata(request)
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -1050,7 +1139,7 @@ class Worker:
                 output_data=output_data,
                 state_update=None,  # TODO: Use structured StateUpdate object
                 error_message=None,
-                metadata=metadata,  # Include state in metadata for Worker Coordinator
+                metadata=metadata if metadata else None,  # Include state in metadata for Worker Coordinator
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
@@ -1124,8 +1213,10 @@ class Worker:
             # Serialize result
             output_data = json.dumps(result).encode("utf-8")
 
-            # Return session_id in metadata so UI can persist it
-            metadata = {"session_id": session_id}
+            # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
+            metadata = self._extract_critical_metadata(request)
+            # Also include session_id for UI to persist conversation
+            metadata["session_id"] = session_id
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -1133,7 +1224,7 @@ class Worker:
                 output_data=output_data,
                 state_update=None,
                 error_message=None,
-                metadata=metadata,
+                metadata=metadata if metadata else None,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
