@@ -119,6 +119,16 @@ class AgentContext(Context):
         # Entity key for database persistence (without :messages suffix to match API expectations)
         self._entity_key = f"agent:{agent_name}:{self._session_id}"
 
+        # Determine storage mode: "workflow" if parent is WorkflowContext, else "standalone"
+        self._storage_mode = "standalone"  # Default mode
+        self._workflow_entity = None
+
+        if parent_context and hasattr(parent_context, '_workflow_entity'):
+            # Agent is running within a workflow - store conversation in workflow state
+            self._storage_mode = "workflow"
+            self._workflow_entity = parent_context._workflow_entity
+            logger.debug(f"Agent '{agent_name}' using workflow storage mode (workflow entity: {self._workflow_entity.key})")
+
     @property
     def state(self):
         """
@@ -152,10 +162,27 @@ class AgentContext(Context):
         Retrieve conversation history from state, loading from database if needed.
 
         Uses the EntityStateAdapter which delegates to Rust core for cache-first loading.
+        If running within a workflow, loads from workflow entity state instead.
 
         Returns:
             List of Message objects from conversation history
         """
+        if self._storage_mode == "workflow":
+            return await self._load_from_workflow_state()
+        else:
+            return await self._load_from_entity_storage()
+
+    async def _load_from_workflow_state(self) -> List[Message]:
+        """Load conversation history from workflow entity state."""
+        key = f"agent.{self._agent_name}"
+        agent_data = self._workflow_entity.state.get(key, {})
+        messages_data = agent_data.get("messages", [])
+
+        # Convert dict representations back to Message objects
+        return self._convert_dicts_to_messages(messages_data)
+
+    async def _load_from_entity_storage(self) -> List[Message]:
+        """Load conversation history from AgentSession entity (standalone mode)."""
         entity_type = "AgentSession"
         entity_key = self._entity_key
 
@@ -174,6 +201,10 @@ class AgentContext(Context):
             messages_data = []
 
         # Convert dict representations back to Message objects
+        return self._convert_dicts_to_messages(messages_data)
+
+    def _convert_dicts_to_messages(self, messages_data: list) -> List[Message]:
+        """Convert list of message dicts to Message objects."""
         messages = []
         for msg_dict in messages_data:
             if isinstance(msg_dict, dict):
@@ -200,10 +231,48 @@ class AgentContext(Context):
         Save conversation history to state and persist to database.
 
         Uses the EntityStateAdapter which delegates to Rust core for version-checked saves.
+        If running within a workflow, saves to workflow entity state instead.
 
         Args:
             messages: List of Message objects to persist
         """
+        if self._storage_mode == "workflow":
+            await self._save_to_workflow_state(messages)
+        else:
+            await self._save_to_entity_storage(messages)
+
+    async def _save_to_workflow_state(self, messages: List[Message]) -> None:
+        """Save conversation history to workflow entity state."""
+        # Convert Message objects to dict for JSON serialization
+        messages_data = []
+        for msg in messages:
+            messages_data.append({
+                "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
+                "content": msg.content,
+                "timestamp": time.time()
+            })
+
+        # Build agent data structure
+        key = f"agent.{self._agent_name}"
+        current_data = self._workflow_entity.state.get(key, {})
+        now = time.time()
+
+        agent_data = {
+            "session_id": self._session_id,
+            "agent_name": self._agent_name,
+            "created_at": current_data.get("created_at", now),
+            "last_message_time": now,
+            "message_count": len(messages_data),
+            "messages": messages_data,
+            "metadata": getattr(self, '_custom_metadata', {})
+        }
+
+        # Store in workflow state (WorkflowEntity handles persistence)
+        self._workflow_entity.state.set(key, agent_data)
+        logger.info(f"Saved conversation to workflow state: {key} ({len(messages_data)} messages)")
+
+    async def _save_to_entity_storage(self, messages: List[Message]) -> None:
+        """Save conversation history to AgentSession entity (standalone mode)."""
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:
@@ -272,6 +341,35 @@ class AgentContext(Context):
             print(f"User ID: {metadata['custom'].get('user_id')}")
             ```
         """
+        if self._storage_mode == "workflow":
+            return await self._get_metadata_from_workflow()
+        else:
+            return await self._get_metadata_from_entity()
+
+    async def _get_metadata_from_workflow(self) -> Dict[str, Any]:
+        """Get metadata from workflow entity state."""
+        key = f"agent.{self._agent_name}"
+        agent_data = self._workflow_entity.state.get(key, {})
+
+        if not agent_data:
+            # No conversation exists yet - return defaults
+            return {
+                "created_at": None,
+                "last_activity": None,
+                "message_count": 0,
+                "custom": getattr(self, '_custom_metadata', {})
+            }
+
+        messages = agent_data.get("messages", [])
+        return {
+            "created_at": agent_data.get("created_at"),
+            "last_activity": agent_data.get("last_message_time"),
+            "message_count": len(messages),
+            "custom": agent_data.get("metadata", {})
+        }
+
+    async def _get_metadata_from_entity(self) -> Dict[str, Any]:
+        """Get metadata from AgentSession entity (standalone mode)."""
         entity_type = "AgentSession"
         entity_key = self._entity_key
 

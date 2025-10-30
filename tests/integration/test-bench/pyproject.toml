@@ -1,0 +1,22 @@
+[project]
+name = "agnt5-test-bench"
+version = "1.0.0"
+description = "Integration test bench for AGNT5 Python SDK"
+requires-python = ">=3.11"
+dependencies = [
+    "agnt5>=0.2.8a3",
+    "python-dotenv>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+agnt5 = { path = "../../../", editable = true }
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agnt5_test_bench"]

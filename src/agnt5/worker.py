@@ -819,7 +819,8 @@ class Worker:
                     logger.info(f"▶️  Resuming workflow with user response: {user_response}")
 
             # Create WorkflowEntity for state management
-            workflow_entity = WorkflowEntity(run_id=f"{self.service_name}:{config.name}")
+            # Use invocation_id as run_id to ensure each execution has unique state
+            workflow_entity = WorkflowEntity(run_id=request.invocation_id)
 
             # Load replay data into entity if provided
             if completed_steps:
@@ -867,7 +868,7 @@ class Worker:
             # Create WorkflowContext with entity, runtime_context, and checkpoint callback
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
-                run_id=f"{self.service_name}:{config.name}",
+                run_id=request.invocation_id,  # Use unique invocation_id for this execution
                 runtime_context=request.runtime_context,
                 checkpoint_callback=checkpoint_callback,
             )
@@ -885,6 +886,9 @@ class Worker:
                     result = await config.handler(ctx, **input_dict)
                 else:
                     result = await config.handler(ctx)
+
+                # Note: Workflow entity persistence is handled by the @workflow decorator wrapper
+                # which persists before returning. No need to persist here.
             finally:
                 # Always reset context to prevent leakage
                 from .context import _current_context

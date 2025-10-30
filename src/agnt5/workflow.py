@@ -501,6 +501,98 @@ class WorkflowEntity(Entity):
         self._completed_steps[response_key] = response
         logger.info(f"Injected user response for {self.run_id}: {response}")
 
+    def get_agent_data(self, agent_name: str) -> Dict[str, Any]:
+        """
+        Get agent conversation data from workflow state.
+
+        Args:
+            agent_name: Name of the agent
+
+        Returns:
+            Dictionary containing agent conversation data (messages, metadata)
+            or empty dict if agent has no data yet
+
+        Example:
+            ```python
+            agent_data = workflow_entity.get_agent_data("ResearchAgent")
+            messages = agent_data.get("messages", [])
+            ```
+        """
+        return self.state.get(f"agent.{agent_name}", {})
+
+    def get_agent_messages(self, agent_name: str) -> list[Dict[str, Any]]:
+        """
+        Get agent messages from workflow state.
+
+        Args:
+            agent_name: Name of the agent
+
+        Returns:
+            List of message dictionaries
+
+        Example:
+            ```python
+            messages = workflow_entity.get_agent_messages("ResearchAgent")
+            for msg in messages:
+                print(f"{msg['role']}: {msg['content']}")
+            ```
+        """
+        agent_data = self.get_agent_data(agent_name)
+        return agent_data.get("messages", [])
+
+    def list_agents(self) -> list[str]:
+        """
+        List all agents with data in this workflow.
+
+        Returns:
+            List of agent names that have stored conversation data
+
+        Example:
+            ```python
+            agents = workflow_entity.list_agents()
+            # ['ResearchAgent', 'AnalysisAgent', 'SynthesisAgent']
+            ```
+        """
+        agents = []
+        for key in self.state._state.keys():
+            if key.startswith("agent."):
+                agents.append(key.replace("agent.", "", 1))
+        return agents
+
+    async def _persist_state(self) -> None:
+        """
+        Internal method to persist workflow state to entity storage.
+
+        This is prefixed with _ so it won't be wrapped by the entity method wrapper.
+        Called after workflow execution completes to ensure state is durable.
+        """
+        from .entity import _get_state_adapter
+
+        # Get the state adapter (must be in Worker context)
+        adapter = _get_state_adapter()
+
+        # Get current state snapshot
+        state_dict = self.state.get_state_snapshot()
+
+        # Load current version (for optimistic locking)
+        _, current_version = await adapter.load_with_version(
+            self._entity_type,
+            self._key
+        )
+
+        # Save state with version check
+        new_version = await adapter.save_state(
+            self._entity_type,
+            self._key,
+            state_dict,
+            current_version
+        )
+
+        logger.info(
+            f"Persisted WorkflowEntity state for {self.run_id} "
+            f"(version {current_version} -> {new_version})"
+        )
+
     @property
     def state(self) -> "WorkflowState":
         """
@@ -785,7 +877,12 @@ def workflow(
                 token = set_current_context(ctx)
                 try:
                     # Execute workflow
-                    return await handler_func(ctx, *args, **kwargs)
+                    result = await handler_func(ctx, *args, **kwargs)
+
+                    # Persist workflow state after successful execution
+                    await workflow_entity._persist_state()
+
+                    return result
                 finally:
                     # Always reset context to prevent leakage
                     from .context import _current_context
@@ -795,7 +892,12 @@ def workflow(
                 ctx = args[0]
                 token = set_current_context(ctx)
                 try:
-                    return await handler_func(*args, **kwargs)
+                    result = await handler_func(*args, **kwargs)
+
+                    # Persist workflow state after successful execution
+                    await ctx._workflow_entity._persist_state()
+
+                    return result
                 finally:
                     # Always reset context to prevent leakage
                     from .context import _current_context
