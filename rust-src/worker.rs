@@ -168,6 +168,108 @@ impl PyWorker {
         Ok(())
     }
 
+    /// Queue a workflow checkpoint for progressive durability
+    ///
+    /// This method is called from Python during workflow execution to send
+    /// checkpoints (state changes, step completions) to the platform in real-time.
+    ///
+    /// # Arguments
+    /// * `invocation_id` - Workflow run ID
+    /// * `checkpoint_type` - Event type ("workflow.state.changed", etc.)
+    /// * `checkpoint_data` - JSON payload as string
+    /// * `sequence_number` - Monotonic sequence for ordering
+    /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
+    fn queue_workflow_checkpoint(
+        &self,
+        invocation_id: String,
+        checkpoint_type: String,
+        checkpoint_data: String,
+        sequence_number: i64,
+        metadata: HashMap<String, String>,
+    ) -> PyResult<()> {
+        // Convert checkpoint_data string to bytes
+        let data_bytes = checkpoint_data.into_bytes();
+
+        // Access worker and queue checkpoint
+        let worker_guard = self.worker.lock().map_err(|e| {
+            let err_msg = format!("Failed to lock worker: {}", e);
+            log::error!("{}", err_msg);
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
+        })?;
+
+        if let Some(ref worker) = *worker_guard {
+            worker.queue_checkpoint(
+                invocation_id,
+                checkpoint_type,
+                data_bytes,
+                sequence_number,
+                metadata,
+            ).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to queue checkpoint: {}", e)
+                )
+            })?;
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Worker not initialized"
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Flush all buffered workflow checkpoints by waiting for background task
+    ///
+    /// This method waits 200ms for the background flush task (100ms interval)
+    /// to send all queued checkpoints. This ensures checkpoints arrive at the
+    /// platform BEFORE the workflow completion response is sent.
+    ///
+    /// Returns the number of checkpoints that were initially queued.
+    fn flush_workflow_checkpoints(&self, py: Python) -> PyResult<usize> {
+        let worker_guard = self.worker.lock().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                format!("Failed to lock worker: {}", e)
+            )
+        })?;
+
+        let worker = worker_guard.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Worker not initialized")
+        })?;
+
+        // Get initial queue size
+        let (initial_queued, _, _, _) = worker.checkpoint_metrics();
+
+        if initial_queued == 0 {
+            return Ok(0); // No checkpoints to flush
+        }
+
+        log::debug!("Waiting 200ms to flush {} queued checkpoints before response", initial_queued);
+
+        // Release the lock while waiting
+        drop(worker_guard);
+
+        // Simple approach: Wait 200ms (2x flush interval) to ensure checkpoints are sent
+        // The background flush task runs every 100ms, so 200ms guarantees at least 2 flushes
+        py.allow_threads(|| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+
+        // Log final metrics
+        let worker_guard = self.worker.lock().ok();
+        if let Some(worker_guard) = worker_guard {
+            if let Some(ref worker) = *worker_guard {
+                let (queued, sent, _, _) = worker.checkpoint_metrics();
+                log::debug!(
+                    "Checkpoint flush complete: {} still queued, {} sent total",
+                    queued,
+                    sent
+                );
+            }
+        }
+
+        Ok(initial_queued as usize)
+    }
+
     /// Set the Python event loop for concurrent async execution
     ///
     /// This method stores a reference to the Python event loop via TaskLocals.

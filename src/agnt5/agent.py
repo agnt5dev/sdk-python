@@ -12,7 +12,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from .context import Context
+from .context import Context, get_current_context, set_current_context
 from . import lm
 from .lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
 from .tool import Tool, ToolRegistry
@@ -79,6 +79,7 @@ class AgentContext(Context):
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id
+        self.parent_context = parent_context  # Store for context chain traversal
 
         # Determine state adapter based on parent context
         from .entity import EntityStateAdapter, _get_state_adapter
@@ -777,7 +778,7 @@ class Agent:
 
         Args:
             user_message: User's input message
-            context: Optional context (auto-created if not provided)
+            context: Optional context (auto-created if not provided, or read from contextvar)
 
         Returns:
             AgentResult with output and execution details
@@ -789,6 +790,15 @@ class Agent:
             ```
         """
         # Create or adapt context
+        if context is None:
+            # Try to get context from task-local storage (set by workflow/function decorator)
+            context = get_current_context()
+
+        # IMPORTANT: Capture workflow context NOW before we replace it with AgentContext
+        # This allows LM calls inside the agent to emit workflow checkpoints
+        from .workflow import WorkflowContext
+        workflow_ctx = context if isinstance(context, WorkflowContext) else None
+
         if context is None:
             # Standalone execution - create AgentContext
             import uuid
@@ -809,6 +819,7 @@ class Agent:
                 agent_name=self.name,
                 session_id=context.run_id,  # Share workflow's session
                 parent_context=context,
+                runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
         else:
             # FunctionContext or other - create new AgentContext
@@ -817,198 +828,247 @@ class Agent:
             context = AgentContext(
                 run_id=run_id,
                 agent_name=self.name,
+                runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
 
-        # Load conversation history from state (if AgentContext)
-        if isinstance(context, AgentContext):
-            messages: List[Message] = await context.get_conversation_history()
-            # Add new user message
-            messages.append(Message.user(user_message))
-            # Save updated conversation
-            await context.save_conversation_history(messages)
-        else:
-            # Fallback for non-AgentContext (shouldn't happen with code above)
-            messages = [Message.user(user_message)]
-
-        # Create span for agent execution with trace linking
-        from ._core import create_span
-
-        with create_span(
-            self.name,
-            "agent",
-            context._runtime_context if hasattr(context, "_runtime_context") else None,
-            {
+        # Emit checkpoint if called within a workflow context
+        if workflow_ctx is not None:
+            workflow_ctx._send_checkpoint("workflow.agent.started", {
                 "agent.name": self.name,
-                "agent.model": self.model_name,  # Use model_name (always a string)
-                "agent.max_iterations": str(self.max_iterations),
-            },
-        ) as span:
-            all_tool_calls: List[Dict[str, Any]] = []
+                "agent.model": self.model_name,
+                "agent.tools": list(self.tools.keys()),
+                "agent.max_iterations": self.max_iterations,
+                "user_message": user_message,
+            })
 
-            # Reasoning loop
-            for iteration in range(self.max_iterations):
-                # Build tool definitions for LLM
-                tool_defs = [
-                    ToolDefinition(
-                        name=tool.name,
-                        description=tool.description,
-                        parameters=tool.input_schema,
-                    )
-                    for tool in self.tools.values()
-                ]
-
-                # Convert messages to dict format for lm.generate()
-                messages_dict = []
-                for msg in messages:
-                    messages_dict.append({
-                        "role": msg.role.value,
-                        "content": msg.content
-                    })
-
-                # Call LLM
-                # Check if we have a legacy LanguageModel instance or need to create one
-                if self._language_model is not None:
-                    # Legacy API: use provided LanguageModel instance
-                    request = GenerateRequest(
-                        model="mock-model",  # Not used by MockLanguageModel
-                        system_prompt=self.instructions,
-                        messages=messages,
-                        tools=tool_defs if tool_defs else [],
-                    )
-                    request.config.temperature = self.temperature
-                    if self.max_tokens:
-                        request.config.max_tokens = self.max_tokens
-                    if self.top_p:
-                        request.config.top_p = self.top_p
-                    response = await self._language_model.generate(request)
+        # Set context in task-local storage for automatic propagation to tools and LM calls
+        token = set_current_context(context)
+        try:
+            try:
+                # Load conversation history from state (if AgentContext)
+                if isinstance(context, AgentContext):
+                    messages: List[Message] = await context.get_conversation_history()
+                    # Add new user message
+                    messages.append(Message.user(user_message))
+                    # Save updated conversation
+                    await context.save_conversation_history(messages)
                 else:
-                    # New API: model is a string, create internal LM instance
-                    request = GenerateRequest(
-                        model=self.model,
-                        system_prompt=self.instructions,
-                        messages=messages,
-                        tools=tool_defs if tool_defs else [],
-                    )
-                    request.config.temperature = self.temperature
-                    if self.max_tokens:
-                        request.config.max_tokens = self.max_tokens
-                    if self.top_p:
-                        request.config.top_p = self.top_p
+                    # Fallback for non-AgentContext (shouldn't happen with code above)
+                    messages = [Message.user(user_message)]
 
-                    # Create internal LM instance for generation
-                    # TODO: Use model_config when provided
-                    from .lm import _LanguageModel
-                    provider, model_name = self.model.split('/', 1)
-                    internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                    response = await internal_lm.generate(request)
+                # Create span for agent execution with trace linking
+                from ._core import create_span
 
-                # Add assistant response to messages
-                messages.append(Message.assistant(response.text))
+                with create_span(
+                    self.name,
+                    "agent",
+                    context._runtime_context if hasattr(context, "_runtime_context") else None,
+                    {
+                        "agent.name": self.name,
+                        "agent.model": self.model_name,  # Use model_name (always a string)
+                        "agent.max_iterations": str(self.max_iterations),
+                    },
+                ) as span:
+                    all_tool_calls: List[Dict[str, Any]] = []
 
-                # Check if LLM wants to use tools
-                if response.tool_calls:
-                    self.logger.debug(f"Agent calling {len(response.tool_calls)} tool(s)")
-
-                    # Store current conversation in context for potential handoffs
-                    # Use a simple dict attribute since we don't need full state persistence for this
-                    if not hasattr(context, '_agent_data'):
-                        context._agent_data = {}
-                    context._agent_data["_current_conversation"] = messages
-
-                    # Execute tool calls
-                    tool_results = []
-                    for tool_call in response.tool_calls:
-                        tool_name = tool_call["name"]
-                        tool_args_str = tool_call["arguments"]
-
-                        # Track tool call
-                        all_tool_calls.append(
-                            {
-                                "name": tool_name,
-                                "arguments": tool_args_str,
-                                "iteration": iteration + 1,
-                            }
-                        )
-
-                        # Execute tool
-                        try:
-                            # Parse arguments
-                            tool_args = json.loads(tool_args_str)
-
-                            # Get tool
-                            tool = self.tools.get(tool_name)
-                            if not tool:
-                                result_text = f"Error: Tool '{tool_name}' not found"
-                            else:
-                                # Execute tool
-                                result = await tool.invoke(context, **tool_args)
-
-                                # Check if this was a handoff
-                                if isinstance(result, dict) and result.get("_handoff"):
-                                    self.logger.info(
-                                        f"Handoff detected to '{result['to_agent']}', "
-                                        f"terminating current agent"
-                                    )
-                                    # Save conversation before returning
-                                    if isinstance(context, AgentContext):
-                                        await context.save_conversation_history(messages)
-                                    # Return immediately with handoff result
-                                    return AgentResult(
-                                        output=result["output"],
-                                        tool_calls=all_tool_calls + result.get("tool_calls", []),
-                                        context=context,
-                                        handoff_to=result["to_agent"],
-                                        handoff_metadata=result,
-                                    )
-
-                                result_text = json.dumps(result) if result else "null"
-
-                            tool_results.append(
-                                {"tool": tool_name, "result": result_text, "error": None}
+                    # Reasoning loop
+                    for iteration in range(self.max_iterations):
+                        # Build tool definitions for LLM
+                        tool_defs = [
+                            ToolDefinition(
+                                name=tool.name,
+                                description=tool.description,
+                                parameters=tool.input_schema,
                             )
-
-                        except Exception as e:
-                            self.logger.error(f"Tool execution error: {e}")
-                            tool_results.append(
-                                {"tool": tool_name, "result": None, "error": str(e)}
-                            )
-
-                    # Add tool results to conversation
-                    results_text = "\n".join(
-                        [
-                            f"Tool: {tr['tool']}\nResult: {tr['result']}"
-                            if tr["error"] is None
-                            else f"Tool: {tr['tool']}\nError: {tr['error']}"
-                            for tr in tool_results
+                            for tool in self.tools.values()
                         ]
-                    )
-                    messages.append(Message.user(f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."))
 
-                    # Continue loop for agent to process results
+                        # Convert messages to dict format for lm.generate()
+                        messages_dict = []
+                        for msg in messages:
+                            messages_dict.append({
+                                "role": msg.role.value,
+                                "content": msg.content
+                            })
 
-                else:
-                    # No tool calls - agent is done
-                    self.logger.debug(f"Agent completed after {iteration + 1} iterations")
+                        # Call LLM
+                        # Check if we have a legacy LanguageModel instance or need to create one
+                        if self._language_model is not None:
+                            # Legacy API: use provided LanguageModel instance
+                            request = GenerateRequest(
+                                model="mock-model",  # Not used by MockLanguageModel
+                                system_prompt=self.instructions,
+                                messages=messages,
+                                tools=tool_defs if tool_defs else [],
+                            )
+                            request.config.temperature = self.temperature
+                            if self.max_tokens:
+                                request.config.max_tokens = self.max_tokens
+                            if self.top_p:
+                                request.config.top_p = self.top_p
+                            response = await self._language_model.generate(request)
+                        else:
+                            # New API: model is a string, create internal LM instance
+                            request = GenerateRequest(
+                                model=self.model,
+                                system_prompt=self.instructions,
+                                messages=messages,
+                                tools=tool_defs if tool_defs else [],
+                            )
+                            request.config.temperature = self.temperature
+                            if self.max_tokens:
+                                request.config.max_tokens = self.max_tokens
+                            if self.top_p:
+                                request.config.top_p = self.top_p
+
+                            # Create internal LM instance for generation
+                            # TODO: Use model_config when provided
+                            from .lm import _LanguageModel
+                            provider, model_name = self.model.split('/', 1)
+                            internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+                            response = await internal_lm.generate(request)
+
+                        # Add assistant response to messages
+                        messages.append(Message.assistant(response.text))
+
+                        # Check if LLM wants to use tools
+                        if response.tool_calls:
+                            self.logger.debug(f"Agent calling {len(response.tool_calls)} tool(s)")
+
+                            # Store current conversation in context for potential handoffs
+                            # Use a simple dict attribute since we don't need full state persistence for this
+                            if not hasattr(context, '_agent_data'):
+                                context._agent_data = {}
+                            context._agent_data["_current_conversation"] = messages
+
+                            # Execute tool calls
+                            tool_results = []
+                            for tool_call in response.tool_calls:
+                                tool_name = tool_call["name"]
+                                tool_args_str = tool_call["arguments"]
+
+                                # Track tool call
+                                all_tool_calls.append(
+                                    {
+                                        "name": tool_name,
+                                        "arguments": tool_args_str,
+                                        "iteration": iteration + 1,
+                                    }
+                                )
+
+                                # Execute tool
+                                try:
+                                    # Parse arguments
+                                    tool_args = json.loads(tool_args_str)
+
+                                    # Get tool
+                                    tool = self.tools.get(tool_name)
+                                    if not tool:
+                                        result_text = f"Error: Tool '{tool_name}' not found"
+                                    else:
+                                        # Execute tool
+                                        result = await tool.invoke(context, **tool_args)
+
+                                        # Check if this was a handoff
+                                        if isinstance(result, dict) and result.get("_handoff"):
+                                            self.logger.info(
+                                                f"Handoff detected to '{result['to_agent']}', "
+                                                f"terminating current agent"
+                                            )
+                                            # Save conversation before returning
+                                            if isinstance(context, AgentContext):
+                                                await context.save_conversation_history(messages)
+                                            # Return immediately with handoff result
+                                            return AgentResult(
+                                                output=result["output"],
+                                                tool_calls=all_tool_calls + result.get("tool_calls", []),
+                                                context=context,
+                                                handoff_to=result["to_agent"],
+                                                handoff_metadata=result,
+                                            )
+
+                                        result_text = json.dumps(result) if result else "null"
+
+                                    tool_results.append(
+                                        {"tool": tool_name, "result": result_text, "error": None}
+                                    )
+
+                                except Exception as e:
+                                    self.logger.error(f"Tool execution error: {e}")
+                                    tool_results.append(
+                                        {"tool": tool_name, "result": None, "error": str(e)}
+                                    )
+
+                            # Add tool results to conversation
+                            results_text = "\n".join(
+                                [
+                                    f"Tool: {tr['tool']}\nResult: {tr['result']}"
+                                    if tr["error"] is None
+                                    else f"Tool: {tr['tool']}\nError: {tr['error']}"
+                                    for tr in tool_results
+                                ]
+                            )
+                            messages.append(Message.user(f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."))
+
+                            # Continue loop for agent to process results
+
+                        else:
+                            # No tool calls - agent is done
+                            self.logger.debug(f"Agent completed after {iteration + 1} iterations")
+                            # Save conversation before returning
+                            if isinstance(context, AgentContext):
+                                await context.save_conversation_history(messages)
+
+                            # Emit completion checkpoint
+                            if workflow_ctx:
+                                workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                                    "agent.name": self.name,
+                                    "agent.iterations": iteration + 1,
+                                    "agent.tool_calls_count": len(all_tool_calls),
+                                    "output_length": len(response.text),
+                                })
+
+                            return AgentResult(
+                                output=response.text,
+                                tool_calls=all_tool_calls,
+                                context=context,
+                            )
+
+                    # Max iterations reached
+                    self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
+                    final_output = messages[-1].content if messages else "No output generated"
                     # Save conversation before returning
                     if isinstance(context, AgentContext):
                         await context.save_conversation_history(messages)
+
+                    # Emit completion checkpoint with max iterations flag
+                    if workflow_ctx:
+                        workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                            "agent.name": self.name,
+                            "agent.iterations": self.max_iterations,
+                            "agent.tool_calls_count": len(all_tool_calls),
+                            "agent.max_iterations_reached": True,
+                            "output_length": len(final_output),
+                        })
+
                     return AgentResult(
-                        output=response.text,
+                        output=final_output,
                         tool_calls=all_tool_calls,
                         context=context,
                     )
-
-            # Max iterations reached
-            self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
-            final_output = messages[-1].content if messages else "No output generated"
-            # Save conversation before returning
-            if isinstance(context, AgentContext):
-                await context.save_conversation_history(messages)
-            return AgentResult(
-                output=final_output,
-                tool_calls=all_tool_calls,
-                context=context,
-            )
+            except Exception as e:
+                # Emit error checkpoint for observability
+                if workflow_ctx:
+                    workflow_ctx._send_checkpoint("workflow.agent.error", {
+                        "agent.name": self.name,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    })
+                raise
+        finally:
+            # Always reset context to prevent leakage between agent executions
+            from .context import _current_context
+            _current_context.reset(token)
 
 
 def agent(

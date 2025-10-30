@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_
 
 from docstring_parser import parse as parse_docstring
 
-from .context import Context
+from .context import Context, set_current_context
 from .exceptions import ConfigurationError
 from ._telemetry import setup_module_logger
 
@@ -229,26 +229,61 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
             )
 
-        # Create span for tool execution with trace linking
-        from ._core import create_span
+        # Emit checkpoint if called within a workflow context
+        from .context import get_workflow_context
 
-        logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
-
-        # Create span with runtime_context for parent-child span linking
-        with create_span(
-            self.name,
-            "tool",
-            ctx._runtime_context if hasattr(ctx, "_runtime_context") else None,
-            {
+        workflow_ctx = get_workflow_context()
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.tool.started", {
                 "tool.name": self.name,
-                "tool.args": ",".join(kwargs.keys()),
-            },
-        ) as span:
-            # Handler is already async (validated in tool() decorator)
-            result = await self.handler(ctx, **kwargs)
+                "tool.args": list(kwargs.keys()),
+            })
 
-            logger.debug(f"Tool '{self.name}' completed successfully")
-            return result
+        # Set context in task-local storage for automatic propagation to nested calls
+        token = set_current_context(ctx)
+        try:
+            try:
+                # Create span for tool execution with trace linking
+                from ._core import create_span
+
+                logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
+
+                # Create span with runtime_context for parent-child span linking
+                with create_span(
+                    self.name,
+                    "tool",
+                    ctx._runtime_context if hasattr(ctx, "_runtime_context") else None,
+                    {
+                        "tool.name": self.name,
+                        "tool.args": ",".join(kwargs.keys()),
+                    },
+                ) as span:
+                    # Handler is already async (validated in tool() decorator)
+                    result = await self.handler(ctx, **kwargs)
+
+                    logger.debug(f"Tool '{self.name}' completed successfully")
+
+                    # Emit completion checkpoint
+                    if workflow_ctx:
+                        workflow_ctx._send_checkpoint("workflow.tool.completed", {
+                            "tool.name": self.name,
+                            "tool.success": True,
+                        })
+
+                    return result
+            except Exception as e:
+                # Emit error checkpoint for observability
+                if workflow_ctx:
+                    workflow_ctx._send_checkpoint("workflow.tool.error", {
+                        "tool.name": self.name,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    })
+                raise
+        finally:
+            # Always reset context to prevent leakage
+            from .context import _current_context
+            _current_context.reset(token)
 
     def get_schema(self) -> Dict[str, Any]:
         """
@@ -448,17 +483,18 @@ class AskUserTool(Tool):
         ```
     """
 
-    def __init__(self, context: "WorkflowContext"):  # type: ignore
+    def __init__(self, context: Optional["WorkflowContext"] = None):  # type: ignore
         """
         Initialize AskUserTool.
 
         Args:
-            context: Workflow context with wait_for_user capability
+            context: Optional workflow context with wait_for_user capability.
+                     If not provided, will attempt to get from task-local contextvar.
         """
         # Import here to avoid circular dependency
         from .workflow import WorkflowContext
 
-        if not isinstance(context, WorkflowContext):
+        if context is not None and not isinstance(context, WorkflowContext):
             raise ConfigurationError(
                 "AskUserTool requires a WorkflowContext. "
                 "This tool can only be used within workflows."
@@ -477,13 +513,35 @@ class AskUserTool(Tool):
         Ask user a question and wait for their response.
 
         Args:
-            ctx: Execution context (unused, required by Tool signature)
+            ctx: Execution context (may contain WorkflowContext via contextvar)
             question: Question to ask the user
 
         Returns:
             User's text response
         """
-        return await self.context.wait_for_user(question, input_type="text")
+        # Import here to avoid circular dependency
+        from .workflow import WorkflowContext
+        from .context import get_current_context
+
+        # Use explicit context if provided during __init__
+        workflow_ctx = self.context
+
+        # If not provided, try to get from task-local contextvar
+        if workflow_ctx is None:
+            current = get_current_context()
+            if isinstance(current, WorkflowContext):
+                workflow_ctx = current
+            elif hasattr(current, '_workflow_entity'):
+                # Current context has workflow entity (is WorkflowContext)
+                workflow_ctx = current  # type: ignore
+
+        if workflow_ctx is None:
+            raise ConfigurationError(
+                "AskUserTool requires WorkflowContext. "
+                "Either pass context to __init__ or ensure tool is used within a workflow."
+            )
+
+        return await workflow_ctx.wait_for_user(question, input_type="text")
 
 
 class RequestApprovalTool(Tool):
@@ -516,17 +574,18 @@ class RequestApprovalTool(Tool):
         ```
     """
 
-    def __init__(self, context: "WorkflowContext"):  # type: ignore
+    def __init__(self, context: Optional["WorkflowContext"] = None):  # type: ignore
         """
         Initialize RequestApprovalTool.
 
         Args:
-            context: Workflow context with wait_for_user capability
+            context: Optional workflow context with wait_for_user capability.
+                     If not provided, will attempt to get from task-local contextvar.
         """
         # Import here to avoid circular dependency
         from .workflow import WorkflowContext
 
-        if not isinstance(context, WorkflowContext):
+        if context is not None and not isinstance(context, WorkflowContext):
             raise ConfigurationError(
                 "RequestApprovalTool requires a WorkflowContext. "
                 "This tool can only be used within workflows."
@@ -545,19 +604,41 @@ class RequestApprovalTool(Tool):
         Request approval from user for an action.
 
         Args:
-            ctx: Execution context (unused, required by Tool signature)
+            ctx: Execution context (may contain WorkflowContext via contextvar)
             action: The action requiring approval
             details: Additional details about the action
 
         Returns:
             "approve" or "reject" based on user's decision
         """
+        # Import here to avoid circular dependency
+        from .workflow import WorkflowContext
+        from .context import get_current_context
+
+        # Use explicit context if provided during __init__
+        workflow_ctx = self.context
+
+        # If not provided, try to get from task-local contextvar
+        if workflow_ctx is None:
+            current = get_current_context()
+            if isinstance(current, WorkflowContext):
+                workflow_ctx = current
+            elif hasattr(current, '_workflow_entity'):
+                # Current context has workflow entity (is WorkflowContext)
+                workflow_ctx = current  # type: ignore
+
+        if workflow_ctx is None:
+            raise ConfigurationError(
+                "RequestApprovalTool requires WorkflowContext. "
+                "Either pass context to __init__ or ensure tool is used within a workflow."
+            )
+
         question = f"Action: {action}"
         if details:
             question += f"\n\nDetails:\n{details}"
         question += "\n\nDo you approve?"
 
-        return await self.context.wait_for_user(
+        return await workflow_ctx.wait_for_user(
             question,
             input_type="approval",
             options=[

@@ -39,6 +39,7 @@ from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ._schema_utils import detect_format_type
+from .context import get_current_context
 
 try:
     from ._core import LanguageModel as RustLanguageModel
@@ -366,12 +367,55 @@ class _LanguageModel(LanguageModel):
             # Serialize tool_choice to JSON for Rust
             kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
-        # Call Rust implementation - it returns a proper Python coroutine now
-        # Using pyo3-async-runtimes for truly async HTTP calls without blocking
-        rust_response = await self._rust_lm.generate(prompt=prompt, **kwargs)
+        # Pass runtime_context for proper trace linking
+        # Try to get from current context if available
+        current_ctx = get_current_context()
+        if current_ctx and hasattr(current_ctx, '_runtime_context') and current_ctx._runtime_context:
+            kwargs["runtime_context"] = current_ctx._runtime_context
 
-        # Convert Rust response to Python
-        return self._convert_response(rust_response)
+        # Emit checkpoint if called within a workflow context
+        from .context import get_workflow_context
+        workflow_ctx = get_workflow_context()
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.lm.started", {
+                "model": model,
+                "provider": self._provider,
+                "temperature": kwargs.get("temperature"),
+                "max_tokens": kwargs.get("max_tokens"),
+            })
+
+        try:
+            # Call Rust implementation - it returns a proper Python coroutine now
+            # Using pyo3-async-runtimes for truly async HTTP calls without blocking
+            rust_response = await self._rust_lm.generate(prompt=prompt, **kwargs)
+
+            # Convert Rust response to Python
+            response = self._convert_response(rust_response)
+
+            # Emit completion checkpoint with usage stats
+            if workflow_ctx:
+                usage_dict = None
+                if response.usage:
+                    usage_dict = {
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "total_tokens": response.usage.total_tokens,
+                    }
+                workflow_ctx._send_checkpoint("workflow.lm.completed", {
+                    "model": model,
+                    "usage": usage_dict,
+                })
+
+            return response
+        except Exception as e:
+            # Emit error checkpoint for observability
+            if workflow_ctx:
+                workflow_ctx._send_checkpoint("workflow.lm.error", {
+                    "model": model,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                })
+            raise
 
     async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
         """Stream completion from LLM.
@@ -427,14 +471,43 @@ class _LanguageModel(LanguageModel):
             # Serialize tool_choice to JSON for Rust
             kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
-        # Call Rust implementation - it returns a proper Python coroutine now
-        # Using pyo3-async-runtimes for truly async streaming without blocking
-        rust_chunks = await self._rust_lm.stream(prompt=prompt, **kwargs)
+        # Emit checkpoint if called within a workflow context
+        from .context import get_workflow_context
+        workflow_ctx = get_workflow_context()
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.lm.started", {
+                "model": model,
+                "provider": self._provider,
+                "temperature": kwargs.get("temperature"),
+                "max_tokens": kwargs.get("max_tokens"),
+                "streaming": True,
+            })
 
-        # Yield each chunk
-        for chunk in rust_chunks:
-            if chunk.text:
-                yield chunk.text
+        try:
+            # Call Rust implementation - it returns a proper Python coroutine now
+            # Using pyo3-async-runtimes for truly async streaming without blocking
+            rust_chunks = await self._rust_lm.stream(prompt=prompt, **kwargs)
+
+            # Yield each chunk
+            for chunk in rust_chunks:
+                if chunk.text:
+                    yield chunk.text
+
+            # Emit completion checkpoint after streaming finishes
+            if workflow_ctx:
+                workflow_ctx._send_checkpoint("workflow.lm.completed", {
+                    "model": model,
+                    "streaming": True,
+                })
+        except Exception as e:
+            # Emit error checkpoint for observability
+            if workflow_ctx:
+                workflow_ctx._send_checkpoint("workflow.lm.error", {
+                    "model": model,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                })
+            raise
 
     def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, str]]:
         """Build structured message list for Rust.
@@ -603,8 +676,12 @@ async def generate(
         response_schema=response_schema_json,
     )
 
+    # Checkpoints are emitted by _LanguageModel.generate() internally
+    # to avoid duplication. No need to emit them here.
+
     # Generate and return
-    return await lm.generate(request)
+    result = await lm.generate(request)
+    return result
 
 
 async def stream(
@@ -700,6 +777,37 @@ async def stream(
         config=config,
     )
 
-    # Stream and yield chunks
-    async for chunk in lm.stream(request):
-        yield chunk
+    # Emit checkpoint if called within a workflow context
+    from .context import get_workflow_context
+
+    workflow_ctx = get_workflow_context()
+    if workflow_ctx:
+        workflow_ctx._send_checkpoint("workflow.lm.started", {
+            "model": model,
+            "provider": provider,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "streaming": True,
+        })
+
+    try:
+        # Stream and yield chunks
+        async for chunk in lm.stream(request):
+            yield chunk
+
+        # Emit completion checkpoint (note: no usage stats for streaming)
+        if isinstance(ctx, WorkflowContext):
+            ctx._send_checkpoint("workflow.lm.completed", {
+                "model": model,
+                "streaming": True,
+            })
+    except Exception as e:
+        # Emit error checkpoint for observability
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.lm.error", {
+                "model": model,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "streaming": True,
+            })
+        raise
