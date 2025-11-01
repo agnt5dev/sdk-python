@@ -13,11 +13,14 @@ from agnt5_test_bench.workflows import (
     test_session_memory_workflow,
     test_user_memory_workflow,
     test_multi_agent_session_workflow,
-    # Comprehensive test workflows
+    # Agent test workflows
     test_agent_basic,
     test_agent_with_simple_tool,
     test_agent_with_multiple_tools,
     test_agent_with_agent_as_tool,
+    test_handoff_simple,
+    test_handoff_with_context,
+    test_handoff_complex,
     test_agent_with_hitl,
     test_comprehensive_scenario,
 )
@@ -48,11 +51,14 @@ async def main():
                 test_session_memory_workflow,
                 test_user_memory_workflow,
                 test_multi_agent_session_workflow,
-                # Comprehensive test workflows
+                # Agent test workflows
                 test_agent_basic,
                 test_agent_with_simple_tool,
                 test_agent_with_multiple_tools,
                 test_agent_with_agent_as_tool,
+                test_handoff_simple,
+                test_handoff_with_context,
+                test_handoff_complex,
                 test_agent_with_hitl,
                 test_comprehensive_scenario,
             ],
