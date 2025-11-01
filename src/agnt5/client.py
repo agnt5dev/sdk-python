@@ -43,6 +43,8 @@ class Client:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -52,6 +54,8 @@ class Client:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
+            session_id: Session identifier for multi-turn conversations (optional)
+            user_id: User identifier for user-scoped memory (optional)
 
         Returns:
             Dictionary containing the component's output
@@ -68,6 +72,12 @@ class Client:
             # Workflow execution (explicit)
             result = client.run("order_fulfillment", {"order_id": "123"}, component_type="workflow")
 
+            # Multi-turn conversation with session
+            result = client.run("chat", {"message": "Hello"}, session_id="session-123")
+
+            # User-scoped memory
+            result = client.run("assistant", {"message": "Help me"}, user_id="user-456")
+
             # No input data
             result = client.run("get_status")
             ```
@@ -78,11 +88,18 @@ class Client:
         # Build URL with component type
         url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
 
+        # Build headers with memory scoping identifiers
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+
         # Make request
         response = self._client.post(
             url,
             json=input_data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
 
         # Handle errors

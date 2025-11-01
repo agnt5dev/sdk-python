@@ -23,6 +23,7 @@ T = TypeVar("T")
 # Global workflow registry
 _WORKFLOW_REGISTRY: Dict[str, WorkflowConfig] = {}
 
+
 class WorkflowContext(Context):
     """
     Context for durable workflows.
@@ -32,15 +33,25 @@ class WorkflowContext(Context):
     - Step tracking and replay
     - Orchestration (task, parallel, gather)
     - Checkpointing (step)
+    - Memory scoping (session_id, user_id for multi-level memory)
 
     WorkflowContext delegates state to the underlying WorkflowEntity,
     which provides durability and state change tracking for AI workflows.
+
+    Memory Scoping:
+    - run_id: Unique workflow run identifier
+    - session_id: For multi-turn conversations (optional)
+    - user_id: For user-scoped long-term memory (optional)
+    These identifiers enable agents to automatically select the appropriate
+    memory scope (run/session/user) via context propagation.
     """
 
     def __init__(
         self,
         workflow_entity: "WorkflowEntity",  # Forward reference
         run_id: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         checkpoint_callback: Optional[Callable[[dict], None]] = None,
@@ -51,6 +62,8 @@ class WorkflowContext(Context):
         Args:
             workflow_entity: WorkflowEntity instance managing workflow state
             run_id: Unique workflow run identifier
+            session_id: Session identifier for multi-turn conversations (default: run_id)
+            user_id: User identifier for user-scoped memory (optional)
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
             checkpoint_callback: Optional callback for sending real-time checkpoints
@@ -60,6 +73,10 @@ class WorkflowContext(Context):
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
         self._checkpoint_callback = checkpoint_callback
+
+        # Memory scoping identifiers
+        self.session_id = session_id or run_id  # Default: session = run (ephemeral)
+        self.user_id = user_id  # Optional: user-scoped memory
 
     # === State Management ===
 
@@ -94,7 +111,7 @@ class WorkflowContext(Context):
         """
         state = self._workflow_entity.state
         # Pass checkpoint callback to state for real-time streaming
-        if hasattr(state, '_set_checkpoint_callback'):
+        if hasattr(state, "_set_checkpoint_callback"):
             state._set_checkpoint_callback(self._send_checkpoint)
         return state
 
@@ -154,7 +171,7 @@ class WorkflowContext(Context):
         # Extract handler name from function reference or use string
         if callable(handler):
             handler_name = handler.__name__
-            if not hasattr(handler, '_agnt5_config'):
+            if not hasattr(handler, "_agnt5_config"):
                 raise ValueError(
                     f"Function '{handler_name}' is not a registered @function. "
                     f"Did you forget to add the @function decorator?"
@@ -173,10 +190,14 @@ class WorkflowContext(Context):
             return result
 
         # Emit workflow.step.started checkpoint
-        self._send_checkpoint("workflow.step.started", {
-            "step_name": step_name,
-            "handler_name": handler_name,
-        })
+        self._send_checkpoint(
+            "workflow.step.started",
+            {
+                "step_name": step_name,
+                "handler_name": handler_name,
+                "input": args or kwargs,
+            },
+        )
 
         # Execute function with OpenTelemetry span
         self._logger.info(f"▶️  Executing new step: {step_name}")
@@ -201,7 +222,7 @@ class WorkflowContext(Context):
                 "handler_name": handler_name,
                 "run_id": self.run_id,
                 "input.data": input_repr,
-            }
+            },
         ) as span:
             # Create FunctionContext for the function execution
             func_ctx = FunctionContext(
@@ -209,34 +230,63 @@ class WorkflowContext(Context):
                 runtime_context=self._runtime_context,
             )
 
-            # Execute function with arguments
-            # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
-            if len(args) == 0 and "input" in kwargs:
-                # Legacy pattern - single input parameter
-                input_data = kwargs.pop("input")  # Remove from kwargs
-                result = await func_config.handler(func_ctx, input_data, **kwargs)
-            else:
-                # Type-safe pattern - pass all args/kwargs
-                result = await func_config.handler(func_ctx, *args, **kwargs)
-
-            # Add output data to span
             try:
-                output_repr = json.dumps(result)
-                span.set_attribute("output.data", output_repr)
-            except (TypeError, ValueError):
-                # If result is not JSON serializable, use repr
-                span.set_attribute("output.data", repr(result))
+                # Execute function with arguments
+                # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
+                if len(args) == 0 and "input" in kwargs:
+                    # Legacy pattern - single input parameter
+                    input_data = kwargs.pop("input")  # Remove from kwargs
+                    result = await func_config.handler(func_ctx, input_data, **kwargs)
+                else:
+                    # Type-safe pattern - pass all args/kwargs
+                    result = await func_config.handler(func_ctx, *args, **kwargs)
 
-            # Record step completion in WorkflowEntity
-            self._workflow_entity.record_step_completion(step_name, handler_name, args or kwargs, result)
+                # Add output data to span
+                try:
+                    output_repr = json.dumps(result)
+                    span.set_attribute("output.data", output_repr)
+                except (TypeError, ValueError):
+                    # If result is not JSON serializable, use repr
+                    span.set_attribute("output.data", repr(result))
 
-            # Emit workflow.step.completed checkpoint
-            self._send_checkpoint("workflow.step.completed", {
-                "step_name": step_name,
-                "handler_name": handler_name,
-            })
+                # Record step completion in WorkflowEntity
+                self._workflow_entity.record_step_completion(
+                    step_name, handler_name, args or kwargs, result
+                )
 
-            return result
+                # Emit workflow.step.completed checkpoint
+                self._send_checkpoint(
+                    "workflow.step.completed",
+                    {
+                        "step_name": step_name,
+                        "handler_name": handler_name,
+                        "input": args or kwargs,
+                        "result": result,
+                    },
+                )
+
+                return result
+
+            except Exception as e:
+                # Emit workflow.step.error checkpoint
+                self._send_checkpoint(
+                    "workflow.step.error",
+                    {
+                        "step_name": step_name,
+                        "handler_name": handler_name,
+                        "input": args or kwargs,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    },
+                )
+
+                # Record error in span
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e))
+                span.set_attribute("error.type", type(e).__name__)
+
+                # Re-raise to propagate failure
+                raise
 
     async def parallel(self, *tasks: Awaitable[T]) -> List[T]:
         """
@@ -255,6 +305,7 @@ class WorkflowContext(Context):
             )
         """
         import asyncio
+
         return list(await asyncio.gather(*tasks))
 
     async def gather(self, **tasks: Awaitable[T]) -> Dict[str, T]:
@@ -274,15 +325,14 @@ class WorkflowContext(Context):
             )
         """
         import asyncio
+
         keys = list(tasks.keys())
         values = list(tasks.values())
         results = await asyncio.gather(*values)
         return dict(zip(keys, results))
 
     async def step(
-        self,
-        name: str,
-        func_or_awaitable: Union[Callable[[], Awaitable[T]], Awaitable[T]]
+        self, name: str, func_or_awaitable: Union[Callable[[], Awaitable[T]], Awaitable[T]]
     ) -> T:
         """
         Checkpoint expensive operations for durability.
@@ -319,10 +369,7 @@ class WorkflowContext(Context):
         return result
 
     async def wait_for_user(
-        self,
-        question: str,
-        input_type: str = "text",
-        options: Optional[List[Dict]] = None
+        self, question: str, input_type: str = "text", options: Optional[List[Dict]] = None
     ) -> str:
         """
         Pause workflow execution and wait for user input.
@@ -386,7 +433,7 @@ class WorkflowContext(Context):
         # No response yet - pause execution
         # Collect current workflow state for checkpoint
         checkpoint_state = {}
-        if hasattr(self._workflow_entity, '_state') and self._workflow_entity._state is not None:
+        if hasattr(self._workflow_entity, "_state") and self._workflow_entity._state is not None:
             checkpoint_state = self._workflow_entity._state.get_state_snapshot()
 
         self._logger.info(f"⏸️  Pausing workflow for user input: {question}")
@@ -395,13 +442,14 @@ class WorkflowContext(Context):
             question=question,
             input_type=input_type,
             options=options,
-            checkpoint_state=checkpoint_state
+            checkpoint_state=checkpoint_state,
         )
 
 
 # ============================================================================
 # WorkflowEntity: Entity specialized for workflow execution state
 # ============================================================================
+
 
 class WorkflowEntity(Entity):
     """
@@ -411,20 +459,50 @@ class WorkflowEntity(Entity):
     - Step tracking for replay and crash recovery
     - State change tracking for debugging and audit (AI workflows)
     - Completed step cache for efficient replay
+    - Automatic state persistence after workflow execution
 
-    Workflows are temporary entities - they exist for the duration of
-    execution and their state is used for coordination between steps.
+    Workflow state is persisted to the database after successful execution,
+    enabling crash recovery, replay, and cross-invocation state management.
+    The workflow decorator automatically calls _persist_state() to ensure
+    durability.
     """
 
-    def __init__(self, run_id: str):
+    def __init__(
+        self,
+        run_id: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ):
         """
-        Initialize workflow entity.
+        Initialize workflow entity with memory scope.
 
         Args:
             run_id: Unique workflow run identifier
+            session_id: Session identifier for multi-turn conversations (optional)
+            user_id: User identifier for user-scoped memory (optional)
+
+        Memory Scope Priority:
+            - user_id present → key: user:{user_id}
+            - session_id present (and != run_id) → key: session:{session_id}
+            - else → key: run:{run_id}
         """
-        # Initialize as entity with workflow key pattern
-        super().__init__(key=f"workflow:{run_id}")
+        # Determine entity key based on memory scope priority
+        if user_id:
+            entity_key = f"user:{user_id}"
+            memory_scope = "user"
+        elif session_id and session_id != run_id:
+            entity_key = f"session:{session_id}"
+            memory_scope = "session"
+        else:
+            entity_key = f"run:{run_id}"
+            memory_scope = "run"
+
+        # Initialize as entity with scoped key pattern
+        super().__init__(key=entity_key)
+
+        # Store run_id separately for tracking (even if key is session/user scoped)
+        self._run_id = run_id
+        self._memory_scope = memory_scope
 
         # Step tracking for replay and recovery
         self._step_events: list[Dict[str, Any]] = []
@@ -433,19 +511,15 @@ class WorkflowEntity(Entity):
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []
 
-        logger.debug(f"Created WorkflowEntity: {run_id}")
+        logger.debug(f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}")
 
     @property
     def run_id(self) -> str:
-        """Extract run_id from workflow key."""
-        return self._key.split(":", 1)[1]
+        """Get run_id for this workflow execution."""
+        return self._run_id
 
     def record_step_completion(
-        self,
-        step_name: str,
-        handler_name: str,
-        input_data: Any,
-        result: Any
+        self, step_name: str, handler_name: str, input_data: Any, result: Any
     ) -> None:
         """
         Record completed step for replay and recovery.
@@ -456,12 +530,14 @@ class WorkflowEntity(Entity):
             input_data: Input data passed to function
             result: Function result
         """
-        self._step_events.append({
-            "step_name": step_name,
-            "handler_name": handler_name,
-            "input": input_data,
-            "result": result
-        })
+        self._step_events.append(
+            {
+                "step_name": step_name,
+                "handler_name": handler_name,
+                "input": input_data,
+                "result": result,
+            }
+        )
         self._completed_steps[step_name] = result
         logger.debug(f"Recorded step completion: {step_name}")
 
@@ -566,32 +642,43 @@ class WorkflowEntity(Entity):
         This is prefixed with _ so it won't be wrapped by the entity method wrapper.
         Called after workflow execution completes to ensure state is durable.
         """
-        from .entity import _get_state_adapter
+        logger.info(f"🔍 DEBUG: _persist_state() CALLED for workflow {self.run_id}")
 
-        # Get the state adapter (must be in Worker context)
-        adapter = _get_state_adapter()
+        try:
+            from .entity import _get_state_adapter
 
-        # Get current state snapshot
-        state_dict = self.state.get_state_snapshot()
+            logger.info(f"🔍 DEBUG: Getting state adapter...")
+            # Get the state adapter (must be in Worker context)
+            adapter = _get_state_adapter()
+            logger.info(f"🔍 DEBUG: Got state adapter: {type(adapter).__name__}")
 
-        # Load current version (for optimistic locking)
-        _, current_version = await adapter.load_with_version(
-            self._entity_type,
-            self._key
-        )
+            logger.info(f"🔍 DEBUG: Getting state snapshot...")
+            # Get current state snapshot
+            state_dict = self.state.get_state_snapshot()
+            logger.info(f"🔍 DEBUG: State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
 
-        # Save state with version check
-        new_version = await adapter.save_state(
-            self._entity_type,
-            self._key,
-            state_dict,
-            current_version
-        )
+            logger.info(f"🔍 DEBUG: Loading current version for optimistic locking...")
+            # Load current version (for optimistic locking)
+            _, current_version = await adapter.load_with_version(self._entity_type, self._key)
+            logger.info(f"🔍 DEBUG: Current version: {current_version}")
 
-        logger.info(
-            f"Persisted WorkflowEntity state for {self.run_id} "
-            f"(version {current_version} -> {new_version})"
-        )
+            logger.info(f"🔍 DEBUG: Saving state to database...")
+            # Save state with version check
+            new_version = await adapter.save_state(
+                self._entity_type, self._key, state_dict, current_version
+            )
+
+            logger.info(
+                f"✅ SUCCESS: Persisted WorkflowEntity state for {self.run_id} "
+                f"(version {current_version} -> {new_version}, {len(state_dict)} keys)"
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ ERROR: Failed to persist workflow state for {self.run_id}: {e}",
+                exc_info=True
+            )
+            # Re-raise to let caller handle
+            raise
 
     @property
     def state(self) -> "WorkflowState":
@@ -643,60 +730,46 @@ class WorkflowState(EntityState):
         super().set(key, value)
         # Track change for debugging/audit
         import time
-        change_record = {
-            "key": key,
-            "value": value,
-            "timestamp": time.time(),
-            "deleted": False
-        }
+
+        change_record = {"key": key, "value": value, "timestamp": time.time(), "deleted": False}
         self._workflow_entity._state_changes.append(change_record)
 
         # Emit checkpoint for real-time state streaming
         if self._checkpoint_callback:
-            self._checkpoint_callback("workflow.state.changed", {
-                "key": key,
-                "value": value,
-                "operation": "set"
-            })
+            self._checkpoint_callback(
+                "workflow.state.changed", {"key": key, "value": value, "operation": "set"}
+            )
 
     def delete(self, key: str) -> None:
         """Delete key and track change."""
         super().delete(key)
         # Track deletion
         import time
-        change_record = {
-            "key": key,
-            "value": None,
-            "timestamp": time.time(),
-            "deleted": True
-        }
+
+        change_record = {"key": key, "value": None, "timestamp": time.time(), "deleted": True}
         self._workflow_entity._state_changes.append(change_record)
 
         # Emit checkpoint for real-time state streaming
         if self._checkpoint_callback:
-            self._checkpoint_callback("workflow.state.changed", {
-                "key": key,
-                "operation": "delete"
-            })
+            self._checkpoint_callback("workflow.state.changed", {"key": key, "operation": "delete"})
 
     def clear(self) -> None:
         """Clear all state and track change."""
         super().clear()
         # Track clear operation
         import time
+
         change_record = {
             "key": "__clear__",
             "value": None,
             "timestamp": time.time(),
-            "deleted": True
+            "deleted": True,
         }
         self._workflow_entity._state_changes.append(change_record)
 
         # Emit checkpoint for real-time state streaming
         if self._checkpoint_callback:
-            self._checkpoint_callback("workflow.state.changed", {
-                "operation": "clear"
-            })
+            self._checkpoint_callback("workflow.state.changed", {"operation": "clear"})
 
     def has_changes(self) -> bool:
         """Check if any state changes have been tracked."""
@@ -880,12 +953,17 @@ def workflow(
                     result = await handler_func(ctx, *args, **kwargs)
 
                     # Persist workflow state after successful execution
-                    await workflow_entity._persist_state()
+                    try:
+                        await workflow_entity._persist_state()
+                    except Exception as e:
+                        logger.error(f"Failed to persist workflow state (non-fatal): {e}", exc_info=True)
+                        # Don't fail the workflow - persistence failure shouldn't break execution
 
                     return result
                 finally:
                     # Always reset context to prevent leakage
                     from .context import _current_context
+
                     _current_context.reset(token)
             else:
                 # WorkflowContext provided - use it and set in contextvar
@@ -895,12 +973,17 @@ def workflow(
                     result = await handler_func(*args, **kwargs)
 
                     # Persist workflow state after successful execution
-                    await ctx._workflow_entity._persist_state()
+                    try:
+                        await ctx._workflow_entity._persist_state()
+                    except Exception as e:
+                        logger.error(f"Failed to persist workflow state (non-fatal): {e}", exc_info=True)
+                        # Don't fail the workflow - persistence failure shouldn't break execution
 
                     return result
                 finally:
                     # Always reset context to prevent leakage
                     from .context import _current_context
+
                     _current_context.reset(token)
 
         # Store config on wrapper for introspection
@@ -912,5 +995,3 @@ def workflow(
         return decorator
     else:
         return decorator(_func)
-
-
