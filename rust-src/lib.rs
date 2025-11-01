@@ -37,7 +37,7 @@ impl PySpan {
     /// Context manager exit - ends the span
     fn __exit__(
         &self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
+        exc_type: Option<&Bound<'_, PyAny>>,
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
@@ -45,10 +45,34 @@ impl PySpan {
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
             if let Some(exc) = exc_value {
-                let error_str = format!("{}", exc);
-                span.set_attribute(opentelemetry::KeyValue::new("error", true));
-                span.set_attribute(opentelemetry::KeyValue::new("error.message", error_str.clone()));
-                span.set_status(opentelemetry::trace::Status::error(error_str));
+                // Check if this is WaitingForUserInputException (HITL pause - not an error)
+                let is_hitl_pause = if let Some(exc_type_obj) = exc_type {
+                    // Get the exception type name
+                    if let Ok(exc_type_name) = exc_type_obj.getattr("__name__") {
+                        if let Ok(name_str) = exc_type_name.extract::<String>() {
+                            name_str == "WaitingForUserInputException"
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if is_hitl_pause {
+                    // HITL pause is normal workflow behavior, not an error
+                    span.set_attribute(opentelemetry::KeyValue::new("hitl.pause", true));
+                    span.set_attribute(opentelemetry::KeyValue::new("hitl.question", format!("{}", exc)));
+                    span.set_status(opentelemetry::trace::Status::Ok);
+                } else {
+                    // Regular exception - mark as error
+                    let error_str = format!("{}", exc);
+                    span.set_attribute(opentelemetry::KeyValue::new("error", true));
+                    span.set_attribute(opentelemetry::KeyValue::new("error.message", error_str.clone()));
+                    span.set_status(opentelemetry::trace::Status::error(error_str));
+                }
             } else {
                 span.set_status(opentelemetry::trace::Status::Ok);
             }
@@ -113,7 +137,7 @@ impl PyToolSpan {
     /// End the span when exiting context manager
     fn __exit__(
         &self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
+        exc_type: Option<&Bound<'_, PyAny>>,
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
@@ -121,8 +145,32 @@ impl PyToolSpan {
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
             if let Some(exc) = exc_value {
-                let error_str = format!("{}", exc);
-                record_tool_error(&mut span, &error_str);
+                // Check if this is WaitingForUserInputException (HITL pause - not an error)
+                let is_hitl_pause = if let Some(exc_type_obj) = exc_type {
+                    // Get the exception type name
+                    if let Ok(exc_type_name) = exc_type_obj.getattr("__name__") {
+                        if let Ok(name_str) = exc_type_name.extract::<String>() {
+                            name_str == "WaitingForUserInputException"
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if is_hitl_pause {
+                    // HITL pause is normal workflow behavior, not an error
+                    span.set_attribute(opentelemetry::KeyValue::new("hitl.pause", true));
+                    span.set_attribute(opentelemetry::KeyValue::new("hitl.question", format!("{}", exc)));
+                    span.set_status(opentelemetry::trace::Status::Ok);
+                } else {
+                    // Regular exception - mark as error
+                    let error_str = format!("{}", exc);
+                    record_tool_error(&mut span, &error_str);
+                }
             }
             // Span will be ended when dropped
         }

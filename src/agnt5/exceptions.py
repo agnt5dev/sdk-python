@@ -65,6 +65,8 @@ class WaitingForUserInputException(AGNT5Error):
         input_type: Type of input ("text", "approval", or "choice")
         options: List of options for approval/choice inputs
         checkpoint_state: Current workflow state for resume
+        agent_context: Optional agent execution state for agent-level HITL
+            Contains: agent_name, iteration, messages, tool_results, pending_tool_call, etc.
     """
 
     def __init__(
@@ -73,6 +75,7 @@ class WaitingForUserInputException(AGNT5Error):
         input_type: str,
         options: Optional[List[Dict]],
         checkpoint_state: Dict,
+        agent_context: Optional[Dict] = None,
     ) -> None:
         """Initialize WaitingForUserInputException.
 
@@ -81,9 +84,19 @@ class WaitingForUserInputException(AGNT5Error):
             input_type: Type of input - "text", "approval", or "choice"
             options: List of option dicts (for approval/choice)
             checkpoint_state: Workflow state snapshot for resume
+            agent_context: Optional agent execution state for resuming agents
+                Required fields when provided:
+                - agent_name: Name of the agent that paused
+                - iteration: Current iteration number (0-indexed)
+                - messages: LLM conversation history as list of dicts
+                - tool_results: Partial tool results for current iteration
+                - pending_tool_call: The HITL tool call awaiting response
+                - all_tool_calls: All tool calls made so far
+                - model_config: Model settings for resume
         """
         super().__init__(f"Waiting for user input: {question}")
         self.question = question
         self.input_type = input_type
         self.options = options or []
         self.checkpoint_state = checkpoint_state
+        self.agent_context = agent_context

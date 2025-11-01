@@ -17,6 +17,7 @@ from . import lm
 from .lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
 from .tool import Tool, ToolRegistry
 from ._telemetry import setup_module_logger
+from .exceptions import WaitingForUserInputException
 
 logger = setup_module_logger(__name__)
 
@@ -867,6 +868,47 @@ class Agent:
 
         return handoff_tool
 
+    def _detect_memory_scope(self, context: Optional[Context]) -> tuple[str, str]:
+        """
+        Auto-detect memory scope from context for agent conversation persistence.
+
+        Implements priority logic:
+        1. user_id → user-scoped memory (long-term)
+        2. session_id → session-scoped memory (multi-turn)
+        3. run_id → run-scoped memory (ephemeral)
+
+        Args:
+            context: WorkflowContext or other context with memory scoping fields
+
+        Returns:
+            Tuple of (entity_key, scope) where:
+            - entity_key: e.g., "user:user-456", "session:abc-123", "run:xyz-789"
+            - scope: "user", "session", or "run"
+
+        Example:
+            entity_key, scope = agent._detect_memory_scope(ctx)
+            # If ctx.user_id="user-123": ("user:user-123", "user")
+            # If ctx.session_id="sess-456": ("session:sess-456", "session")
+            # Otherwise: ("run:run-789", "run")
+        """
+        # Extract identifiers from context
+        user_id = getattr(context, 'user_id', None) if context else None
+        session_id = getattr(context, 'session_id', None) if context else None
+        run_id = getattr(context, 'run_id', None) if context else None
+
+        # Priority: user_id > session_id > run_id
+        if user_id:
+            return (f"user:{user_id}", "user")
+        elif session_id and session_id != run_id:  # Explicit session (not defaulting to run_id)
+            return (f"session:{session_id}", "session")
+        elif run_id:
+            return (f"run:{run_id}", "run")
+        else:
+            # Fallback: create ephemeral key
+            import uuid
+            fallback_run_id = f"agent-{self.name}-{uuid.uuid4().hex[:8]}"
+            return (f"run:{fallback_run_id}", "run")
+
     async def run(
         self,
         user_message: str,
@@ -910,12 +952,18 @@ class Agent:
             pass
         elif hasattr(context, '_workflow_entity'):
             # WorkflowContext - create AgentContext that inherits state
+            # Auto-detect memory scope based on user_id/session_id/run_id priority
+            entity_key, scope = self._detect_memory_scope(context)
+
             import uuid
             run_id = f"{context.run_id}:agent:{self.name}"
+            # Extract the ID from entity_key (e.g., "session:abc-123" → "abc-123")
+            detected_session_id = entity_key.split(":", 1)[1] if ":" in entity_key else context.run_id
+
             context = AgentContext(
                 run_id=run_id,
                 agent_name=self.name,
-                session_id=context.run_id,  # Share workflow's session
+                session_id=detected_session_id,  # Use auto-detected scope
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
@@ -938,6 +986,22 @@ class Agent:
                 "agent.max_iterations": self.max_iterations,
                 "user_message": user_message,
             })
+
+        # NEW: Check if this is a resume from HITL
+        if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
+            resume_info = workflow_ctx._agent_resume_info
+            if resume_info["agent_name"] == self.name:
+                self.logger.info("Detected HITL resume, calling resume_from_hitl()")
+
+                # Clear resume info to avoid re-entry
+                delattr(workflow_ctx, "_agent_resume_info")
+
+                # Resume from checkpoint (context setup happens inside resume_from_hitl)
+                return await self.resume_from_hitl(
+                    context=workflow_ctx,
+                    agent_context=resume_info["agent_context"],
+                    user_response=resume_info["user_response"],
+                )
 
         # Set context in task-local storage for automatic propagation to tools and LM calls
         token = set_current_context(context)
@@ -1091,7 +1155,44 @@ class Agent:
                                         {"tool": tool_name, "result": result_text, "error": None}
                                     )
 
+                                except WaitingForUserInputException as e:
+                                    # HITL PAUSE: Capture agent state and propagate exception
+                                    self.logger.info(f"Agent pausing for user input at iteration {iteration}")
+
+                                    # Serialize messages to dict format
+                                    messages_dict = [
+                                        {"role": msg.role.value, "content": msg.content}
+                                        for msg in messages
+                                    ]
+
+                                    # Enhance exception with agent execution context
+                                    raise WaitingForUserInputException(
+                                        question=e.question,
+                                        input_type=e.input_type,
+                                        options=e.options,
+                                        checkpoint_state=e.checkpoint_state,
+                                        agent_context={
+                                            "agent_name": self.name,
+                                            "iteration": iteration,
+                                            "messages": messages_dict,
+                                            "tool_results": tool_results,
+                                            "pending_tool_call": {
+                                                "name": tool_call["name"],
+                                                "arguments": tool_call["arguments"],
+                                                "tool_call_index": response.tool_calls.index(tool_call),
+                                            },
+                                            "all_tool_calls": all_tool_calls,
+                                            "model_config": {
+                                                "model": self.model,
+                                                "temperature": self.temperature,
+                                                "max_tokens": self.max_tokens,
+                                                "top_p": self.top_p,
+                                            },
+                                        },
+                                    ) from e
+
                                 except Exception as e:
+                                    # Regular tool errors - log and continue
                                     self.logger.error(f"Tool execution error: {e}")
                                     tool_results.append(
                                         {"tool": tool_name, "result": None, "error": str(e)}
@@ -1167,6 +1268,317 @@ class Agent:
             # Always reset context to prevent leakage between agent executions
             from .context import _current_context
             _current_context.reset(token)
+
+    async def resume_from_hitl(
+        self,
+        context: Context,
+        agent_context: Dict,
+        user_response: str,
+    ) -> AgentResult:
+        """
+        Resume agent execution after HITL pause.
+
+        This method reconstructs agent state from the checkpoint and injects
+        the user's response as the successful tool result, then continues
+        the conversation loop.
+
+        Args:
+            context: Current execution context (workflow or agent)
+            agent_context: Agent state from WaitingForUserInputException.agent_context
+            user_response: User's answer to the HITL question
+
+        Returns:
+            AgentResult with final output and tool calls
+        """
+        self.logger.info(f"Resuming agent '{self.name}' from HITL pause")
+
+        # 1. Restore conversation state
+        messages = [
+            Message(role=lm.MessageRole(msg["role"]), content=msg["content"])
+            for msg in agent_context["messages"]
+        ]
+        iteration = agent_context["iteration"]
+        all_tool_calls = agent_context["all_tool_calls"]
+
+        # 2. Restore partial tool results for current iteration
+        tool_results = agent_context["tool_results"]
+
+        # 3. Inject user response as successful tool result
+        pending_tool = agent_context["pending_tool_call"]
+        tool_results.append({
+            "tool": pending_tool["name"],
+            "result": json.dumps(user_response),
+            "error": None,
+        })
+
+        self.logger.debug(
+            f"Injected user response for tool '{pending_tool['name']}': {user_response}"
+        )
+
+        # 4. Add tool results to conversation
+        results_text = "\n".join([
+            f"Tool: {tr['tool']}\nResult: {tr['result']}"
+            if tr["error"] is None
+            else f"Tool: {tr['tool']}\nError: {tr['error']}"
+            for tr in tool_results
+        ])
+        messages.append(Message.user(
+            f"Tool results:\n{results_text}\n\n"
+            f"Please provide your final answer based on these results."
+        ))
+
+        # 5. Continue agent execution loop from next iteration
+        return await self._continue_execution_from_iteration(
+            context=context,
+            messages=messages,
+            iteration=iteration + 1,  # Next iteration
+            all_tool_calls=all_tool_calls,
+        )
+
+    async def _continue_execution_from_iteration(
+        self,
+        context: Context,
+        messages: List[Message],
+        iteration: int,
+        all_tool_calls: List[Dict],
+    ) -> AgentResult:
+        """
+        Continue agent execution from a specific iteration.
+
+        This is the core execution loop extracted to support both:
+        1. Normal execution (starting from iteration 0)
+        2. Resume after HITL (starting from iteration N)
+
+        Args:
+            context: Execution context
+            messages: Conversation history
+            iteration: Starting iteration number
+            all_tool_calls: Accumulated tool calls
+
+        Returns:
+            AgentResult with output and tool calls
+        """
+        # Extract workflow context for checkpointing
+        workflow_ctx = None
+        if hasattr(context, "_workflow_entity"):
+            workflow_ctx = context
+        elif hasattr(context, "_agent_data") and "_workflow_ctx" in context._agent_data:
+            workflow_ctx = context._agent_data["_workflow_ctx"]
+
+        # Prepare tool definitions
+        tool_defs = [
+            ToolDefinition(
+                name=name,
+                description=tool.description or f"Tool: {name}",
+                parameters=tool.input_schema if hasattr(tool, "input_schema") else {},
+            )
+            for name, tool in self.tools.items()
+        ]
+
+        # Main iteration loop (continue from specified iteration)
+        while iteration < self.max_iterations:
+            self.logger.debug(f"Agent iteration {iteration + 1}/{self.max_iterations}")
+
+            # Call LLM for next response
+            if self._language_model:
+                # Legacy API: model is a LanguageModel instance
+                request = GenerateRequest(
+                    system_prompt=self.instructions,
+                    messages=messages,
+                    tools=tool_defs if tool_defs else [],
+                )
+                request.config.temperature = self.temperature
+                if self.max_tokens:
+                    request.config.max_tokens = self.max_tokens
+                if self.top_p:
+                    request.config.top_p = self.top_p
+                response = await self._language_model.generate(request)
+            else:
+                # New API: model is a string, create internal LM instance
+                request = GenerateRequest(
+                    model=self.model,
+                    system_prompt=self.instructions,
+                    messages=messages,
+                    tools=tool_defs if tool_defs else [],
+                )
+                request.config.temperature = self.temperature
+                if self.max_tokens:
+                    request.config.max_tokens = self.max_tokens
+                if self.top_p:
+                    request.config.top_p = self.top_p
+
+                # Create internal LM instance for generation
+                from .lm import _LanguageModel
+                provider, model_name = self.model.split('/', 1)
+                internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+                response = await internal_lm.generate(request)
+
+            # Add assistant response to messages
+            messages.append(Message.assistant(response.text))
+
+            # Check if LLM wants to use tools
+            if response.tool_calls:
+                self.logger.debug(f"Agent calling {len(response.tool_calls)} tool(s)")
+
+                # Store current conversation in context for potential handoffs
+                if not hasattr(context, '_agent_data'):
+                    context._agent_data = {}
+                context._agent_data["_current_conversation"] = messages
+
+                # Execute tool calls
+                tool_results = []
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args_str = tool_call["arguments"]
+
+                    # Track tool call
+                    all_tool_calls.append({
+                        "name": tool_name,
+                        "arguments": tool_args_str,
+                        "iteration": iteration + 1,
+                    })
+
+                    # Execute tool
+                    try:
+                        # Parse arguments
+                        tool_args = json.loads(tool_args_str)
+
+                        # Get tool
+                        tool = self.tools.get(tool_name)
+                        if not tool:
+                            result_text = f"Error: Tool '{tool_name}' not found"
+                        else:
+                            # Execute tool
+                            result = await tool.invoke(context, **tool_args)
+
+                            # Check if this was a handoff
+                            if isinstance(result, dict) and result.get("_handoff"):
+                                self.logger.info(
+                                    f"Handoff detected to '{result['to_agent']}', "
+                                    f"terminating current agent"
+                                )
+                                # Save conversation before returning
+                                if isinstance(context, AgentContext):
+                                    await context.save_conversation_history(messages)
+                                # Return immediately with handoff result
+                                return AgentResult(
+                                    output=result["output"],
+                                    tool_calls=all_tool_calls + result.get("tool_calls", []),
+                                    context=context,
+                                    handoff_to=result["to_agent"],
+                                    handoff_metadata=result,
+                                )
+
+                            result_text = json.dumps(result) if result else "null"
+
+                        tool_results.append(
+                            {"tool": tool_name, "result": result_text, "error": None}
+                        )
+
+                    except WaitingForUserInputException as e:
+                        # HITL PAUSE: Capture agent state and propagate exception
+                        self.logger.info(f"Agent pausing for user input at iteration {iteration}")
+
+                        # Serialize messages to dict format
+                        messages_dict = [
+                            {"role": msg.role.value, "content": msg.content}
+                            for msg in messages
+                        ]
+
+                        # Enhance exception with agent execution context
+                        from .exceptions import WaitingForUserInputException
+                        raise WaitingForUserInputException(
+                            question=e.question,
+                            input_type=e.input_type,
+                            options=e.options,
+                            checkpoint_state=e.checkpoint_state,
+                            agent_context={
+                                "agent_name": self.name,
+                                "iteration": iteration,
+                                "messages": messages_dict,
+                                "tool_results": tool_results,
+                                "pending_tool_call": {
+                                    "name": tool_call["name"],
+                                    "arguments": tool_call["arguments"],
+                                    "tool_call_index": response.tool_calls.index(tool_call),
+                                },
+                                "all_tool_calls": all_tool_calls,
+                                "model_config": {
+                                    "model": self.model,
+                                    "temperature": self.temperature,
+                                    "max_tokens": self.max_tokens,
+                                    "top_p": self.top_p,
+                                },
+                            },
+                        ) from e
+
+                    except Exception as e:
+                        # Regular tool errors - log and continue
+                        self.logger.error(f"Tool execution error: {e}")
+                        tool_results.append(
+                            {"tool": tool_name, "result": None, "error": str(e)}
+                        )
+
+                # Add tool results to conversation
+                results_text = "\n".join([
+                    f"Tool: {tr['tool']}\nResult: {tr['result']}"
+                    if tr["error"] is None
+                    else f"Tool: {tr['tool']}\nError: {tr['error']}"
+                    for tr in tool_results
+                ])
+                messages.append(Message.user(
+                    f"Tool results:\n{results_text}\n\n"
+                    f"Please provide your final answer based on these results."
+                ))
+
+                # Continue loop for agent to process results
+
+            else:
+                # No tool calls - agent is done
+                self.logger.debug(f"Agent completed after {iteration + 1} iterations")
+                # Save conversation before returning
+                if isinstance(context, AgentContext):
+                    await context.save_conversation_history(messages)
+
+                # Emit completion checkpoint
+                if workflow_ctx:
+                    workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                        "agent.name": self.name,
+                        "agent.iterations": iteration + 1,
+                        "agent.tool_calls_count": len(all_tool_calls),
+                        "output_length": len(response.text),
+                    })
+
+                return AgentResult(
+                    output=response.text,
+                    tool_calls=all_tool_calls,
+                    context=context,
+                )
+
+            iteration += 1
+
+        # Max iterations reached
+        self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
+        final_output = messages[-1].content if messages else "No output generated"
+        # Save conversation before returning
+        if isinstance(context, AgentContext):
+            await context.save_conversation_history(messages)
+
+        # Emit completion checkpoint with max iterations flag
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                "agent.name": self.name,
+                "agent.iterations": self.max_iterations,
+                "agent.tool_calls_count": len(all_tool_calls),
+                "agent.max_iterations_reached": True,
+                "output_length": len(final_output),
+            })
+
+        return AgentResult(
+            output=final_output,
+            tool_calls=all_tool_calls,
+            context=context,
+        )
 
 
 def agent(

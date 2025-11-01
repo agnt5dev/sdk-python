@@ -818,9 +818,35 @@ class Worker:
                     user_response = request.metadata["user_response"]
                     logger.info(f"▶️  Resuming workflow with user response: {user_response}")
 
-            # Create WorkflowEntity for state management
-            # Use invocation_id as run_id to ensure each execution has unique state
-            workflow_entity = WorkflowEntity(run_id=request.invocation_id)
+            # NEW: Check for agent resume (agent-level HITL)
+            agent_context = None
+            if hasattr(request, 'metadata') and request.metadata:
+                if "agent_context" in request.metadata:
+                    agent_context_json = request.metadata["agent_context"]
+                    try:
+                        agent_context = json.loads(agent_context_json)
+                        agent_name = agent_context.get("agent_name", "unknown")
+                        iteration = agent_context.get("iteration", 0)
+                        logger.info(
+                            f"▶️  Resuming agent '{agent_name}' from iteration {iteration} "
+                            f"with user response: {user_response}"
+                        )
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse agent_context from metadata")
+                        agent_context = None
+
+            # Extract session_id and user_id from request for memory scoping
+            # Do this FIRST so we can pass to WorkflowEntity constructor
+            session_id = request.session_id if hasattr(request, 'session_id') and request.session_id else request.invocation_id
+            user_id = request.user_id if hasattr(request, 'user_id') and request.user_id else None
+
+            # Create WorkflowEntity for state management with memory scoping
+            # Entity key will be scoped based on priority: user_id > session_id > run_id
+            workflow_entity = WorkflowEntity(
+                run_id=request.invocation_id,
+                session_id=session_id,
+                user_id=user_id,
+            )
 
             # Load replay data into entity if provided
             if completed_steps:
@@ -869,9 +895,23 @@ class Worker:
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
                 run_id=request.invocation_id,  # Use unique invocation_id for this execution
+                session_id=session_id,  # Session for multi-turn conversations
+                user_id=user_id,  # User for long-term memory
                 runtime_context=request.runtime_context,
                 checkpoint_callback=checkpoint_callback,
             )
+
+            # NEW: Populate agent resume info if this is an agent HITL resume
+            if agent_context and user_response:
+                ctx._agent_resume_info = {
+                    "agent_name": agent_context["agent_name"],
+                    "agent_context": agent_context,
+                    "user_response": user_response,
+                }
+                logger.debug(
+                    f"Set agent resume info for '{agent_context['agent_name']}' "
+                    f"in workflow context"
+                )
 
             # Execute workflow directly - Rust bridge handles tracing
             # Note: Removed Python-level span creation to avoid duplicate spans.
@@ -933,6 +973,16 @@ class Worker:
                     else:
                         logger.warning("⚠️  _state_changes list is empty - no state change history captured")
 
+                    # CRITICAL: Persist workflow entity state to platform
+                    # This stores the WorkflowEntity as a first-class entity with proper versioning
+                    try:
+                        logger.info(f"🔍 DEBUG: About to call _persist_state() for run {request.invocation_id}")
+                        await ctx._workflow_entity._persist_state()
+                        logger.info(f"✅ Successfully persisted WorkflowEntity state for run {request.invocation_id}")
+                    except Exception as persist_error:
+                        logger.error(f"❌ Failed to persist WorkflowEntity state (non-fatal): {persist_error}", exc_info=True)
+                        # Continue anyway - persistence failure shouldn't fail the workflow
+
             logger.info(f"Workflow completed successfully with {len(step_events)} steps")
 
             # Add session_id to metadata for multi-turn conversation support
@@ -961,8 +1011,9 @@ class Worker:
             )
 
         except WaitingForUserInputException as e:
-            # Workflow paused for user input
-            logger.info(f"⏸️  Workflow paused waiting for user input: {e.question}")
+            # Workflow or agent paused for user input
+            pause_type = "agent" if e.agent_context else "workflow"
+            logger.info(f"⏸️  {pause_type.capitalize()} paused waiting for user input: {e.question}")
 
             # Collect metadata for pause state
             # Note: All metadata values must be strings for Rust FFI
@@ -970,6 +1021,7 @@ class Worker:
                 "status": "awaiting_user_input",
                 "question": e.question,
                 "input_type": e.input_type,
+                "pause_type": pause_type,  # NEW: Indicates workflow vs agent pause
             }
 
             # CRITICAL: Propagate tenant_id even when pausing
@@ -983,6 +1035,14 @@ class Worker:
                 pause_metadata["checkpoint_state"] = json.dumps(e.checkpoint_state)
             if session_id:
                 pause_metadata["session_id"] = session_id
+
+            # NEW: Store agent execution state if present
+            if e.agent_context:
+                pause_metadata["agent_context"] = json.dumps(e.agent_context)
+                logger.debug(
+                    f"Agent '{e.agent_context['agent_name']}' paused at "
+                    f"iteration {e.agent_context['iteration']}"
+                )
 
             # Add step events to pause metadata for durability
             step_events = ctx._workflow_entity._step_events

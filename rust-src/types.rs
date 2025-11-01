@@ -308,6 +308,10 @@ pub struct PyExecuteComponentRequest {
     pub step_checkpoints: Vec<PyStepCheckpoint>,
     #[pyo3(get)]
     pub runtime_context: Option<crate::PyRuntimeContext>,
+    #[pyo3(get)]
+    pub session_id: Option<String>,
+    #[pyo3(get)]
+    pub user_id: Option<String>,
 }
 
 #[pymethods]
@@ -344,6 +348,8 @@ impl PyExecuteComponentRequest {
             metadata: metadata.unwrap_or_default(),
             step_checkpoints: step_checkpoints.unwrap_or_default(),
             runtime_context: None,
+            session_id: None,
+            user_id: None,
         }
     }
 }
@@ -400,6 +406,16 @@ impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
                 .map(PyStepCheckpoint::from)
                 .collect(),
             runtime_context: None, // Will be set in worker.rs after context extraction
+            session_id: if req.session_id.is_empty() {
+                None
+            } else {
+                Some(req.session_id)
+            },
+            user_id: if req.user_id.is_empty() {
+                None
+            } else {
+                Some(req.user_id)
+            },
         }
     }
 }
