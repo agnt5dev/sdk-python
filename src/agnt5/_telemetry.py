@@ -69,8 +69,13 @@ class OpenTelemetryHandler(logging.Handler):
 
             # Include exception traceback if present (from logger.exception() or exc_info=True)
             if record.exc_info:
-                # formatException() returns the formatted traceback string
-                exc_text = self.formatException(record.exc_info)
+                # Use formatter to format the exception, or fall back to basic formatting
+                if self.formatter:
+                    exc_text = self.formatter.formatException(record.exc_info)
+                else:
+                    # Fallback: use basic traceback formatting
+                    import traceback
+                    exc_text = ''.join(traceback.format_exception(*record.exc_info))
                 message = f"{message}\n{exc_text}"
 
             # Extract correlation IDs from LogRecord attributes (added by _CorrelationFilter)
