@@ -784,6 +784,23 @@ impl PyWorker {
                                                 "function.error",
                                                 error_msg.to_string(),
                                             ));
+
+                                            // Add stack trace if available from metadata
+                                            if let Some(metadata) = &py_response.metadata {
+                                                if let Some(stack_trace) = metadata.get("stack_trace") {
+                                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                                        "exception.stacktrace",
+                                                        stack_trace.clone(),
+                                                    ));
+                                                }
+                                                if let Some(error_type) = metadata.get("error_type") {
+                                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                                        "exception.type",
+                                                        error_type.clone(),
+                                                    ));
+                                                }
+                                            }
+
                                             span.set_status(opentelemetry::trace::Status::error(
                                                 error_msg.to_string(),
                                             ));

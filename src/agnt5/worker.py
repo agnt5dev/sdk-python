@@ -749,14 +749,27 @@ class Worker:
         except Exception as e:
             # Include exception type for better error messages
             error_msg = f"{type(e).__name__}: {str(e)}"
+
+            # Capture full stack trace for telemetry
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+
+            # Log with full traceback
             logger.error(f"Function execution failed: {error_msg}", exc_info=True)
+
+            # Store stack trace in metadata for observability
+            metadata = {
+                "error_type": type(e).__name__,
+                "stack_trace": stack_trace,
+            }
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=None,
+                metadata=metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
