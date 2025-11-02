@@ -55,27 +55,35 @@ async def domain_specific_analysis(ctx: Context, data: str) -> Dict:
 
 
 # ============================================================================
-# AGENT FACTORY HELPERS
+# MODULE-LEVEL AGENTS (for auto-registration)
 # ============================================================================
 
+# Domain specialist agent with analysis capabilities
+domain_specialist = Agent(
+    name="DomainSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a domain specialist for data analysis.
+    Use your analysis tool to provide expert insights.
+    Be thorough and technical in your responses.""",
+    tools=[domain_specific_analysis],
+    temperature=0.7,
+    max_iterations=5,
+)
 
-def create_domain_specialist() -> Agent:
-    """
-    Create a domain specialist agent with analysis capabilities.
+# Coordinator agent that uses specialist as a tool
+coordinator_agent = Agent(
+    name="Coordinator",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a coordinator agent. You can:
+    - Search for information (search_web)
+    - Delegate complex analysis to the DomainSpecialist agent
 
-    Returns:
-        Agent configured as a domain specialist
-    """
-    return Agent(
-        name="DomainSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a domain specialist for data analysis.
-        Use your analysis tool to provide expert insights.
-        Be thorough and technical in your responses.""",
-        tools=[domain_specific_analysis],
-        temperature=0.7,
-        max_iterations=5,
-    )
+    When you need expert analysis, use the DomainSpecialist.
+    Synthesize results from all sources into a coherent response.""",
+    tools=[search_web, domain_specialist],  # Agent as tool!
+    temperature=0.7,
+    max_iterations=10,
+)
 
 
 # ============================================================================
@@ -106,25 +114,7 @@ async def test_agent_with_agent_as_tool(ctx: WorkflowContext, task: str) -> dict
     ctx.logger.info("=== TEST 4: Agent with Agent as Tool ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create specialist agent with domain-specific tool
-    specialist_agent = create_domain_specialist()
-
-    # Create coordinator agent that uses specialist as a tool
-    coordinator_agent = Agent(
-        name="Coordinator",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a coordinator agent. You can:
-        - Search for information (search_web)
-        - Delegate complex analysis to the DomainSpecialist agent
-
-        When you need expert analysis, use the DomainSpecialist.
-        Synthesize results from all sources into a coherent response.""",
-        tools=[search_web, specialist_agent],  # Agent as tool!
-        temperature=0.7,
-        max_iterations=10,
-    )
-
-    # Run coordinator
+    # Run coordinator (using module-level agent instance)
     ctx.logger.info("Executing coordinator agent...")
     result = await coordinator_agent.run(task, context=ctx)
 

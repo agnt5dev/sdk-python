@@ -733,6 +733,9 @@ class Agent:
             }
         }
 
+        # Auto-register agent for discovery by auto_register=True
+        AgentRegistry.register(self)
+
         # Store metadata
         self.metadata = {
             "description": instructions,

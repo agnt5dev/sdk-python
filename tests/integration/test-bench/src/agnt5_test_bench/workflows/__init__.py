@@ -64,20 +64,21 @@ from .agent_tools_workflows import (
 
 from .agent_collaboration_workflows import (
     test_agent_with_agent_as_tool,
-    # Shared tools and helpers
+    # Shared tools and agents
     domain_specific_analysis,
-    create_domain_specialist,
+    domain_specialist,
+    coordinator_agent,
 )
 
 from .agent_handoff_workflows import (
     test_handoff_simple,
     test_handoff_with_context,
     test_handoff_complex,
-    # Shared tools and helpers
+    # Shared tools and agents
     save_user_preference,
-    create_technical_specialist,
-    create_business_specialist,
-    create_research_specialist,
+    technical_specialist,
+    business_specialist,
+    research_specialist,
 )
 
 from .agent_hitl_workflows import (
@@ -123,9 +124,10 @@ __all__ = [
     "domain_specific_analysis",
     "save_user_preference",
 
-    # Agent factory helpers (exported for reuse)
-    "create_domain_specialist",
-    "create_technical_specialist",
-    "create_business_specialist",
-    "create_research_specialist",
+    # Shared agents (exported for reuse)
+    "domain_specialist",
+    "coordinator_agent",
+    "technical_specialist",
+    "business_specialist",
+    "research_specialist",
 ]

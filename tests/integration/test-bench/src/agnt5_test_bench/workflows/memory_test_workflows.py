@@ -2,6 +2,10 @@
 Memory Architecture Test Workflows
 
 Test workflows for verifying session-scoped and user-scoped memory functionality.
+
+NOTE: Agents in this file are intentionally created inline (not module-level) to test
+memory scoping behavior across different invocations. They will not be auto-registered,
+which is expected for these memory-specific test workflows.
 """
 
 from agnt5 import workflow, WorkflowContext, Agent

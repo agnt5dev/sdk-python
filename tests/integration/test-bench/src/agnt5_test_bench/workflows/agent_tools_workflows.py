@@ -109,6 +109,39 @@ async def get_weather(ctx: Context, location: str) -> Dict:
 
 
 # ============================================================================
+# MODULE-LEVEL AGENTS (for auto-registration)
+# ============================================================================
+
+# Agent with calculator tool
+calculator_agent = Agent(
+    name="CalculatorAgent",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a helpful assistant with access to a calculator.
+    Use the simple_calculator tool when you need to perform mathematical calculations.
+    Be precise and show your work.""",
+    tools=[simple_calculator],
+    temperature=0.7,
+    max_iterations=5,
+)
+
+# Agent with multiple tools
+multi_tool_agent = Agent(
+    name="MultiToolAgent",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a research assistant with access to multiple tools:
+    - search_web: Search for information online
+    - simple_calculator: Perform mathematical calculations
+    - get_weather: Get current weather information
+
+    Use the appropriate tools to complete tasks effectively.
+    Explain your reasoning and the results from each tool.""",
+    tools=[search_web, simple_calculator, get_weather],
+    temperature=0.7,
+    max_iterations=10,
+)
+
+
+# ============================================================================
 # TEST WORKFLOW 2: Agent with Simple Tool
 # ============================================================================
 
@@ -136,21 +169,9 @@ async def test_agent_with_simple_tool(ctx: WorkflowContext, task: str) -> dict:
     ctx.logger.info("=== TEST 2: Agent with Simple Tool ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create agent with calculator tool
-    agent = Agent(
-        name="CalculatorAgent",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a helpful assistant with access to a calculator.
-        Use the simple_calculator tool when you need to perform mathematical calculations.
-        Be precise and show your work.""",
-        tools=[simple_calculator],
-        temperature=0.7,
-        max_iterations=5,
-    )
-
-    # Run agent
+    # Run agent (using module-level agent instance)
     ctx.logger.info("Executing agent with calculator tool...")
-    result = await agent.run(task, context=ctx)
+    result = await calculator_agent.run(task, context=ctx)
 
     # Extract tool usage info
     tool_calls = result.tool_calls
@@ -197,25 +218,9 @@ async def test_agent_with_multiple_tools(ctx: WorkflowContext, task: str) -> dic
     ctx.logger.info("=== TEST 3: Agent with Multiple Tools ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create agent with multiple tools
-    agent = Agent(
-        name="MultiToolAgent",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a research assistant with access to multiple tools:
-        - search_web: Search for information online
-        - simple_calculator: Perform mathematical calculations
-        - get_weather: Get current weather information
-
-        Use the appropriate tools to complete tasks effectively.
-        Explain your reasoning and the results from each tool.""",
-        tools=[search_web, simple_calculator, get_weather],
-        temperature=0.7,
-        max_iterations=10,
-    )
-
-    # Run agent
+    # Run agent (using module-level agent instance)
     ctx.logger.info("Executing agent with multiple tools...")
-    result = await agent.run(task, context=ctx)
+    result = await multi_tool_agent.run(task, context=ctx)
 
     # Extract tool usage info
     tool_calls = result.tool_calls

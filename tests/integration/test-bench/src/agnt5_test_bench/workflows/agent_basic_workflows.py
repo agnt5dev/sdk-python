@@ -17,6 +17,14 @@ See also:
 
 from agnt5 import workflow, WorkflowContext, Agent
 
+# Create agent at module level for auto-registration
+basic_agent = Agent(
+    name="BasicAgent",
+    model="openai/gpt-4o-mini",
+    instructions="You are a helpful assistant. Be concise and clear.",
+    temperature=0.7,
+)
+
 
 @workflow
 async def test_agent_basic(ctx: WorkflowContext, task: str) -> dict:
@@ -41,17 +49,9 @@ async def test_agent_basic(ctx: WorkflowContext, task: str) -> dict:
     ctx.logger.info("=== TEST 1: Basic Agent ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create simple agent
-    agent = Agent(
-        name="BasicAgent",
-        model="openai/gpt-4o-mini",
-        instructions="You are a helpful assistant. Be concise and clear.",
-        temperature=0.7,
-    )
-
-    # Run agent
+    # Run agent (using module-level agent instance)
     ctx.logger.info("Executing agent...")
-    result = await agent.run(task, context=ctx)
+    result = await basic_agent.run(task, context=ctx)
 
     ctx.logger.info(f"Agent output: {result.output}")
     ctx.logger.info(f"Tool calls: {len(result.tool_calls)}")

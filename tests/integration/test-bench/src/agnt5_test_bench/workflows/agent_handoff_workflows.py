@@ -58,49 +58,158 @@ async def save_user_preference(ctx: Context, key: str, value: str) -> str:
 
 
 # ============================================================================
-# AGENT FACTORY HELPERS
+# MODULE-LEVEL AGENTS (for auto-registration)
 # ============================================================================
 
+# Technical specialist agent for software engineering questions
+technical_specialist = Agent(
+    name="TechnicalSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a technical specialist for software engineering questions.
+    Provide detailed technical answers with code examples when appropriate.
+    Be thorough and precise.""",
+    temperature=0.7,
+    max_iterations=5,
+)
 
-def create_technical_specialist() -> Agent:
-    """Create a technical specialist agent for software engineering questions."""
-    return Agent(
-        name="TechnicalSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a technical specialist for software engineering questions.
-        Provide detailed technical answers with code examples when appropriate.
-        Be thorough and precise.""",
-        temperature=0.7,
-        max_iterations=5,
-    )
+# Business specialist agent for business and strategy questions
+business_specialist = Agent(
+    name="BusinessSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a business specialist for business and strategy questions.
+    Provide business-focused advice with practical recommendations.
+    Consider ROI and business impact.""",
+    temperature=0.7,
+    max_iterations=5,
+)
 
+# Research specialist with search and analysis capabilities
+research_specialist = Agent(
+    name="ResearchSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a research specialist. You can:
+    - Search the web for information
+    - Perform data analysis
+    Be thorough and provide detailed insights.""",
+    tools=[search_web, domain_specific_analysis],
+    temperature=0.7,
+    max_iterations=5,
+)
 
-def create_business_specialist() -> Agent:
-    """Create a business specialist agent for business and strategy questions."""
-    return Agent(
-        name="BusinessSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a business specialist for business and strategy questions.
-        Provide business-focused advice with practical recommendations.
-        Consider ROI and business impact.""",
-        temperature=0.7,
-        max_iterations=5,
-    )
+# Context-aware specialist for handoff scenarios
+context_aware_specialist = Agent(
+    name="ContextAwareSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a specialist agent receiving a handoff.
 
+    IMPORTANT: Check the context for user preferences:
+    - Use ctx.get('user_preferences', {}) to retrieve preferences
+    - Personalize your response based on the user's name and preferences
+    - Acknowledge the user by name in your response""",
+    tools=[],
+    temperature=0.7,
+    max_iterations=5,
+)
 
-def create_research_specialist() -> Agent:
-    """Create a research specialist with search and analysis capabilities."""
-    return Agent(
-        name="ResearchSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a research specialist. You can:
-        - Search the web for information
-        - Perform data analysis
-        Be thorough and provide detailed insights.""",
-        tools=[search_web, domain_specific_analysis],
-        temperature=0.7,
-        max_iterations=5,
-    )
+# Researcher agent for gathering information
+researcher_agent = Agent(
+    name="Researcher",
+    model="openai/gpt-4o-mini",
+    instructions="Research topics and gather information using web search.",
+    tools=[search_web],
+    temperature=0.7,
+    max_iterations=3,
+)
+
+# Analyst agent for data analysis
+analyst_agent = Agent(
+    name="Analyst",
+    model="openai/gpt-4o-mini",
+    instructions="Analyze data and provide insights using analysis tools.",
+    tools=[domain_specific_analysis],
+    temperature=0.7,
+    max_iterations=3,
+)
+
+# Triage agent with handoffs to specialists
+triage_agent = Agent(
+    name="TriageAgent",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a triage agent that routes requests to specialists.
+
+    Available specialists:
+    - TechnicalSpecialist: For technical/engineering questions
+    - BusinessSpecialist: For business/strategy questions
+
+    Analyze the user's request:
+    - If it's technical (code, architecture, engineering), transfer to TechnicalSpecialist
+    - If it's business (strategy, pricing, marketing), transfer to BusinessSpecialist
+    - Only handle simple general questions yourself
+
+    Use the transfer_to_{specialist} tools for delegation.""",
+    handoffs=[technical_specialist, business_specialist],
+    temperature=0.7,
+    max_iterations=3,
+)
+
+# Report writer that uses other agents as tools
+report_writer_agent = Agent(
+    name="ReportWriter",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a report writer. You can:
+    - Use the Researcher agent to gather information
+    - Use the Analyst agent to analyze data
+    - Use simple_calculator for calculations
+
+    Synthesize findings into a well-structured report with:
+    1. Executive Summary
+    2. Research Findings
+    3. Data Analysis
+    4. Recommendations""",
+    tools=[researcher_agent, analyst_agent, simple_calculator],  # Agents as tools!
+    temperature=0.7,
+    max_iterations=10,
+)
+
+# Executive that can handoff to report writer
+executive_agent = Agent(
+    name="Executive",
+    model="openai/gpt-4o-mini",
+    instructions="""You are an executive assistant.
+
+    For simple questions, answer directly.
+    For complex requests requiring comprehensive reports, transfer to ReportWriter.
+
+    Transfer if the request asks for:
+    - Research + analysis
+    - Comprehensive reports
+    - Multi-step investigations""",
+    handoffs=[handoff(report_writer_agent, "Transfer to report writer for detailed reports")],
+    temperature=0.7,
+    max_iterations=3,
+)
+
+# Intake agent that collects info and hands off
+intake_agent = Agent(
+    name="IntakeAgent",
+    model="openai/gpt-4o-mini",
+    instructions="""You are an intake agent. Your job:
+    1. Save the user's information using save_user_preference tool
+    2. Save their communication preference (concise or detailed) by asking or inferring
+    3. Transfer to ContextAwareSpecialist to handle their actual request
+
+    Always transfer after collecting info.""",
+    tools=[save_user_preference],
+    handoffs=[
+        handoff(
+            context_aware_specialist,
+            "Transfer to specialist after collecting user preferences",
+            pass_full_history=True,  # Pass conversation history
+        )
+    ],
+    temperature=0.7,
+    max_iterations=5,
+)
 
 
 # ============================================================================
@@ -137,32 +246,7 @@ async def test_handoff_simple(ctx: WorkflowContext, user_request: str) -> dict:
     ctx.logger.info("=== TEST 7: Simple Handoff ===")
     ctx.logger.info(f"User request: {user_request}")
 
-    # Create specialist agents
-    technical = create_technical_specialist()
-    business = create_business_specialist()
-
-    # Create triage agent with handoffs
-    triage_agent = Agent(
-        name="TriageAgent",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a triage agent that routes requests to specialists.
-
-        Available specialists:
-        - TechnicalSpecialist: For technical/engineering questions
-        - BusinessSpecialist: For business/strategy questions
-
-        Analyze the user's request:
-        - If it's technical (code, architecture, engineering), transfer to TechnicalSpecialist
-        - If it's business (strategy, pricing, marketing), transfer to BusinessSpecialist
-        - Only handle simple general questions yourself
-
-        Use the transfer_to_{specialist} tools for delegation.""",
-        handoffs=[technical, business],
-        temperature=0.7,
-        max_iterations=3,
-    )
-
-    # Run triage agent
+    # Run triage agent (using module-level agent instance)
     ctx.logger.info("Executing triage agent...")
     result = await triage_agent.run(user_request, context=ctx)
 
@@ -226,46 +310,12 @@ async def test_handoff_with_context(ctx: WorkflowContext, user_name: str, user_r
     ctx.logger.info("=== TEST 8: Handoff with Context Sharing ===")
     ctx.logger.info(f"User: {user_name}, Request: {user_request}")
 
-    # Create specialist that uses context
-    specialist = Agent(
-        name="ContextAwareSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a specialist agent receiving a handoff.
+    # Construct the full task with user name embedded
+    full_task = f"User name is {user_name}. User request: {user_request}. Please save the user's name first, then handle their request."
 
-        IMPORTANT: Check the context for user preferences:
-        - Use ctx.get('user_preferences', {}) to retrieve preferences
-        - Personalize your response based on the user's name and preferences
-        - Acknowledge the user by name in your response""",
-        tools=[],
-        temperature=0.7,
-        max_iterations=5,
-    )
-
-    # Create intake agent that collects info and hands off
-    intake_agent = Agent(
-        name="IntakeAgent",
-        model="openai/gpt-4o-mini",
-        instructions=f"""You are an intake agent. Your job:
-        1. Save the user's name ({user_name}) using save_user_preference(key="name", value="{user_name}")
-        2. Save their communication preference (concise or detailed) by asking or inferring
-        3. Transfer to ContextAwareSpecialist to handle their actual request
-
-        Always transfer after collecting info.""",
-        tools=[save_user_preference],
-        handoffs=[
-            handoff(
-                specialist,
-                "Transfer to specialist after collecting user preferences",
-                pass_full_history=True,  # Pass conversation history
-            )
-        ],
-        temperature=0.7,
-        max_iterations=5,
-    )
-
-    # Run intake agent
+    # Run intake agent (using module-level agent instance)
     ctx.logger.info("Executing intake agent...")
-    result = await intake_agent.run(user_request, context=ctx)
+    result = await intake_agent.run(full_task, context=ctx)
 
     # Extract handoff and context info
     handoff_occurred = result.handoff_to is not None
@@ -333,66 +383,9 @@ async def test_handoff_complex(ctx: WorkflowContext, task: str) -> dict:
     ctx.logger.info("=== TEST 9: Complex Multi-Agent Workflow ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create researcher agent (will be used AS A TOOL by report_writer)
-    researcher = Agent(
-        name="Researcher",
-        model="openai/gpt-4o-mini",
-        instructions="Research topics and gather information using web search.",
-        tools=[search_web],
-        temperature=0.7,
-        max_iterations=3,
-    )
-
-    # Create analyst agent (will be used AS A TOOL by report_writer)
-    analyst = Agent(
-        name="Analyst",
-        model="openai/gpt-4o-mini",
-        instructions="Analyze data and provide insights using analysis tools.",
-        tools=[domain_specific_analysis],
-        temperature=0.7,
-        max_iterations=3,
-    )
-
-    # Create report writer that USES other agents as tools (not handoffs!)
-    report_writer = Agent(
-        name="ReportWriter",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a report writer. You can:
-        - Use the Researcher agent to gather information
-        - Use the Analyst agent to analyze data
-        - Use simple_calculator for calculations
-
-        Synthesize findings into a well-structured report with:
-        1. Executive Summary
-        2. Research Findings
-        3. Data Analysis
-        4. Recommendations""",
-        tools=[researcher, analyst, simple_calculator],  # Agents as tools!
-        temperature=0.7,
-        max_iterations=10,
-    )
-
-    # Create executive that can HANDOFF to report writer
-    executive = Agent(
-        name="Executive",
-        model="openai/gpt-4o-mini",
-        instructions="""You are an executive assistant.
-
-        For simple questions, answer directly.
-        For complex requests requiring comprehensive reports, transfer to ReportWriter.
-
-        Transfer if the request asks for:
-        - Research + analysis
-        - Comprehensive reports
-        - Multi-step investigations""",
-        handoffs=[handoff(report_writer, "Transfer to report writer for detailed reports")],
-        temperature=0.7,
-        max_iterations=3,
-    )
-
-    # Run executive agent
+    # Run executive agent (using module-level agent instance)
     ctx.logger.info("Executing executive agent...")
-    result = await executive.run(task, context=ctx)
+    result = await executive_agent.run(task, context=ctx)
 
     # Extract comprehensive metadata
     tool_calls = result.tool_calls

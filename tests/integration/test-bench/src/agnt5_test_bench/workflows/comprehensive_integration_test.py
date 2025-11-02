@@ -30,8 +30,27 @@ See also:
 from agnt5 import workflow, WorkflowContext, Agent
 from agnt5.tool import RequestApprovalTool
 from .agent_tools_workflows import simple_calculator, get_weather
-from .agent_collaboration_workflows import create_domain_specialist, domain_specific_analysis
+from .agent_collaboration_workflows import domain_specific_analysis
 from .agent_handoff_workflows import search_web
+
+
+# ============================================================================
+# MODULE-LEVEL AGENTS (for auto-registration)
+# ============================================================================
+
+# Research specialist with search and analysis tools
+research_specialist = Agent(
+    name="ResearchSpecialist",
+    model="openai/gpt-4o-mini",
+    instructions="""You are a research specialist. You can:
+    - Search the web for information (search_web)
+    - Perform data analysis (domain_specific_analysis)
+
+    Be thorough and provide detailed insights with evidence.""",
+    tools=[search_web, domain_specific_analysis],
+    temperature=0.7,
+    max_iterations=5,
+)
 
 
 # ============================================================================
@@ -88,21 +107,10 @@ async def test_comprehensive_scenario(ctx: WorkflowContext, task: str) -> dict:
     ctx.logger.info("=== TEST 10: Comprehensive Scenario (All Features) ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Create specialist agent with research capabilities
-    specialist_agent = Agent(
-        name="ResearchSpecialist",
-        model="openai/gpt-4o-mini",
-        instructions="""You are a research specialist. You can:
-        - Search the web for information (search_web)
-        - Perform data analysis (domain_specific_analysis)
-
-        Be thorough and provide detailed insights with evidence.""",
-        tools=[search_web, domain_specific_analysis],
-        temperature=0.7,
-        max_iterations=5,
-    )
-
     # Create coordinator with all capabilities
+    # NOTE: This agent is created inline (not module-level) because it uses
+    # RequestApprovalTool which requires runtime WorkflowContext.
+    # It will not be auto-registered, but that's expected for this comprehensive test.
     coordinator_agent = Agent(
         name="ComprehensiveCoordinator",
         model="openai/gpt-4o-mini",
@@ -122,7 +130,7 @@ async def test_comprehensive_scenario(ctx: WorkflowContext, task: str) -> dict:
         tools=[
             simple_calculator,
             get_weather,
-            specialist_agent,  # Agent as tool
+            research_specialist,  # Agent as tool (module-level)
             RequestApprovalTool(ctx),  # HITL - needs WorkflowContext
         ],
         temperature=0.7,

@@ -65,7 +65,9 @@ async def test_agent_with_hitl(ctx: WorkflowContext, task: str, auto_approve: bo
     ctx.logger.info(f"Auto-approve: {auto_approve}")
 
     # Create agent with HITL capabilities
-    # Note: AskUserTool and RequestApprovalTool need WorkflowContext
+    # NOTE: This agent is created inline (not module-level) because HITL tools
+    # (AskUserTool, RequestApprovalTool) require runtime WorkflowContext.
+    # It will not be auto-registered, but that's expected for HITL test workflows.
     agent = Agent(
         name="HITLAgent",
         model="openai/gpt-4o-mini",
