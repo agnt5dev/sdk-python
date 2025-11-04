@@ -8,6 +8,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from agnt5 import Worker
 
+# Import all components to ensure they're registered
+# This is necessary for auto_register=True to discover them
+from agnt5_test_bench import entities  # noqa: F401
+from agnt5_test_bench import functions  # noqa: F401
+from agnt5_test_bench import workflows  # noqa: F401
+from agnt5_test_bench import agents  # noqa: F401
+from agnt5_test_bench import tools  # noqa: F401
+
 # Load environment variables from .env file
 dotenv_path = Path(__file__).parent / ".env"
 if dotenv_path.exists():
