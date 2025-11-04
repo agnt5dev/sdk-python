@@ -312,6 +312,9 @@ pub struct PyExecuteComponentRequest {
     pub session_id: Option<String>,
     #[pyo3(get)]
     pub user_id: Option<String>,
+    // Retry orchestration
+    #[pyo3(get)]
+    pub attempt: i32,
 }
 
 #[pymethods]
@@ -350,6 +353,7 @@ impl PyExecuteComponentRequest {
             runtime_context: None,
             session_id: None,
             user_id: None,
+            attempt: 0,
         }
     }
 }
@@ -416,6 +420,7 @@ impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
             } else {
                 Some(req.user_id)
             },
+            attempt: req.attempt,
         }
     }
 }
@@ -442,6 +447,9 @@ pub struct PyExecuteComponentResponse {
     pub done: bool,
     #[pyo3(get)]
     pub chunk_index: i64,
+    // Retry orchestration
+    #[pyo3(get)]
+    pub attempt: i32,
 }
 
 #[pymethods]
@@ -458,6 +466,7 @@ impl PyExecuteComponentResponse {
         is_chunk: Option<bool>,
         done: Option<bool>,
         chunk_index: Option<i64>,
+        attempt: Option<i32>,
     ) -> Self {
         Self {
             invocation_id,
@@ -469,6 +478,7 @@ impl PyExecuteComponentResponse {
             is_chunk: is_chunk.unwrap_or(false),
             done: done.unwrap_or(true),
             chunk_index: chunk_index.unwrap_or(0),
+            attempt: attempt.unwrap_or(0),
         }
     }
 }
@@ -498,6 +508,7 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
             is_chunk: resp.is_chunk,
             done: resp.done,
             chunk_index: resp.chunk_index,
+            attempt: resp.attempt,
         }
     }
 }
@@ -527,6 +538,7 @@ impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
             is_chunk: resp.is_chunk,
             done: resp.done,
             chunk_index: resp.chunk_index,
+            attempt: resp.attempt,
         }
     }
 }
@@ -601,6 +613,25 @@ impl From<PyComponentInfo> for ComponentInfo {
             .as_ref()
             .and_then(|json_str| parse_json_schema(json_str));
 
+        // Parse retry configuration from config dict
+        let max_attempts = comp
+            .config
+            .get("max_attempts")
+            .and_then(|v| v.parse::<i32>().ok());
+        let initial_interval_ms = comp
+            .config
+            .get("initial_interval_ms")
+            .and_then(|v| v.parse::<i32>().ok());
+        let max_interval_ms = comp
+            .config
+            .get("max_interval_ms")
+            .and_then(|v| v.parse::<i32>().ok());
+        let backoff_type = comp.config.get("backoff_type").cloned();
+        let backoff_multiplier = comp
+            .config
+            .get("backoff_multiplier")
+            .and_then(|v| v.parse::<f64>().ok());
+
         Self {
             name: comp.name,
             component_type,
@@ -609,6 +640,11 @@ impl From<PyComponentInfo> for ComponentInfo {
             config: comp.config,
             metadata: comp.metadata,
             definition: comp.definition,
+            max_attempts,
+            initial_interval_ms,
+            max_interval_ms,
+            backoff_type,
+            backoff_multiplier,
         }
     }
 }

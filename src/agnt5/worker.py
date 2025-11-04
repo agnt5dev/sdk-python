@@ -14,6 +14,38 @@ from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
 
+
+def _normalize_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Convert metadata dictionary to Dict[str, str] for Rust FFI compatibility.
+
+    PyO3 requires HashMap<String, String>, but Python code may include booleans,
+    integers, or other types. This helper ensures all values are strings.
+
+    Args:
+        metadata: Dictionary with potentially mixed types
+
+    Returns:
+        Dictionary with all string values
+
+    Example:
+        >>> _normalize_metadata({"error": True, "count": 42, "msg": "hello"})
+        {"error": "true", "count": "42", "msg": "hello"}
+    """
+    normalized = {}
+    for key, value in metadata.items():
+        if isinstance(value, str):
+            normalized[key] = value
+        elif isinstance(value, bool):
+            # Convert bool to lowercase string for JSON compatibility
+            normalized[key] = str(value).lower()
+        elif value is None:
+            normalized[key] = ""
+        else:
+            # Convert any other type to string representation
+            normalized[key] = str(value)
+    return normalized
+
 # Context variable to store trace metadata for propagation to LM calls
 # This allows Rust LM layer to access traceparent without explicit parameter passing
 _trace_metadata: contextvars.ContextVar[Dict[str, str]] = contextvars.ContextVar(
@@ -455,11 +487,22 @@ class Worker:
             output_schema_str = json.dumps(config.output_schema) if config.output_schema else None
             metadata = config.metadata if config.metadata else {}
 
+            # Serialize retry and backoff policies
+            config_dict = {}
+            if config.retries:
+                config_dict["max_attempts"] = str(config.retries.max_attempts)
+                config_dict["initial_interval_ms"] = str(config.retries.initial_interval_ms)
+                config_dict["max_interval_ms"] = str(config.retries.max_interval_ms)
+
+            if config.backoff:
+                config_dict["backoff_type"] = config.backoff.type.value
+                config_dict["backoff_multiplier"] = str(config.backoff.multiplier)
+
             component_info = self._PyComponentInfo(
                 name=config.name,
                 component_type="function",
                 metadata=metadata,
-                config={},
+                config=config_dict,
                 input_schema=input_schema_str,
                 output_schema=output_schema_str,
                 definition=None,
@@ -627,22 +670,29 @@ class Worker:
 
         return handle_message
 
-    def _extract_critical_metadata(self, request) -> dict:
+    def _extract_critical_metadata(self, request) -> Dict[str, str]:
         """
         Extract critical metadata from request that MUST be propagated to response.
 
         This ensures journal events are written to the correct tenant partition
         and can be properly replayed. Missing tenant_id causes catastrophic
         event sourcing corruption where events are split across partitions.
+
+        Returns:
+            Dict[str, str]: Metadata with all values normalized to strings for Rust FFI
         """
         metadata = {}
         if hasattr(request, 'metadata') and request.metadata:
             # CRITICAL: Propagate tenant_id to prevent journal corruption
+            # Convert to string immediately to ensure Rust FFI compatibility
             if "tenant_id" in request.metadata:
-                metadata["tenant_id"] = request.metadata["tenant_id"]
+                metadata["tenant_id"] = str(request.metadata["tenant_id"])
             if "deployment_id" in request.metadata:
-                metadata["deployment_id"] = request.metadata["deployment_id"]
-        return metadata
+                metadata["deployment_id"] = str(request.metadata["deployment_id"])
+
+        # CRITICAL: Normalize all metadata values to strings for Rust FFI (PyO3)
+        # PyO3 expects HashMap<String, String> and will fail with bool/int values
+        return _normalize_metadata(metadata)
 
     async def _execute_function(self, config, input_data: bytes, request):
         """Execute a function handler (supports both regular and streaming functions)."""
@@ -664,17 +714,33 @@ class Worker:
                 _trace_metadata.set(dict(request.metadata))
                 logger.debug(f"Trace metadata stored: traceparent={request.metadata.get('traceparent', 'N/A')}")
 
+            # Extract attempt number from platform request (if provided)
+            platform_attempt = getattr(request, 'attempt', 0)
+
             # Create context with runtime_context for trace correlation
+            # If platform is orchestrating retries, use its attempt number
             ctx = Context(
                 run_id=f"{self.service_name}:{config.name}",
                 runtime_context=request.runtime_context,
             )
+
+            # Set attempt on context if this is a function with retry config
+            if hasattr(ctx, '_attempt') and platform_attempt > 0:
+                ctx._attempt = platform_attempt
+
+            # Set context in contextvar so get_current_context() and error handlers can access it
+            from .context import set_current_context, _current_context
+            token = set_current_context(ctx)
 
             # Execute function directly - Rust bridge handles tracing
             # Note: Removed Python-level span creation to avoid duplicate spans.
             # The Rust worker bridge (sdk-python/rust-src/worker.rs:413-659) already
             # creates a comprehensive OpenTelemetry span with all necessary attributes.
             # See DUPLICATE_SPANS_FIX.md for details.
+            #
+            # Note on retry handling:
+            # - If platform_attempt > 0: Platform is orchestrating retries, execute once
+            # - If platform_attempt == 0: Local retry loop in decorator wrapper handles retries
             if input_dict:
                 result = config.handler(ctx, **input_dict)
             else:
@@ -705,6 +771,7 @@ class Worker:
                         is_chunk=True,
                         done=False,
                         chunk_index=chunk_index,
+                        attempt=platform_attempt,
                     ))
                     chunk_index += 1
 
@@ -719,6 +786,7 @@ class Worker:
                     is_chunk=True,
                     done=True,
                     chunk_index=chunk_index,
+                    attempt=platform_attempt,
                 ))
 
                 logger.debug(f"Streaming function produced {len(responses)} chunks")
@@ -744,6 +812,7 @@ class Worker:
                     is_chunk=False,
                     done=True,
                     chunk_index=0,
+                    attempt=platform_attempt,
                 )
 
         except Exception as e:
@@ -754,14 +823,27 @@ class Worker:
             import traceback
             stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
 
-            # Log with full traceback
-            logger.error(f"Function execution failed: {error_msg}", exc_info=True)
+            # Log with full traceback using ctx.logger to ensure run_id correlation
+            from .context import get_current_context
+            current_ctx = get_current_context()
+            error_logger = current_ctx.logger if current_ctx else logger
+            error_logger.error(f"Function execution failed: {error_msg}", exc_info=True)
 
             # Store stack trace in metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
                 "stack_trace": stack_trace,
+                "error": True,  # Boolean flag for error detection
             }
+
+            # CRITICAL: Extract critical metadata (including tenant_id) for journal event correlation
+            # This ensures run.failed events are properly emitted by Worker Coordinator
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
+
+            # CRITICAL: Normalize metadata to ensure all values are strings (Rust FFI requirement)
+            # PyO3 expects HashMap<String, String>, but we may have booleans or other types
+            normalized_metadata = _normalize_metadata(metadata)
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -769,11 +851,16 @@ class Worker:
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=metadata,
+                metadata=normalized_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
+
+        finally:
+            # Always reset context to prevent leakage between executions
+            _current_context.reset(token)
 
     async def _execute_workflow(self, config, input_data: bytes, request):
         """Execute a workflow handler with automatic replay support."""
@@ -889,6 +976,9 @@ class Worker:
                     # Extract critical metadata for checkpoint routing
                     metadata = self._extract_critical_metadata(request)
 
+                    # DEBUG: Log metadata types for troubleshooting PyO3 conversion errors
+                    logger.debug(f"Checkpoint metadata types: {[(k, type(v).__name__) for k, v in metadata.items()]}")
+
                     # Queue checkpoint via Rust FFI
                     self._rust_worker.queue_workflow_checkpoint(
                         invocation_id=request.invocation_id,
@@ -903,6 +993,8 @@ class Worker:
                     )
                 except Exception as e:
                     logger.error(f"Failed to queue checkpoint: {e}", exc_info=True)
+                    logger.error(f"Checkpoint metadata causing error: {metadata}")
+                    logger.error(f"Checkpoint data: {checkpoint}")
 
             # Create WorkflowContext with entity, runtime_context, and checkpoint callback
             ctx = WorkflowContext(
@@ -1100,17 +1192,39 @@ class Worker:
         except Exception as e:
             # Include exception type for better error messages
             error_msg = f"{type(e).__name__}: {str(e)}"
+
+            # Capture full stack trace for telemetry
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+
+            # Log with full traceback
             logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
+
+            # Store error metadata for observability
+            metadata = {
+                "error_type": type(e).__name__,
+                "stack_trace": stack_trace,
+                "error": True,
+            }
+
+            # Extract critical metadata for journal correlation (if available)
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
+
+            # Normalize metadata for Rust FFI compatibility
+            normalized_metadata = _normalize_metadata(metadata)
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=None,
+                metadata=normalized_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
     async def _execute_tool(self, tool, input_data: bytes, request):
@@ -1128,6 +1242,10 @@ class Worker:
                 run_id=f"{self.service_name}:{tool.name}",
                 runtime_context=request.runtime_context,
             )
+
+            # Set context in contextvar so get_current_context() and error handlers can access it
+            from .context import set_current_context, _current_context
+            token = set_current_context(ctx)
 
             # Execute tool
             result = await tool.invoke(ctx, **input_dict)
@@ -1150,18 +1268,47 @@ class Worker:
         except Exception as e:
             # Include exception type for better error messages
             error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"Tool execution failed: {error_msg}", exc_info=True)
+
+            # Capture full stack trace for telemetry
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+
+            # Log with full traceback using ctx.logger to ensure run_id correlation
+            from .context import get_current_context
+            current_ctx = get_current_context()
+            error_logger = current_ctx.logger if current_ctx else logger
+            error_logger.error(f"Tool execution failed: {error_msg}", exc_info=True)
+
+            # Store error metadata for observability
+            metadata = {
+                "error_type": type(e).__name__,
+                "stack_trace": stack_trace,
+                "error": True,
+            }
+
+            # CRITICAL: Extract critical metadata (including tenant_id) for journal event correlation
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
+
+            # Normalize metadata for Rust FFI compatibility
+            normalized_metadata = _normalize_metadata(metadata)
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=None,
+                metadata=normalized_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
+
+        finally:
+            # Always reset context to prevent leakage between executions
+            _current_context.reset(token)
 
     async def _execute_entity(self, entity_type, input_data: bytes, request):
         """Execute an entity method."""
@@ -1185,6 +1332,16 @@ class Worker:
                 raise ValueError("Entity invocation requires 'key' parameter")
             if not method_name:
                 raise ValueError("Entity invocation requires 'method' parameter")
+
+            # Create context for logging and tracing
+            ctx = Context(
+                run_id=f"{self.service_name}:{entity_type.name}:{entity_key}",
+                runtime_context=request.runtime_context,
+            )
+
+            # Set context in contextvar so get_current_context() and error handlers can access it
+            from .context import set_current_context, _current_context
+            token = set_current_context(ctx)
 
             # Note: State loading is now handled automatically by the entity method wrapper
             # via EntityStateAdapter which uses the Rust core for cache + platform persistence
@@ -1225,18 +1382,47 @@ class Worker:
         except Exception as e:
             # Include exception type for better error messages
             error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"Entity execution failed: {error_msg}", exc_info=True)
+
+            # Capture full stack trace for telemetry
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+
+            # Log with full traceback using ctx.logger to ensure run_id correlation
+            from .context import get_current_context
+            current_ctx = get_current_context()
+            error_logger = current_ctx.logger if current_ctx else logger
+            error_logger.error(f"Entity execution failed: {error_msg}", exc_info=True)
+
+            # Store error metadata for observability
+            metadata = {
+                "error_type": type(e).__name__,
+                "stack_trace": stack_trace,
+                "error": True,
+            }
+
+            # Extract critical metadata for journal correlation (if available)
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
+
+            # Normalize metadata for Rust FFI compatibility
+            normalized_metadata = _normalize_metadata(metadata)
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=None,
+                metadata=normalized_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
+
+        finally:
+            # Always reset context to prevent leakage between executions
+            _current_context.reset(token)
 
     async def _execute_agent(self, agent, input_data: bytes, request):
         """Execute an agent with session support for multi-turn conversations."""
@@ -1278,6 +1464,10 @@ class Worker:
                 runtime_context=request.runtime_context,
             )
 
+            # Set context in contextvar so get_current_context() and error handlers can access it
+            from .context import set_current_context, _current_context
+            token = set_current_context(ctx)
+
             # Execute agent - conversation history is automatically included
             agent_result = await agent.run(user_message, context=ctx)
 
@@ -1310,18 +1500,47 @@ class Worker:
         except Exception as e:
             # Include exception type for better error messages
             error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"Agent execution failed: {error_msg}", exc_info=True)
+
+            # Capture full stack trace for telemetry
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+
+            # Log with full traceback using ctx.logger to ensure run_id correlation
+            from .context import get_current_context
+            current_ctx = get_current_context()
+            error_logger = current_ctx.logger if current_ctx else logger
+            error_logger.error(f"Agent execution failed: {error_msg}", exc_info=True)
+
+            # Store error metadata for observability
+            metadata = {
+                "error_type": type(e).__name__,
+                "stack_trace": stack_trace,
+                "error": True,
+            }
+
+            # Extract critical metadata for journal correlation (if available)
+            critical_metadata = self._extract_critical_metadata(request)
+            metadata.update(critical_metadata)
+
+            # Normalize metadata for Rust FFI compatibility
+            normalized_metadata = _normalize_metadata(metadata)
+
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
                 output_data=b"",
                 state_update=None,
                 error_message=error_msg,
-                metadata=None,
+                metadata=normalized_metadata,
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
+
+        finally:
+            # Always reset context to prevent leakage between executions
+            _current_context.reset(token)
 
     def _create_error_response(self, request, error_message: str):
         """Create an error response."""
