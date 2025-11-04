@@ -1113,6 +1113,7 @@ class Worker:
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
         except WaitingForUserInputException as e:
@@ -1187,6 +1188,7 @@ class Worker:
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
         except Exception as e:
@@ -1263,6 +1265,7 @@ class Worker:
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
         except Exception as e:
@@ -1377,6 +1380,7 @@ class Worker:
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
         except Exception as e:
@@ -1495,6 +1499,7 @@ class Worker:
                 is_chunk=False,
                 done=True,
                 chunk_index=0,
+                attempt=getattr(request, 'attempt', 0),
             )
 
         except Exception as e:
@@ -1556,6 +1561,7 @@ class Worker:
             is_chunk=False,
             done=True,
             chunk_index=0,
+            attempt=getattr(request, 'attempt', 0),
         )
 
     async def run(self):
