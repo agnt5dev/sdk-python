@@ -27,6 +27,12 @@ _lm = importlib.import_module(".04_lm_functions", package=__name__)
 fn_10_lm_simple_completion = _lm.fn_10_lm_simple_completion
 fn_11_lm_structured_output = _lm.fn_11_lm_structured_output
 
+_helpers = importlib.import_module(".05_test_helpers", package=__name__)
+greet = _helpers.greet
+long_task = _helpers.long_task
+flaky_function = _helpers.flaky_function
+generate_text = _helpers.generate_text
+
 __all__ = [
     # Simple functions (01-04)
     "fn_01_no_params",
@@ -43,4 +49,9 @@ __all__ = [
     # LM functions (10-11)
     "fn_10_lm_simple_completion",
     "fn_11_lm_structured_output",
+    # Test helpers (backward compatibility)
+    "greet",
+    "long_task",
+    "flaky_function",
+    "generate_text",
 ]

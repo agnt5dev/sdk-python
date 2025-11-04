@@ -8,8 +8,8 @@ These tests verify the complete function execution flow:
 4. Results are returned correctly
 5. Error handling works as expected
 
-Uses the test-service blueprint which provides simple functions
-without LLM dependencies for reliable testing.
+Uses the test-bench with numbered functions (fn_01, fn_02, etc.)
+for reliable testing without LLM dependencies.
 """
 
 import pytest
@@ -34,14 +34,14 @@ def test_simple_function_execution(client, worker_process, platform):
     # Create client with longer timeout for analysis
     client_with_timeout = Client(platform["gateway_url"], timeout=120.0)
 
-
     start_time = time.time()
-    result = client_with_timeout.run("greet", {"name": "Alice"})
+    result = client_with_timeout.run("fn_02_one_param", {"value": 5})
     duration = time.time() - start_time
     print(f"\n✅ Simple function executed in {duration:.2f}s")
 
-    assert "message" in result
-    assert result["message"] == "Hello, Alice!"
+    assert "result" in result
+    assert result["result"] == 10  # value * 2
+    assert result["params"] == 1
 
 
 
@@ -58,15 +58,16 @@ def test_function_with_different_inputs(client, worker_process):
     time.sleep(2)
 
     test_cases = [
-        {"name": "Bob", "expected": "Hello, Bob!"},
-        {"name": "Charlie", "expected": "Hello, Charlie!"},
-        {"name": "测试", "expected": "Hello, 测试!"},  # Unicode
+        {"a": 5, "b": 3, "expected": 8},
+        {"a": 10, "b": 20, "expected": 30},
+        {"a": -5, "b": 5, "expected": 0},  # Negative numbers
     ]
 
     for test_case in test_cases:
-        result = client.run("greet", {"name": test_case["name"]})
-        assert "message" in result
-        assert result["message"] == test_case["expected"]
+        result = client.run("fn_03_two_params", {"a": test_case["a"], "b": test_case["b"]})
+        assert "result" in result
+        assert result["result"] == test_case["expected"]
+        assert result["params"] == 2
 
     print(f"\n✅ All test cases passed ({len(test_cases)} inputs)")
 
@@ -83,19 +84,19 @@ def test_function_error_handling(client, worker_process):
     """
     time.sleep(2)
 
-    # Invoke function that always fails
+    # Invoke function that raises RuntimeError
     from agnt5.client import RunError
 
     try:
-        result = client.run("failing_function", {"error": "Test error message"})
+        result = client.run("fn_06_raises_runtime_error", {"message": "Test error message"})
         assert False, "Expected RunError to be raised"
     except RunError as e:
         assert "Test error message" in str(e)
 
     # Verify worker still works after error
-    result2 = client.run("greet", {"name": "After Error"})
-    assert "message" in result2
-    assert result2["message"] == "Hello, After Error!"
+    result2 = client.run("fn_02_one_param", {"value": 7})
+    assert "result" in result2
+    assert result2["result"] == 14
 
     print(f"\n✅ Error handling works correctly")
     print(f"   Worker still functional after error")
@@ -119,13 +120,13 @@ def test_function_retry_logic(client, worker_process):
     """
     time.sleep(2)
 
-    # This function fails 2 times, then succeeds
-    # It's configured with max_attempts=5
-    result = client.run("flaky_function", {"fail_count": 2})
+    # fn_08 fails once (attempt 0), then succeeds on attempt 1
+    # It's configured with max_attempts=3
+    result = client.run("fn_08_retry_succeeds_on_attempt_2", {})
 
-    assert "succeeded" in result
-    assert result["succeeded"] is True
-    assert result["attempts"] == 3  # Failed 2 times, succeeded on 3rd
+    assert "success" in result
+    assert result["success"] is True
+    assert result["attempts"] == 2  # Failed once, succeeded on 2nd attempt
 
     print(f"\n✅ Retry logic works correctly")
     print(f"   Attempts: {result['attempts']}")
@@ -145,23 +146,23 @@ def test_concurrent_function_executions(client, worker_process):
 
     import concurrent.futures
 
-    def invoke_function(name):
-        return client.run("greet", {"name": name})
+    def invoke_function(value):
+        return client.run("fn_02_one_param", {"value": value})
 
     # Execute 5 function calls concurrently
-    names = ["User1", "User2", "User3", "User4", "User5"]
+    values = [1, 2, 3, 4, 5]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(invoke_function, name) for name in names]
+        futures = [executor.submit(invoke_function, value) for value in values]
         results = [future.result() for future in concurrent.futures.as_completed(futures)]
 
     # Verify all succeeded
     assert len(results) == 5
 
     # Verify each got correct result
-    returned_messages = {r["message"] for r in results}
-    expected_messages = {f"Hello, {name}!" for name in names}
-    assert returned_messages == expected_messages
+    returned_results = {r["result"] for r in results}
+    expected_results = {value * 2 for value in values}
+    assert returned_results == expected_results
 
     print(f"\n✅ Concurrent execution works correctly")
     print(f"   Executed: {len(results)} concurrent calls")
@@ -254,10 +255,11 @@ def test_function_context_access(client, worker_process):
     """
     time.sleep(2)
 
-    # The greet function uses ctx.logger.info internally
-    result = client.run("greet", {"name": "Context Test"})
+    # All functions use ctx.logger.info internally
+    result = client.run("fn_02_one_param", {"value": 3})
 
-    assert "message" in result
+    assert "result" in result
+    assert result["result"] == 6
     # If context was broken, the function would have errored
 
     print(f"\n✅ Function context access works")
@@ -274,11 +276,11 @@ def test_function_with_missing_parameter(client, worker_process):
     """
     time.sleep(2)
 
-    # Invoke without required 'name' parameter
+    # Invoke without required 'value' parameter
     from agnt5.client import RunError
 
     try:
-        result = client.run("greet", {})  # Missing 'name'
+        result = client.run("fn_02_one_param", {})  # Missing 'value'
         assert False, "Expected RunError to be raised"
     except RunError as e:
         print(f"\n✅ Parameter validation works")
