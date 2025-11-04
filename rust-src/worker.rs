@@ -250,7 +250,7 @@ impl PyWorker {
 
         // Simple approach: Wait 200ms (2x flush interval) to ensure checkpoints are sent
         // The background flush task runs every 100ms, so 200ms guarantees at least 2 flushes
-        py.allow_threads(|| {
+        py.detach(|| {
             std::thread::sleep(std::time::Duration::from_millis(200));
         });
 
@@ -786,19 +786,17 @@ impl PyWorker {
                                             ));
 
                                             // Add stack trace if available from metadata
-                                            if let Some(metadata) = &py_response.metadata {
-                                                if let Some(stack_trace) = metadata.get("stack_trace") {
-                                                    span.set_attribute(opentelemetry::KeyValue::new(
-                                                        "exception.stacktrace",
-                                                        stack_trace.clone(),
-                                                    ));
-                                                }
-                                                if let Some(error_type) = metadata.get("error_type") {
-                                                    span.set_attribute(opentelemetry::KeyValue::new(
-                                                        "exception.type",
-                                                        error_type.clone(),
-                                                    ));
-                                                }
+                                            if let Some(stack_trace) = py_response.metadata.get("stack_trace") {
+                                                span.set_attribute(opentelemetry::KeyValue::new(
+                                                    "exception.stacktrace",
+                                                    stack_trace.clone(),
+                                                ));
+                                            }
+                                            if let Some(error_type) = py_response.metadata.get("error_type") {
+                                                span.set_attribute(opentelemetry::KeyValue::new(
+                                                    "exception.type",
+                                                    error_type.clone(),
+                                                ));
                                             }
 
                                             span.set_status(opentelemetry::trace::Status::error(
