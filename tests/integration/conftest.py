@@ -453,14 +453,13 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
     """
     service_path = os.path.join(
         os.path.dirname(__file__),
-        "blueprints",
-        "test-service"
+        "test-bench"
     )
 
     env = {
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
-        "AGNT5_SERVICE_NAME": "test-service",
+        "AGNT5_SERVICE_NAME": "test-bench",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
         "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],
@@ -611,14 +610,13 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
     # Start new worker
     service_path = os.path.join(
         os.path.dirname(__file__),
-        "blueprints",
-        "test-service"
+        "test-bench"
     )
 
     env = {
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
-        "AGNT5_SERVICE_NAME": "test-service",
+        "AGNT5_SERVICE_NAME": "test-bench",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
         "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],

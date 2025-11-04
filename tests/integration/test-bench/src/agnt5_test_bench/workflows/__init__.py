@@ -74,6 +74,13 @@ from .wf_07_agent_handoff_workflows import (
     wf_35_handoff_with_state,
 )
 
+# WF_08: Human-in-the-Loop (HITL) Workflows
+from .wf_08_hitl_workflows import (
+    approval_workflow_hitl,
+    multi_choice_workflow,
+    text_input_workflow,
+)
+
 __all__ = [
     # WF_01: Simple workflows
     "wf_01_basic_execution",
@@ -123,4 +130,8 @@ __all__ = [
     "wf_33_handoff_with_tools",
     "wf_34_multiple_handoff_options",
     "wf_35_handoff_with_state",
+    # WF_08: HITL workflows
+    "approval_workflow_hitl",
+    "multi_choice_workflow",
+    "text_input_workflow",
 ]

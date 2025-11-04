@@ -281,7 +281,7 @@ class WorkflowContext(Context):
                 )
 
                 # Record error in span
-                span.set_attribute("error", True)
+                span.set_attribute("error", "true")
                 span.set_attribute("error.message", str(e))
                 span.set_attribute("error.type", type(e).__name__)
 

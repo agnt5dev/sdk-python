@@ -796,8 +796,8 @@ async def stream(
             yield chunk
 
         # Emit completion checkpoint (note: no usage stats for streaming)
-        if isinstance(ctx, WorkflowContext):
-            ctx._send_checkpoint("workflow.lm.completed", {
+        if workflow_ctx:
+            workflow_ctx._send_checkpoint("workflow.lm.completed", {
                 "model": model,
                 "streaming": True,
             })
