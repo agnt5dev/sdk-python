@@ -17,10 +17,6 @@ async def approval_workflow_hitl(ctx: WorkflowContext, message: str) -> dict:
     ctx.logger.info("=== HITL: Approval Workflow ===")
     ctx.logger.info(f"Processing message: {message}")
 
-    # Store message in state
-    ctx.set("message", message)
-    ctx.set("processed", True)
-
     # In a real scenario, this would call ctx.wait_for_user()
     # For now, just return success to indicate workflow completed
     # The actual pause functionality requires platform support
@@ -43,10 +39,6 @@ async def multi_choice_workflow(ctx: WorkflowContext, task: str) -> dict:
     ctx.logger.info("=== HITL: Multi-Choice Workflow ===")
     ctx.logger.info(f"Task: {task}")
 
-    # Store task in state
-    ctx.set("task", task)
-    ctx.set("choice_presented", True)
-
     # In a real scenario, this would call ctx.wait_for_user() with choices
     # For now, return a simulated choice
 
@@ -58,7 +50,7 @@ async def multi_choice_workflow(ctx: WorkflowContext, task: str) -> dict:
 
 
 @workflow(name="text_input_workflow")
-async def text_input_workflow(ctx: WorkflowContext, prompt: str) -> dict:
+async def text_input_workflow(ctx: WorkflowContext, prompt: str = "Enter text") -> dict:
     """Test Scenario: Workflow that pauses for text input.
 
     MCP Verification Points:
@@ -68,14 +60,9 @@ async def text_input_workflow(ctx: WorkflowContext, prompt: str) -> dict:
     ctx.logger.info("=== HITL: Text Input Workflow ===")
     ctx.logger.info(f"Prompt: {prompt}")
 
-    # Store prompt in state
-    ctx.set("prompt", prompt)
-    ctx.set("awaiting_input", True)
-
+    # In a real scenario, this would call ctx.wait_for_user() for text input
     # Simulate user providing input
     user_input = "Sample user response"
-    ctx.set("user_input", user_input)
-    ctx.set("awaiting_input", False)
 
     return {
         "status": "completed",
