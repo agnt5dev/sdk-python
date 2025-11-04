@@ -717,16 +717,16 @@ class Worker:
             # Extract attempt number from platform request (if provided)
             platform_attempt = getattr(request, 'attempt', 0)
 
-            # Create context with runtime_context for trace correlation
-            # If platform is orchestrating retries, use its attempt number
-            ctx = Context(
+            # Create FunctionContext with attempt number for retry tracking
+            # - If platform_attempt > 0: Platform is orchestrating retries
+            # - If platform_attempt == 0: First attempt (or no retry config)
+            from .function import FunctionContext
+            ctx = FunctionContext(
                 run_id=f"{self.service_name}:{config.name}",
+                attempt=platform_attempt,
                 runtime_context=request.runtime_context,
+                retry_policy=config.retries,
             )
-
-            # Set attempt on context if this is a function with retry config
-            if hasattr(ctx, '_attempt') and platform_attempt > 0:
-                ctx._attempt = platform_attempt
 
             # Set context in contextvar so get_current_context() and error handlers can access it
             from .context import set_current_context, _current_context
