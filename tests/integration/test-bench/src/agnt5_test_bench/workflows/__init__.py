@@ -1,133 +1,126 @@
 """
-Test Bench Workflows
+Test Workflows
 
-This package contains workflow definitions for testing AGNT5 functionality.
-
-Workflow Categories:
-- simple_workflows.py: Basic workflows for setup verification
-- replay_test_workflows.py: Workflows for testing Phase 1 replay functionality
-- memory_test_workflows.py: Workflows for testing entity memory architecture
-
-Agent Test Workflows (Organized by Feature):
-- agent_basic_workflows.py: Simple agents without tools
-- agent_tools_workflows.py: Agents with tools (single and multiple)
-- agent_collaboration_workflows.py: Agents using other agents as tools
-- agent_handoff_workflows.py: Explicit handoff patterns between agents
-- agent_hitl_workflows.py: Human-in-the-loop interactions
-- comprehensive_integration_test.py: Ultimate test combining all features
+Comprehensive test workflows for testing SDK functionality.
+Workflows are organized by category and numbered sequentially.
 """
 
-# Import workflows from simple_workflows
-from .simple_workflows import (
-    test_workflow,
-    test_workflow_with_state,
+# WF_01: Simple Workflows (wf_01 - wf_05)
+from .wf_01_simple_workflows import (
+    wf_01_basic_execution,
+    wf_02_state_management,
+    wf_03_function_invocation,
+    wf_04_agent_integration,
+    wf_05_multi_step_workflow,
 )
 
-# Import replay test workflows
-from .replay_test_workflows import (
-    # Primary crash/recovery test
-    workflow_that_crashes_at_step,
-
-    # Cost/time savings demonstration
-    workflow_with_expensive_steps,
-
-    # Mixed step types (functions, state, etc.)
-    workflow_with_mixed_steps,
-
-    # State consistency verification
-    workflow_with_state_changes,
-
-    # Performance/scale testing
-    workflow_replay_stress_test,
+# WF_02: Function Invocation Workflows (wf_06 - wf_10)
+from .wf_02_function_workflows import (
+    wf_06_different_param_counts,
+    wf_07_sequential_function_calls,
+    wf_08_function_result_chaining,
+    wf_09_function_with_state,
+    wf_10_conditional_function_calls,
 )
 
-# Import memory test workflows
-from .memory_test_workflows import (
-    test_session_memory_workflow,
-    test_user_memory_workflow,
-    test_multi_agent_session_workflow,
+# WF_03: Error Handling Workflows (wf_11 - wf_15)
+from .wf_03_error_workflows import (
+    wf_11_function_error_propagation,
+    wf_12_error_handling_with_try_catch,
+    wf_13_error_recovery_continue,
+    wf_14_mixed_error_types,
+    wf_15_partial_success_with_errors,
 )
 
-# Import agent test workflows (organized by feature)
-from .agent_basic_workflows import (
-    test_agent_basic,
+# WF_04: Retry Workflows (wf_16 - wf_20)
+from .wf_04_retry_workflows import (
+    wf_16_retry_eventual_success,
+    wf_17_retry_exhaustion,
+    wf_18_retry_with_error_handling,
+    wf_19_multiple_retry_operations,
+    wf_20_retry_state_persistence,
 )
 
-from .agent_tools_workflows import (
-    test_agent_with_simple_tool,
-    test_agent_with_multiple_tools,
-    # Shared tools (can be imported for reuse)
-    simple_calculator,
-    search_web,
-    get_weather,
+# WF_05: Agent Workflows (wf_21 - wf_25)
+from .wf_05_agent_workflows import (
+    test_agent,  # Module-level agent
+    wf_21_basic_agent_execution,
+    wf_22_agent_conversation,
+    wf_23_agent_with_workflow_state,
+    wf_24_multiple_agents_in_workflow,
+    wf_25_agent_with_structured_output,
 )
 
-from .agent_collaboration_workflows import (
-    test_agent_with_agent_as_tool,
-    # Shared tools and agents
-    domain_specific_analysis,
-    domain_specialist,
-    coordinator_agent,
+# WF_06: Agent Tool Workflows (wf_26 - wf_30)
+from .wf_06_agent_tool_workflows import (
+    calculator_agent,  # Module-level agent
+    wf_26_agent_with_single_tool,
+    wf_27_agent_with_multiple_tools,
+    wf_28_agent_multi_tool_coordination,
+    wf_29_agent_tool_with_parameters,
+    wf_30_agent_tool_iteration,
 )
 
-from .agent_handoff_workflows import (
-    test_handoff_simple,
-    test_handoff_with_context,
-    test_handoff_complex,
-    # Shared tools and agents
-    save_user_preference,
-    technical_specialist,
+# WF_07: Agent Handoff Workflows (wf_31 - wf_35)
+from .wf_07_agent_handoff_workflows import (
+    save_preference,  # Shared tool
+    technical_specialist,  # Module-level agents
     business_specialist,
     research_specialist,
-)
-
-from .agent_hitl_workflows import (
-    test_agent_with_hitl,
-)
-
-from .comprehensive_integration_test import (
-    test_comprehensive_scenario,
+    wf_31_simple_triage_handoff,
+    wf_32_handoff_with_context,
+    wf_33_handoff_with_tools,
+    wf_34_multiple_handoff_options,
+    wf_35_handoff_with_state,
 )
 
 __all__ = [
-    # Simple workflows
-    "test_workflow",
-    "test_workflow_with_state",
-
-    # Replay test workflows
-    "workflow_that_crashes_at_step",
-    "workflow_with_expensive_steps",
-    "workflow_with_mixed_steps",
-    "workflow_with_state_changes",
-    "workflow_replay_stress_test",
-
-    # Memory test workflows
-    "test_session_memory_workflow",
-    "test_user_memory_workflow",
-    "test_multi_agent_session_workflow",
-
-    # Agent test workflows
-    "test_agent_basic",
-    "test_agent_with_simple_tool",
-    "test_agent_with_multiple_tools",
-    "test_agent_with_agent_as_tool",
-    "test_handoff_simple",
-    "test_handoff_with_context",
-    "test_handoff_complex",
-    "test_agent_with_hitl",
-    "test_comprehensive_scenario",
-
-    # Shared tools (exported for reuse in custom workflows)
-    "simple_calculator",
-    "search_web",
-    "get_weather",
-    "domain_specific_analysis",
-    "save_user_preference",
-
-    # Shared agents (exported for reuse)
-    "domain_specialist",
-    "coordinator_agent",
+    # WF_01: Simple workflows
+    "wf_01_basic_execution",
+    "wf_02_state_management",
+    "wf_03_function_invocation",
+    "wf_04_agent_integration",
+    "wf_05_multi_step_workflow",
+    # WF_02: Function invocation
+    "wf_06_different_param_counts",
+    "wf_07_sequential_function_calls",
+    "wf_08_function_result_chaining",
+    "wf_09_function_with_state",
+    "wf_10_conditional_function_calls",
+    # WF_03: Error handling
+    "wf_11_function_error_propagation",
+    "wf_12_error_handling_with_try_catch",
+    "wf_13_error_recovery_continue",
+    "wf_14_mixed_error_types",
+    "wf_15_partial_success_with_errors",
+    # WF_04: Retry workflows
+    "wf_16_retry_eventual_success",
+    "wf_17_retry_exhaustion",
+    "wf_18_retry_with_error_handling",
+    "wf_19_multiple_retry_operations",
+    "wf_20_retry_state_persistence",
+    # WF_05: Agent workflows
+    "test_agent",
+    "wf_21_basic_agent_execution",
+    "wf_22_agent_conversation",
+    "wf_23_agent_with_workflow_state",
+    "wf_24_multiple_agents_in_workflow",
+    "wf_25_agent_with_structured_output",
+    # WF_06: Agent tool workflows
+    "calculator_agent",
+    "wf_26_agent_with_single_tool",
+    "wf_27_agent_with_multiple_tools",
+    "wf_28_agent_multi_tool_coordination",
+    "wf_29_agent_tool_with_parameters",
+    "wf_30_agent_tool_iteration",
+    # WF_07: Agent handoff workflows
+    "save_preference",
     "technical_specialist",
     "business_specialist",
     "research_specialist",
+    "wf_31_simple_triage_handoff",
+    "wf_32_handoff_with_context",
+    "wf_33_handoff_with_tools",
+    "wf_34_multiple_handoff_options",
+    "wf_35_handoff_with_state",
 ]
