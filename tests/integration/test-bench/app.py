@@ -4,30 +4,17 @@ import asyncio
 import os
 import sys
 import logging
+from pathlib import Path
+from dotenv import load_dotenv
 from agnt5 import Worker
 
-from agnt5_test_bench.workflows import (
-    test_workflow,
-    workflow_with_expensive_steps,
-    workflow_that_crashes_at_step,
-    test_session_memory_workflow,
-    test_user_memory_workflow,
-    test_multi_agent_session_workflow,
-    # Agent test workflows
-    test_agent_basic,
-    test_agent_with_simple_tool,
-    test_agent_with_multiple_tools,
-    test_agent_with_agent_as_tool,
-    test_handoff_simple,
-    test_handoff_with_context,
-    test_handoff_complex,
-    test_agent_with_hitl,
-    test_comprehensive_scenario,
-)
-
-from agnt5_test_bench.functions import (
-    intermittent_error,
-)
+# Load environment variables from .env file
+dotenv_path = Path(__file__).parent / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
+    logging.info(f"Loaded environment from {dotenv_path}")
+else:
+    logging.info("No .env file found, using system environment variables")
 
 SERVICE_NAME = "agnt5-test-bench"
 
@@ -48,24 +35,6 @@ async def main():
             service_version="1.0.0",
             coordinator_endpoint=coordinator_endpoint,
             runtime="standalone",
-            # workflows=[
-            #     test_workflow,
-            #     workflow_with_expensive_steps,
-            #     workflow_that_crashes_at_step,
-            #     test_session_memory_workflow,
-            #     test_user_memory_workflow,
-            #     test_multi_agent_session_workflow,
-            #     # Agent test workflows
-            #     test_agent_basic,
-            #     test_agent_with_simple_tool,
-            #     test_agent_with_multiple_tools,
-            #     test_agent_with_agent_as_tool,
-            #     test_handoff_simple,
-            #     test_handoff_with_context,
-            #     test_handoff_complex,
-            #     test_agent_with_hitl,
-            #     test_comprehensive_scenario,
-            # ],
             auto_register=True,
         )
 

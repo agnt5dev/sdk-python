@@ -138,9 +138,66 @@ async def validate_data(ctx: Context, data: Dict, required_fields: List[str]) ->
     }
 
 
+@tool(auto_schema=True)
+async def search_web(ctx: Context, query: str) -> List[Dict]:
+    """
+    Search the web for information (simulated).
+
+    Args:
+        query: Search query string
+
+    Returns:
+        List of search results with title and snippet
+    """
+    ctx.logger.info(f"[TOOL] search_web: searching for '{query}'")
+
+    # Simulate search results
+    results = [
+        {
+            "title": f"Article: {query}",
+            "url": f"https://example.com/article-{query.replace(' ', '-')}",
+            "snippet": f"Detailed information about {query}...",
+        },
+        {
+            "title": f"Tutorial: {query}",
+            "url": f"https://tutorial.com/{query.replace(' ', '-')}",
+            "snippet": f"Learn all about {query} with examples...",
+        },
+    ]
+
+    ctx.logger.info(f"[TOOL] search_web: found {len(results)} results")
+    return results
+
+
+@tool(auto_schema=True)
+async def domain_specific_analysis(ctx: Context, data: str) -> Dict:
+    """
+    Perform domain-specific analysis on data (for specialist agent).
+
+    Args:
+        data: Data to analyze
+
+    Returns:
+        Analysis results with insights and recommendations
+    """
+    ctx.logger.info(f"[TOOL] domain_specific_analysis: analyzing '{data[:50]}...'")
+
+    analysis = {
+        "summary": f"Analysis of: {data[:50]}...",
+        "key_insights": ["Insight 1: Important finding", "Insight 2: Notable pattern"],
+        "recommendations": ["Recommendation 1: Action item", "Recommendation 2: Follow-up"],
+        "confidence": 0.85,
+    }
+
+    ctx.logger.info(f"[TOOL] domain_specific_analysis: confidence = {analysis['confidence']}")
+    return analysis
+
+
 __all__ = [
     "calculate_total",
     "search_database",
     "format_report",
     "validate_data",
+    "search_web",
+    "domain_specific_analysis",
 ]
