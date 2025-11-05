@@ -447,6 +447,52 @@ class WorkflowContext(Context):
 
 
 # ============================================================================
+# Helper functions for workflow execution
+# ============================================================================
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """
+    Sanitize data for JSON serialization by removing or converting non-serializable objects.
+
+    Specifically handles:
+    - WorkflowContext objects (replaced with placeholder)
+    - Nested structures (recursively sanitized)
+
+    Args:
+        obj: Object to sanitize
+
+    Returns:
+        JSON-serializable version of the object
+    """
+    # Handle None, primitives
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # Handle WorkflowContext - replace with placeholder
+    if isinstance(obj, WorkflowContext):
+        return "<WorkflowContext>"
+
+    # Handle tuples/lists - recursively sanitize
+    if isinstance(obj, (tuple, list)):
+        sanitized = [_sanitize_for_json(item) for item in obj]
+        return sanitized if isinstance(obj, list) else tuple(sanitized)
+
+    # Handle dicts - recursively sanitize values
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+
+    # For other objects, try to serialize or convert to string
+    try:
+        import json
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        # Not JSON serializable, use string representation
+        return repr(obj)
+
+
+# ============================================================================
 # WorkflowEntity: Entity specialized for workflow execution state
 # ============================================================================
 
@@ -530,12 +576,17 @@ class WorkflowEntity(Entity):
             input_data: Input data passed to function
             result: Function result
         """
+        # Sanitize input_data and result to ensure JSON serializability
+        # This removes WorkflowContext objects and other non-serializable types
+        sanitized_input = _sanitize_for_json(input_data)
+        sanitized_result = _sanitize_for_json(result)
+
         self._step_events.append(
             {
                 "step_name": step_name,
                 "handler_name": handler_name,
-                "input": input_data,
-                "result": result,
+                "input": sanitized_input,
+                "result": sanitized_result,
             }
         )
         self._completed_steps[step_name] = result
