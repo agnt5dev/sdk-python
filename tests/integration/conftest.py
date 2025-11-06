@@ -13,6 +13,9 @@ Fixtures:
 - platform: Mode-aware platform fixture
 - worker_process: Start Python worker subprocess
 - client: Create agnt5.Client instance for testing
+
+Command-line options:
+- --runtime-mode: Specify runtime mode (embedded|postgres|managed|all)
 """
 
 import os
@@ -24,6 +27,31 @@ import pytest
 import requests
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.waiting_utils import wait_for_logs
+
+
+# ==================== Pytest Configuration ====================
+
+
+def pytest_addoption(parser):
+    """Add command-line options for runtime mode selection."""
+    parser.addoption(
+        "--runtime-mode",
+        action="store",
+        default="embedded",
+        choices=["embedded", "postgres", "managed", "all"],
+        help="Runtime mode for integration tests (embedded|postgres|managed|all)"
+    )
+
+
+def pytest_generate_tests(metafunc):
+    """Generate test parametrization based on command-line options."""
+    if "runtime_mode" in metafunc.fixturenames:
+        mode = metafunc.config.getoption("--runtime-mode")
+        if mode == "all":
+            modes = ["embedded", "postgres", "managed"]
+        else:
+            modes = [mode]
+        metafunc.parametrize("runtime_mode", modes, scope="session", indirect=True)
 
 
 # ==================== Docker Configuration ====================
@@ -69,12 +97,19 @@ def runtime_mode(request) -> str:
     """
     Runtime mode for integration tests.
 
-    Currently: embedded mode only (SQLite + embedded journal)
+    Parametrized across runtime modes via pytest_generate_tests:
+    - embedded: SQLite + embedded journal (fastest, default for local dev)
+    - postgres: PostgreSQL + embedded journal (community edition)
+    - managed: Redpanda + CockroachDB (production-like, slowest)
 
-    TODO: Add parametrization for postgres and managed modes:
-        params=["embedded", "postgres", "managed"]
+    Default: embedded mode for fast test execution.
+
+    To test other modes, run:
+        pytest tests/integration/ --runtime-mode=postgres
+        pytest tests/integration/ --runtime-mode=managed
+        pytest tests/integration/ --runtime-mode=all
     """
-    return "embedded"
+    return request.param
 
 
 @pytest.fixture(scope="session")
@@ -416,20 +451,27 @@ def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=Non
 @pytest.fixture(scope="function")
 def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], None, None]:
     """
-    Start AGNT5 platform in embedded mode.
+    Start AGNT5 platform in the specified runtime mode.
 
     Uses function scope so each test gets a clean platform state.
-    However, the SQLite database is mounted to a persistent directory
+    For embedded mode, the SQLite database is mounted to a persistent directory
     (persistent_data_dir), allowing the database to survive worker restarts
     and be inspected from the host.
 
-    Currently supports:
+    Supports three runtime modes:
     - embedded: SQLite + embedded journal (dev-server container)
-
-    TODO: Add postgres and managed modes
+    - postgres: PostgreSQL + embedded journal (dev-server + postgres containers)
+    - managed: Redpanda + CockroachDB (dev-server + redpanda + cockroach containers)
     """
-    # Setup embedded mode with persistent data directory
-    platform_config = setup_embedded_mode(data_dir=persistent_data_dir)
+    # Setup platform based on runtime mode
+    if runtime_mode == "embedded":
+        platform_config = setup_embedded_mode(data_dir=persistent_data_dir)
+    elif runtime_mode == "postgres":
+        platform_config = setup_postgres_mode()
+    elif runtime_mode == "managed":
+        platform_config = setup_managed_mode()
+    else:
+        raise ValueError(f"Unknown runtime mode: {runtime_mode}")
 
     yield platform_config
 
