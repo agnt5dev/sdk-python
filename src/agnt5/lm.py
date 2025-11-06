@@ -106,6 +106,48 @@ class ToolChoice(str, Enum):
     REQUIRED = "required"
 
 
+class BuiltInTool(str, Enum):
+    """Built-in tools for OpenAI Responses API.
+
+    These are platform-provided tools that don't require implementation:
+    - WEB_SEARCH: Real-time web search capability
+    - CODE_INTERPRETER: Execute Python code in a sandboxed environment
+    - FILE_SEARCH: Search through uploaded files
+    """
+
+    WEB_SEARCH = "web_search_preview"
+    CODE_INTERPRETER = "code_interpreter"
+    FILE_SEARCH = "file_search"
+
+
+class ReasoningEffort(str, Enum):
+    """Reasoning effort level for o-series models (o1, o3, etc.).
+
+    Controls the amount of reasoning/thinking the model performs:
+    - MINIMAL: Fast responses with basic reasoning
+    - MEDIUM: Balanced reasoning and speed (default)
+    - HIGH: Deep reasoning, slower but more thorough
+    """
+
+    MINIMAL = "minimal"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class Modality(str, Enum):
+    """Output modalities for multimodal models.
+
+    Specifies the types of content the model can generate:
+    - TEXT: Standard text output
+    - AUDIO: Audio output (e.g., for text-to-speech models)
+    - IMAGE: Image generation (future capability)
+    """
+
+    TEXT = "text"
+    AUDIO = "audio"
+    IMAGE = "image"
+
+
 @dataclass
 class ModelConfig:
     """Advanced model configuration for custom endpoints and settings.
@@ -141,11 +183,22 @@ class ModelConfig:
 
 @dataclass
 class GenerationConfig:
-    """LLM generation configuration."""
+    """LLM generation configuration.
 
+    Supports both Chat Completions and Responses API parameters.
+    """
+
+    # Standard parameters (both APIs)
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
+
+    # Responses API specific parameters
+    built_in_tools: List[BuiltInTool] = field(default_factory=list)
+    reasoning_effort: Optional[ReasoningEffort] = None
+    modalities: Optional[List[Modality]] = None
+    store: Optional[bool] = None  # Enable server-side conversation state
+    previous_response_id: Optional[str] = None  # Continue previous conversation
 
 
 @dataclass
@@ -165,6 +218,7 @@ class GenerateResponse:
     usage: Optional[TokenUsage] = None
     finish_reason: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    response_id: Optional[str] = None  # Response ID for conversation continuation (Responses API)
     _rust_response: Optional[Any] = field(default=None, repr=False)
 
     @property
@@ -324,7 +378,7 @@ class _LanguageModel(LanguageModel):
         model = self._prepare_model_name(request.model)
 
         # Build kwargs for Rust
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model,
         }
 
@@ -348,6 +402,25 @@ class _LanguageModel(LanguageModel):
         # Pass response schema for structured output if provided
         if request.response_schema is not None:
             kwargs["response_schema_kw"] = request.response_schema
+
+        # Pass Responses API specific parameters
+        if request.config.built_in_tools:
+            # Serialize built-in tools to JSON for Rust
+            built_in_tools_list = [tool.value for tool in request.config.built_in_tools]
+            kwargs["built_in_tools"] = json.dumps(built_in_tools_list)
+
+        if request.config.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = request.config.reasoning_effort.value
+
+        if request.config.modalities is not None:
+            modalities_list = [modality.value for modality in request.config.modalities]
+            kwargs["modalities"] = json.dumps(modalities_list)
+
+        if request.config.store is not None:
+            kwargs["store"] = request.config.store
+
+        if request.config.previous_response_id is not None:
+            kwargs["previous_response_id"] = request.config.previous_response_id
 
         # Pass tools and tool_choice to Rust
         if request.tools:
@@ -433,7 +506,7 @@ class _LanguageModel(LanguageModel):
         model = self._prepare_model_name(request.model)
 
         # Build kwargs for Rust
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model,
         }
 
@@ -453,6 +526,25 @@ class _LanguageModel(LanguageModel):
             kwargs["max_tokens"] = request.config.max_tokens
         if request.config.top_p is not None:
             kwargs["top_p"] = request.config.top_p
+
+        # Pass Responses API specific parameters
+        if request.config.built_in_tools:
+            # Serialize built-in tools to JSON for Rust
+            built_in_tools_list = [tool.value for tool in request.config.built_in_tools]
+            kwargs["built_in_tools"] = json.dumps(built_in_tools_list)
+
+        if request.config.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = request.config.reasoning_effort.value
+
+        if request.config.modalities is not None:
+            modalities_list = [modality.value for modality in request.config.modalities]
+            kwargs["modalities"] = json.dumps(modalities_list)
+
+        if request.config.store is not None:
+            kwargs["store"] = request.config.store
+
+        if request.config.previous_response_id is not None:
+            kwargs["previous_response_id"] = request.config.previous_response_id
 
         # Pass tools and tool_choice to Rust
         if request.tools:
@@ -553,11 +645,17 @@ class _LanguageModel(LanguageModel):
         if hasattr(rust_response, 'tool_calls') and rust_response.tool_calls:
             tool_calls = rust_response.tool_calls
 
+        # Extract response_id from Rust response (for Responses API)
+        response_id = None
+        if hasattr(rust_response, 'response_id') and rust_response.response_id:
+            response_id = rust_response.response_id
+
         return GenerateResponse(
             text=rust_response.content,
             usage=usage,
             finish_reason=None,  # TODO: Add finish_reason to Rust response
             tool_calls=tool_calls,
+            response_id=response_id,
             _rust_response=rust_response,  # Store for .structured_output access
         )
 
@@ -576,6 +674,12 @@ async def generate(
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
     response_format: Optional[Any] = None,
+    # Responses API specific parameters
+    built_in_tools: Optional[List[BuiltInTool]] = None,
+    reasoning_effort: Optional[ReasoningEffort] = None,
+    modalities: Optional[List[Modality]] = None,
+    store: Optional[bool] = None,
+    previous_response_id: Optional[str] = None,
 ) -> GenerateResponse:
     """Generate text using any LLM provider (simplified API).
 
@@ -591,6 +695,11 @@ async def generate(
         max_tokens: Maximum tokens to generate
         top_p: Nucleus sampling parameter
         response_format: Pydantic model, dataclass, or JSON schema dict for structured output
+        built_in_tools: List of built-in tools (OpenAI Responses API only)
+        reasoning_effort: Reasoning effort level for o-series models (OpenAI Responses API only)
+        modalities: Output modalities (text, audio, image) (OpenAI Responses API only)
+        store: Enable server-side conversation state (OpenAI Responses API only)
+        previous_response_id: Continue from previous response (OpenAI Responses API only)
 
     Returns:
         GenerateResponse with text, usage, and optional structured output
@@ -648,7 +757,7 @@ async def generate(
     if prompt:
         msg_list = [{"role": "user", "content": prompt}]
     else:
-        msg_list = messages
+        msg_list = messages or []
 
     # Convert to Message objects for internal API
     message_objects = []
@@ -661,11 +770,16 @@ async def generate(
         elif role == MessageRole.SYSTEM:
             message_objects.append(Message.system(msg["content"]))
 
-    # Build request
+    # Build request with Responses API parameters
     config = GenerationConfig(
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
+        built_in_tools=built_in_tools or [],
+        reasoning_effort=reasoning_effort,
+        modalities=modalities,
+        store=store,
+        previous_response_id=previous_response_id,
     )
 
     request = GenerateRequest(
@@ -692,6 +806,12 @@ async def stream(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
+    # Responses API specific parameters
+    built_in_tools: Optional[List[BuiltInTool]] = None,
+    reasoning_effort: Optional[ReasoningEffort] = None,
+    modalities: Optional[List[Modality]] = None,
+    store: Optional[bool] = None,
+    previous_response_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """Stream text using any LLM provider (simplified API).
 
@@ -706,6 +826,11 @@ async def stream(
         temperature: Sampling temperature (0.0-2.0)
         max_tokens: Maximum tokens to generate
         top_p: Nucleus sampling parameter
+        built_in_tools: List of built-in tools (OpenAI Responses API only)
+        reasoning_effort: Reasoning effort level for o-series models (OpenAI Responses API only)
+        modalities: Output modalities (text, audio, image) (OpenAI Responses API only)
+        store: Enable server-side conversation state (OpenAI Responses API only)
+        previous_response_id: Continue from previous response (OpenAI Responses API only)
 
     Yields:
         Text chunks as they are generated
@@ -750,7 +875,7 @@ async def stream(
     if prompt:
         msg_list = [{"role": "user", "content": prompt}]
     else:
-        msg_list = messages
+        msg_list = messages or []
 
     # Convert to Message objects for internal API
     message_objects = []
@@ -763,11 +888,16 @@ async def stream(
         elif role == MessageRole.SYSTEM:
             message_objects.append(Message.system(msg["content"]))
 
-    # Build request
+    # Build request with Responses API parameters
     config = GenerationConfig(
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
+        built_in_tools=built_in_tools or [],
+        reasoning_effort=reasoning_effort,
+        modalities=modalities,
+        store=store,
+        previous_response_id=previous_response_id,
     )
 
     request = GenerateRequest(
