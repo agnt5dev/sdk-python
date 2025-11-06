@@ -168,8 +168,8 @@ async def wf_32_handoff_with_context(ctx: WorkflowContext, user_name: str, query
     ctx.logger.info(f"User: {user_name}, Query: {query}")
 
     # Set context before triage
-    ctx.set("user_name", user_name)
-    ctx.set("preferences", {"detail_level": "comprehensive"})
+    ctx.state.set("user_name", user_name)
+    ctx.state.set("preferences", {"detail_level": "comprehensive"})
     ctx.logger.info(f"Context set: user={user_name}")
 
     # Context-aware specialist

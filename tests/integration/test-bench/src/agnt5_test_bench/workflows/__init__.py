@@ -74,11 +74,13 @@ from .wf_07_agent_handoff_workflows import (
     wf_35_handoff_with_state,
 )
 
-# WF_08: Human-in-the-Loop (HITL) Workflows
+# WF_08: Human-in-the-Loop (HITL) Workflows (wf_36 - wf_40)
 from .wf_08_hitl_workflows import (
-    approval_workflow_hitl,
-    multi_choice_workflow,
-    text_input_workflow,
+    wf_36_approval_workflow_hitl,
+    wf_37_multi_choice_workflow,
+    wf_38_text_input_workflow,
+    wf_39_agent_with_ask_user_tool,
+    wf_40_agent_with_approval_tool,
 )
 
 __all__ = [
@@ -131,7 +133,9 @@ __all__ = [
     "wf_34_multiple_handoff_options",
     "wf_35_handoff_with_state",
     # WF_08: HITL workflows
-    "approval_workflow_hitl",
-    "multi_choice_workflow",
-    "text_input_workflow",
+    "wf_36_approval_workflow_hitl",
+    "wf_37_multi_choice_workflow",
+    "wf_38_text_input_workflow",
+    "wf_39_agent_with_ask_user_tool",
+    "wf_40_agent_with_approval_tool",
 ]

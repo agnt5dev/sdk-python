@@ -1,6 +1,6 @@
 [package]
 name = "agnt5-sdk-python"
-version = "0.2.8-alpha.10"
+version = "0.2.8-alpha.11"
 edition = "2021"
 authors = ["AGNT5 Team"]
 
