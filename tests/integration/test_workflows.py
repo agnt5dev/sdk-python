@@ -186,14 +186,17 @@ def test_workflow_with_function_chaining(client, worker_process, platform):
     result = client.run("wf_08_function_result_chaining", {})
 
     # Verify result chaining
-    # fn_02(5) = 10, fn_02(10) = 20, fn_02(20) = 40
-    assert result["step1_result"] == 10
-    assert result["step2_result"] == 20
-    assert result["step3_result"] == 40
-    assert result["chain_length"] == 3
+    # fn_02(5) = 10, fn_02(3) = 6
+    # fn_03(10, 6) = 16
+    # fn_04(16, 2, 8) = 16 * 2 + 8 = 40
+    assert result["val1"] == 10
+    assert result["val2"] == 6
+    assert result["sum"] == 16
+    assert result["final"] == 40
+    assert "formula" in result
 
     print(f"\n✅ Function result chaining works correctly")
-    print(f"   ✓ Chain length: {result['chain_length']}")
+    print(f"   ✓ Final result: {result['final']}")
 
 
 @pytest.mark.integration
@@ -208,15 +211,19 @@ def test_workflow_sequential_function_calls(client, worker_process, platform):
     """
     time.sleep(2)
 
-    result = client.run("wf_07_sequential_function_calls", {})
+    result = client.run("wf_07_sequential_function_calls", {"start_value": 5})
 
-    # Verify all function calls succeeded
-    assert "results" in result
-    assert len(result["results"]) == 4
-    assert result["total_calls"] == 4
+    # Verify sequential computation
+    # (5 * 2) = 10, (10 + 10) = 20, (20 * 2 + 5) = 45
+    assert result["start_value"] == 5
+    assert result["step1_doubled"] == 10
+    assert result["step2_added"] == 20
+    assert result["step3_final"] == 45
+    assert "computation" in result
 
     print(f"\n✅ Sequential function calls work correctly")
-    print(f"   ✓ {result['total_calls']} sequential calls executed")
+    print(f"   ✓ 3 sequential steps completed")
+    print(f"   ✓ Final result: {result['step3_final']}")
 
 
 @pytest.mark.integration
@@ -261,17 +268,27 @@ def test_workflow_conditional_execution(client, worker_process, platform):
     """
     time.sleep(2)
 
-    # Test both conditional paths
-    result_high = client.run("wf_10_conditional_function_calls", {"threshold": 3})
-    assert result_high["path_taken"] == "above_threshold"
-    assert result_high["function_called"] == "fn_04_three_params"
+    # Test different conditional paths
+    result_double = client.run("wf_10_conditional_function_calls", {
+        "operation": "double",
+        "a": 5,
+        "b": 0
+    })
+    assert result_double["operation"] == "double"
+    assert result_double["function_used"] == "fn_02_one_param"
+    assert result_double["result"] == 10  # 5 * 2
 
-    result_low = client.run("wf_10_conditional_function_calls", {"threshold": 10})
-    assert result_low["path_taken"] == "below_threshold"
-    assert result_low["function_called"] == "fn_02_one_param"
+    result_add = client.run("wf_10_conditional_function_calls", {
+        "operation": "add",
+        "a": 7,
+        "b": 3
+    })
+    assert result_add["operation"] == "add"
+    assert result_add["function_used"] == "fn_03_two_params"
+    assert result_add["result"] == 10  # 7 + 3
 
     print(f"\n✅ Conditional workflow execution works correctly")
-    print(f"   ✓ Both code paths tested")
+    print(f"   ✓ Multiple code paths tested")
 
 
 @pytest.mark.integration
@@ -289,11 +306,15 @@ def test_workflow_different_param_counts(client, worker_process, platform):
     result = client.run("wf_06_different_param_counts", {})
 
     # Verify all function calls with different param counts
-    assert result["fn_0_params"]["params"] == 0
-    assert result["fn_1_param"]["params"] == 1
-    assert result["fn_2_params"]["params"] == 2
-    assert result["fn_3_params"]["params"] == 3
-    assert result["total_functions_called"] == 4
+    assert "no_params" in result
+    assert result["no_params"]["params"] == 0
+    assert "one_param" in result
+    assert result["one_param"]["params"] == 1
+    assert "two_params" in result
+    assert result["two_params"]["params"] == 2
+    assert "three_params" in result
+    assert result["three_params"]["params"] == 3
+    assert result["total_calls"] == 4
 
     print(f"\n✅ Functions with different parameter counts work correctly")
     print(f"   ✓ Tested 0-3 parameters")
@@ -354,14 +375,20 @@ def test_workflow_with_state_persistence(client, worker_process, platform):
     """
     time.sleep(2)
 
-    result = client.run("wf_09_function_with_state", {"multiplier": 3})
+    result = client.run("wf_09_function_with_state", {})
 
     # Verify state was used in computation
-    assert result["stored_multiplier"] == 3
-    assert "result" in result
-    assert result["state_operations"] == ["set", "get", "compute"]
+    # wf_09 processes [2, 5, 8, 3, 7], doubles each, accumulates
+    assert "input_values" in result
+    assert result["input_values"] == [2, 5, 8, 3, 7]
+    assert "doubled_values" in result
+    assert result["count"] == 5
+    assert "total" in result
+    assert "average" in result
 
     print(f"\n✅ Workflow state persistence works correctly")
+    print(f"   ✓ Processed {result['count']} values")
+    print(f"   ✓ Average: {result['average']}")
 
 
 # TODO: Add tests for:
