@@ -1,37 +1,36 @@
 """LM Functions - Test OpenAI integration via ctx.lm()."""
 
-from agnt5 import function, FunctionContext
+from agnt5 import function, FunctionContext, lm
 
 
 @function
-async def fn_10_lm_simple_completion(ctx: FunctionContext, prompt: str) -> dict:
+async def fn_10_lm_simple_completion(ctx: FunctionContext, prompt: str, model_name: str) -> dict:
     """Function that calls OpenAI for text completion."""
     ctx.logger.info(f"Calling LM with prompt: {prompt[:50]}...")
 
     # Use context's lm() method for OpenAI calls
-    response = await ctx.lm(
-        model="openai/gpt-4o-mini",
+    response = await lm.generate(
+        model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
     )
 
-    result = response["choices"][0]["message"]["content"]
+    result = response.text
     ctx.logger.info(f"LM response: {result[:50]}...")
 
     return {
         "prompt": prompt,
         "response": result,
-        "model": "openai/gpt-4o-mini",
+        "model": model_name,
     }
 
 
 @function
-async def fn_11_lm_structured_output(ctx: FunctionContext, question: str) -> dict:
+async def fn_11_lm_structured_output(ctx: FunctionContext, question: str, model_name: str) -> dict:
     """Function that gets structured output from LM."""
     ctx.logger.info(f"Getting structured answer for: {question}")
 
-    response = await ctx.lm(
-        model="openai/gpt-4o-mini",
+    response = await lm.generate(
+        model=model_name,
         messages=[
             {
                 "role": "system",
@@ -42,12 +41,10 @@ async def fn_11_lm_structured_output(ctx: FunctionContext, question: str) -> dic
         temperature=0.5,
     )
 
-    answer = response["choices"][0]["message"]["content"]
-
     return {
         "question": question,
-        "answer": answer,
-        "tokens": response.get("usage", {}),
+        "answer": response.text,
+        "tokens": response.usage,
     }
 
 

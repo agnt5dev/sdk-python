@@ -151,8 +151,7 @@ async def wf_23_agent_with_workflow_state(ctx: WorkflowContext) -> dict:
     # Execute agent with context
     ctx.logger.info(f"Executing agent for user: {user_name}")
     agent_result = await test_agent.run(
-        f"Explain the concept of variables in programming. "
-        f"The user prefers {preference}.",
+        f"Explain the concept of variables in programming. " f"The user prefers {preference}.",
         context=ctx,
     )
     ctx.logger.info(f"Agent output: {agent_result.output[:100]}...")
@@ -228,7 +227,9 @@ async def wf_24_multiple_agents_in_workflow(ctx: WorkflowContext, topic: str = "
         temperature=0.7,
     )
 
-    summarizer_result = await summarizer.run(f"Summarize the key points about {topic}.", context=ctx)
+    summarizer_result = await summarizer.run(
+        f"Summarize the key points about {topic}.", context=ctx
+    )
     ctx.logger.info(f"Summarizer response: {summarizer_result.output[:100]}...")
 
     return {
@@ -262,12 +263,11 @@ async def wf_25_agent_with_structured_output(ctx: WorkflowContext) -> dict:
     # Create agent for structured output
     structured_agent = Agent(
         name="StructuredAgent",
-        model="openai/gpt-4o-mini",
+        model="openai/gpt-5-mini",
         instructions=(
             "You provide structured information. "
             "Always format your response as clear bullet points."
         ),
-        temperature=0.7,
     )
 
     # Request structured information

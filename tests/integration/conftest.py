@@ -39,7 +39,7 @@ def pytest_addoption(parser):
         action="store",
         default="embedded",
         choices=["embedded", "postgres", "managed", "all"],
-        help="Runtime mode for integration tests (embedded|postgres|managed|all)"
+        help="Runtime mode for integration tests (embedded|postgres|managed|all)",
     )
 
 
@@ -152,7 +152,8 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
 
     # Pull latest image to ensure we have the most recent version
     import docker
-    image_name = "ghcr.io/agnt5dev/agnt5-dev-server:develop"
+
+    image_name = "ghcr.io/agnt5dev/agnt5-dev-server-py:latest"
     # image_name = "agnt5/dev-server:latest"  # Use Docker Hub mirror for CI speed
     print(f"📥 Pulling latest image: {image_name}")
     try:
@@ -165,7 +166,9 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
 
     # Start dev-server container
     dev_server = DockerContainer(image_name)
-    dev_server.with_exposed_ports(34181, 34182, 34186, 4317, 34180)  # HTTP, gRPC, Coordinator, OTLP, MCP
+    dev_server.with_exposed_ports(
+        34181, 34182, 34186, 4317, 34180
+    )  # HTTP, gRPC, Coordinator, OTLP, MCP
 
     # Configure for embedded mode (SQLite + embedded journal)
     dev_server.with_env("AGNT5_DATA_DIR", "/data")
@@ -245,7 +248,7 @@ def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
         "host_observability_path": os.path.join(data_dir, "observability.db") if data_dir else None,
         "containers": {
             "dev-server": dev_server,
-        }
+        },
     }
 
 
@@ -274,7 +277,9 @@ def setup_postgres_mode() -> Dict[str, any]:
 
     postgres_host = postgres.get_container_host_ip()
     postgres_port = postgres.get_exposed_port(5432)
-    postgres_url = f"postgresql://agnt5:agnt5@{postgres_host}:{postgres_port}/orchestration?sslmode=disable"
+    postgres_url = (
+        f"postgresql://agnt5:agnt5@{postgres_host}:{postgres_port}/orchestration?sslmode=disable"
+    )
 
     print(f"✅ PostgreSQL started: {postgres_url}")
 
@@ -318,7 +323,7 @@ def setup_postgres_mode() -> Dict[str, any]:
         "containers": {
             "postgres": postgres,
             "dev-server": dev_server,
-        }
+        },
     }
 
 
@@ -411,7 +416,7 @@ def setup_managed_mode() -> Dict[str, any]:
             "cockroach": cockroach,
             "redpanda": redpanda,
             "dev-server": dev_server,
-        }
+        },
     }
 
 
@@ -435,7 +440,7 @@ def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=Non
                     try:
                         logs = container.get_logs()
                         error_msg += f"\nContainer logs (last 50 lines):\n"
-                        error_msg += "\n".join(logs[0].decode('utf-8').split('\n')[-50:])
+                        error_msg += "\n".join(logs[0].decode("utf-8").split("\n")[-50:])
                     except Exception as log_error:
                         error_msg += f"\nCould not retrieve container logs: {log_error}"
 
@@ -493,10 +498,7 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
 
     Worker runs the test service blueprint and connects to Worker Coordinator.
     """
-    service_path = os.path.join(
-        os.path.dirname(__file__),
-        "test-bench"
-    )
+    service_path = os.path.join(os.path.dirname(__file__), "test-bench")
 
     env = {
         **os.environ,
@@ -504,7 +506,7 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         "AGNT5_SERVICE_NAME": "test-bench",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],
+        "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
     }
 
     print(f"🔌 Worker connecting to coordinator: {env['AGNT5_COORDINATOR_ENDPOINT']}")
@@ -542,9 +544,9 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
                 f"{platform['gateway_url']}/v1/workers",
                 params={
                     "tenant_id": "00000000-0000-0000-0000-000000000001",
-                    "deployment_id": "00000000-0000-0000-0000-000000000002"
+                    "deployment_id": "00000000-0000-0000-0000-000000000002",
                 },
-                timeout=2
+                timeout=2,
             )
             print(f"   Worker check: status={response.status_code}")
             if response.status_code == 200:
@@ -560,7 +562,7 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
                         print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
 
                         # Print components grouped by type
-                        components = worker_info.get('components', {})
+                        components = worker_info.get("components", {})
                         if components:
                             print(f"     • Components:")
                             for comp_type, comp_list in components.items():
@@ -593,13 +595,13 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
     try:
         stdout, stderr = worker.communicate(timeout=5)
         # Print worker logs for debugging (last 100 lines)
-        stderr_lines = stderr.decode('utf-8', errors='ignore').split('\n')
+        stderr_lines = stderr.decode("utf-8", errors="ignore").split("\n")
         if len(stderr_lines) > 100:
             print(f"\n📋 Worker logs (last 100 lines):")
-            print('\n'.join(stderr_lines[-100:]))
+            print("\n".join(stderr_lines[-100:]))
         else:
             print(f"\n📋 Worker logs (all):")
-            print('\n'.join(stderr_lines))
+            print("\n".join(stderr_lines))
     except subprocess.TimeoutExpired:
         worker.kill()
         worker.wait()
@@ -622,6 +624,7 @@ def client(platform):
 
 
 # Helper utilities for tests
+
 
 def wait_for_worker_registration(platform: Dict[str, any], timeout: int = 10) -> bool:
     """
@@ -650,10 +653,7 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
         worker_process.wait()
 
     # Start new worker
-    service_path = os.path.join(
-        os.path.dirname(__file__),
-        "test-bench"
-    )
+    service_path = os.path.join(os.path.dirname(__file__), "test-bench")
 
     env = {
         **os.environ,
@@ -661,7 +661,7 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
         "AGNT5_SERVICE_NAME": "test-bench",
         "AGNT5_TENANT_ID": "test-tenant-001",
         "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": platform['otlp_endpoint'],
+        "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
     }
 
     new_worker = subprocess.Popen(

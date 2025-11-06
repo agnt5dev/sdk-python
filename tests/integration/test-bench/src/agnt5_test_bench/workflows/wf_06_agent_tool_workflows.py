@@ -155,7 +155,9 @@ async def wf_28_agent_multi_tool_coordination(ctx: WorkflowContext) -> dict:
         instructions=(
             "You are a data processing assistant. "
             "Use tools to search, validate, and format data. "
-            "Perform tasks step by step."
+            "IMPORTANT: Execute one tool at a time and wait for results before calling the next tool. "
+            "Always pass the results from one tool as arguments to the next tool when needed. "
+            "For example, if you search for data, pass that data to validate_data before formatting."
         ),
         tools=[search_database, validate_data, format_report],
         temperature=0.7,
@@ -166,9 +168,10 @@ async def wf_28_agent_multi_tool_coordination(ctx: WorkflowContext) -> dict:
     ctx.logger.info("Executing complex multi-tool task...")
     result = await data_agent.run(
         (
-            "Search for analytics records, "
-            "validate that they have 'title' and 'category' fields, "
-            "then format the results as a detailed report."
+            "Step 1: Use search_database to search for 'analytics' records (limit 3). "
+            "Step 2: Take the results from search_database and pass them to validate_data "
+            "to check that each record has 'title' and 'category' fields. "
+            "Step 3: Format the validation results as a detailed report."
         ),
         context=ctx,
     )

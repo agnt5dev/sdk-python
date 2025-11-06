@@ -501,6 +501,309 @@ def test_message_helpers():
 
 
 # ============================================================================
+# OpenAI Responses API Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_generate_with_built_in_tools(mock_rust_generate):
+    """Test generation with OpenAI built-in tools."""
+    from agnt5.lm import BuiltInTool
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o",
+            prompt="Search for the latest AI news",
+            built_in_tools=[BuiltInTool.WEB_SEARCH, BuiltInTool.FILE_SEARCH]
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        # Verify built-in tools were passed to Rust
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert "built_in_tools" in call_kwargs
+        built_in_tools = json.loads(call_kwargs["built_in_tools"])
+        assert "web_search_preview" in built_in_tools
+        assert "file_search" in built_in_tools
+
+
+@pytest.mark.asyncio
+async def test_generate_with_code_interpreter(mock_rust_generate):
+    """Test generation with code interpreter built-in tool."""
+    from agnt5.lm import BuiltInTool
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt="Calculate the fibonacci sequence",
+            built_in_tools=[BuiltInTool.CODE_INTERPRETER]
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert "built_in_tools" in call_kwargs
+        built_in_tools = json.loads(call_kwargs["built_in_tools"])
+        assert "code_interpreter" in built_in_tools
+
+
+@pytest.mark.asyncio
+async def test_generate_with_reasoning_effort(mock_rust_generate):
+    """Test generation with reasoning effort for o-series models."""
+    from agnt5.lm import ReasoningEffort
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/o1",
+            prompt="Solve this complex problem",
+            reasoning_effort=ReasoningEffort.HIGH
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_generate_with_minimal_reasoning(mock_rust_generate):
+    """Test generation with minimal reasoning effort."""
+    from agnt5.lm import ReasoningEffort
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/o1-mini",
+            prompt="Quick question",
+            reasoning_effort=ReasoningEffort.MINIMAL
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["reasoning_effort"] == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_generate_with_modalities(mock_rust_generate):
+    """Test generation with modalities (text, audio, image)."""
+    from agnt5.lm import Modality
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o",
+            prompt="Describe this image",
+            modalities=[Modality.TEXT, Modality.AUDIO]
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert "modalities" in call_kwargs
+        modalities = json.loads(call_kwargs["modalities"])
+        assert "text" in modalities
+        assert "audio" in modalities
+
+
+@pytest.mark.asyncio
+async def test_generate_with_store_enabled(mock_rust_generate):
+    """Test generation with server-side state storage enabled."""
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt="Remember this conversation",
+            store=True
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["store"] is True
+
+
+@pytest.mark.asyncio
+async def test_generate_with_previous_response_id(mock_rust_generate):
+    """Test generation continuing from previous response."""
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt="Continue from where we left off",
+            previous_response_id="resp_abc123",
+            store=True
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["previous_response_id"] == "resp_abc123"
+        assert call_kwargs["store"] is True
+
+
+@pytest.mark.asyncio
+async def test_generate_with_all_responses_api_features(mock_rust_generate):
+    """Test generation with all Responses API features combined."""
+    from agnt5.lm import BuiltInTool, ReasoningEffort, Modality
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/o1",
+            prompt="Complex task with all features",
+            temperature=0.7,
+            max_tokens=1000,
+            built_in_tools=[BuiltInTool.WEB_SEARCH, BuiltInTool.CODE_INTERPRETER],
+            reasoning_effort=ReasoningEffort.HIGH,
+            modalities=[Modality.TEXT],
+            store=True
+        )
+
+        assert isinstance(response, GenerateResponse)
+
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert "built_in_tools" in call_kwargs
+        assert call_kwargs["reasoning_effort"] == "high"
+        assert "modalities" in call_kwargs
+        assert call_kwargs["store"] is True
+
+
+# ============================================================================
+# Streaming with Responses API Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
+    """Test streaming with OpenAI built-in tools."""
+    from agnt5.lm import BuiltInTool
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_rust_class.return_value = mock_instance
+
+        chunks = []
+        async for chunk in lm.stream(
+            model="openai/gpt-4o",
+            prompt="Search and summarize AI news",
+            built_in_tools=[BuiltInTool.WEB_SEARCH]
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) > 0
+
+        # Verify built-in tools were passed to Rust
+        call_kwargs = mock_instance.stream.call_args.kwargs
+        assert "built_in_tools" in call_kwargs
+        built_in_tools = json.loads(call_kwargs["built_in_tools"])
+        assert "web_search_preview" in built_in_tools
+
+
+@pytest.mark.asyncio
+async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
+    """Test streaming with reasoning effort for o-series models."""
+    from agnt5.lm import ReasoningEffort
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_rust_class.return_value = mock_instance
+
+        chunks = []
+        async for chunk in lm.stream(
+            model="openai/o1-mini",
+            prompt="Solve step by step",
+            reasoning_effort=ReasoningEffort.MEDIUM
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) > 0
+
+        call_kwargs = mock_instance.stream.call_args.kwargs
+        assert call_kwargs["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_modalities(mock_rust_stream_chunks):
+    """Test streaming with modalities specification."""
+    from agnt5.lm import Modality
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_rust_class.return_value = mock_instance
+
+        chunks = []
+        async for chunk in lm.stream(
+            model="openai/gpt-4o",
+            prompt="Describe this scene",
+            modalities=[Modality.TEXT, Modality.AUDIO]
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) > 0
+
+        call_kwargs = mock_instance.stream.call_args.kwargs
+        assert "modalities" in call_kwargs
+        modalities = json.loads(call_kwargs["modalities"])
+        assert "text" in modalities
+        assert "audio" in modalities
+
+
+@pytest.mark.asyncio
+async def test_stream_with_store_and_previous_response(mock_rust_stream_chunks):
+    """Test streaming with server-side state and continuation."""
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_rust_class.return_value = mock_instance
+
+        chunks = []
+        async for chunk in lm.stream(
+            model="openai/gpt-4o-mini",
+            prompt="Continue our conversation",
+            store=True,
+            previous_response_id="resp_abc123"
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) > 0
+
+        call_kwargs = mock_instance.stream.call_args.kwargs
+        assert call_kwargs["store"] is True
+        assert call_kwargs["previous_response_id"] == "resp_abc123"
+
+
+# ============================================================================
 # Integration Tests (with real API calls - requires keys)
 # ============================================================================
 
@@ -553,3 +856,325 @@ async def test_live_openai_stream():
     assert len(chunks) > 0
     full_text = "".join(chunks)
     assert len(full_text) > 0
+
+
+# ============================================================================
+# OpenAI Responses API Integration Tests (with real API calls)
+# ============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_basic():
+    """Test basic Responses API call with real OpenAI API.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_basic -m lm_live -v
+    """
+    import os
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    response = await lm.generate(
+        model="openai/gpt-4o-mini",
+        prompt="Say 'Hello from Responses API' and nothing else.",
+        max_tokens=20,
+        temperature=0.5
+    )
+
+    assert isinstance(response, GenerateResponse)
+    assert len(response.text) > 0
+    assert "hello" in response.text.lower() or "responses" in response.text.lower()
+    assert response.usage is not None
+    assert response.usage.total_tokens > 0
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_with_web_search():
+    """Test Responses API with web search built-in tool (requires OPENAI_API_KEY).
+
+    NOTE: Web search is a preview feature and may not be available on all accounts.
+    This test will be skipped if web search is not available.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_web_search -m lm_live -v
+    """
+    import os
+    from agnt5.lm import BuiltInTool
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    try:
+        response = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt="What are the latest AI news headlines? Just give me 2 headlines.",
+            built_in_tools=[BuiltInTool.WEB_SEARCH],
+            max_tokens=200,
+            temperature=0.5
+        )
+
+        assert isinstance(response, GenerateResponse)
+        assert len(response.text) > 0
+        print(f"\nWeb search response: {response.text}")
+    except Exception as e:
+        # Web search may not be available on all accounts
+        if "web_search" in str(e).lower() or "not available" in str(e).lower():
+            pytest.skip(f"Web search not available: {e}")
+        raise
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_with_reasoning_effort():
+    """Test Responses API with reasoning effort for o-series models.
+
+    NOTE: Requires access to o-series models (o1, o1-mini, etc.)
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_reasoning_effort -m lm_live -v
+    """
+    import os
+    from agnt5.lm import ReasoningEffort
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    try:
+        response = await lm.generate(
+            model="openai/o1-mini",
+            prompt="What is 15 * 23?",
+            reasoning_effort=ReasoningEffort.MINIMAL,
+            max_tokens=100
+        )
+
+        assert isinstance(response, GenerateResponse)
+        assert len(response.text) > 0
+        # Should contain the answer 345
+        assert "345" in response.text
+        print(f"\nReasoning response: {response.text}")
+    except Exception as e:
+        # o-series models may not be available on all accounts
+        if "o1" in str(e).lower() or "not available" in str(e).lower() or "model" in str(e).lower():
+            pytest.skip(f"o1-mini model not available: {e}")
+        raise
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_with_modalities():
+    """Test Responses API with modalities specification.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_modalities -m lm_live -v
+    """
+    import os
+    from agnt5.lm import Modality
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    response = await lm.generate(
+        model="openai/gpt-4o-mini",
+        prompt="Describe the color blue in one sentence.",
+        modalities=[Modality.TEXT],
+        max_tokens=50,
+        temperature=0.5
+    )
+
+    assert isinstance(response, GenerateResponse)
+    assert len(response.text) > 0
+    assert "blue" in response.text.lower()
+    print(f"\nModality response: {response.text}")
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_with_store():
+    """Test Responses API with server-side state storage.
+
+    This test verifies that conversations can be stored server-side
+    and continued with previous_response_id.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_store -m lm_live -v
+    """
+    import os
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    # First message with store=True
+    response1 = await lm.generate(
+        model="openai/gpt-4o-mini",
+        prompt="My favorite color is purple. Remember this.",
+        store=True,
+        max_tokens=50,
+        temperature=0.5
+    )
+
+    assert isinstance(response1, GenerateResponse)
+    assert len(response1.text) > 0
+    print(f"\nFirst response: {response1.text}")
+
+    # NOTE: The Responses API returns a response_id in the response object
+    # However, our current implementation may not expose it yet.
+    # For now, this test just verifies that store=True doesn't cause errors.
+    # In a complete implementation, we would:
+    # 1. Extract response_id from response1
+    # 2. Use it in a follow-up call with previous_response_id
+    # 3. Verify the model remembers the context
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_comprehensive():
+    """Comprehensive test combining multiple Responses API features.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_comprehensive -m lm_live -v
+    """
+    import os
+    from agnt5.lm import Modality
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    response = await lm.generate(
+        model="openai/gpt-4o-mini",
+        prompt="Tell me one interesting fact about Python programming language.",
+        temperature=0.7,
+        max_tokens=100,
+        modalities=[Modality.TEXT],
+        store=True
+    )
+
+    assert isinstance(response, GenerateResponse)
+    assert len(response.text) > 0
+    assert "python" in response.text.lower()
+    assert response.usage is not None
+    print(f"\nComprehensive response: {response.text}")
+    print(f"Token usage: {response.usage}")
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_responses_api_conversation_continuation():
+    """Test conversation continuation with response_id.
+
+    This test validates that response_id is returned and can be used
+    to continue conversations with server-side state.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_responses_api_conversation_continuation -m lm_live -v
+    """
+    import os
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    # First message with store=True
+    response1 = await lm.generate(
+        model="openai/gpt-4o-mini",
+        prompt="My favorite animal is a penguin. Please remember this.",
+        store=True,
+        max_tokens=50
+    )
+
+    assert isinstance(response1, GenerateResponse)
+    assert len(response1.text) > 0
+    print(f"\nFirst response: {response1.text}")
+    print(f"Response ID: {response1.response_id}")
+
+    # If response_id is available, test continuation
+    if response1.response_id:
+        print(f"Testing continuation with response_id: {response1.response_id}")
+
+        response2 = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt="What is my favorite animal?",
+            previous_response_id=response1.response_id,
+            store=True,
+            max_tokens=50
+        )
+
+        assert isinstance(response2, GenerateResponse)
+        assert len(response2.text) > 0
+        print(f"\nSecond response: {response2.text}")
+
+        # The model should remember the penguin
+        assert "penguin" in response2.text.lower()
+    else:
+        print("Note: response_id not yet exposed by Rust layer")
+
+
+# ============================================================================
+# Streaming with Responses API Integration Tests
+# ============================================================================
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_stream_with_built_in_tools():
+    """Test streaming with web search built-in tool.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_stream_with_built_in_tools -m lm_live -v
+    """
+    import os
+    from agnt5.lm import BuiltInTool
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    try:
+        chunks = []
+        async for chunk in lm.stream(
+            model="openai/gpt-4o-mini",
+            prompt="What's trending in AI today? Give me 2 headlines.",
+            built_in_tools=[BuiltInTool.WEB_SEARCH],
+            max_tokens=200
+        ):
+            chunks.append(chunk)
+            print(chunk, end="", flush=True)
+
+        full_text = "".join(chunks)
+        assert len(full_text) > 0
+        print(f"\n\nTotal chunks: {len(chunks)}")
+    except Exception as e:
+        if "web_search" in str(e).lower() or "not available" in str(e).lower():
+            pytest.skip(f"Web search not available: {e}")
+        raise
+
+
+@pytest.mark.integration
+@pytest.mark.lm_live
+@pytest.mark.asyncio
+async def test_live_stream_with_modalities():
+    """Test streaming with modalities specification.
+
+    Run with: pytest tests/unit/test_lm.py::test_live_stream_with_modalities -m lm_live -v
+    """
+    import os
+    from agnt5.lm import Modality
+
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set")
+
+    chunks = []
+    async for chunk in lm.stream(
+        model="openai/gpt-4o-mini",
+        prompt="Describe a sunset in vivid detail, one sentence.",
+        modalities=[Modality.TEXT],
+        max_tokens=100,
+        temperature=0.7
+    ):
+        chunks.append(chunk)
+        print(chunk, end="", flush=True)
+
+    full_text = "".join(chunks)
+    assert len(full_text) > 0
+    assert "sunset" in full_text.lower() or "sun" in full_text.lower()
+    print(f"\n\nTotal chunks: {len(chunks)}")

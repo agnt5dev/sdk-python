@@ -23,34 +23,54 @@ T = TypeVar("T")
 ToolHandler = Callable[..., Awaitable[T]]
 
 
-def _python_type_to_json_schema_type(py_type: Any) -> str:
+def _python_type_to_json_schema(py_type: Any) -> Dict[str, Any]:
     """
-    Convert Python type to JSON Schema type.
+    Convert Python type to JSON Schema.
 
     Args:
         py_type: Python type annotation
 
     Returns:
-        JSON Schema type string
+        JSON Schema dict with type and potentially items/properties
     """
     # Handle None/NoneType
     if py_type is None or py_type is type(None):
-        return "null"
+        return {"type": "null"}
 
-    # Handle string types
+    # Get origin and args for generic types
     origin = get_origin(py_type)
+    args = get_args(py_type)
 
     # Handle Optional[T] -> unwrap to T
     if origin is type(None.__class__):  # Union type
-        args = get_args(py_type)
         # Filter out NoneType
         non_none_args = [arg for arg in args if arg is not type(None)]
         if len(non_none_args) == 1:
-            return _python_type_to_json_schema_type(non_none_args[0])
+            return _python_type_to_json_schema(non_none_args[0])
         # Multiple non-None types -> just use first one
         if non_none_args:
-            return _python_type_to_json_schema_type(non_none_args[0])
-        return "null"
+            return _python_type_to_json_schema(non_none_args[0])
+        return {"type": "null"}
+
+    # Handle List[T] - need to specify items
+    if origin is list or (origin is None and py_type is list):
+        if args:
+            # List[T] - extract T and create items schema
+            item_type = args[0]
+            return {
+                "type": "array",
+                "items": _python_type_to_json_schema(item_type)
+            }
+        else:
+            # Bare list without type parameter
+            return {
+                "type": "array",
+                "items": {"type": "string"}  # Default to string items
+            }
+
+    # Handle Dict[K, V] - basic object schema
+    if origin is dict or (origin is None and py_type is dict):
+        return {"type": "object"}
 
     # Handle basic types
     type_map = {
@@ -58,19 +78,12 @@ def _python_type_to_json_schema_type(py_type: Any) -> str:
         int: "integer",
         float: "number",
         bool: "boolean",
-        list: "array",
-        List: "array",
-        dict: "object",
-        Dict: "object",
         Any: "string",  # Default to string for Any
     }
 
-    # Check origin for generic types
-    if origin is not None:
-        return type_map.get(origin, "string")
-
     # Direct type match
-    return type_map.get(py_type, "string")
+    json_type = type_map.get(py_type, "string")
+    return {"type": json_type}
 
 
 def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
@@ -111,11 +124,9 @@ def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
         # Get description from docstring
         description = param_descriptions.get(param_name, "")
 
-        # Build parameter schema
-        param_schema = {
-            "type": _python_type_to_json_schema_type(param_type),
-            "description": description
-        }
+        # Build parameter schema using full JSON Schema conversion
+        param_schema = _python_type_to_json_schema(param_type)
+        param_schema["description"] = description
 
         properties[param_name] = param_schema
 
@@ -134,9 +145,7 @@ def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
     return_type = sig.return_annotation
     output_schema = None
     if return_type != inspect.Parameter.empty:
-        output_schema = {
-            "type": _python_type_to_json_schema_type(return_type)
-        }
+        output_schema = _python_type_to_json_schema(return_type)
 
     return {
         "input_schema": input_schema,

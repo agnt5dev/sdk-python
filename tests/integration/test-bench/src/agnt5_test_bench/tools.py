@@ -4,7 +4,7 @@ Test Tools for Integration Testing
 Provides reusable tools for testing tool and agent functionality.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from agnt5 import Context, tool
 
@@ -114,11 +114,11 @@ async def format_report(ctx: Context, data: Dict, format_style: str = "summary")
 
 
 @tool(auto_schema=True)
-async def validate_data(ctx: Context, data: Dict, required_fields: List[str]) -> Dict:
+async def validate_data(ctx: Context, data: Union[Dict, List[Dict]], required_fields: List[str]) -> Dict:
     """Validate that data contains required fields.
 
     Args:
-        data: Data dictionary to validate
+        data: Data dictionary or list of dictionaries to validate
         required_fields: List of required field names
 
     Returns:
@@ -126,16 +126,39 @@ async def validate_data(ctx: Context, data: Dict, required_fields: List[str]) ->
     """
     ctx.logger.info(f"Validating data with {len(required_fields)} required fields")
 
-    missing_fields = [field for field in required_fields if field not in data]
+    # Handle both single dict and list of dicts
+    if isinstance(data, list):
+        # Validate each item in the list
+        results = []
+        for idx, item in enumerate(data):
+            missing_fields = [field for field in required_fields if field not in item]
+            is_valid = len(missing_fields) == 0
+            results.append({
+                "index": idx,
+                "is_valid": is_valid,
+                "missing_fields": missing_fields,
+                "provided_fields": list(item.keys()),
+            })
 
-    is_valid = len(missing_fields) == 0
+        all_valid = all(r["is_valid"] for r in results)
+        return {
+            "is_valid": all_valid,
+            "total_items": len(data),
+            "valid_items": sum(1 for r in results if r["is_valid"]),
+            "results": results,
+            "message": f"Validated {len(data)} items. All valid: {all_valid}",
+        }
+    else:
+        # Single dictionary validation
+        missing_fields = [field for field in required_fields if field not in data]
+        is_valid = len(missing_fields) == 0
 
-    return {
-        "is_valid": is_valid,
-        "missing_fields": missing_fields,
-        "provided_fields": list(data.keys()),
-        "message": "Validation passed" if is_valid else f"Missing fields: {missing_fields}",
-    }
+        return {
+            "is_valid": is_valid,
+            "missing_fields": missing_fields,
+            "provided_fields": list(data.keys()),
+            "message": "Validation passed" if is_valid else f"Missing fields: {missing_fields}",
+        }
 
 
 @tool(auto_schema=True)
