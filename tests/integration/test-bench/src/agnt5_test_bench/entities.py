@@ -35,6 +35,14 @@ class BankAccountState(BaseModel):
     )
 
 
+class ConversationHistoryState(BaseModel):
+    """State schema for ConversationHistory entity."""
+    messages: list[dict] = Field(
+        default_factory=list,
+        description="Conversation messages with role and content"
+    )
+
+
 # ============================================================================
 # Entity Definitions
 # ============================================================================
@@ -231,6 +239,71 @@ class BankAccount(Entity):
         return self.state.get("transactions", [])
 
 
+class ConversationHistory(Entity):
+    """Conversation history entity for testing multi-turn chat workflows."""
+
+    _state_schema = {
+        "type": "object",
+        "properties": {
+            "messages": {
+                "type": "array",
+                "description": "Conversation messages",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "content": {"type": "string"}
+                    }
+                }
+            }
+        }
+    }
+
+    async def add_message(self, role: str, content: str) -> dict:
+        """Add a message to conversation history.
+
+        Args:
+            role: Message role ("user", "assistant", "system")
+            content: Message content
+
+        Returns:
+            Dictionary with message count
+        """
+        messages = self.state.get("messages", [])
+        messages.append({"role": role, "content": content})
+        self.state.set("messages", messages)
+
+        return {
+            "message_count": len(messages),
+            "last_role": role
+        }
+
+    async def get_messages(self) -> list[dict]:
+        """Get all messages in conversation history.
+
+        Returns:
+            List of message dictionaries with role and content
+        """
+        return self.state.get("messages", [])
+
+    async def get_message_count(self) -> int:
+        """Get number of messages in history.
+
+        Returns:
+            Message count
+        """
+        return len(self.state.get("messages", []))
+
+    async def clear(self) -> dict:
+        """Clear all messages from history.
+
+        Returns:
+            Confirmation dictionary
+        """
+        self.state.set("messages", [])
+        return {"message_count": 0}
+
+
 __all__ = [
     "Counter",
     "CounterState",
@@ -238,4 +311,6 @@ __all__ = [
     "ShoppingCartState",
     "BankAccount",
     "BankAccountState",
+    "ConversationHistory",
+    "ConversationHistoryState",
 ]

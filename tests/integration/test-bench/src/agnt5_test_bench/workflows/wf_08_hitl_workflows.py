@@ -9,14 +9,16 @@ Test Coverage:
 ✅ Free-text user input (direct)
 ✅ Agent with AskUserTool (interactive Q&A)
 ✅ Agent with RequestApprovalTool (approval flow)
+✅ Multi-turn conversation with chat=True
 ✅ Workflow pause/resume behavior
 ✅ State persistence across pause
+✅ Session-based conversation history
 
 MCP Verification Points:
 - Logs: User input requests, pause events, resume events, agent reasoning
 - Traces: Workflow spans showing pause points, agent spans with tool calls
 - Events: workflow.paused, workflow.resumed, agent.started, tool.invoked
-- Entity: Workflow state preservation during pause, agent conversation history
+- Entity: Workflow state preservation during pause, agent conversation history, session persistence
 """
 
 from agnt5 import workflow, WorkflowContext, Agent
@@ -387,10 +389,93 @@ async def wf_40_agent_with_approval_tool(
     }
 
 
+@workflow(chat=True)
+async def wf_41_multi_turn_conversation(
+    ctx: WorkflowContext, session_id: str, message: str
+) -> dict:
+    """Test Scenario: Multi-turn conversation with session-based history.
+
+    Demonstrates chat=True functionality where agents automatically persist
+    conversation history across multiple workflow invocations using AgentContext
+    with session_id. Each turn adds to the conversation, allowing the agent
+    to remember previous context.
+
+    Args:
+        session_id: Unique session identifier to group conversation turns
+        message: New user message for this turn
+
+    Returns:
+        Result dictionary with response, turn count, and session metadata
+
+    MCP Verification Points:
+        - Logs: Agent reasoning, message tracking, turn progression
+        - Entity: AgentSession entity persists conversation automatically
+        - Traces: Each turn creates workflow span with agent span
+        - Events: Entity state updates for agent conversation history
+    """
+    ctx.logger.info("=== HITL: Multi-Turn Conversation (chat=True) ===")
+    ctx.logger.info(f"Session ID: {session_id}")
+    ctx.logger.info(f"New message: {message}")
+
+    # Create AgentContext with session_id for conversation persistence
+    # This automatically handles loading/saving conversation history
+    from agnt5 import AgentContext
+
+    agent_ctx = AgentContext(
+        run_id=ctx.run_id,
+        agent_name="ChatAssistant",
+        session_id=session_id,  # Key for multi-turn persistence
+        parent_context=ctx,  # Inherit workflow context
+    )
+
+    # Get metadata before processing (shows conversation state)
+    metadata_before = await agent_ctx.get_metadata()
+    message_count_before = metadata_before.get("message_count", 0)
+    ctx.logger.info(f"📚 Session has {message_count_before} messages before this turn")
+
+    # Create agent
+    chat_agent = Agent(
+        name="ChatAssistant",
+        model="openai/gpt-4o-mini",
+        instructions=(
+            "You are a helpful chat assistant. You can see the full conversation "
+            "history and should reference previous messages when relevant. "
+            "Keep responses concise and natural."
+        ),
+        temperature=0.7,
+        max_iterations=5,
+    )
+
+    ctx.logger.info(f"🤖 Running agent (turn {message_count_before // 2 + 1})...")
+
+    # Run agent - it automatically loads history, adds user message, and saves
+    result = await chat_agent.run(message, context=agent_ctx)
+
+    assistant_response = result.output
+    ctx.logger.info(f"💬 Agent response: {assistant_response[:100]}...")
+
+    # Get metadata after processing
+    metadata_after = await agent_ctx.get_metadata()
+    message_count_after = metadata_after.get("message_count", 0)
+    turn_count = message_count_after // 2  # Each turn = 1 user + 1 assistant message
+
+    ctx.logger.info(f"✅ Turn {turn_count} complete ({message_count_after} total messages)")
+
+    return {
+        "session_id": session_id,
+        "role": "assistant",  # Indicate this is an assistant response
+        "response": assistant_response,
+        "turn_count": turn_count,
+        "total_messages": message_count_after,
+        "metadata": metadata_after,
+    }
+
+
 __all__ = [
     "wf_36_approval_workflow_hitl",
     "wf_37_multi_choice_workflow",
     "wf_38_text_input_workflow",
     "wf_39_agent_with_ask_user_tool",
     "wf_40_agent_with_approval_tool",
+    "wf_41_multi_turn_conversation",
 ]
