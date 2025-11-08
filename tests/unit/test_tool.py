@@ -33,7 +33,8 @@ def test_python_type_to_json_schema():
     assert _python_type_to_json_schema(int) == {"type": "integer"}
     assert _python_type_to_json_schema(float) == {"type": "number"}
     assert _python_type_to_json_schema(bool) == {"type": "boolean"}
-    assert _python_type_to_json_schema(list) == {"type": "array"}
+    # list without type args defaults to array of strings
+    assert _python_type_to_json_schema(list) == {"type": "array", "items": {"type": "string"}}
     assert _python_type_to_json_schema(dict) == {"type": "object"}
 
 
