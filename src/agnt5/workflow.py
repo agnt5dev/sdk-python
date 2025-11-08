@@ -884,6 +884,7 @@ def workflow(
     *,
     name: Optional[str] = None,
     chat: bool = False,
+    cron: Optional[str] = None,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as an AGNT5 durable workflow.
@@ -894,6 +895,7 @@ def workflow(
     Args:
         name: Custom workflow name (default: function's __name__)
         chat: Enable chat mode for multi-turn conversation workflows (default: False)
+        cron: Cron expression for scheduled execution (e.g., "0 9 * * *" for daily at 9am)
 
     Example (standard workflow):
         @workflow
@@ -934,6 +936,15 @@ def workflow(
             ctx.state.set("messages", messages)
 
             return {"response": response, "turn_count": len(messages) // 2}
+
+    Example (scheduled workflow):
+        @workflow(name="daily_report", cron="0 9 * * *")
+        async def daily_report(ctx: WorkflowContext) -> dict:
+            # Runs automatically every day at 9am
+            sales = await ctx.task(get_sales_data, report_type="sales")
+            report = await ctx.task(generate_pdf, input=sales)
+            await ctx.task(send_email, to="team@company.com", attachment=report)
+            return {"status": "sent", "report_id": report["id"]}
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -969,6 +980,10 @@ def workflow(
         # Add chat metadata if chat mode is enabled
         if chat:
             metadata["chat"] = "true"
+
+        # Add cron metadata if cron schedule is provided
+        if cron:
+            metadata["cron"] = cron
 
         # Register workflow
         config = WorkflowConfig(
