@@ -453,20 +453,26 @@ def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=Non
             time.sleep(1)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], None, None]:
     """
     Start AGNT5 platform in the specified runtime mode.
 
-    Uses function scope so each test gets a clean platform state.
+    Uses session scope so the platform container runs once for all tests.
+    This significantly improves test performance by avoiding container
+    startup/shutdown overhead for each test.
+
     For embedded mode, the SQLite database is mounted to a persistent directory
-    (persistent_data_dir), allowing the database to survive worker restarts
+    (persistent_data_dir), allowing the database to survive across all tests
     and be inspected from the host.
 
     Supports three runtime modes:
     - embedded: SQLite + embedded journal (dev-server container)
     - postgres: PostgreSQL + embedded journal (dev-server + postgres containers)
     - managed: Redpanda + CockroachDB (dev-server + redpanda + cockroach containers)
+
+    Note: Tests should use unique entity keys and run IDs to avoid conflicts,
+    as the platform state persists across all tests in the session.
     """
     # Setup platform based on runtime mode
     if runtime_mode == "embedded":
@@ -491,10 +497,13 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
                 print(f"⚠️  Failed to stop {name}: {e}")
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
     """
     Start Python worker process connected to platform.
+
+    Uses session scope so the worker runs once for all tests, avoiding
+    the overhead of starting/stopping the worker for each test.
 
     Worker runs the test service blueprint and connects to Worker Coordinator.
     """
