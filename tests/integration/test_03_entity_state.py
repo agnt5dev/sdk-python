@@ -35,7 +35,7 @@ def test_counter_entity_state_persists(client, worker_process, platform):
     time.sleep(2)
 
     # Increment counter
-    result = client.run("Counter", "increment", key="test-counter-1", amount=5)
+    result = client.entity("Counter", "test-counter-1").increment(amount=5)
     assert result["count"] == 5
 
     # Verify state persisted to database
@@ -74,18 +74,14 @@ def test_shopping_cart_complex_state_persists(client, worker_process, platform):
     time.sleep(2)
 
     # Add items to cart
-    result1 = client.run(
-        "ShoppingCart", "add_item",
-        key="cart-user-123",
+    result1 = client.entity("ShoppingCart", "cart-user-123").add_item(
         item_id="item-001",
         quantity=2,
         price=10.99
     )
     assert result1["total_value"] == pytest.approx(21.98)
 
-    result2 = client.run(
-        "ShoppingCart", "add_item",
-        key="cart-user-123",
+    result2 = client.entity("ShoppingCart", "cart-user-123").add_item(
         item_id="item-002",
         quantity=1,
         price=5.50
@@ -134,25 +130,19 @@ def test_bank_account_transaction_history_persists(client, worker_process, platf
     time.sleep(2)
 
     # Perform transactions
-    result1 = client.run(
-        "BankAccount", "deposit",
-        key="account-alice",
+    result1 = client.entity("BankAccount", "account-alice").deposit(
         amount=100.0,
         description="Initial deposit"
     )
     assert result1["balance"] == 100.0
 
-    result2 = client.run(
-        "BankAccount", "deposit",
-        key="account-alice",
+    result2 = client.entity("BankAccount", "account-alice").deposit(
         amount=50.0,
         description="Second deposit"
     )
     assert result2["balance"] == 150.0
 
-    result3 = client.run(
-        "BankAccount", "withdraw",
-        key="account-alice",
+    result3 = client.entity("BankAccount", "account-alice").withdraw(
         amount=30.0,
         description="Withdrawal"
     )
@@ -200,9 +190,9 @@ def test_multiple_entity_instances_separate_state(client, worker_process, platfo
     time.sleep(2)
 
     # Create three separate counters
-    client.run("Counter", "increment", key="counter-a", amount=10)
-    client.run("Counter", "increment", key="counter-b", amount=20)
-    client.run("Counter", "increment", key="counter-c", amount=30)
+    client.entity("Counter", "counter-a").increment(amount=10)
+    client.entity("Counter", "counter-b").increment(amount=20)
+    client.entity("Counter", "counter-c").increment(amount=30)
 
     # Verify each has separate state in database
     db_path = platform['host_db_path']
@@ -254,11 +244,11 @@ def test_entity_state_updates_incrementally(client, worker_process, platform):
     time.sleep(2)
 
     # Perform multiple operations
-    client.run("Counter", "increment", key="counter-history", amount=1)
+    client.entity("Counter", "counter-history").increment(amount=1)
     time.sleep(0.1)  # Small delay to ensure different timestamps
-    client.run("Counter", "increment", key="counter-history", amount=2)
+    client.entity("Counter", "counter-history").increment(amount=2)
     time.sleep(0.1)
-    client.run("Counter", "increment", key="counter-history", amount=3)
+    client.entity("Counter", "counter-history").increment(amount=3)
 
     # Query all state records for this entity
     db_path = platform['host_db_path']
@@ -299,8 +289,8 @@ def test_entity_state_isolation_across_types(client, worker_process, platform):
     # Use same key for different entity types
     key = "test-entity-001"
 
-    client.run("Counter", "increment", key=key, amount=100)
-    client.run("BankAccount", "deposit", key=key, amount=500.0, description="Test")
+    client.entity("Counter", key).increment(amount=100)
+    client.entity("BankAccount", key).deposit(amount=500.0, description="Test")
 
     # Verify both exist with different state
     db_path = platform['host_db_path']
@@ -345,16 +335,14 @@ def test_entity_state_query_after_multiple_operations(client, worker_process, pl
     cart_key = "cart-integration-test"
 
     for i in range(5):
-        client.run(
-            "ShoppingCart", "add_item",
-            key=cart_key,
+        client.entity("ShoppingCart", cart_key).add_item(
             item_id=f"item-{i:03d}",
             quantity=i + 1,
             price=10.0 + i
         )
 
     # Get final state
-    result = client.run("ShoppingCart", "get_items", key=cart_key)
+    result = client.entity("ShoppingCart", cart_key).get_items()
 
     assert len(result) == 5
     assert "item-000" in result
@@ -401,12 +389,12 @@ def test_entity_error_does_not_corrupt_state(client, worker_process, platform):
     account_key = "account-error-test"
 
     # Successful deposit
-    client.run("BankAccount", "deposit", key=account_key, amount=100.0)
+    client.entity("BankAccount", account_key).deposit(amount=100.0, description="Initial deposit")
 
     # Try invalid withdrawal (should fail)
     from agnt5.client import RunError
     try:
-        client.run("BankAccount", "withdraw", key=account_key, amount=200.0)
+        client.entity("BankAccount", account_key).withdraw(amount=200.0, description="Invalid withdrawal")
         assert False, "Expected RunError for insufficient funds"
     except RunError:
         pass  # Expected
@@ -428,7 +416,7 @@ def test_entity_error_does_not_corrupt_state(client, worker_process, platform):
     assert len(state["transactions"]) == 1
 
     # Subsequent operation should work
-    result = client.run("BankAccount", "withdraw", key=account_key, amount=50.0)
+    result = client.entity("BankAccount", account_key).withdraw(amount=50.0, description="Valid withdrawal")
     assert result["balance"] == 50.0
 
     print(f"\n✅ Entity errors don't corrupt state")
@@ -450,7 +438,7 @@ def test_concurrent_entity_operations(client, worker_process, platform):
     import concurrent.futures
 
     def increment_counter(counter_id):
-        return client.run("Counter", "increment", key=f"concurrent-{counter_id}", amount=counter_id)
+        return client.entity("Counter", f"concurrent-{counter_id}").increment(amount=counter_id)
 
     # Perform 10 concurrent counter increments
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
