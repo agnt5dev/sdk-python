@@ -14,7 +14,7 @@ import pytest
 
 from agnt5 import Context, tool
 from agnt5.exceptions import ConfigurationError
-from agnt5.tool import Tool, ToolRegistry, _extract_schema_from_function, _python_type_to_json_schema_type
+from agnt5.tool import Tool, ToolRegistry, _extract_schema_from_function, _python_type_to_json_schema
 
 
 @pytest.fixture(autouse=True)
@@ -29,21 +29,21 @@ def clear_registry():
 
 def test_python_type_to_json_schema():
     """Test Python type to JSON schema type conversion."""
-    assert _python_type_to_json_schema_type(str) == "string"
-    assert _python_type_to_json_schema_type(int) == "integer"
-    assert _python_type_to_json_schema_type(float) == "number"
-    assert _python_type_to_json_schema_type(bool) == "boolean"
-    assert _python_type_to_json_schema_type(list) == "array"
-    assert _python_type_to_json_schema_type(dict) == "object"
+    assert _python_type_to_json_schema(str) == {"type": "string"}
+    assert _python_type_to_json_schema(int) == {"type": "integer"}
+    assert _python_type_to_json_schema(float) == {"type": "number"}
+    assert _python_type_to_json_schema(bool) == {"type": "boolean"}
+    assert _python_type_to_json_schema(list) == {"type": "array"}
+    assert _python_type_to_json_schema(dict) == {"type": "object"}
 
 
 def test_python_type_optional():
     """Test Optional type handling."""
     from typing import Optional
 
-    # Optional[str] should resolve to string
-    result = _python_type_to_json_schema_type(Optional[str])
-    assert result == "string"
+    # Optional[str] should resolve to string type
+    result = _python_type_to_json_schema(Optional[str])
+    assert result == {"type": "string"}
 
 
 # Test Schema Extraction
