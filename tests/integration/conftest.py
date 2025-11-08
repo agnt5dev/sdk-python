@@ -21,6 +21,7 @@ Command-line options:
 import os
 import subprocess
 import time
+import uuid
 from typing import Dict, Generator
 
 import pytest
@@ -513,8 +514,8 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
         "AGNT5_SERVICE_NAME": "test-bench",
-        "AGNT5_TENANT_ID": "test-tenant-001",
-        "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+        "AGNT5_TENANT_ID": "00000000-0000-0000-0000-000000000001",  # Fixed UUID for test tenant
+        "AGNT5_DEPLOYMENT_ID": "00000000-0000-0000-0000-000000000002",  # Fixed UUID for test deployment
         "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
     }
 
@@ -668,8 +669,8 @@ def restart_worker(worker_process: subprocess.Popen, platform: Dict[str, any]) -
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
         "AGNT5_SERVICE_NAME": "test-bench",
-        "AGNT5_TENANT_ID": "test-tenant-001",
-        "AGNT5_DEPLOYMENT_ID": "test-deployment-001",
+        "AGNT5_TENANT_ID": "00000000-0000-0000-0000-000000000001",  # Fixed UUID for test tenant
+        "AGNT5_DEPLOYMENT_ID": "00000000-0000-0000-0000-000000000002",  # Fixed UUID for test deployment
         "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
     }
 
