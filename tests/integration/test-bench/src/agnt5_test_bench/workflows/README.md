@@ -79,7 +79,7 @@ result = await client.workflow("wf_01_basic_execution").run()
 
 ```bash
 # Start dev server with test-bench
-just platform start-dev-server python
+just platform dev-server python
 
 # Restart test-bench after code changes
 pm2 restart agnt5-python-test-bench

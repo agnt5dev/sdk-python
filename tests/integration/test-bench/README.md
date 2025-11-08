@@ -163,7 +163,7 @@ The recommended way to run the test bench during development:
 
 ```bash
 # From the agnt5 root directory
-just platform start-dev-server python
+just platform dev-server python
 ```
 
 This will:
@@ -268,7 +268,7 @@ total = client.entity("ShoppingCart", "user-123").get_total()
 - Comprehensive agent workflow testing (20+ workflows)
 - Memory, handoff, and HITL testing
 - MCP verification infrastructure
-- Used with `just platform start-dev-server python`
+- Used with `just platform dev-server python`
 
 **test-service** has been deprecated and its components migrated here.
 
@@ -336,4 +336,4 @@ uv sync
 - **Platform Documentation**: `/CLAUDE.md`
 - **SDK Documentation**: `/sdk/CLAUDE.md`
 - **Python SDK Documentation**: `/sdk/sdk-python/CLAUDE.md`
-- **Development Server**: `just platform start-dev-server --help`
+- **Development Server**: `just platform dev-server --help`
