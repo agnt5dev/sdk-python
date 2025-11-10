@@ -884,6 +884,9 @@ def workflow(
     *,
     name: Optional[str] = None,
     chat: bool = False,
+    cron: Optional[str] = None,
+    webhook: bool = False,
+    webhook_secret: Optional[str] = None,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as an AGNT5 durable workflow.
@@ -894,6 +897,9 @@ def workflow(
     Args:
         name: Custom workflow name (default: function's __name__)
         chat: Enable chat mode for multi-turn conversation workflows (default: False)
+        cron: Cron expression for scheduled execution (e.g., "0 9 * * *" for daily at 9am)
+        webhook: Enable webhook triggering for this workflow (default: False)
+        webhook_secret: Optional secret for HMAC-SHA256 signature verification
 
     Example (standard workflow):
         @workflow
@@ -934,6 +940,29 @@ def workflow(
             ctx.state.set("messages", messages)
 
             return {"response": response, "turn_count": len(messages) // 2}
+
+    Example (scheduled workflow):
+        @workflow(name="daily_report", cron="0 9 * * *")
+        async def daily_report(ctx: WorkflowContext) -> dict:
+            # Runs automatically every day at 9am
+            sales = await ctx.task(get_sales_data, report_type="sales")
+            report = await ctx.task(generate_pdf, input=sales)
+            await ctx.task(send_email, to="team@company.com", attachment=report)
+            return {"status": "sent", "report_id": report["id"]}
+
+    Example (webhook workflow):
+        @workflow(name="on_payment", webhook=True, webhook_secret="your_secret_key")
+        async def on_payment(ctx: WorkflowContext, webhook_data: dict) -> dict:
+            # Triggered by webhook POST /v1/webhooks/on_payment
+            # webhook_data contains: payload, headers, source_ip, timestamp
+            payment = webhook_data["payload"]
+
+            if payment.get("status") == "succeeded":
+                await ctx.task(fulfill_order, order_id=payment["order_id"])
+                await ctx.task(send_receipt, customer_email=payment["email"])
+                return {"status": "processed", "order_id": payment["order_id"]}
+
+            return {"status": "skipped", "reason": "payment not successful"}
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -969,6 +998,16 @@ def workflow(
         # Add chat metadata if chat mode is enabled
         if chat:
             metadata["chat"] = "true"
+
+        # Add cron metadata if cron schedule is provided
+        if cron:
+            metadata["cron"] = cron
+
+        # Add webhook metadata if webhook is enabled
+        if webhook:
+            metadata["webhook"] = "true"
+            if webhook_secret:
+                metadata["webhook_secret"] = webhook_secret
 
         # Register workflow
         config = WorkflowConfig(
