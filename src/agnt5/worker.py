@@ -171,6 +171,22 @@ class Worker:
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
         except ImportError as e:
+            # Capture SDK-level import failure in Sentry
+            _sentry.capture_exception(
+                e,
+                context={
+                    "service_name": service_name,
+                    "service_version": service_version,
+                    "error_location": "Worker.__init__",
+                    "error_phase": "rust_core_import",
+                },
+                tags={
+                    "sdk_error": "true",
+                    "error_type": "import_error",
+                    "component": "rust_core",
+                },
+                level="error",
+            )
             raise ImportError(
                 f"Failed to import Rust core worker: {e}. "
                 "Make sure agnt5 is properly installed with: pip install agnt5"
@@ -198,13 +214,15 @@ class Worker:
 
         logger.info("Created EntityStateAdapter with Rust core for state management")
 
-        # Initialize Sentry for error tracking (opt-in via environment variables)
+        # Initialize Sentry for SDK-level error tracking (opt-in via environment variables)
+        # This captures SDK bugs, initialization failures, and Python-specific issues
+        # NOT user code execution errors (those should be handled by users)
         sentry_enabled = _sentry.initialize_sentry(
             service_name=service_name,
             service_version=service_version,
         )
         if sentry_enabled:
-            logger.info("Sentry error tracking initialized")
+            logger.info("Sentry SDK error tracking initialized (captures SDK bugs and startup issues)")
             # Set service-level context
             _sentry.set_context("service", {
                 "name": service_name,
@@ -414,6 +432,21 @@ class Worker:
                             total_modules += 1
                 except Exception as e:
                     logger.warning(f"Failed to import {module_name}: {e}")
+                    # Capture SDK auto-registration failures
+                    _sentry.capture_exception(
+                        e,
+                        context={
+                            "service_name": self.service_name,
+                            "module_name": module_name,
+                            "source_path": str(py_file),
+                            "error_location": "_auto_discover_components",
+                        },
+                        tags={
+                            "sdk_error": "true",
+                            "error_type": "auto_registration_failure",
+                        },
+                        level="warning",
+                    )
 
         logger.info(f"Auto-imported {total_modules} modules")
 
@@ -846,23 +879,6 @@ class Worker:
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Function execution failed: {error_msg}", exc_info=True)
 
-            # Capture exception in Sentry with rich context
-            _sentry.capture_exception(
-                e,
-                context={
-                    "run_id": current_ctx.run_id if current_ctx else "unknown",
-                    "component_name": config.name,
-                    "component_type": "function",
-                    "service_name": self.service_name,
-                    "attempt": platform_attempt,
-                },
-                tags={
-                    "component_type": "function",
-                    "component_name": config.name,
-                    "error_type": type(e).__name__,
-                },
-            )
-
             # Store stack trace in metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1236,24 +1252,6 @@ class Worker:
             # Log with full traceback
             logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
 
-            # Capture exception in Sentry with rich context
-            _sentry.capture_exception(
-                e,
-                context={
-                    "run_id": request.invocation_id,
-                    "session_id": session_id,
-                    "component_name": config.name,
-                    "component_type": "workflow",
-                    "service_name": self.service_name,
-                    "step_count": len(ctx._workflow_entity._step_events) if ctx and hasattr(ctx, '_workflow_entity') else 0,
-                },
-                tags={
-                    "component_type": "workflow",
-                    "component_name": config.name,
-                    "error_type": type(e).__name__,
-                },
-            )
-
             # Store error metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1333,22 +1331,6 @@ class Worker:
             current_ctx = get_current_context()
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Tool execution failed: {error_msg}", exc_info=True)
-
-            # Capture exception in Sentry with rich context
-            _sentry.capture_exception(
-                e,
-                context={
-                    "run_id": current_ctx.run_id if current_ctx else "unknown",
-                    "component_name": tool.name,
-                    "component_type": "tool",
-                    "service_name": self.service_name,
-                },
-                tags={
-                    "component_type": "tool",
-                    "component_name": tool.name,
-                    "error_type": type(e).__name__,
-                },
-            )
 
             # Store error metadata for observability
             metadata = {
@@ -1464,24 +1446,6 @@ class Worker:
             current_ctx = get_current_context()
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Entity execution failed: {error_msg}", exc_info=True)
-
-            # Capture exception in Sentry with rich context
-            _sentry.capture_exception(
-                e,
-                context={
-                    "run_id": current_ctx.run_id if current_ctx else "unknown",
-                    "component_name": entity_type.name,
-                    "component_type": "entity",
-                    "entity_key": entity_key if 'entity_key' in locals() else "unknown",
-                    "method_name": method_name if 'method_name' in locals() else "unknown",
-                    "service_name": self.service_name,
-                },
-                tags={
-                    "component_type": "entity",
-                    "component_name": entity_type.name,
-                    "error_type": type(e).__name__,
-                },
-            )
 
             # Store error metadata for observability
             metadata = {
@@ -1602,24 +1566,6 @@ class Worker:
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Agent execution failed: {error_msg}", exc_info=True)
 
-            # Capture exception in Sentry with rich context
-            _sentry.capture_exception(
-                e,
-                context={
-                    "run_id": request.invocation_id,
-                    "session_id": session_id,
-                    "component_name": agent.name,
-                    "component_type": "agent",
-                    "service_name": self.service_name,
-                    "user_message": user_message if 'user_message' in locals() else None,
-                },
-                tags={
-                    "component_type": "agent",
-                    "component_name": agent.name,
-                    "error_type": type(e).__name__,
-                },
-            )
-
             # Store error metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1680,48 +1626,70 @@ class Worker:
 
         This is the main entry point for your worker service.
         """
-        logger.info(f"Starting worker: {self.service_name}")
+        try:
+            logger.info(f"Starting worker: {self.service_name}")
 
-        # Discover components
-        components = self._discover_components()
+            # Discover components
+            components = self._discover_components()
 
-        # Set components on Rust worker
-        self._rust_worker.set_components(components)
+            # Set components on Rust worker
+            self._rust_worker.set_components(components)
 
-        # Set metadata
-        if self.metadata:
-            self._rust_worker.set_service_metadata(self.metadata)
+            # Set metadata
+            if self.metadata:
+                self._rust_worker.set_service_metadata(self.metadata)
 
-        # Configure entity state manager on Rust worker for database persistence
-        logger.info("Configuring Rust EntityStateManager for database persistence")
-        # Access the Rust core from the adapter
-        if hasattr(self._entity_state_adapter, '_rust_core') and self._entity_state_adapter._rust_core:
-            self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
-            logger.info("Successfully configured Rust EntityStateManager")
+            # Configure entity state manager on Rust worker for database persistence
+            logger.info("Configuring Rust EntityStateManager for database persistence")
+            # Access the Rust core from the adapter
+            if hasattr(self._entity_state_adapter, '_rust_core') and self._entity_state_adapter._rust_core:
+                self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
+                logger.info("Successfully configured Rust EntityStateManager")
 
-        # Get the current event loop to pass to Rust for concurrent Python async execution
-        # This allows Rust to execute Python async functions on the same event loop
-        # without spawn_blocking overhead, enabling true concurrency
-        loop = asyncio.get_running_loop()
-        logger.info("Passing Python event loop to Rust worker for concurrent execution")
+            # Get the current event loop to pass to Rust for concurrent Python async execution
+            # This allows Rust to execute Python async functions on the same event loop
+            # without spawn_blocking overhead, enabling true concurrency
+            loop = asyncio.get_running_loop()
+            logger.info("Passing Python event loop to Rust worker for concurrent execution")
 
-        # Set event loop on Rust worker
-        self._rust_worker.set_event_loop(loop)
+            # Set event loop on Rust worker
+            self._rust_worker.set_event_loop(loop)
 
-        # Set message handler
-        handler = self._create_message_handler()
-        self._rust_worker.set_message_handler(handler)
+            # Set message handler
+            handler = self._create_message_handler()
+            self._rust_worker.set_message_handler(handler)
 
-        # Initialize worker
-        self._rust_worker.initialize()
+            # Initialize worker
+            self._rust_worker.initialize()
 
-        logger.info("Worker registered successfully, entering message loop...")
+            logger.info("Worker registered successfully, entering message loop...")
 
-        # Run worker (this will block until shutdown)
-        await self._rust_worker.run()
+            # Run worker (this will block until shutdown)
+            await self._rust_worker.run()
 
-        # Flush Sentry events before shutdown
-        logger.info("Flushing Sentry events before shutdown...")
-        _sentry.flush(timeout=5.0)
+        except Exception as e:
+            # Capture SDK-level startup/runtime failures
+            logger.error(f"Worker failed to start or encountered critical error: {e}", exc_info=True)
+            _sentry.capture_exception(
+                e,
+                context={
+                    "service_name": self.service_name,
+                    "service_version": self.service_version,
+                    "error_location": "Worker.run",
+                    "error_phase": "worker_lifecycle",
+                },
+                tags={
+                    "sdk_error": "true",
+                    "error_type": "worker_failure",
+                    "severity": "critical",
+                },
+                level="error",
+            )
+            raise
 
-        logger.info("Worker shutdown complete")
+        finally:
+            # Flush Sentry events before shutdown
+            logger.info("Flushing Sentry events before shutdown...")
+            _sentry.flush(timeout=5.0)
+
+            logger.info("Worker shutdown complete")

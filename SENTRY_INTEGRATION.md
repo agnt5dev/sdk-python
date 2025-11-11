@@ -1,6 +1,25 @@
 # Sentry Integration for AGNT5 Python SDK
 
-The AGNT5 Python SDK includes built-in Sentry integration for error tracking and performance monitoring. This integration is **opt-in** and requires minimal configuration.
+The AGNT5 Python SDK includes built-in Sentry integration for **SDK-level error tracking**. This helps us identify and fix SDK bugs, initialization failures, and Python-specific issues.
+
+## What Gets Captured
+
+This integration captures **SDK errors**, not user code execution errors:
+
+✅ **Captured (SDK Issues):**
+- SDK initialization failures
+- Rust FFI import errors
+- Component auto-registration failures
+- Worker startup/lifecycle errors
+- SDK internal bugs and crashes
+- Configuration errors
+
+❌ **Not Captured (User Code Errors):**
+- Exceptions in your @function/@workflow/@agent code
+- User application logic errors
+- Business logic failures
+
+> **Note:** Users should handle their own application errors. The SDK integration only captures SDK-level issues to help us improve the SDK itself.
 
 ## Prerequisites
 
@@ -36,7 +55,8 @@ from agnt5 import Worker, function
 
 @function
 async def process_data(ctx, data: str) -> dict:
-    # Errors here will be automatically captured by Sentry
+    # SDK errors (initialization, FFI issues) will be captured
+    # Your application errors should be handled by your code
     result = risky_operation(data)
     return {"result": result}
 
@@ -45,6 +65,7 @@ async def main():
         service_name="data-processor",
         service_version="1.0.0",
     )
+    # SDK startup failures will be captured here
     await worker.run()
 
 if __name__ == "__main__":
@@ -52,126 +73,97 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## What Gets Captured
+## SDK Errors Captured
 
-The integration automatically captures:
+The integration automatically captures SDK-level issues:
 
-### Exceptions
-- All unhandled exceptions in functions, workflows, agents, entities, and tools
-- Full stack traces with source code context
-- Rich metadata including:
-  - `run_id`: Unique execution identifier
-  - `component_name`: Name of the component that failed
-  - `component_type`: Type (function, workflow, agent, entity, tool)
-  - `service_name`: Your service name
-  - `error_type`: Exception class name
-  - Additional context specific to each component type
+### SDK Initialization Errors
+- Rust core import failures (PyO3/maturin issues)
+- Worker initialization failures
+- Entity state manager setup errors
+- Configuration errors
 
-### Performance (APM)
-- Transaction traces for workflow and agent executions
-- Sampling controlled by `AGNT5_SENTRY_TRACES_SAMPLE_RATE`
+### Component Registration Errors
+- Auto-discovery import failures
+- Component registration bugs
+- Schema validation errors
 
-### Breadcrumbs
-- Execution flow leading up to errors
-- State transitions
-- API calls
+### Worker Lifecycle Errors
+- Worker startup failures
+- Event loop configuration issues
+- Coordinator communication failures
+- Critical runtime errors
 
-## Advanced Usage
+### Rich Context
+All captured errors include:
+- `service_name` and `service_version`
+- `error_location`: Where in the SDK the error occurred
+- `error_phase`: What operation was being performed
+- Stack traces with source code context
+- SDK version and Python version
 
-### Manual Error Capture
+## For User Application Errors
 
-For custom error tracking in your code:
+**Important:** The SDK integration only captures SDK bugs. For your application errors, you should:
+
+### Option 1: Use Your Own Sentry Project
+
+Set up a separate Sentry project for your application:
+
+```python
+import sentry_sdk
+from agnt5 import Worker, function
+
+# Initialize your app's Sentry separately
+sentry_sdk.init(
+    dsn="your-app-sentry-dsn",  # Different from AGNT5_SENTRY_DSN
+    environment="production",
+)
+
+@function
+async def process_order(ctx, order_id: str):
+    try:
+        result = await dangerous_operation(order_id)
+        return result
+    except ValidationError as e:
+        # Capture in YOUR Sentry project
+        sentry_sdk.capture_exception(e)
+        return {"status": "failed"}
+```
+
+### Option 2: Use the SDK's Sentry Utilities
+
+If you want to use the same Sentry project, you can access the utilities:
 
 ```python
 from agnt5 import sentry, function
 
 @function
-async def complex_operation(ctx, data: dict):
+async def risky_operation(ctx, data: dict):
     try:
         result = await process(data)
         return result
-    except ValidationError as e:
-        # Capture non-critical errors with custom context
+    except Exception as e:
+        # Manually capture your application error
         sentry.capture_exception(
             e,
-            context={
-                "data_size": len(data),
-                "validation_step": "schema_check"
-            },
-            tags={
-                "severity": "warning",
-                "component": "validator"
-            },
-            level="warning"
+            context={"operation": "process_data"},
+            tags={"app_error": "true"},
         )
-        # Handle gracefully
-        return {"status": "validation_failed"}
+        raise  # Re-raise for retry handling
 ```
 
-### Adding Breadcrumbs
+### Option 3: Let Errors Propagate
 
-Track execution flow for debugging:
-
-```python
-from agnt5 import sentry, workflow
-
-@workflow
-async def data_pipeline(ctx, input_data: dict):
-    sentry.add_breadcrumb(
-        message="Starting data validation",
-        category="workflow",
-        data={"record_count": len(input_data)}
-    )
-
-    validated = await validate_data(input_data)
-
-    sentry.add_breadcrumb(
-        message="Data validated successfully",
-        category="workflow",
-        data={"valid_records": len(validated)}
-    )
-
-    return await process_validated_data(validated)
-```
-
-### Setting User Context
-
-Track errors by user:
+The platform handles retries and error tracking:
 
 ```python
-from agnt5 import sentry, function
-
 @function
-async def user_action(ctx, user_id: str, action: str):
-    # Set user context for this execution
-    sentry.set_user(user_id=user_id)
-
-    # Errors will now be tagged with user_id
-    result = await perform_action(action)
+async def my_function(ctx, data: str):
+    # Just let exceptions propagate
+    # Platform will retry based on your retry policy
+    result = await risky_call(data)
     return result
-```
-
-### Custom Tags and Context
-
-Enrich error reports with custom metadata:
-
-```python
-from agnt5 import sentry, function
-
-@function
-async def api_handler(ctx, endpoint: str, method: str):
-    # Set custom tags for filtering in Sentry
-    sentry.set_tag("api_endpoint", endpoint)
-    sentry.set_tag("http_method", method)
-
-    # Set structured context
-    sentry.set_context("api", {
-        "endpoint": endpoint,
-        "method": method,
-        "version": "v2"
-    })
-
-    return await handle_request(endpoint, method)
 ```
 
 ## Configuration Reference
@@ -195,38 +187,33 @@ Choose sampling based on your traffic and Sentry plan:
 - **High-traffic Production**: `0.1` (10% - reduce costs)
 - **Very High-traffic**: `0.01` (1% - minimal overhead)
 
-## Testing Sentry Integration
+## Testing SDK Error Tracking
 
-Test that Sentry is working correctly:
+Test that SDK error tracking is working:
 
 ```python
 from agnt5 import Worker, function, sentry
 
 @function
-async def test_sentry(ctx):
-    # Check if Sentry is initialized
+async def test_sdk_tracking(ctx):
+    # Check if SDK error tracking is enabled
     if sentry.is_sentry_enabled():
-        print("✅ Sentry is enabled")
-
-        # Send a test message
-        sentry.capture_message(
-            "Test message from AGNT5",
-            level="info",
-            tags={"test": "true"}
-        )
-
-        # Trigger a test error (don't do this in production!)
-        # raise Exception("Test exception for Sentry")
+        print("✅ SDK error tracking is enabled")
+        return {"sentry_enabled": True}
     else:
-        print("❌ Sentry is not enabled (AGNT5_SENTRY_DSN not set)")
-
-    return {"sentry_enabled": sentry.is_sentry_enabled()}
+        print("❌ SDK error tracking not enabled (AGNT5_SENTRY_DSN not set)")
+        return {"sentry_enabled": False}
 
 async def main():
+    # To test SDK error capture, introduce SDK-level issues:
+    # - Try with invalid coordinator endpoint
+    # - Use malformed component registration
+    # - Trigger auto-discovery import errors
+
     worker = Worker(
         service_name="sentry-test",
         service_version="1.0.0",
-        functions=[test_sentry]
+        functions=[test_sdk_tracking],
     )
     await worker.run()
 
@@ -251,51 +238,43 @@ unset AGNT5_SENTRY_DSN
 
 ## Best Practices
 
-### 1. Use Different Projects for Environments
+### 1. Separate SDK and Application Errors
 
-Create separate Sentry projects for dev/staging/prod:
+Use different Sentry projects for SDK vs application errors:
 
 ```bash
-# Development
-export AGNT5_SENTRY_DSN="https://dev-key@o123.ingest.sentry.io/111"
-export AGNT5_SENTRY_ENVIRONMENT="development"
+# SDK error tracking (AGNT5 team)
+export AGNT5_SENTRY_DSN="https://sdk-key@o123.ingest.sentry.io/111"
 
-# Production
-export AGNT5_SENTRY_DSN="https://prod-key@o123.ingest.sentry.io/222"
-export AGNT5_SENTRY_ENVIRONMENT="production"
+# Your application errors (separate project)
+# Initialize separately in your code with sentry_sdk.init()
 ```
 
-### 2. Add Release Tags
+### 2. Use Semantic Versioning
 
-Use semantic versioning for better tracking:
+Helps track which SDK versions have issues:
 
 ```python
 worker = Worker(
     service_name="my-service",
-    service_version="1.2.3",  # Sent as release tag to Sentry
+    service_version="1.2.3",  # SDK sees this as release tag
 )
 ```
 
-### 3. Filter Sensitive Data
+### 3. Report SDK Bugs
 
-Never log sensitive information:
+If you see SDK errors in Sentry:
+1. Check if it's a known issue in [agnt5/issues](https://github.com/arunreddy/agnt5/issues)
+2. Report with full context from Sentry
+3. Include SDK version and Python version
 
-```python
-from agnt5 import sentry
+### 4. Don't Over-Report
 
-# ❌ Bad - logs sensitive data
-sentry.capture_exception(e, context={"password": user_password})
-
-# ✅ Good - redact sensitive fields
-sentry.capture_exception(e, context={"user_id": user_id})
-```
-
-### 4. Set Alert Rules
-
-Configure Sentry alerts for:
-- High error rates (> 10 errors/minute)
-- New error types (first occurrence)
-- Regression issues (previously resolved errors)
+The SDK integration is meant for SDK bugs, not:
+- User code errors (handle in your app)
+- Expected business logic failures
+- Validation errors
+- Rate limiting errors
 
 ## Troubleshooting
 
@@ -327,21 +306,21 @@ Verify:
 
 ### Too Many Events
 
-1. **Reduce sampling**: Lower `AGNT5_SENTRY_TRACES_SAMPLE_RATE`
-2. **Add filters**: Use Sentry's inbound filters to ignore known issues
-3. **Fix errors**: The best way to reduce events is to fix bugs!
+If you're seeing too many SDK errors:
+1. **Check your setup**: SDK errors should be rare
+2. **Report the issue**: Frequent SDK errors indicate a bug we should fix
+3. **Disable temporarily**: Set `AGNT5_SENTRY_ENABLED=false` while we investigate
 
 ## Performance Impact
 
-The Sentry integration is designed for minimal overhead:
+The SDK error tracking has negligible overhead:
 
 - **Initialization**: One-time setup cost (~10ms)
-- **Error capture**: Only triggered on exceptions (~5-10ms per error)
-- **APM tracing**: Controlled by sampling rate (default 10%)
+- **Error capture**: Only triggered on SDK exceptions (rare)
+- **No execution overhead**: User code execution not affected
 - **Async sending**: Events sent asynchronously, non-blocking
-- **Batching**: Events batched for efficient network usage
 
-Typical overhead in production: **< 1% CPU and memory**
+Since SDK errors are rare, the overhead is effectively **0% in normal operation**.
 
 ## Support
 
