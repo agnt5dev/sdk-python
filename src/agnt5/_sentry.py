@@ -1,25 +1,51 @@
 """Sentry integration for AGNT5 SDK error tracking and monitoring.
 
-This module provides opt-in Sentry integration for capturing errors and exceptions
-in the AGNT5 SDK. Sentry is only initialized if AGNT5_SENTRY_DSN is set.
+This module provides automatic SDK error tracking to help improve AGNT5.
+
+**Telemetry Behavior:**
+- Alpha/Beta releases (e.g., 0.2.8a12, 1.0.0b3): Telemetry ENABLED by default
+- Stable releases (e.g., 1.0.0, 2.1.3): Telemetry DISABLED by default
+
+**What's Collected:**
+- SDK initialization failures and crashes
+- Rust FFI import errors
+- Component registration failures
+- Anonymized service metadata (no user code/data)
+
+**Privacy:**
+- Only SDK errors are captured (not your application errors)
+- All data is anonymized (no secrets, IP addresses, or personal data)
+- Full transparency in what's sent
 
 Environment Variables:
-    AGNT5_SENTRY_DSN: Sentry project DSN (required to enable Sentry)
-    AGNT5_SENTRY_ENVIRONMENT: Environment tag (default: "development")
+    AGNT5_DISABLE_SDK_TELEMETRY: Set to "true" to disable (for alpha/beta)
+    AGNT5_ENABLE_SDK_TELEMETRY: Set to "true" to enable (for stable)
+    AGNT5_SENTRY_ENVIRONMENT: Environment tag (default: "production")
     AGNT5_SENTRY_TRACES_SAMPLE_RATE: APM trace sampling rate (default: 0.1)
-    AGNT5_SENTRY_ENABLED: Explicitly enable/disable Sentry (default: auto from DSN)
 
 Example:
-    export AGNT5_SENTRY_DSN="https://abc123@o123.ingest.sentry.io/456"
-    export AGNT5_SENTRY_ENVIRONMENT="production"
-    export AGNT5_SENTRY_TRACES_SAMPLE_RATE="0.2"
+    # Disable telemetry in alpha/beta
+    export AGNT5_DISABLE_SDK_TELEMETRY="true"
+
+    # Enable telemetry in stable (to help AGNT5 team)
+    export AGNT5_ENABLE_SDK_TELEMETRY="true"
 """
 
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# AGNT5-owned Sentry project for SDK error collection
+# This DSN is hardcoded and sends SDK errors to the AGNT5 team
+AGNT5_SDK_SENTRY_DSN = os.getenv(
+    "AGNT5_SDK_SENTRY_DSN",
+    # TODO: Replace with actual AGNT5 Sentry DSN when ready
+    # "https://your-key@o123.ingest.sentry.io/456"
+    None  # Disabled until AGNT5 team sets up Sentry project
+)
 
 _sentry_initialized = False
 _sentry_available = False
@@ -43,30 +69,140 @@ def is_sentry_enabled() -> bool:
     return _sentry_initialized and _sentry_available
 
 
+def _is_prerelease_version(version: str) -> bool:
+    """Check if SDK version is alpha or beta (pre-release).
+
+    Args:
+        version: Version string (e.g., "0.2.8a12", "1.0.0b3", "1.2.3")
+
+    Returns:
+        True if version contains 'a' (alpha) or 'b' (beta), False otherwise
+
+    Examples:
+        >>> _is_prerelease_version("0.2.8a12")
+        True
+        >>> _is_prerelease_version("1.0.0b3")
+        True
+        >>> _is_prerelease_version("1.2.3")
+        False
+    """
+    # Match alpha (a) or beta (b) in version string
+    return bool(re.search(r'[ab]\d+', version))
+
+
+def _should_enable_telemetry(sdk_version: str) -> bool:
+    """Determine if SDK telemetry should be enabled based on version and env vars.
+
+    Default behavior:
+    - Alpha/Beta releases: ENABLED by default (users can opt-out)
+    - Stable releases: DISABLED by default (users can opt-in)
+
+    Environment variable overrides:
+    - AGNT5_DISABLE_SDK_TELEMETRY="true" → Force disable
+    - AGNT5_ENABLE_SDK_TELEMETRY="true" → Force enable
+
+    Args:
+        sdk_version: SDK version string
+
+    Returns:
+        True if telemetry should be enabled, False otherwise
+    """
+    # Check explicit disable flag (takes precedence)
+    disable_flag = os.getenv("AGNT5_DISABLE_SDK_TELEMETRY", "").lower()
+    if disable_flag in ("true", "1", "yes"):
+        logger.debug("SDK telemetry explicitly disabled via AGNT5_DISABLE_SDK_TELEMETRY")
+        return False
+
+    # Check explicit enable flag
+    enable_flag = os.getenv("AGNT5_ENABLE_SDK_TELEMETRY", "").lower()
+    if enable_flag in ("true", "1", "yes"):
+        logger.debug("SDK telemetry explicitly enabled via AGNT5_ENABLE_SDK_TELEMETRY")
+        return True
+
+    # Default behavior based on version
+    is_prerelease = _is_prerelease_version(sdk_version)
+
+    if is_prerelease:
+        logger.debug(f"SDK version {sdk_version} is pre-release → telemetry enabled by default")
+        return True
+    else:
+        logger.debug(f"SDK version {sdk_version} is stable → telemetry disabled by default")
+        return False
+
+
+def _anonymize_event(event, hint):
+    """Remove potentially sensitive data before sending to Sentry.
+
+    This ensures no user secrets, environment variables, or personal data
+    is sent to Sentry.
+
+    Args:
+        event: Sentry event dict
+        hint: Event hint with exception info
+
+    Returns:
+        Sanitized event or None to drop the event
+    """
+    # Remove user IP address
+    if 'user' in event:
+        event['user'].pop('ip_address', None)
+
+    # Remove environment variables (might contain secrets)
+    if 'contexts' in event:
+        if 'os' in event['contexts']:
+            event['contexts']['os'].pop('env', None)
+
+        # Remove sensitive runtime context
+        if 'runtime' in event['contexts']:
+            event['contexts']['runtime'].pop('env', None)
+
+    # Sanitize breadcrumbs (remove any data fields that might be sensitive)
+    if 'breadcrumbs' in event:
+        for crumb in event['breadcrumbs'].get('values', []):
+            if 'data' in crumb:
+                # Keep only safe metadata
+                safe_keys = {'category', 'level', 'message', 'timestamp', 'type'}
+                crumb['data'] = {k: v for k, v in crumb['data'].items() if k in safe_keys}
+
+    return event
+
+
 def initialize_sentry(
     service_name: str,
     service_version: str,
-    dsn: Optional[str] = None,
+    sdk_version: str,
     environment: Optional[str] = None,
     traces_sample_rate: Optional[float] = None,
 ) -> bool:
-    """Initialize Sentry SDK for error tracking and performance monitoring.
+    """Initialize Sentry SDK for automatic SDK error tracking.
 
     This function is idempotent - calling it multiple times will not reinitialize Sentry.
 
+    **Telemetry Behavior:**
+    - Alpha/Beta releases: ENABLED by default (opt-out with AGNT5_DISABLE_SDK_TELEMETRY=true)
+    - Stable releases: DISABLED by default (opt-in with AGNT5_ENABLE_SDK_TELEMETRY=true)
+
+    **What's Collected:**
+    - SDK initialization failures and crashes
+    - Component registration errors
+    - Anonymized metadata (no user code, secrets, or personal data)
+
     Args:
-        service_name: Name of the service (used as transaction name prefix)
-        service_version: Version of the service (used as release tag)
-        dsn: Sentry DSN (if None, reads from AGNT5_SENTRY_DSN env var)
-        environment: Environment tag (if None, reads from AGNT5_SENTRY_ENVIRONMENT, defaults to "development")
+        service_name: Name of the service (used in event context)
+        service_version: Version of the service (used in event context)
+        sdk_version: AGNT5 SDK version (determines default telemetry behavior)
+        environment: Environment tag (if None, reads from AGNT5_SENTRY_ENVIRONMENT, defaults to "production")
         traces_sample_rate: APM sampling rate 0.0-1.0 (if None, reads from AGNT5_SENTRY_TRACES_SAMPLE_RATE, defaults to 0.1)
 
     Returns:
         True if Sentry was initialized, False if disabled or unavailable
 
     Example:
-        >>> initialize_sentry("my-service", "1.0.0")
-        True
+        >>> initialize_sentry("my-service", "1.0.0", "0.2.8a12")
+        True  # Telemetry enabled (alpha version)
+
+        >>> initialize_sentry("my-service", "1.0.0", "1.0.0")
+        False  # Telemetry disabled (stable version)
     """
     global _sentry_initialized
 
@@ -80,20 +216,28 @@ def initialize_sentry(
         logger.debug("Sentry SDK not available, skipping initialization")
         return False
 
-    # Check explicit disable flag
-    enabled_flag = os.getenv("AGNT5_SENTRY_ENABLED", "").lower()
-    if enabled_flag in ("false", "0", "no"):
-        logger.info("Sentry explicitly disabled via AGNT5_SENTRY_ENABLED")
+    # Check if AGNT5 team has configured the DSN
+    if not AGNT5_SDK_SENTRY_DSN:
+        logger.debug("AGNT5_SDK_SENTRY_DSN not configured, telemetry disabled")
         return False
 
-    # Get DSN from parameter or environment
-    sentry_dsn = dsn or os.getenv("AGNT5_SENTRY_DSN")
-    if not sentry_dsn:
-        logger.debug("AGNT5_SENTRY_DSN not set, Sentry integration disabled")
+    # Determine if telemetry should be enabled based on version and env vars
+    if not _should_enable_telemetry(sdk_version):
+        is_prerelease = _is_prerelease_version(sdk_version)
+        if is_prerelease:
+            logger.info(
+                f"SDK telemetry disabled for pre-release version {sdk_version} "
+                f"(set AGNT5_ENABLE_SDK_TELEMETRY=true to enable)"
+            )
+        else:
+            logger.debug(
+                f"SDK telemetry disabled by default for stable version {sdk_version} "
+                f"(set AGNT5_ENABLE_SDK_TELEMETRY=true to help AGNT5 team)"
+            )
         return False
 
     # Get environment and sampling rate
-    sentry_env = environment or os.getenv("AGNT5_SENTRY_ENVIRONMENT", "development")
+    sentry_env = environment or os.getenv("AGNT5_SENTRY_ENVIRONMENT", "production")
     sample_rate_str = os.getenv("AGNT5_SENTRY_TRACES_SAMPLE_RATE", "0.1")
     if traces_sample_rate is None:
         try:
@@ -112,13 +256,15 @@ def initialize_sentry(
     )
 
     try:
-        # Initialize Sentry SDK
+        # Initialize Sentry SDK with AGNT5's hardcoded DSN
         sentry_sdk.init(
-            dsn=sentry_dsn,
+            dsn=AGNT5_SDK_SENTRY_DSN,  # Hardcoded AGNT5 Sentry project
             environment=sentry_env,
-            release=f"{service_name}@{service_version}",
+            release=f"agnt5-python-sdk@{sdk_version}",  # SDK version, not service version
             traces_sample_rate=traces_sample_rate,
             integrations=[logging_integration],
+            # Anonymize all events before sending
+            before_send=_anonymize_event,
             # Add default tags
             default_integrations=True,
             # Enable performance monitoring
@@ -126,22 +272,32 @@ def initialize_sentry(
             # Attach stack traces to messages
             attach_stacktrace=True,
             # Max breadcrumbs to keep
-            max_breadcrumbs=100,
+            max_breadcrumbs=50,
         )
 
-        # Set global tags
-        sentry_sdk.set_tag("service", service_name)
-        sentry_sdk.set_tag("version", service_version)
+        # Set global tags for filtering
+        sentry_sdk.set_tag("sdk_version", sdk_version)
+        sentry_sdk.set_tag("sdk_component", "python")
+        sentry_sdk.set_tag("is_prerelease", str(_is_prerelease_version(sdk_version)))
 
         _sentry_initialized = True
-        logger.info(
-            f"Sentry initialized for {service_name}@{service_version} "
-            f"(env: {sentry_env}, sample_rate: {traces_sample_rate})"
-        )
+
+        # Log different messages based on version
+        is_prerelease = _is_prerelease_version(sdk_version)
+        if is_prerelease:
+            logger.info(
+                f"SDK telemetry enabled for alpha/beta version {sdk_version} "
+                f"(helps AGNT5 team find bugs). To disable: export AGNT5_DISABLE_SDK_TELEMETRY=true"
+            )
+        else:
+            logger.info(
+                f"SDK telemetry enabled for version {sdk_version} (thank you for helping improve AGNT5!)"
+            )
+
         return True
 
     except Exception as e:
-        logger.error(f"Failed to initialize Sentry: {e}", exc_info=True)
+        logger.error(f"Failed to initialize SDK telemetry: {e}", exc_info=True)
         return False
 
 

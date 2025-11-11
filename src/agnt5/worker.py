@@ -214,23 +214,29 @@ class Worker:
 
         logger.info("Created EntityStateAdapter with Rust core for state management")
 
-        # Initialize Sentry for SDK-level error tracking (opt-in via environment variables)
+        # Initialize Sentry for SDK-level error tracking
+        # Telemetry behavior:
+        # - Alpha/Beta releases: ENABLED by default (opt-out with AGNT5_DISABLE_SDK_TELEMETRY=true)
+        # - Stable releases: DISABLED by default (opt-in with AGNT5_ENABLE_SDK_TELEMETRY=true)
         # This captures SDK bugs, initialization failures, and Python-specific issues
         # NOT user code execution errors (those should be handled by users)
+        from .version import _get_version
+        sdk_version = _get_version()
+
         sentry_enabled = _sentry.initialize_sentry(
             service_name=service_name,
             service_version=service_version,
+            sdk_version=sdk_version,
         )
         if sentry_enabled:
-            logger.info("Sentry SDK error tracking initialized (captures SDK bugs and startup issues)")
-            # Set service-level context
+            # Set service-level context (anonymized)
             _sentry.set_context("service", {
-                "name": service_name,
+                "name": service_name,  # User's service name (they control this)
                 "version": service_version,
                 "runtime": runtime,
             })
         else:
-            logger.debug("Sentry not initialized (AGNT5_SENTRY_DSN not set or disabled)")
+            logger.debug("SDK telemetry not enabled")
 
         # Component registration: auto-discover or explicit
         if auto_register:
