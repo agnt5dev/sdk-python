@@ -24,6 +24,7 @@ dependencies = [
     "typing-extensions>=4.8",
     "httpx>=0.28.1",
     "pydantic>=2.0",
+    "sentry-sdk>=2.0.0",
 ]
 
 [project.urls]

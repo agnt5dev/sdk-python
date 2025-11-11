@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from .function import FunctionRegistry
 from .workflow import WorkflowRegistry
 from ._telemetry import setup_module_logger
+from . import _sentry
 
 logger = setup_module_logger(__name__)
 
@@ -196,6 +197,22 @@ class Worker:
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
 
         logger.info("Created EntityStateAdapter with Rust core for state management")
+
+        # Initialize Sentry for error tracking (opt-in via environment variables)
+        sentry_enabled = _sentry.initialize_sentry(
+            service_name=service_name,
+            service_version=service_version,
+        )
+        if sentry_enabled:
+            logger.info("Sentry error tracking initialized")
+            # Set service-level context
+            _sentry.set_context("service", {
+                "name": service_name,
+                "version": service_version,
+                "runtime": runtime,
+            })
+        else:
+            logger.debug("Sentry not initialized (AGNT5_SENTRY_DSN not set or disabled)")
 
         # Component registration: auto-discover or explicit
         if auto_register:
@@ -829,6 +846,23 @@ class Worker:
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Function execution failed: {error_msg}", exc_info=True)
 
+            # Capture exception in Sentry with rich context
+            _sentry.capture_exception(
+                e,
+                context={
+                    "run_id": current_ctx.run_id if current_ctx else "unknown",
+                    "component_name": config.name,
+                    "component_type": "function",
+                    "service_name": self.service_name,
+                    "attempt": platform_attempt,
+                },
+                tags={
+                    "component_type": "function",
+                    "component_name": config.name,
+                    "error_type": type(e).__name__,
+                },
+            )
+
             # Store stack trace in metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1202,6 +1236,24 @@ class Worker:
             # Log with full traceback
             logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
 
+            # Capture exception in Sentry with rich context
+            _sentry.capture_exception(
+                e,
+                context={
+                    "run_id": request.invocation_id,
+                    "session_id": session_id,
+                    "component_name": config.name,
+                    "component_type": "workflow",
+                    "service_name": self.service_name,
+                    "step_count": len(ctx._workflow_entity._step_events) if ctx and hasattr(ctx, '_workflow_entity') else 0,
+                },
+                tags={
+                    "component_type": "workflow",
+                    "component_name": config.name,
+                    "error_type": type(e).__name__,
+                },
+            )
+
             # Store error metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1281,6 +1333,22 @@ class Worker:
             current_ctx = get_current_context()
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Tool execution failed: {error_msg}", exc_info=True)
+
+            # Capture exception in Sentry with rich context
+            _sentry.capture_exception(
+                e,
+                context={
+                    "run_id": current_ctx.run_id if current_ctx else "unknown",
+                    "component_name": tool.name,
+                    "component_type": "tool",
+                    "service_name": self.service_name,
+                },
+                tags={
+                    "component_type": "tool",
+                    "component_name": tool.name,
+                    "error_type": type(e).__name__,
+                },
+            )
 
             # Store error metadata for observability
             metadata = {
@@ -1396,6 +1464,24 @@ class Worker:
             current_ctx = get_current_context()
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Entity execution failed: {error_msg}", exc_info=True)
+
+            # Capture exception in Sentry with rich context
+            _sentry.capture_exception(
+                e,
+                context={
+                    "run_id": current_ctx.run_id if current_ctx else "unknown",
+                    "component_name": entity_type.name,
+                    "component_type": "entity",
+                    "entity_key": entity_key if 'entity_key' in locals() else "unknown",
+                    "method_name": method_name if 'method_name' in locals() else "unknown",
+                    "service_name": self.service_name,
+                },
+                tags={
+                    "component_type": "entity",
+                    "component_name": entity_type.name,
+                    "error_type": type(e).__name__,
+                },
+            )
 
             # Store error metadata for observability
             metadata = {
@@ -1516,6 +1602,24 @@ class Worker:
             error_logger = current_ctx.logger if current_ctx else logger
             error_logger.error(f"Agent execution failed: {error_msg}", exc_info=True)
 
+            # Capture exception in Sentry with rich context
+            _sentry.capture_exception(
+                e,
+                context={
+                    "run_id": request.invocation_id,
+                    "session_id": session_id,
+                    "component_name": agent.name,
+                    "component_type": "agent",
+                    "service_name": self.service_name,
+                    "user_message": user_message if 'user_message' in locals() else None,
+                },
+                tags={
+                    "component_type": "agent",
+                    "component_name": agent.name,
+                    "error_type": type(e).__name__,
+                },
+            )
+
             # Store error metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
@@ -1615,5 +1719,9 @@ class Worker:
 
         # Run worker (this will block until shutdown)
         await self._rust_worker.run()
+
+        # Flush Sentry events before shutdown
+        logger.info("Flushing Sentry events before shutdown...")
+        _sentry.flush(timeout=5.0)
 
         logger.info("Worker shutdown complete")
