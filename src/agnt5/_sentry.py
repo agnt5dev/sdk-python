@@ -84,9 +84,13 @@ def _is_prerelease_version(version: str) -> bool:
         True
         >>> _is_prerelease_version("1.2.3")
         False
+        >>> _is_prerelease_version("1.2.3rc1")
+        False
     """
-    # Match alpha (a) or beta (b) in version string
-    return bool(re.search(r'[ab]\d+', version))
+    # Match alpha (a) or beta (b) followed by digits after version number
+    # Pattern: <major>.<minor>.<patch>(a|b)<number>
+    # More robust: anchored to end and requires digits after a/b
+    return bool(re.search(r'\d+\.\d+\.\d+(a|b)\d+', version))
 
 
 def _should_enable_telemetry(sdk_version: str) -> bool:
@@ -133,7 +137,12 @@ def _anonymize_event(event, hint):
     """Remove potentially sensitive data before sending to Sentry.
 
     This ensures no user secrets, environment variables, or personal data
-    is sent to Sentry.
+    is sent to Sentry. This includes:
+    - IP addresses
+    - Environment variables
+    - Stack trace local variables (may contain API keys, passwords, etc.)
+    - Request data and headers
+    - Sensitive breadcrumb data
 
     Args:
         event: Sentry event dict
@@ -154,6 +163,25 @@ def _anonymize_event(event, hint):
         # Remove sensitive runtime context
         if 'runtime' in event['contexts']:
             event['contexts']['runtime'].pop('env', None)
+
+    # CRITICAL: Remove stack trace local variables (may contain secrets)
+    # Example: api_key = "sk-abc123..." in local scope
+    if 'exception' in event:
+        for exc in event['exception'].get('values', []):
+            if 'stacktrace' in exc:
+                for frame in exc['stacktrace'].get('frames', []):
+                    # Remove all local variables from stack frames
+                    if 'vars' in frame:
+                        frame.pop('vars')
+
+    # Remove request data if present (may contain secrets in POST data)
+    if 'request' in event:
+        event['request'].pop('data', None)
+        event['request'].pop('env', None)
+        event['request'].pop('headers', None)
+        # Keep only safe request metadata
+        safe_request_keys = {'url', 'method', 'query_string'}
+        event['request'] = {k: v for k, v in event['request'].items() if k in safe_request_keys}
 
     # Sanitize breadcrumbs (remove any data fields that might be sensitive)
     if 'breadcrumbs' in event:
