@@ -40,11 +40,10 @@ logger = logging.getLogger(__name__)
 
 # AGNT5-owned Sentry project for SDK error collection
 # This DSN is hardcoded and sends SDK errors to the AGNT5 team
+# Users can override for testing with AGNT5_SDK_SENTRY_DSN env var
 AGNT5_SDK_SENTRY_DSN = os.getenv(
     "AGNT5_SDK_SENTRY_DSN",
-    # TODO: Replace with actual AGNT5 Sentry DSN when ready
-    # "https://your-key@o123.ingest.sentry.io/456"
-    None  # Disabled until AGNT5 team sets up Sentry project
+    "https://a25fea6eeec2e8b393a77f1e2cc7fe2c@o4509047159521280.ingest.us.sentry.io/4509047294656512"
 )
 
 _sentry_initialized = False
