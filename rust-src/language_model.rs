@@ -386,9 +386,10 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
         "anthropic" => Ok(ProviderKind::Anthropic(AnthropicProvider::from_env()?)),
         "groq" => Ok(ProviderKind::Groq(GroqProvider::from_env()?)),
         "openrouter" => Ok(ProviderKind::OpenRouter(OpenRouterProvider::from_env()?)),
-        other => Err(SdkError::Configuration(format!(
-            "Unsupported provider `{other}`"
-        ))),
+        other => Err(SdkError::Configuration {
+            message: format!("Unsupported provider `{other}`"),
+            field: Some("provider".to_string()),
+        }),
     }
 }
 
