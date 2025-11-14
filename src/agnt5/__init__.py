@@ -38,6 +38,9 @@ from .workflow import WorkflowRegistry, workflow
 # Expose simplified language model API (recommended)
 from . import lm
 
+# Expose Sentry utilities for custom error tracking (optional)
+from . import _sentry as sentry
+
 __version__ = _get_version()
 
 __all__ = [
@@ -88,4 +91,6 @@ __all__ = [
     "RunError",
     # Language Model (Simplified API)
     "lm",
+    # Sentry integration (Optional)
+    "sentry",
 ]

@@ -351,7 +351,11 @@ impl PyWorker {
         );
 
         // Initialize worker if not already done
-        if self.worker.lock().unwrap().is_none() {
+        let needs_init = self.worker.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Worker mutex poisoned: {}", e))
+        })?.is_none();
+
+        if needs_init {
             log::debug!("Worker not initialized, initializing now");
             self.initialize()?;
         }

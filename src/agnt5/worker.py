@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from .function import FunctionRegistry
 from .workflow import WorkflowRegistry
 from ._telemetry import setup_module_logger
+from . import _sentry
 
 logger = setup_module_logger(__name__)
 
@@ -170,6 +171,22 @@ class Worker:
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
         except ImportError as e:
+            # Capture SDK-level import failure in Sentry
+            _sentry.capture_exception(
+                e,
+                context={
+                    "service_name": service_name,
+                    "service_version": service_version,
+                    "error_location": "Worker.__init__",
+                    "error_phase": "rust_core_import",
+                },
+                tags={
+                    "sdk_error": "true",
+                    "error_type": "import_error",
+                    "component": "rust_core",
+                },
+                level="error",
+            )
             raise ImportError(
                 f"Failed to import Rust core worker: {e}. "
                 "Make sure agnt5 is properly installed with: pip install agnt5"
@@ -196,6 +213,30 @@ class Worker:
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
 
         logger.info("Created EntityStateAdapter with Rust core for state management")
+
+        # Initialize Sentry for SDK-level error tracking
+        # Telemetry behavior:
+        # - Alpha/Beta releases: ENABLED by default (opt-out with AGNT5_DISABLE_SDK_TELEMETRY=true)
+        # - Stable releases: DISABLED by default (opt-in with AGNT5_ENABLE_SDK_TELEMETRY=true)
+        # This captures SDK bugs, initialization failures, and Python-specific issues
+        # NOT user code execution errors (those should be handled by users)
+        from .version import _get_version
+        sdk_version = _get_version()
+
+        sentry_enabled = _sentry.initialize_sentry(
+            service_name=service_name,
+            service_version=service_version,
+            sdk_version=sdk_version,
+        )
+        if sentry_enabled:
+            # Set service-level context (anonymized)
+            _sentry.set_context("service", {
+                "name": service_name,  # User's service name (they control this)
+                "version": service_version,
+                "runtime": runtime,
+            })
+        else:
+            logger.debug("SDK telemetry not enabled")
 
         # Component registration: auto-discover or explicit
         if auto_register:
@@ -397,6 +438,21 @@ class Worker:
                             total_modules += 1
                 except Exception as e:
                     logger.warning(f"Failed to import {module_name}: {e}")
+                    # Capture SDK auto-registration failures
+                    _sentry.capture_exception(
+                        e,
+                        context={
+                            "service_name": self.service_name,
+                            "module_name": module_name,
+                            "source_path": str(py_file),
+                            "error_location": "_auto_discover_components",
+                        },
+                        tags={
+                            "sdk_error": "true",
+                            "error_type": "auto_registration_failure",
+                        },
+                        level="warning",
+                    )
 
         logger.info(f"Auto-imported {total_modules} modules")
 
@@ -1576,44 +1632,70 @@ class Worker:
 
         This is the main entry point for your worker service.
         """
-        logger.info(f"Starting worker: {self.service_name}")
+        try:
+            logger.info(f"Starting worker: {self.service_name}")
 
-        # Discover components
-        components = self._discover_components()
+            # Discover components
+            components = self._discover_components()
 
-        # Set components on Rust worker
-        self._rust_worker.set_components(components)
+            # Set components on Rust worker
+            self._rust_worker.set_components(components)
 
-        # Set metadata
-        if self.metadata:
-            self._rust_worker.set_service_metadata(self.metadata)
+            # Set metadata
+            if self.metadata:
+                self._rust_worker.set_service_metadata(self.metadata)
 
-        # Configure entity state manager on Rust worker for database persistence
-        logger.info("Configuring Rust EntityStateManager for database persistence")
-        # Access the Rust core from the adapter
-        if hasattr(self._entity_state_adapter, '_rust_core') and self._entity_state_adapter._rust_core:
-            self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
-            logger.info("Successfully configured Rust EntityStateManager")
+            # Configure entity state manager on Rust worker for database persistence
+            logger.info("Configuring Rust EntityStateManager for database persistence")
+            # Access the Rust core from the adapter
+            if hasattr(self._entity_state_adapter, '_rust_core') and self._entity_state_adapter._rust_core:
+                self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
+                logger.info("Successfully configured Rust EntityStateManager")
 
-        # Get the current event loop to pass to Rust for concurrent Python async execution
-        # This allows Rust to execute Python async functions on the same event loop
-        # without spawn_blocking overhead, enabling true concurrency
-        loop = asyncio.get_running_loop()
-        logger.info("Passing Python event loop to Rust worker for concurrent execution")
+            # Get the current event loop to pass to Rust for concurrent Python async execution
+            # This allows Rust to execute Python async functions on the same event loop
+            # without spawn_blocking overhead, enabling true concurrency
+            loop = asyncio.get_running_loop()
+            logger.info("Passing Python event loop to Rust worker for concurrent execution")
 
-        # Set event loop on Rust worker
-        self._rust_worker.set_event_loop(loop)
+            # Set event loop on Rust worker
+            self._rust_worker.set_event_loop(loop)
 
-        # Set message handler
-        handler = self._create_message_handler()
-        self._rust_worker.set_message_handler(handler)
+            # Set message handler
+            handler = self._create_message_handler()
+            self._rust_worker.set_message_handler(handler)
 
-        # Initialize worker
-        self._rust_worker.initialize()
+            # Initialize worker
+            self._rust_worker.initialize()
 
-        logger.info("Worker registered successfully, entering message loop...")
+            logger.info("Worker registered successfully, entering message loop...")
 
-        # Run worker (this will block until shutdown)
-        await self._rust_worker.run()
+            # Run worker (this will block until shutdown)
+            await self._rust_worker.run()
 
-        logger.info("Worker shutdown complete")
+        except Exception as e:
+            # Capture SDK-level startup/runtime failures
+            logger.error(f"Worker failed to start or encountered critical error: {e}", exc_info=True)
+            _sentry.capture_exception(
+                e,
+                context={
+                    "service_name": self.service_name,
+                    "service_version": self.service_version,
+                    "error_location": "Worker.run",
+                    "error_phase": "worker_lifecycle",
+                },
+                tags={
+                    "sdk_error": "true",
+                    "error_type": "worker_failure",
+                    "severity": "critical",
+                },
+                level="error",
+            )
+            raise
+
+        finally:
+            # Flush Sentry events before shutdown
+            logger.info("Flushing Sentry events before shutdown...")
+            _sentry.flush(timeout=5.0)
+
+            logger.info("Worker shutdown complete")
