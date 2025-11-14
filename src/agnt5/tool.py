@@ -243,7 +243,7 @@ class Tool:
 
         workflow_ctx = get_workflow_context()
         if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.tool.started", {
+            workflow_ctx._send_checkpoint("tool.invoked", {
                 "tool.name": self.name,
                 "tool.args": list(kwargs.keys()),
             })
@@ -274,7 +274,7 @@ class Tool:
 
                     # Emit completion checkpoint
                     if workflow_ctx:
-                        workflow_ctx._send_checkpoint("workflow.tool.completed", {
+                        workflow_ctx._send_checkpoint("tool.completed", {
                             "tool.name": self.name,
                             "tool.success": True,
                         })
@@ -283,7 +283,7 @@ class Tool:
             except Exception as e:
                 # Emit error checkpoint for observability
                 if workflow_ctx:
-                    workflow_ctx._send_checkpoint("workflow.tool.error", {
+                    workflow_ctx._send_checkpoint("tool.failed", {
                         "tool.name": self.name,
                         "error": str(e),
                         "error_type": type(e).__name__,

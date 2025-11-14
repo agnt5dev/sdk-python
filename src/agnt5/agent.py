@@ -712,6 +712,83 @@ class Agent:
 
         self.logger = logging.getLogger(f"agnt5.agent.{name}")
 
+        # Cost tracking for this agent's execution
+        self._cumulative_cost_usd = 0.0
+
+    @property
+    def cumulative_cost_usd(self) -> float:
+        """
+        Get cumulative LLM cost in USD for this agent's execution.
+
+        Returns the total cost of all LLM calls made by this agent instance
+        since it was created.
+
+        Returns:
+            float: Cumulative cost in USD
+
+        Example:
+            ```python
+            result = await agent.run("Analyze this data")
+            print(f"Total cost: ${agent.cumulative_cost_usd:.4f}")
+            ```
+        """
+        return self._cumulative_cost_usd
+
+    def _track_llm_cost(self, response: GenerateResponse, workflow_ctx: Optional[Any] = None) -> None:
+        """
+        Track LLM cost from response and emit cost accrual event.
+
+        Reads cost from OpenTelemetry span attributes (calculated by Rust core)
+        and emits a run.cost.accrued checkpoint event if in workflow context.
+
+        Args:
+            response: LLM response with usage data
+            workflow_ctx: Optional workflow context for checkpoint emission
+        """
+        # Try to get cost from current OpenTelemetry span
+        cost_usd = None
+        try:
+            from opentelemetry import trace
+            span = trace.get_current_span()
+            if span.is_recording():
+                # Cost is set by Rust telemetry in gen_ai.usage.cost attribute
+                attributes = span.attributes or {}
+                cost_usd = attributes.get("gen_ai.usage.cost")
+        except Exception as e:
+            self.logger.debug(f"Could not read cost from span: {e}")
+
+        # Fallback: calculate cost from usage if span doesn't have it
+        # (This shouldn't happen in production, but useful for testing)
+        if cost_usd is None and response.usage:
+            self.logger.debug("Span cost not available, skipping cost tracking")
+            return
+
+        if cost_usd is not None:
+            # Update cumulative cost
+            self._cumulative_cost_usd += cost_usd
+
+            # Emit cost accrual event if in workflow context
+            if workflow_ctx is not None:
+                event_data = {
+                    "cost_usd": cost_usd,
+                    "cumulative_cost_usd": self._cumulative_cost_usd,
+                    "agent_name": self.name,
+                    "model": self.model_name,
+                }
+
+                # Add token usage if available
+                if response.usage:
+                    event_data["input_tokens"] = response.usage.prompt_tokens
+                    event_data["output_tokens"] = response.usage.completion_tokens
+                    event_data["total_tokens"] = response.usage.total_tokens
+
+                workflow_ctx._send_checkpoint("run.cost.accrued", event_data)
+
+            self.logger.debug(
+                f"Agent '{self.name}' cost: ${cost_usd:.6f} "
+                f"(cumulative: ${self._cumulative_cost_usd:.6f})"
+            )
+
         # Define schemas based on the run method signature
         # Input: user_message (string)
         self.input_schema = {
@@ -982,7 +1059,7 @@ class Agent:
 
         # Emit checkpoint if called within a workflow context
         if workflow_ctx is not None:
-            workflow_ctx._send_checkpoint("workflow.agent.started", {
+            workflow_ctx._send_checkpoint("agent.started", {
                 "agent.name": self.name,
                 "agent.model": self.model_name,
                 "agent.tools": list(self.tools.keys()),
@@ -1072,6 +1149,9 @@ class Agent:
                             if self.top_p:
                                 request.config.top_p = self.top_p
                             response = await self._language_model.generate(request)
+
+                            # Track cost for this LLM call
+                            self._track_llm_cost(response, workflow_ctx)
                         else:
                             # New API: model is a string, create internal LM instance
                             request = GenerateRequest(
@@ -1092,6 +1172,9 @@ class Agent:
                             provider, model_name = self.model.split('/', 1)
                             internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
                             response = await internal_lm.generate(request)
+
+                            # Track cost for this LLM call
+                            self._track_llm_cost(response, workflow_ctx)
 
                         # Add assistant response to messages
                         messages.append(Message.assistant(response.text))
@@ -1223,7 +1306,7 @@ class Agent:
 
                             # Emit completion checkpoint
                             if workflow_ctx:
-                                workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                                workflow_ctx._send_checkpoint("agent.completed", {
                                     "agent.name": self.name,
                                     "agent.iterations": iteration + 1,
                                     "agent.tool_calls_count": len(all_tool_calls),
@@ -1245,7 +1328,7 @@ class Agent:
 
                     # Emit completion checkpoint with max iterations flag
                     if workflow_ctx:
-                        workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                        workflow_ctx._send_checkpoint("agent.completed", {
                             "agent.name": self.name,
                             "agent.iterations": self.max_iterations,
                             "agent.tool_calls_count": len(all_tool_calls),
@@ -1261,7 +1344,7 @@ class Agent:
             except Exception as e:
                 # Emit error checkpoint for observability
                 if workflow_ctx:
-                    workflow_ctx._send_checkpoint("workflow.agent.error", {
+                    workflow_ctx._send_checkpoint("agent.failed", {
                         "agent.name": self.name,
                         "error": str(e),
                         "error_type": type(e).__name__,
@@ -1396,6 +1479,9 @@ class Agent:
                 if self.top_p:
                     request.config.top_p = self.top_p
                 response = await self._language_model.generate(request)
+
+                # Track cost for this LLM call
+                self._track_llm_cost(response, workflow_ctx)
             else:
                 # New API: model is a string, create internal LM instance
                 request = GenerateRequest(
@@ -1415,6 +1501,9 @@ class Agent:
                 provider, model_name = self.model.split('/', 1)
                 internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
                 response = await internal_lm.generate(request)
+
+                # Track cost for this LLM call
+                self._track_llm_cost(response, workflow_ctx)
 
             # Add assistant response to messages
             messages.append(Message.assistant(response.text))
@@ -1545,7 +1634,7 @@ class Agent:
 
                 # Emit completion checkpoint
                 if workflow_ctx:
-                    workflow_ctx._send_checkpoint("workflow.agent.completed", {
+                    workflow_ctx._send_checkpoint("agent.completed", {
                         "agent.name": self.name,
                         "agent.iterations": iteration + 1,
                         "agent.tool_calls_count": len(all_tool_calls),
@@ -1569,7 +1658,7 @@ class Agent:
 
         # Emit completion checkpoint with max iterations flag
         if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.agent.completed", {
+            workflow_ctx._send_checkpoint("agent.completed", {
                 "agent.name": self.name,
                 "agent.iterations": self.max_iterations,
                 "agent.tool_calls_count": len(all_tool_calls),
