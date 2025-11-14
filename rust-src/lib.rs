@@ -41,7 +41,9 @@ impl PySpan {
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
             if let Some(exc) = exc_value {
@@ -83,7 +85,9 @@ impl PySpan {
 
     /// Set a span attribute
     fn set_attribute(&self, key: String, value: String) -> PyResult<()> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(ref mut span) = *span_guard {
             span.set_attribute(opentelemetry::KeyValue::new(key, value));
         }
@@ -92,7 +96,9 @@ impl PySpan {
 
     /// Record an exception on the span
     fn record_exception(&self, exception: String) -> PyResult<()> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(ref mut span) = *span_guard {
             span.set_attribute(opentelemetry::KeyValue::new("error", true));
             span.set_attribute(opentelemetry::KeyValue::new("error.message", exception.clone()));
@@ -103,7 +109,9 @@ impl PySpan {
 
     /// Manually end the span with a status
     fn end(&self, status: Option<String>) -> PyResult<()> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(mut span) = span_guard.take() {
             if let Some(status_str) = status {
                 if status_str.to_lowercase() == "error" {
@@ -141,7 +149,9 @@ impl PyToolSpan {
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
             if let Some(exc) = exc_value {
@@ -179,7 +189,9 @@ impl PyToolSpan {
 
     /// Record successful tool execution with optional result
     fn record_success(&self, result: Option<String>) -> PyResult<()> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(ref mut span) = *span_guard {
             record_tool_success(span, result.as_deref());
         }
@@ -188,7 +200,9 @@ impl PyToolSpan {
 
     /// Record tool execution error
     fn record_error(&self, error_msg: String) -> PyResult<()> {
-        let mut span_guard = self.span.lock().unwrap();
+        let mut span_guard = self.span.lock().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
+        })?;
         if let Some(ref mut span) = *span_guard {
             record_tool_error(span, &error_msg);
         }
@@ -432,8 +446,9 @@ fn log_from_python(
         // Parse hex strings to bytes
         if let (Ok(tid_bytes), Ok(sid_bytes)) = (hex::decode(tid_str), hex::decode(sid_str)) {
             if tid_bytes.len() == 16 && sid_bytes.len() == 8 {
-                let trace_id = TraceId::from_bytes(tid_bytes.try_into().unwrap());
-                let span_id = SpanId::from_bytes(sid_bytes.try_into().unwrap());
+                // Safe unwrap: we just checked the length
+                let trace_id = TraceId::from_bytes(tid_bytes.try_into().expect("trace_id length verified"));
+                let span_id = SpanId::from_bytes(sid_bytes.try_into().expect("span_id length verified"));
 
                 let span_context = SpanContext::new(
                     trace_id,
