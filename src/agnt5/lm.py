@@ -448,13 +448,30 @@ class _LanguageModel(LanguageModel):
 
         # Emit checkpoint if called within a workflow context
         from .context import get_workflow_context
+        import time
         workflow_ctx = get_workflow_context()
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.lm.started", {
+
+        # Get trace context for event linkage
+        trace_id = None
+        span_id = None
+        try:
+            from opentelemetry import trace
+            span = trace.get_current_span()
+            if span.is_recording():
+                span_context = span.get_span_context()
+                trace_id = format(span_context.trace_id, '032x')
+                span_id = format(span_context.span_id, '016x')
+        except Exception:
+            pass  # Tracing not available, continue without
+
+        # Emit started event
+        if workflow_ctx and trace_id:
+            workflow_ctx._send_checkpoint("agent.llm.call.started", {
                 "model": model,
                 "provider": self._provider,
-                "temperature": kwargs.get("temperature"),
-                "max_tokens": kwargs.get("max_tokens"),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "timestamp": time.time_ns() // 1_000_000,
             })
 
         try:
@@ -465,28 +482,39 @@ class _LanguageModel(LanguageModel):
             # Convert Rust response to Python
             response = self._convert_response(rust_response)
 
-            # Emit completion checkpoint with usage stats
-            if workflow_ctx:
-                usage_dict = None
-                if response.usage:
-                    usage_dict = {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    }
-                workflow_ctx._send_checkpoint("workflow.lm.completed", {
+            # Emit completion event with token usage and cost
+            if workflow_ctx and trace_id:
+                event_data = {
                     "model": model,
-                    "usage": usage_dict,
-                })
+                    "provider": self._provider,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "timestamp": time.time_ns() // 1_000_000,
+                }
+
+                # Add token usage if available
+                if response.usage:
+                    event_data["input_tokens"] = response.usage.prompt_tokens
+                    event_data["output_tokens"] = response.usage.completion_tokens
+                    event_data["total_tokens"] = response.usage.total_tokens
+
+                    # Calculate cost (Rust already calculated it in span, but we can recalculate for event)
+                    # Cost will be available in the span via trace_id link
+
+                workflow_ctx._send_checkpoint("agent.llm.call.completed", event_data)
 
             return response
         except Exception as e:
-            # Emit error checkpoint for observability
-            if workflow_ctx:
-                workflow_ctx._send_checkpoint("workflow.lm.error", {
+            # Emit failed event
+            if workflow_ctx and trace_id:
+                workflow_ctx._send_checkpoint("agent.llm.call.failed", {
                     "model": model,
+                    "provider": self._provider,
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "timestamp": time.time_ns() // 1_000_000,
                 })
             raise
 
@@ -565,14 +593,31 @@ class _LanguageModel(LanguageModel):
 
         # Emit checkpoint if called within a workflow context
         from .context import get_workflow_context
+        import time
         workflow_ctx = get_workflow_context()
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.lm.started", {
+
+        # Get trace context for event linkage
+        trace_id = None
+        span_id = None
+        try:
+            from opentelemetry import trace
+            span = trace.get_current_span()
+            if span.is_recording():
+                span_context = span.get_span_context()
+                trace_id = format(span_context.trace_id, '032x')
+                span_id = format(span_context.span_id, '016x')
+        except Exception:
+            pass  # Tracing not available, continue without
+
+        # Emit started event
+        if workflow_ctx and trace_id:
+            workflow_ctx._send_checkpoint("agent.llm.call.started", {
                 "model": model,
                 "provider": self._provider,
-                "temperature": kwargs.get("temperature"),
-                "max_tokens": kwargs.get("max_tokens"),
                 "streaming": True,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "timestamp": time.time_ns() // 1_000_000,
             })
 
         try:
@@ -585,19 +630,28 @@ class _LanguageModel(LanguageModel):
                 if chunk.text:
                     yield chunk.text
 
-            # Emit completion checkpoint after streaming finishes
-            if workflow_ctx:
-                workflow_ctx._send_checkpoint("workflow.lm.completed", {
+            # Emit completion event (note: streaming doesn't provide token counts)
+            if workflow_ctx and trace_id:
+                workflow_ctx._send_checkpoint("agent.llm.call.completed", {
                     "model": model,
+                    "provider": self._provider,
                     "streaming": True,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "timestamp": time.time_ns() // 1_000_000,
                 })
         except Exception as e:
-            # Emit error checkpoint for observability
-            if workflow_ctx:
-                workflow_ctx._send_checkpoint("workflow.lm.error", {
+            # Emit failed event
+            if workflow_ctx and trace_id:
+                workflow_ctx._send_checkpoint("agent.llm.call.failed", {
                     "model": model,
+                    "provider": self._provider,
+                    "streaming": True,
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "timestamp": time.time_ns() // 1_000_000,
                 })
             raise
 
@@ -907,37 +961,9 @@ async def stream(
         config=config,
     )
 
-    # Emit checkpoint if called within a workflow context
-    from .context import get_workflow_context
+    # Events are emitted by _LanguageModel.stream() internally
+    # (agent.llm.call.started/completed/failed with trace linkage)
 
-    workflow_ctx = get_workflow_context()
-    if workflow_ctx:
-        workflow_ctx._send_checkpoint("workflow.lm.started", {
-            "model": model,
-            "provider": provider,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "streaming": True,
-        })
-
-    try:
-        # Stream and yield chunks
-        async for chunk in lm.stream(request):
-            yield chunk
-
-        # Emit completion checkpoint (note: no usage stats for streaming)
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.lm.completed", {
-                "model": model,
-                "streaming": True,
-            })
-    except Exception as e:
-        # Emit error checkpoint for observability
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("workflow.lm.error", {
-                "model": model,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "streaming": True,
-            })
-        raise
+    # Stream and yield chunks
+    async for chunk in lm.stream(request):
+        yield chunk
