@@ -715,6 +715,36 @@ class Agent:
         # Cost tracking for this agent's execution
         self._cumulative_cost_usd = 0.0
 
+        # Define schemas based on the run method signature
+        # Input: user_message (string)
+        self.input_schema = {
+            "type": "object",
+            "properties": {
+                "user_message": {"type": "string"}
+            },
+            "required": ["user_message"]
+        }
+        # Output: AgentResult with output and tool_calls
+        self.output_schema = {
+            "type": "object",
+            "properties": {
+                "output": {"type": "string"},
+                "tool_calls": {
+                    "type": "array",
+                    "items": {"type": "object"}
+                }
+            }
+        }
+
+        # Auto-register agent for discovery
+        AgentRegistry.register(self)
+
+        # Store metadata
+        self.metadata = {
+            "description": instructions,
+            "model": model
+        }
+
     @property
     def cumulative_cost_usd(self) -> float:
         """
@@ -788,36 +818,6 @@ class Agent:
                 f"Agent '{self.name}' cost: ${cost_usd:.6f} "
                 f"(cumulative: ${self._cumulative_cost_usd:.6f})"
             )
-
-        # Define schemas based on the run method signature
-        # Input: user_message (string)
-        self.input_schema = {
-            "type": "object",
-            "properties": {
-                "user_message": {"type": "string"}
-            },
-            "required": ["user_message"]
-        }
-        # Output: AgentResult with output and tool_calls
-        self.output_schema = {
-            "type": "object",
-            "properties": {
-                "output": {"type": "string"},
-                "tool_calls": {
-                    "type": "array",
-                    "items": {"type": "object"}
-                }
-            }
-        }
-
-        # Auto-register agent for discovery by auto_register=True
-        AgentRegistry.register(self)
-
-        # Store metadata
-        self.metadata = {
-            "description": instructions,
-            "model": model
-        }
 
     def to_tool(self, description: Optional[str] = None) -> Tool:
         """Convert this agent to a Tool that can be used by other agents.

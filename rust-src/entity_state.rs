@@ -198,7 +198,6 @@ impl EntityStateManager {
         // Build request message
         let request = RuntimeServiceRequest {
             request_id: request_id.clone(),
-            tenant_id: self.tenant_id.clone(),
             session_id: String::new(), // Not needed for entity operations
             operation: Some(operation),
         };
@@ -206,6 +205,7 @@ impl EntityStateManager {
         // Wrap in ServiceMessage with RuntimeService
         let service_message = ServiceMessage {
             worker_id: String::new(), // Will be set by worker
+            metadata: std::collections::HashMap::new(),
             message_type: Some(service_message::MessageType::RuntimeService(request)),
         };
 
