@@ -725,6 +725,7 @@ impl PyWorker {
                                         // Create ServiceMessage
                                         let service_message = ServiceMessage {
                                             worker_id: worker_id.clone(),
+                                            metadata: std::collections::HashMap::new(),
                                             message_type: Some(
                                                 agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(rust_response)
                                             ),
@@ -815,6 +816,7 @@ impl PyWorker {
                                         // Create ServiceMessage
                                         let service_message = ServiceMessage {
                                         worker_id: worker_id.clone(),
+                                        metadata: std::collections::HashMap::new(),
                                         message_type: Some(
                                             agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(rust_response)
                                         ),
