@@ -55,6 +55,7 @@ class WorkflowContext(Context):
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         checkpoint_callback: Optional[Callable[[dict], None]] = None,
+        checkpoint_client: Optional[Any] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -67,12 +68,14 @@ class WorkflowContext(Context):
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
             checkpoint_callback: Optional callback for sending real-time checkpoints
+            checkpoint_client: Optional CheckpointClient for platform-side memoization
         """
         super().__init__(run_id, attempt, runtime_context)
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
         self._checkpoint_callback = checkpoint_callback
+        self._checkpoint_client = checkpoint_client
 
         # Memory scoping identifiers
         self.session_id = session_id or run_id  # Default: session = run (ephemeral)
@@ -338,7 +341,11 @@ class WorkflowContext(Context):
         Checkpoint expensive operations for durability.
 
         If workflow crashes, won't re-execute this step on retry.
-        The step result is persisted to the journal for crash recovery.
+        The step result is persisted to the platform for crash recovery.
+
+        When a CheckpointClient is available, this method uses platform-side
+        memoization via gRPC. The platform stores step results in the run_steps
+        table, enabling replay even after worker crashes.
 
         Args:
             name: Unique name for this checkpoint (used as step_key for memoization)
@@ -351,11 +358,36 @@ class WorkflowContext(Context):
             result = await ctx.step("load", load_data())
         """
         import inspect
+        import json
+        import time
 
-        # Check if step already completed (for replay)
+        # Generate step key for platform memoization
+        step_key = f"step:{name}:{self._step_counter}"
+        self._step_counter += 1
+
+        # Check platform-side memoization first (Phase 3)
+        if self._checkpoint_client:
+            try:
+                result = await self._checkpoint_client.step_started(
+                    self.run_id,
+                    step_key,
+                    name,
+                    "checkpoint",
+                )
+                if result.memoized and result.cached_output:
+                    # Deserialize cached output
+                    cached_value = json.loads(result.cached_output.decode("utf-8"))
+                    self._logger.info(f"🔄 Replaying memoized step from platform: {name}")
+                    # Also record locally for consistency
+                    self._workflow_entity.record_step_completion(name, "checkpoint", None, cached_value)
+                    return cached_value
+            except Exception as e:
+                self._logger.warning(f"Platform memoization check failed, falling back to local: {e}")
+
+        # Fall back to local memoization (for backward compatibility)
         if self._workflow_entity.has_completed_step(name):
             result = self._workflow_entity.get_completed_step(name)
-            self._logger.info(f"🔄 Replaying checkpoint: {name}")
+            self._logger.info(f"🔄 Replaying checkpoint from local cache: {name}")
             return result
 
         # Emit workflow.step.started checkpoint for observability
@@ -367,6 +399,7 @@ class WorkflowContext(Context):
             },
         )
 
+        start_time = time.time()
         try:
             # Execute and checkpoint
             if inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
@@ -374,11 +407,27 @@ class WorkflowContext(Context):
             else:
                 result = await func_or_awaitable()
 
+            latency_ms = int((time.time() - start_time) * 1000)
+
             # Record step completion locally for in-memory replay
             self._workflow_entity.record_step_completion(name, "checkpoint", None, result)
 
+            # Record to platform for persistent memoization (Phase 3)
+            if self._checkpoint_client:
+                try:
+                    output_bytes = json.dumps(result).encode("utf-8")
+                    await self._checkpoint_client.step_completed(
+                        self.run_id,
+                        step_key,
+                        name,
+                        "checkpoint",
+                        output_bytes,
+                        latency_ms,
+                    )
+                except Exception as e:
+                    self._logger.warning(f"Failed to record step completion to platform: {e}")
+
             # Emit workflow.step.completed checkpoint to journal for crash recovery
-            # This persists the step result so it can be loaded on retry
             self._send_checkpoint(
                 "workflow.step.completed",
                 {
@@ -388,10 +437,24 @@ class WorkflowContext(Context):
                 },
             )
 
-            self._logger.info(f"✅ Checkpoint completed: {name}")
+            self._logger.info(f"✅ Checkpoint completed: {name} ({latency_ms}ms)")
             return result
 
         except Exception as e:
+            # Record failure to platform (Phase 3)
+            if self._checkpoint_client:
+                try:
+                    await self._checkpoint_client.step_failed(
+                        self.run_id,
+                        step_key,
+                        name,
+                        "checkpoint",
+                        str(e),
+                        type(e).__name__,
+                    )
+                except Exception as cp_err:
+                    self._logger.warning(f"Failed to record step failure to platform: {cp_err}")
+
             # Emit workflow.step.error checkpoint
             self._send_checkpoint(
                 "workflow.step.error",

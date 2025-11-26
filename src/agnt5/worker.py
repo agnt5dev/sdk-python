@@ -214,6 +214,16 @@ class Worker:
 
         logger.info("Created EntityStateAdapter with Rust core for state management")
 
+        # Create CheckpointClient for step-level memoization (Phase 3)
+        # This client is shared across all workflow executions and connects lazily on first use
+        try:
+            from .checkpoint import CheckpointClient
+            self._checkpoint_client = CheckpointClient()
+            logger.info("Created CheckpointClient for step-level memoization")
+        except Exception as e:
+            logger.warning(f"Failed to create CheckpointClient (memoization disabled): {e}")
+            self._checkpoint_client = None
+
         # Initialize Sentry for SDK-level error tracking
         # Telemetry behavior:
         # - Alpha/Beta releases: ENABLED by default (opt-out with AGNT5_DISABLE_SDK_TELEMETRY=true)
@@ -1052,7 +1062,7 @@ class Worker:
                     logger.error(f"Checkpoint metadata causing error: {metadata}")
                     logger.error(f"Checkpoint data: {checkpoint}")
 
-            # Create WorkflowContext with entity, runtime_context, and checkpoint callback
+            # Create WorkflowContext with entity, runtime_context, checkpoint callback, and checkpoint client
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
                 run_id=request.invocation_id,  # Use unique invocation_id for this execution
@@ -1060,6 +1070,7 @@ class Worker:
                 user_id=user_id,  # User for long-term memory
                 runtime_context=request.runtime_context,
                 checkpoint_callback=checkpoint_callback,
+                checkpoint_client=self._checkpoint_client,  # Phase 3: platform-side memoization
             )
 
             # NEW: Populate agent resume info if this is an agent HITL resume
