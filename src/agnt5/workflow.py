@@ -338,9 +338,10 @@ class WorkflowContext(Context):
         Checkpoint expensive operations for durability.
 
         If workflow crashes, won't re-execute this step on retry.
+        The step result is persisted to the journal for crash recovery.
 
         Args:
-            name: Unique name for this checkpoint
+            name: Unique name for this checkpoint (used as step_key for memoization)
             func_or_awaitable: Either an async function or awaitable
 
         Returns:
@@ -357,16 +358,51 @@ class WorkflowContext(Context):
             self._logger.info(f"🔄 Replaying checkpoint: {name}")
             return result
 
-        # Execute and checkpoint
-        if inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
-            result = await func_or_awaitable
-        else:
-            result = await func_or_awaitable()
+        # Emit workflow.step.started checkpoint for observability
+        self._send_checkpoint(
+            "workflow.step.started",
+            {
+                "step_name": name,
+                "handler_name": "checkpoint",
+            },
+        )
 
-        # Record step completion
-        self._workflow_entity.record_step_completion(name, "checkpoint", None, result)
+        try:
+            # Execute and checkpoint
+            if inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
+                result = await func_or_awaitable
+            else:
+                result = await func_or_awaitable()
 
-        return result
+            # Record step completion locally for in-memory replay
+            self._workflow_entity.record_step_completion(name, "checkpoint", None, result)
+
+            # Emit workflow.step.completed checkpoint to journal for crash recovery
+            # This persists the step result so it can be loaded on retry
+            self._send_checkpoint(
+                "workflow.step.completed",
+                {
+                    "step_name": name,
+                    "handler_name": "checkpoint",
+                    "result": result,
+                },
+            )
+
+            self._logger.info(f"✅ Checkpoint completed: {name}")
+            return result
+
+        except Exception as e:
+            # Emit workflow.step.error checkpoint
+            self._send_checkpoint(
+                "workflow.step.error",
+                {
+                    "step_name": name,
+                    "handler_name": "checkpoint",
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            raise
 
     async def wait_for_user(
         self, question: str, input_type: str = "text", options: Optional[List[Dict]] = None
