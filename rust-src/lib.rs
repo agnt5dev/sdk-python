@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
 
 mod adk;
+mod checkpoint_client;
 mod entity_state;
 mod language_model;
 mod types;
@@ -565,6 +566,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ADK scaffolding
     adk::register_adk(m)?;
+
+    // Checkpoint client for step-level memoization (Phase 3)
+    checkpoint_client::register_checkpoint_client(m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;
