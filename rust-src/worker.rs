@@ -545,6 +545,15 @@ impl PyWorker {
                     String::from_utf8_lossy(&invoke_request.input_data).to_string(),
                 ));
 
+                // Add is_streaming attribute for journal exporter filtering
+                // Only spans with this attribute set to true will be exported to the journal
+                if invoke_request.is_streaming {
+                    otel_span.set_attribute(opentelemetry::KeyValue::new(
+                        "agnt5.is_streaming",
+                        true,
+                    ));
+                }
+
                 // IMPORTANT: Attach the span to the parent context so Python code executes inside it
                 // This ensures Python logs and operations are children of this span
                 // and maintains the distributed trace link to the gateway/coordinator
