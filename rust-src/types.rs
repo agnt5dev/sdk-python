@@ -315,6 +315,9 @@ pub struct PyExecuteComponentRequest {
     // Retry orchestration
     #[pyo3(get)]
     pub attempt: i32,
+    // Streaming execution flag - when true, SDK should send spans/logs to journal for real-time SSE
+    #[pyo3(get)]
+    pub is_streaming: bool,
 }
 
 #[pymethods]
@@ -354,6 +357,7 @@ impl PyExecuteComponentRequest {
             session_id: None,
             user_id: None,
             attempt: 0,
+            is_streaming: false,
         }
     }
 }
@@ -421,6 +425,7 @@ impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
                 Some(req.user_id)
             },
             attempt: req.attempt,
+            is_streaming: req.is_streaming,
         }
     }
 }

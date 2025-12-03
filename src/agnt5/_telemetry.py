@@ -84,12 +84,17 @@ class OpenTelemetryHandler(logging.Handler):
             span_id = getattr(record, 'span_id', None)
             run_id = getattr(record, 'run_id', None)
 
+            # Extract streaming context for real-time SSE delivery
+            is_streaming = getattr(record, 'is_streaming', None)
+            tenant_id = getattr(record, 'tenant_id', None)
+
             # Forward to Rust tracing system
             # Rust side will:
             # - Add to current span context (inherits invocation.id)
             # - Attach correlation IDs as span attributes for OTLP export
             # - Send to OTLP exporter with trace context
             # - Print to console via fmt layer
+            # - Export to journal for SSE streaming if is_streaming=True
             self._log_from_python(
                 level=record.levelname,
                 message=message,
@@ -100,6 +105,8 @@ class OpenTelemetryHandler(logging.Handler):
                 trace_id=trace_id,
                 span_id=span_id,
                 run_id=run_id,
+                is_streaming=is_streaming,
+                tenant_id=tenant_id,
             )
         except Exception:
             # Don't let logging errors crash the application

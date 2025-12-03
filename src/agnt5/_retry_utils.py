@@ -128,10 +128,13 @@ async def execute_with_retry(
     for attempt in range(retry_policy.max_attempts):
         try:
             # Create context for this attempt (FunctionContext is immutable)
+            # Propagate streaming context from parent for real-time SSE log delivery
             attempt_ctx = FunctionContext(
                 run_id=ctx.run_id,
                 attempt=attempt,
-                retry_policy=retry_policy
+                retry_policy=retry_policy,
+                is_streaming=getattr(ctx, '_is_streaming', False),
+                tenant_id=getattr(ctx, '_tenant_id', None),
             )
 
             # Execute handler (pass context only if needed)
