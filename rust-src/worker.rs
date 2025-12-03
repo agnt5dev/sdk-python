@@ -495,6 +495,9 @@ impl PyWorker {
                     .cloned()
                     .unwrap_or_default();
 
+                // Clone tenant_id before it's moved into RuntimeContext (needed for journal export later)
+                let tenant_id_for_journal_early = tenant_id.clone();
+
                 // Create RuntimeContext with extracted OTel context for Python access
                 // This provides Python with run_id, trace_id, span_id, tenant_id, deployment_id for logging correlation
                 let runtime_context = agnt5_sdk_core::RuntimeContext::with_trace_context(
@@ -539,6 +542,12 @@ impl PyWorker {
                     Some(&invoke_request.metadata),
                 );
 
+                // Record execution request metric
+                agnt5_sdk_core::record_execution_request(
+                    &invoke_request.component_name,
+                    component_type_str,
+                );
+
                 // Add input.data attribute before moving span into context
                 otel_span.set_attribute(opentelemetry::KeyValue::new(
                     "input.data",
@@ -547,7 +556,15 @@ impl PyWorker {
 
                 // Add is_streaming attribute for journal exporter filtering
                 // Only spans with this attribute set to true will be exported to the journal
+                // 🔍 STREAM-DEBUG: Log is_streaming value from request
+                tracing::info!(
+                    "🔍 STREAM-DEBUG: SDK received request with is_streaming={}",
+                    invoke_request.is_streaming
+                );
                 if invoke_request.is_streaming {
+                    tracing::info!(
+                        "🔍 STREAM-DEBUG: Setting agnt5.is_streaming=true attribute on span"
+                    );
                     otel_span.set_attribute(opentelemetry::KeyValue::new(
                         "agnt5.is_streaming",
                         true,
@@ -564,6 +581,25 @@ impl PyWorker {
                 // Clone fields needed for span before moving invoke_request
                 let component_name = invoke_request.component_name.clone();
                 let invocation_id = invoke_request.invocation_id.clone();
+
+                // Capture fields needed for journal export (only used if is_streaming)
+                let is_streaming_request = invoke_request.is_streaming;
+                let tenant_id_for_journal = if tenant_id_for_journal_early.is_empty() { None } else { Some(tenant_id_for_journal_early) };
+                let execution_start_nano = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                // Extract parent span ID from context if available
+                let parent_span_id_for_journal: Option<String> = {
+                    let parent_span = cx.span();
+                    let parent_ctx = parent_span.span_context();
+                    let parent_str = parent_ctx.span_id().to_string();
+                    if parent_str == "0000000000000000" || parent_str.is_empty() {
+                        None
+                    } else {
+                        Some(parent_str)
+                    }
+                };
 
                 // Convert to Python types
                 let mut py_request = PyExecuteComponentRequest::from(invoke_request);
@@ -856,6 +892,77 @@ impl PyWorker {
                         }
                     },
                 )?;
+
+                // Export span to journal for real-time SSE streaming (if is_streaming)
+                // This must happen BEFORE the span is dropped
+                if is_streaming_request {
+                    // Get span context for trace_id and span_id
+                    let span = cx.span();
+                    let span_context = span.span_context();
+                    let trace_id = span_context.trace_id().to_string();
+                    let span_id = span_context.span_id().to_string();
+
+                    // Get current time as end time
+                    let end_time_unix_nano = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as i64)
+                        .unwrap_or(0);
+
+                    // Determine status from result
+                    let (status_code, status_description): (&str, Option<String>) = if let Some(ref msg) = result {
+                        if let Some(agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(ref resp)) = msg.message_type {
+                            if resp.success {
+                                ("ok", None)
+                            } else {
+                                // error_message is a String (protobuf optional string becomes String with empty default)
+                                let err_msg = if resp.error_message.is_empty() { None } else { Some(resp.error_message.clone()) };
+                                ("error", err_msg)
+                            }
+                        } else {
+                            ("ok", None)
+                        }
+                    } else {
+                        ("ok", None) // Streaming case handled separately
+                    };
+
+                    // Create journal span data
+                    let span_data = agnt5_sdk_core::create_journal_span_data(
+                        &trace_id,
+                        &span_id,
+                        parent_span_id_for_journal.as_deref(),
+                        &component_name,
+                        "server", // span kind
+                        execution_start_nano,
+                        end_time_unix_nano,
+                        status_code,
+                        status_description.as_deref(),
+                        None, // TODO: attributes
+                    );
+
+                    // Export component execution span to journal for SSE streaming
+                    // Use timeout to prevent blocking indefinitely on network issues
+                    // Best-effort: if export fails or times out, log warning and continue
+                    let export_result = tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        agnt5_sdk_core::export_span_to_journal(
+                            &invocation_id,
+                            &span_data,
+                            tenant_id_for_journal.as_deref(),
+                        )
+                    ).await;
+
+                    match export_result {
+                        Ok(Ok(())) => {
+                            tracing::debug!("🔍 STREAM-DEBUG: Exported component span to journal");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("🔍 STREAM-DEBUG: Failed to export span to journal: {}", e);
+                        }
+                        Err(_) => {
+                            tracing::warn!("🔍 STREAM-DEBUG: Span export timed out after 100ms");
+                        }
+                    }
+                }
 
                 // Span will be automatically ended when _span_guard is dropped
                 // This ensures proper span lifecycle management
