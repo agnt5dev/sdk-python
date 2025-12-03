@@ -783,6 +783,10 @@ class Worker:
             # Extract attempt number from platform request (if provided)
             platform_attempt = getattr(request, 'attempt', 0)
 
+            # Extract streaming context for real-time SSE log delivery
+            is_streaming = getattr(request, 'is_streaming', False)
+            tenant_id = request.metadata.get('tenant_id') if hasattr(request, 'metadata') else None
+
             # Create FunctionContext with attempt number for retry tracking
             # - If platform_attempt > 0: Platform is orchestrating retries
             # - If platform_attempt == 0: First attempt (or no retry config)
@@ -792,6 +796,8 @@ class Worker:
                 attempt=platform_attempt,
                 runtime_context=request.runtime_context,
                 retry_policy=config.retries,
+                is_streaming=is_streaming,
+                tenant_id=tenant_id,
             )
 
             # Set context in contextvar so get_current_context() and error handlers can access it

@@ -415,6 +415,8 @@ fn flush_telemetry_py() -> PyResult<()> {
 }
 
 /// Forward Python logs to Rust tracing system for OpenTelemetry integration
+///
+/// When is_streaming is true, logs are also exported to the journal for real-time SSE delivery.
 #[pyfunction]
 fn log_from_python(
     level: &str,
@@ -426,6 +428,8 @@ fn log_from_python(
     trace_id: Option<String>,
     span_id: Option<String>,
     run_id: Option<String>,
+    is_streaming: Option<bool>,
+    tenant_id: Option<String>,
 ) -> PyResult<()> {
     // When there's an active span, emit logs within that span's context.
     // The tracing_opentelemetry layer will automatically extract the OpenTelemetry
@@ -537,6 +541,43 @@ fn log_from_python(
             level,
             message
         ),
+    }
+
+    // Export log to journal for real-time SSE streaming (if is_streaming and run_id is present)
+    if is_streaming.unwrap_or(false) {
+        if let Some(ref rid) = run_id {
+            // Get current timestamp
+            let timestamp_unix_nano = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+
+            // Create journal log data
+            let log_data = agnt5_sdk_core::create_journal_log_data(
+                timestamp_unix_nano,
+                level,
+                &message,
+                trace_id.as_deref().unwrap_or(""),
+                span_id.as_deref().unwrap_or(""),
+                None, // attributes
+            );
+
+            // Export to journal (fire and forget - don't block on result)
+            let run_id_clone = rid.clone();
+            let tenant = tenant_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = agnt5_sdk_core::export_log_to_journal(
+                    &run_id_clone,
+                    &log_data,
+                    tenant.as_deref(),
+                ).await {
+                    tracing::warn!(
+                        "Failed to export log to journal for SSE streaming: {}",
+                        e
+                    );
+                }
+            });
+        }
     }
 
     Ok(())

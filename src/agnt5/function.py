@@ -44,6 +44,8 @@ class FunctionContext(Context):
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         retry_policy: Optional[Any] = None,
+        is_streaming: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> None:
         """
         Initialize function context.
@@ -53,8 +55,10 @@ class FunctionContext(Context):
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
             retry_policy: RetryPolicy for should_retry() checks
+            is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
+            tenant_id: Tenant ID for multi-tenant deployments
         """
-        super().__init__(run_id, attempt, runtime_context)
+        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
         self._retry_policy = retry_policy
 
     # === Quick Logging ===
