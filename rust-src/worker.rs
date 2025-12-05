@@ -4,12 +4,13 @@ use agnt5_sdk_core::pb::{
     runtime_message, ComponentInfo, ComponentType, ExecuteComponentResponse, RuntimeMessage,
     ServiceMessage,
 };
+use agnt5_sdk_core::span_export_queue::{LogExportQueue, SpanExportQueue};
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Mutex as AsyncMutex;
 use opentelemetry::trace::{TraceContextExt, Span};
 use opentelemetry::global;
@@ -18,6 +19,31 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 // Removed baggage import - using span inheritance instead
 use std::collections::HashMap;
+
+// Global span and log export queues for cross-thread access from PySpan.__exit__
+// These are set when the Worker is initialized and used by FFI code to push export requests
+static SPAN_EXPORT_QUEUE: OnceLock<SpanExportQueue> = OnceLock::new();
+static LOG_EXPORT_QUEUE: OnceLock<LogExportQueue> = OnceLock::new();
+
+/// Set the global span export queue (called from Worker initialization)
+pub fn set_span_export_queue(queue: SpanExportQueue) {
+    let _ = SPAN_EXPORT_QUEUE.set(queue);
+}
+
+/// Set the global log export queue (called from Worker initialization)
+pub fn set_log_export_queue(queue: LogExportQueue) {
+    let _ = LOG_EXPORT_QUEUE.set(queue);
+}
+
+/// Get the global span export queue (called from PySpan.__exit__)
+pub fn get_span_export_queue() -> Option<&'static SpanExportQueue> {
+    SPAN_EXPORT_QUEUE.get()
+}
+
+/// Get the global log export queue (called from log_from_python)
+pub fn get_log_export_queue() -> Option<&'static LogExportQueue> {
+    LOG_EXPORT_QUEUE.get()
+}
 
 #[pyclass]
 #[derive(Clone)]
@@ -332,6 +358,12 @@ impl PyWorker {
 
         let worker = Worker::new(worker_config, components, metadata);
 
+        // Set global export queues for cross-thread access from PySpan.__exit__ and log_from_python
+        // These are used by FFI code to queue span and log exports for background flushing
+        set_span_export_queue(worker.span_export_queue());
+        set_log_export_queue(worker.log_export_queue());
+        log::info!("Global span and log export queues configured for real-time streaming");
+
         let mut worker_guard = self.worker.lock().map_err(|e| {
             let err_msg = format!("Failed to lock worker: {}", e);
             log::error!("{}", err_msg);
@@ -500,6 +532,7 @@ impl PyWorker {
 
                 // Create RuntimeContext with extracted OTel context for Python access
                 // This provides Python with run_id, trace_id, span_id, tenant_id, deployment_id for logging correlation
+                // is_streaming flag enables child spans and logs to be exported to journal for SSE streaming
                 let runtime_context = agnt5_sdk_core::RuntimeContext::with_trace_context(
                     invoke_request.invocation_id.clone(), // run_id
                     invoke_request.service_name.clone(),
@@ -509,6 +542,7 @@ impl PyWorker {
                     invoke_request.metadata.clone(),
                     parent_context.clone(),
                     std::sync::Arc::new(agnt5_sdk_core::DummyStateManager),
+                    invoke_request.is_streaming, // Pass streaming flag for child span journal export
                 );
 
                 // Note: invocation.id will be handled by tracing span and Python log forwarding

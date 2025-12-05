@@ -63,6 +63,8 @@ class AgentContext(Context):
         parent_context: Optional[Context] = None,
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
+        is_streaming: bool = False,
+        tenant_id: Optional[str] = None,
     ):
         """
         Initialize agent context.
@@ -75,8 +77,16 @@ class AgentContext(Context):
             parent_context: Parent context to inherit state from
             attempt: Retry attempt number
             runtime_context: RuntimeContext for trace correlation
+            is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
+            tenant_id: Tenant identifier for multi-tenant deployments
         """
-        super().__init__(run_id, attempt, runtime_context)
+        # Inherit is_streaming and tenant_id from parent context if not explicitly provided
+        if parent_context and not is_streaming:
+            is_streaming = getattr(parent_context, '_is_streaming', False)
+        if parent_context and not tenant_id:
+            tenant_id = getattr(parent_context, '_tenant_id', None)
+
+        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id
@@ -1054,6 +1064,7 @@ class Agent:
             context = AgentContext(
                 run_id=run_id,
                 agent_name=self.name,
+                parent_context=context,  # Inherit streaming context
                 runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
 

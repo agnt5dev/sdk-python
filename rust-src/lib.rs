@@ -26,6 +26,13 @@ use worker::{PyWorker, PyWorkerConfig};
 #[pyclass]
 struct PySpan {
     span: Mutex<Option<BoxedSpan>>,
+    // Fields for journal export on streaming requests
+    run_id: Option<String>,
+    tenant_id: Option<String>,
+    is_streaming: bool,
+    name: String,
+    component_type: String,
+    start_time_ns: i64,
 }
 
 #[pymethods]
@@ -42,9 +49,25 @@ impl PySpan {
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
+        let end_time_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+
         let mut span_guard = self.span.lock().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
         })?;
+
+        // Get span IDs before processing (needed for journal export)
+        let (trace_id_str, span_id_str) = if let Some(ref span) = *span_guard {
+            let span_ctx = span.span_context();
+            (span_ctx.trace_id().to_string(), span_ctx.span_id().to_string())
+        } else {
+            (String::new(), String::new())
+        };
+
+        let mut status_code = "ok";
+
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
             if let Some(exc) = exc_value {
@@ -71,6 +94,7 @@ impl PySpan {
                     span.set_status(opentelemetry::trace::Status::Ok);
                 } else {
                     // Regular exception - mark as error
+                    status_code = "error";
                     let error_str = format!("{}", exc);
                     span.set_attribute(opentelemetry::KeyValue::new("error", true));
                     span.set_attribute(opentelemetry::KeyValue::new("error.message", error_str.clone()));
@@ -81,6 +105,57 @@ impl PySpan {
             }
             // Span will be ended when dropped
         }
+
+        // Queue span export for background flush if streaming is enabled
+        // Uses the global SpanExportQueue which is flushed by a background task in the Worker's Tokio runtime
+        tracing::debug!(
+            "🔍 CHILD-SPAN-DEBUG: PySpan.__exit__ called, is_streaming={}, run_id={:?}, name={}",
+            self.is_streaming,
+            self.run_id,
+            self.name
+        );
+        if self.is_streaming {
+            if let Some(ref run_id) = self.run_id {
+                // Get the global span export queue (set by Worker on initialization)
+                if let Some(queue) = crate::worker::get_span_export_queue() {
+                    use agnt5_sdk_core::span_export_queue::SpanExportRequest;
+
+                    let request = SpanExportRequest {
+                        run_id: run_id.clone(),
+                        tenant_id: self.tenant_id.clone(),
+                        trace_id: trace_id_str.clone(),
+                        span_id: span_id_str.clone(),
+                        parent_span_id: None, // TODO: track parent span ID
+                        name: self.name.clone(),
+                        kind: self.component_type.clone(),
+                        start_time_ns: self.start_time_ns,
+                        end_time_ns,
+                        status_code: status_code.to_string(),
+                        status_description: None,
+                        attributes: None, // TODO: capture span attributes
+                        queued_at: std::time::Instant::now(),
+                    };
+
+                    if let Err(e) = queue.push(request) {
+                        tracing::warn!(
+                            "Failed to queue child span for journal export: {}",
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "🔍 CHILD-SPAN-DEBUG: Queued span '{}' for journal export (queue_size={})",
+                            self.name,
+                            queue.len()
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        "🔍 CHILD-SPAN-DEBUG: Span export queue not initialized, skipping child span export"
+                    );
+                }
+            }
+        }
+
         Ok(false) // Don't suppress exceptions
     }
 
@@ -252,6 +327,18 @@ impl PyRuntimeContext {
     fn component_name(&self) -> String {
         self.inner.component_name.clone()
     }
+
+    /// Get the is_streaming flag (whether this is a streaming SSE request)
+    #[getter]
+    fn is_streaming(&self) -> bool {
+        self.inner.is_streaming
+    }
+
+    /// Get the tenant_id
+    #[getter]
+    fn tenant_id(&self) -> String {
+        self.inner.tenant_id.clone()
+    }
 }
 
 impl PyRuntimeContext {
@@ -376,6 +463,28 @@ fn create_span(
         None
     };
 
+    // Extract streaming context for journal export
+    let (is_streaming, run_id_opt, tenant_id_opt) = if let Some(ctx) = runtime_context {
+        let streaming = ctx.inner.is_streaming;
+        tracing::debug!(
+            "🔍 CHILD-SPAN-DEBUG: create_span called with runtime_context, is_streaming={}, run_id={}, name={}",
+            streaming,
+            ctx.inner.run_id,
+            name
+        );
+        (
+            streaming,
+            Some(ctx.inner.run_id.clone()),
+            Some(ctx.inner.tenant_id.clone()),
+        )
+    } else {
+        tracing::debug!(
+            "🔍 CHILD-SPAN-DEBUG: create_span called WITHOUT runtime_context, name={}",
+            name
+        );
+        (false, None, None)
+    };
+
     let (parent_context, service_name, run_id) = if let Some(ctx) = runtime_context {
         (
             ctx.get_otel_context(),
@@ -398,8 +507,20 @@ fn create_span(
         Some(&metadata),
     );
 
+    // Capture start time for journal span data
+    let start_time_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+
     Ok(PySpan {
         span: Mutex::new(Some(span)),
+        run_id: run_id_opt,
+        tenant_id: tenant_id_opt,
+        is_streaming,
+        name: name.clone(),
+        component_type: component_type.clone(),
+        start_time_ns,
     })
 }
 
@@ -543,40 +664,52 @@ fn log_from_python(
         ),
     }
 
-    // Export log to journal for real-time SSE streaming (if is_streaming and run_id is present)
+    // Queue log export for background flush if streaming is enabled
+    // Uses the global LogExportQueue which is flushed by a background task in the Worker's Tokio runtime
     if is_streaming.unwrap_or(false) {
         if let Some(ref rid) = run_id {
-            // Get current timestamp
-            let timestamp_unix_nano = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as i64)
-                .unwrap_or(0);
+            // Get the global log export queue (set by Worker on initialization)
+            if let Some(queue) = crate::worker::get_log_export_queue() {
+                use agnt5_sdk_core::span_export_queue::LogExportRequest;
 
-            // Create journal log data
-            let log_data = agnt5_sdk_core::create_journal_log_data(
-                timestamp_unix_nano,
-                level,
-                &message,
-                trace_id.as_deref().unwrap_or(""),
-                span_id.as_deref().unwrap_or(""),
-                None, // attributes
-            );
+                // Get current timestamp
+                let timestamp_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
 
-            // Export to journal (fire and forget - don't block on result)
-            let run_id_clone = rid.clone();
-            let tenant = tenant_id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = agnt5_sdk_core::export_log_to_journal(
-                    &run_id_clone,
-                    &log_data,
-                    tenant.as_deref(),
-                ).await {
+                let request = LogExportRequest {
+                    run_id: rid.clone(),
+                    tenant_id: tenant_id.clone(),
+                    trace_id: trace_id.clone().unwrap_or_default(),
+                    span_id: span_id.clone().unwrap_or_default(),
+                    timestamp_ns,
+                    severity: level.to_string(),
+                    body: message.clone(),
+                    attributes: None, // TODO: capture log attributes
+                    queued_at: std::time::Instant::now(),
+                };
+
+                if let Err(e) = queue.push(request) {
                     tracing::warn!(
-                        "Failed to export log to journal for SSE streaming: {}",
+                        "Failed to queue log for journal export: {}",
                         e
                     );
+                } else {
+                    tracing::debug!(
+                        "Queued log for journal export (queue_size={})",
+                        queue.len()
+                    );
                 }
-            });
+            } else {
+                // Log export queue not initialized - this can happen during testing or
+                // when Python calls this function before worker initialization.
+                // Log a debug message but don't fail - tracing output above still works.
+                tracing::debug!(
+                    "Log export queue not initialized, skipping journal export for run_id={}",
+                    rid
+                );
+            }
         }
     }
 
