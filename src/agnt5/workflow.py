@@ -56,6 +56,8 @@ class WorkflowContext(Context):
         runtime_context: Optional[Any] = None,
         checkpoint_callback: Optional[Callable[[dict], None]] = None,
         checkpoint_client: Optional[Any] = None,
+        is_streaming: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -69,8 +71,10 @@ class WorkflowContext(Context):
             runtime_context: RuntimeContext for trace correlation
             checkpoint_callback: Optional callback for sending real-time checkpoints
             checkpoint_client: Optional CheckpointClient for platform-side memoization
+            is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
+            tenant_id: Tenant identifier for multi-tenant deployments
         """
-        super().__init__(run_id, attempt, runtime_context)
+        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
@@ -81,18 +85,33 @@ class WorkflowContext(Context):
         self.session_id = session_id or run_id  # Default: session = run (ephemeral)
         self.user_id = user_id  # Optional: user-scoped memory
 
+        # Step hierarchy tracking - for nested step visualization
+        # Stack of event IDs for currently executing steps
+        self._step_event_stack: List[str] = []
+
     # === State Management ===
 
     def _send_checkpoint(self, checkpoint_type: str, checkpoint_data: dict) -> None:
         """
         Send a checkpoint via the checkpoint callback.
 
+        Automatically adds parent_event_id from the step event stack if we're
+        currently executing inside a nested step call.
+
         Args:
             checkpoint_type: Type of checkpoint (e.g., "workflow.state.changed")
-            checkpoint_data: Checkpoint payload
+            checkpoint_data: Checkpoint payload (should include event_id if needed)
         """
         if self._checkpoint_callback:
             self._sequence_number += 1
+
+            # Add parent_event_id if we're in a nested step
+            if self._step_event_stack:
+                checkpoint_data = {
+                    **checkpoint_data,
+                    "parent_event_id": self._step_event_stack[-1],
+                }
+
             checkpoint = {
                 "checkpoint_type": checkpoint_type,
                 "checkpoint_data": checkpoint_data,
@@ -186,6 +205,9 @@ class WorkflowContext(Context):
         step_name = f"{handler_name}_{self._step_counter}"
         self._step_counter += 1
 
+        # Generate unique event_id for this step (for hierarchy tracking)
+        step_event_id = str(uuid.uuid4())
+
         # Check if step already completed (for replay)
         if self._workflow_entity.has_completed_step(step_name):
             result = self._workflow_entity.get_completed_step(step_name)
@@ -199,8 +221,12 @@ class WorkflowContext(Context):
                 "step_name": step_name,
                 "handler_name": handler_name,
                 "input": args or kwargs,
+                "event_id": step_event_id,  # Include for hierarchy tracking
             },
         )
+
+        # Push this step's event_id onto the stack for nested calls
+        self._step_event_stack.append(step_event_id)
 
         # Execute function with OpenTelemetry span
         self._logger.info(f"▶️  Executing new step: {step_name}")
@@ -257,6 +283,14 @@ class WorkflowContext(Context):
                     step_name, handler_name, args or kwargs, result
                 )
 
+                # Pop this step's event_id from the stack (execution complete)
+                if self._step_event_stack:
+                    popped_id = self._step_event_stack.pop()
+                    if popped_id != step_event_id:
+                        self._logger.warning(
+                            f"Step event stack mismatch in task(): expected {step_event_id}, got {popped_id}"
+                        )
+
                 # Emit workflow.step.completed checkpoint
                 self._send_checkpoint(
                     "workflow.step.completed",
@@ -265,12 +299,21 @@ class WorkflowContext(Context):
                         "handler_name": handler_name,
                         "input": args or kwargs,
                         "result": result,
+                        "event_id": step_event_id,  # Include for consistency
                     },
                 )
 
                 return result
 
             except Exception as e:
+                # Pop this step's event_id from the stack (execution failed)
+                if self._step_event_stack:
+                    popped_id = self._step_event_stack.pop()
+                    if popped_id != step_event_id:
+                        self._logger.warning(
+                            f"Step event stack mismatch in task() error path: expected {step_event_id}, got {popped_id}"
+                        )
+
                 # Emit workflow.step.error checkpoint
                 self._send_checkpoint(
                     "workflow.step.error",
@@ -280,6 +323,7 @@ class WorkflowContext(Context):
                         "input": args or kwargs,
                         "error": str(e),
                         "error_type": type(e).__name__,
+                        "event_id": step_event_id,  # Include for consistency
                     },
                 )
 
@@ -365,6 +409,9 @@ class WorkflowContext(Context):
         step_key = f"step:{name}:{self._step_counter}"
         self._step_counter += 1
 
+        # Generate unique event_id for this step (for hierarchy tracking)
+        step_event_id = str(uuid.uuid4())
+
         # Check platform-side memoization first (Phase 3)
         if self._checkpoint_client:
             try:
@@ -396,8 +443,12 @@ class WorkflowContext(Context):
             {
                 "step_name": name,
                 "handler_name": "checkpoint",
+                "event_id": step_event_id,  # Include for hierarchy tracking
             },
         )
+
+        # Push this step's event_id onto the stack for nested calls
+        self._step_event_stack.append(step_event_id)
 
         start_time = time.time()
         try:
@@ -427,6 +478,14 @@ class WorkflowContext(Context):
                 except Exception as e:
                     self._logger.warning(f"Failed to record step completion to platform: {e}")
 
+            # Pop this step's event_id from the stack (execution complete)
+            if self._step_event_stack:
+                popped_id = self._step_event_stack.pop()
+                if popped_id != step_event_id:
+                    self._logger.warning(
+                        f"Step event stack mismatch in step(): expected {step_event_id}, got {popped_id}"
+                    )
+
             # Emit workflow.step.completed checkpoint to journal for crash recovery
             self._send_checkpoint(
                 "workflow.step.completed",
@@ -434,6 +493,7 @@ class WorkflowContext(Context):
                     "step_name": name,
                     "handler_name": "checkpoint",
                     "result": result,
+                    "event_id": step_event_id,  # Include for consistency
                 },
             )
 
@@ -441,6 +501,14 @@ class WorkflowContext(Context):
             return result
 
         except Exception as e:
+            # Pop this step's event_id from the stack (execution failed)
+            if self._step_event_stack:
+                popped_id = self._step_event_stack.pop()
+                if popped_id != step_event_id:
+                    self._logger.warning(
+                        f"Step event stack mismatch in step() error path: expected {step_event_id}, got {popped_id}"
+                    )
+
             # Record failure to platform (Phase 3)
             if self._checkpoint_client:
                 try:
@@ -463,6 +531,7 @@ class WorkflowContext(Context):
                     "handler_name": "checkpoint",
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "event_id": step_event_id,  # Include for consistency
                 },
             )
             raise

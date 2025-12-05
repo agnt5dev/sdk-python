@@ -1012,6 +1012,10 @@ class Worker:
             session_id = request.session_id if hasattr(request, 'session_id') and request.session_id else request.invocation_id
             user_id = request.user_id if hasattr(request, 'user_id') and request.user_id else None
 
+            # Extract streaming context for real-time SSE log delivery
+            is_streaming = getattr(request, 'is_streaming', False)
+            tenant_id = request.metadata.get('tenant_id') if hasattr(request, 'metadata') else None
+
             # Create WorkflowEntity for state management with memory scoping
             # Entity key will be scoped based on priority: user_id > session_id > run_id
             workflow_entity = WorkflowEntity(
@@ -1077,6 +1081,8 @@ class Worker:
                 runtime_context=request.runtime_context,
                 checkpoint_callback=checkpoint_callback,
                 checkpoint_client=self._checkpoint_client,  # Phase 3: platform-side memoization
+                is_streaming=is_streaming,  # For real-time SSE log delivery
+                tenant_id=tenant_id,  # For multi-tenant deployments
             )
 
             # NEW: Populate agent resume info if this is an agent HITL resume
@@ -1532,6 +1538,10 @@ class Worker:
             else:
                 logger.info(f"Using existing agent session: {session_id}")
 
+            # Extract streaming context for real-time SSE log delivery
+            is_streaming = getattr(request, 'is_streaming', False)
+            tenant_id = request.metadata.get('tenant_id') if hasattr(request, 'metadata') else None
+
             # Create AgentContext with session support for conversation persistence
             # AgentContext automatically loads/saves conversation history based on session_id
             ctx = AgentContext(
@@ -1539,6 +1549,8 @@ class Worker:
                 agent_name=agent.name,
                 session_id=session_id,
                 runtime_context=request.runtime_context,
+                is_streaming=is_streaming,
+                tenant_id=tenant_id,
             )
 
             # Set context in contextvar so get_current_context() and error handlers can access it
