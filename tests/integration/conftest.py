@@ -1,12 +1,12 @@
 """
 Integration Test Fixtures
 
-Provides Testcontainers-based platform infrastructure for E2E testing
-across three runtime modes:
+Provides platform infrastructure for E2E testing across multiple modes:
 
-1. Embedded - Dev server with SQLite + embedded journal (fastest)
-2. Postgres - Community edition with PostgreSQL backend
-3. Managed - Production mode with Redpanda + CockroachDB
+1. Local - Use already-running dev server (fastest, recommended for development)
+2. Embedded - Dev server in Docker with SQLite + embedded journal
+3. Postgres - Community edition with PostgreSQL backend
+4. Managed - Production mode with Redpanda + CockroachDB
 
 Fixtures:
 - runtime_mode: Parametrized fixture for testing across all modes
@@ -15,7 +15,8 @@ Fixtures:
 - client: Create agnt5.Client instance for testing
 
 Command-line options:
-- --runtime-mode: Specify runtime mode (embedded|postgres|managed|all)
+- --use-local-server: Use already-running local dev server (default: True)
+- --runtime-mode: Specify runtime mode (embedded|postgres|managed|all) - only when not using local server
 """
 
 import os
@@ -26,8 +27,16 @@ from typing import Dict, Generator
 
 import pytest
 import requests
-from testcontainers.core.container import DockerContainer
-from testcontainers.core.waiting_utils import wait_for_logs
+
+# Testcontainers imports - only needed for Docker-based modes
+try:
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+    TESTCONTAINERS_AVAILABLE = True
+except ImportError:
+    TESTCONTAINERS_AVAILABLE = False
+    DockerContainer = None
+    wait_for_logs = None
 
 
 # ==================== Pytest Configuration ====================
@@ -36,22 +45,42 @@ from testcontainers.core.waiting_utils import wait_for_logs
 def pytest_addoption(parser):
     """Add command-line options for runtime mode selection."""
     parser.addoption(
+        "--use-local-server",
+        action="store_true",
+        default=True,
+        help="Use already-running local dev server instead of Docker containers (default: True)",
+    )
+    parser.addoption(
+        "--use-docker",
+        action="store_true",
+        default=False,
+        help="Use Docker containers instead of local dev server",
+    )
+    parser.addoption(
         "--runtime-mode",
         action="store",
         default="embedded",
         choices=["embedded", "postgres", "managed", "all"],
-        help="Runtime mode for integration tests (embedded|postgres|managed|all)",
+        help="Runtime mode for Docker-based tests (embedded|postgres|managed|all)",
     )
 
 
 def pytest_generate_tests(metafunc):
     """Generate test parametrization based on command-line options."""
     if "runtime_mode" in metafunc.fixturenames:
-        mode = metafunc.config.getoption("--runtime-mode")
-        if mode == "all":
-            modes = ["embedded", "postgres", "managed"]
+        use_docker = metafunc.config.getoption("--use-docker")
+
+        if use_docker:
+            # Docker mode: parametrize across runtime modes
+            mode = metafunc.config.getoption("--runtime-mode")
+            if mode == "all":
+                modes = ["embedded", "postgres", "managed"]
+            else:
+                modes = [mode]
         else:
-            modes = [mode]
+            # Local server mode: single "local" mode
+            modes = ["local"]
+
         metafunc.parametrize("runtime_mode", modes, scope="session", indirect=True)
 
 
@@ -59,14 +88,22 @@ def pytest_generate_tests(metafunc):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def configure_docker():
+def configure_docker(request):
     """
     Configure Docker environment for testcontainers.
 
-    On macOS, Docker Desktop uses ~/.docker/run/docker.sock instead of
-    the default /var/run/docker.sock. This fixture automatically detects
-    and configures the correct Docker socket path.
+    Only runs when --use-docker is specified. On macOS, Docker Desktop uses
+    ~/.docker/run/docker.sock instead of the default /var/run/docker.sock.
+    This fixture automatically detects and configures the correct Docker socket path.
     """
+    use_docker = request.config.getoption("--use-docker")
+    if not use_docker:
+        print("\n🏠 Using local dev server (Docker configuration skipped)")
+        return
+
+    if not TESTCONTAINERS_AVAILABLE:
+        pytest.skip("testcontainers package not installed. Install with: pip install testcontainers")
+
     # Check if DOCKER_HOST is already set
     if "DOCKER_HOST" in os.environ:
         print(f"\n🐳 Using existing DOCKER_HOST: {os.environ['DOCKER_HOST']}")
@@ -99,16 +136,17 @@ def runtime_mode(request) -> str:
     Runtime mode for integration tests.
 
     Parametrized across runtime modes via pytest_generate_tests:
-    - embedded: SQLite + embedded journal (fastest, default for local dev)
+    - local: Use already-running local dev server (fastest, default)
+    - embedded: SQLite + embedded journal in Docker container
     - postgres: PostgreSQL + embedded journal (community edition)
     - managed: Redpanda + CockroachDB (production-like, slowest)
 
-    Default: embedded mode for fast test execution.
+    Default: local mode for fastest test execution.
 
-    To test other modes, run:
-        pytest tests/integration/ --runtime-mode=postgres
-        pytest tests/integration/ --runtime-mode=managed
-        pytest tests/integration/ --runtime-mode=all
+    To test with Docker:
+        pytest tests/integration/ --use-docker
+        pytest tests/integration/ --use-docker --runtime-mode=postgres
+        pytest tests/integration/ --use-docker --runtime-mode=all
     """
     return request.param
 
@@ -131,6 +169,61 @@ def persistent_data_dir(tmp_path_factory):
 
 
 # ==================== Mode-Specific Setup Functions ====================
+
+
+def setup_local_mode() -> Dict[str, any]:
+    """
+    Set up Local mode (use already-running dev server).
+
+    This is the fastest mode - no container startup, just connect to localhost.
+    Requires dev server to be running via: just platform standalone python
+
+    Architecture:
+    - Journal: Embedded (in-memory event log)
+    - State: SQLite (local file at /tmp/agnt5/<service-name>/agnt5.db)
+    - Process: PM2-managed standalone binary
+
+    Ports (hardcoded in standalone server):
+    - HTTP Gateway: 34181
+    - gRPC Gateway: 34182
+    - Worker Coordinator: 34186
+    - OTLP: 4317
+    """
+    print("\n🏠 Setting up LOCAL mode (using already-running dev server)")
+
+    gateway_url = "http://localhost:34181"
+    coordinator_url = "http://localhost:34186"
+    otlp_endpoint = "http://localhost:4317"
+
+    # Wait for platform health
+    _wait_for_platform_health(gateway_url, timeout=10)
+
+    # Determine data directory from environment or default
+    # The standalone server uses: /tmp/agnt5/<service-name>/agnt5.db
+    data_dir = os.environ.get("AGNT5_DATA_DIR", "/tmp/agnt5")
+
+    print(f"✅ Local mode ready")
+    print(f"   Gateway HTTP: {gateway_url}")
+    print(f"   Coordinator: {coordinator_url}")
+    print(f"   OTLP Endpoint: {otlp_endpoint}")
+    print(f"   Data directory: {data_dir}")
+
+    return {
+        "mode": "local",
+        "gateway_url": gateway_url,
+        "coordinator_url": coordinator_url,
+        "otlp_endpoint": otlp_endpoint,
+        "gateway_http_port": 34181,
+        "gateway_grpc_port": 34182,
+        "coordinator_port": 34186,
+        "otlp_port": 4317,
+        "db_url": f"{data_dir}/agnt5.db",
+        "db_type": "sqlite",
+        "journal_backend": "embedded",
+        "orchestration_backend": "sqlite",
+        "host_data_dir": data_dir,
+        "containers": {},  # No containers in local mode
+    }
 
 
 def setup_embedded_mode(data_dir: str = None) -> Dict[str, any]:
@@ -427,7 +520,7 @@ def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=Non
 
     for i in range(timeout):
         try:
-            response = requests.get(f"{gateway_url}/api/health", timeout=2)
+            response = requests.get(f"{gateway_url}/v1/health", timeout=2)
             if response.status_code == 200:
                 print(f"✅ Platform is healthy")
                 return
@@ -459,15 +552,11 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
     """
     Start AGNT5 platform in the specified runtime mode.
 
-    Uses session scope so the platform container runs once for all tests.
-    This significantly improves test performance by avoiding container
-    startup/shutdown overhead for each test.
+    Uses session scope so the platform runs once for all tests.
+    This significantly improves test performance by avoiding startup overhead.
 
-    For embedded mode, the SQLite database is mounted to a persistent directory
-    (persistent_data_dir), allowing the database to survive across all tests
-    and be inspected from the host.
-
-    Supports three runtime modes:
+    Supports four runtime modes:
+    - local: Use already-running dev server (fastest, no containers)
     - embedded: SQLite + embedded journal (dev-server container)
     - postgres: PostgreSQL + embedded journal (dev-server + postgres containers)
     - managed: Redpanda + CockroachDB (dev-server + redpanda + cockroach containers)
@@ -476,7 +565,9 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
     as the platform state persists across all tests in the session.
     """
     # Setup platform based on runtime mode
-    if runtime_mode == "embedded":
+    if runtime_mode == "local":
+        platform_config = setup_local_mode()
+    elif runtime_mode == "embedded":
         platform_config = setup_embedded_mode(data_dir=persistent_data_dir)
     elif runtime_mode == "postgres":
         platform_config = setup_postgres_mode()
@@ -498,24 +589,108 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
                 print(f"⚠️  Failed to stop {name}: {e}")
 
 
+def _wait_for_worker_registration(platform: Dict[str, any], max_wait: int = 30) -> bool:
+    """
+    Wait for worker to register with platform.
+
+    Returns True if worker registered, raises Exception if timeout.
+    """
+    print(f"⏳ Waiting for worker to register...")
+    start_time = time.time()
+
+    # In local mode, the worker uses different tenant/deployment IDs
+    # Use the /v1/components endpoint to verify worker is ready instead
+    if platform["mode"] == "local":
+        endpoint = f"{platform['gateway_url']}/v1/components"
+        params = {}
+    else:
+        endpoint = f"{platform['gateway_url']}/v1/workers"
+        params = {
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
+            "deployment_id": "00000000-0000-0000-0000-000000000002",
+        }
+
+    while (time.time() - start_time) < max_wait:
+        try:
+            response = requests.get(endpoint, params=params, timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+
+                # For components endpoint, check if components exist
+                if platform["mode"] == "local":
+                    components = data.get("components", [])
+                    if components and len(components) > 0:
+                        print(f"✅ Worker registered: {len(components)} components found\n")
+
+                        # Group components by type
+                        by_type = {}
+                        for comp in components:
+                            comp_type = comp.get("component_type", "unknown")
+                            if comp_type not in by_type:
+                                by_type[comp_type] = []
+                            by_type[comp_type].append(comp.get("component_name", "unknown"))
+
+                        for comp_type, names in by_type.items():
+                            print(f"   • {comp_type}: {len(names)} components")
+
+                        return True
+                else:
+                    # For workers endpoint
+                    workers = data.get("workers", data) if isinstance(data, dict) else data
+                    if workers and len(workers) > 0:
+                        print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
+
+                        for idx, worker_info in enumerate(workers, 1):
+                            print(f"   Worker #{idx}:")
+                            print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
+                            print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
+                            print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
+
+                            components = worker_info.get("components", {})
+                            if components:
+                                print(f"     • Components:")
+                                for comp_type, comp_list in components.items():
+                                    if comp_list:
+                                        print(f"       - {comp_type}: {', '.join(comp_list)}")
+                            print()
+
+                        return True
+        except Exception as e:
+            if (time.time() - start_time) % 5 < 1:
+                print(f"   Worker check error: {type(e).__name__}: {e}")
+
+        time.sleep(1)
+
+    raise Exception(f"Worker not registered after {max_wait}s")
+
+
 @pytest.fixture(scope="session")
-def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
+def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
     """
     Start Python worker process connected to platform.
 
+    In local mode, the worker is already running (started by PM2 with the dev server).
+    In Docker modes, we start a separate worker subprocess.
+
     Uses session scope so the worker runs once for all tests, avoiding
     the overhead of starting/stopping the worker for each test.
-
-    Worker runs the test service blueprint and connects to Worker Coordinator.
     """
+    # In local mode, worker is already running via PM2
+    if platform["mode"] == "local":
+        print("\n🏠 Local mode: Worker already running via PM2")
+        _wait_for_worker_registration(platform)
+        yield None  # No subprocess to manage
+        return
+
+    # Docker modes: start worker subprocess
     service_path = os.path.join(os.path.dirname(__file__), "test-bench")
 
     env = {
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
         "AGNT5_SERVICE_NAME": "test-bench",
-        "AGNT5_TENANT_ID": "00000000-0000-0000-0000-000000000001",  # Fixed UUID for test tenant
-        "AGNT5_DEPLOYMENT_ID": "00000000-0000-0000-0000-000000000002",  # Fixed UUID for test deployment
+        "AGNT5_TENANT_ID": "00000000-0000-0000-0000-000000000001",
+        "AGNT5_DEPLOYMENT_ID": "00000000-0000-0000-0000-000000000002",
         "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
     }
 
@@ -530,9 +705,8 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
         stderr=subprocess.PIPE,
     )
 
-    # Wait for worker to register and become available
-    print(f"⏳ Waiting for worker to register...")
-    max_wait = 30  # seconds
+    # Wait for worker to register
+    max_wait = 30
     start_time = time.time()
     worker_registered = False
 
@@ -546,10 +720,7 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
                 f"STDERR: {stderr.decode()}"
             )
 
-        # Check if worker is registered
         try:
-            # Query /v1/workers with default UUIDs that coordinator uses
-            # Coordinator converts non-UUID values to these defaults (see grpc_handlers.go:499-511)
             response = requests.get(
                 f"{platform['gateway_url']}/v1/workers",
                 params={
@@ -564,14 +735,12 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
                 if workers and len(workers) > 0:
                     print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
 
-                    # Print detailed worker information
                     for idx, worker_info in enumerate(workers, 1):
                         print(f"   Worker #{idx}:")
                         print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
                         print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
                         print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
 
-                        # Print components grouped by type
                         components = worker_info.get("components", {})
                         if components:
                             print(f"     • Components:")
@@ -588,7 +757,6 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
                 print(f"   Worker check failed: {response.status_code} - {response.text[:200]}")
         except Exception as e:
             print(f"   Worker check error: {type(e).__name__}: {e}")
-            pass  # Keep waiting
 
         time.sleep(1)
 
@@ -604,7 +772,6 @@ def worker_process(platform) -> Generator[subprocess.Popen, None, None]:
     worker.terminate()
     try:
         stdout, stderr = worker.communicate(timeout=5)
-        # Print worker logs for debugging (last 100 lines)
         stderr_lines = stderr.decode("utf-8", errors="ignore").split("\n")
         if len(stderr_lines) > 100:
             print(f"\n📋 Worker logs (last 100 lines):")

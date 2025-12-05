@@ -17,7 +17,9 @@ from .entity import (
     EntityRegistry,
     EntityStateAdapter,
     EntityType,
+    StateType,
     create_entity_context,
+    query,
     with_entity_context,
 )
 from .exceptions import (
@@ -61,6 +63,8 @@ __all__ = [
     "EntityType",
     "EntityRegistry",
     "EntityStateAdapter",
+    "StateType",
+    "query",
     "with_entity_context",
     "create_entity_context",
     "workflow",

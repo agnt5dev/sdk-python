@@ -739,3 +739,386 @@ async def test_entity_definition_with_state_schema():
     assert "state_schema" in definition
     assert definition["state_schema"]["type"] == "object"
     assert "quantity" in definition["state_schema"]["properties"]
+
+
+# ============================================================================
+# Typed State Support Tests (Phase 1A)
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_typed_entity_with_pydantic_model():
+    """Test Entity with Pydantic model state type."""
+    from pydantic import BaseModel
+
+    class CartState(BaseModel):
+        items: list = []
+        total: float = 0.0
+
+    class ShoppingCart(Entity[CartState]):
+        async def add_item(self, item_id: str, price: float) -> dict:
+            self.state.items.append({"item_id": item_id, "price": price})
+            self.state.total += price
+            return {"items_count": len(self.state.items), "total": self.state.total}
+
+        async def get_total(self) -> float:
+            return self.state.total
+
+    cart = ShoppingCart(key="test-cart")
+
+    # Add items
+    result = await cart.add_item("item-1", 10.0)
+    assert result["items_count"] == 1
+    assert result["total"] == 10.0
+
+    result = await cart.add_item("item-2", 25.0)
+    assert result["items_count"] == 2
+    assert result["total"] == 35.0
+
+    # Read total
+    total = await cart.get_total()
+    assert total == 35.0
+
+
+@pytest.mark.asyncio
+async def test_typed_entity_with_dataclass():
+    """Test Entity with dataclass state type."""
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class CounterState:
+        count: int = 0
+        history: list = field(default_factory=list)
+
+    class Counter(Entity[CounterState]):
+        async def increment(self, amount: int = 1) -> int:
+            self.state.count += amount
+            self.state.history.append(amount)
+            return self.state.count
+
+        async def get_count(self) -> int:
+            return self.state.count
+
+        async def get_history(self) -> list:
+            return self.state.history
+
+    counter = Counter(key="test-counter")
+
+    count = await counter.increment(5)
+    assert count == 5
+
+    count = await counter.increment(3)
+    assert count == 8
+
+    history = await counter.get_history()
+    assert history == [5, 3]
+
+
+@pytest.mark.asyncio
+async def test_typed_entity_backward_compatibility():
+    """Test that untyped Entity still works (backward compatibility)."""
+    class LegacyCounter(Entity):
+        async def increment(self) -> int:
+            count = self.state.get("count", 0) + 1
+            self.state.set("count", count)
+            return count
+
+        async def get_count(self) -> int:
+            return self.state.get("count", 0)
+
+    counter = LegacyCounter(key="legacy")
+
+    result = await counter.increment()
+    assert result == 1
+
+    result = await counter.increment()
+    assert result == 2
+
+    count = await counter.get_count()
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_typed_entity_state_type_extraction():
+    """Test that state type is correctly extracted from Entity[StateType]."""
+    from pydantic import BaseModel
+
+    class MyState(BaseModel):
+        value: int = 0
+
+    class MyEntity(Entity[MyState]):
+        async def noop(self):
+            pass
+
+    # Check that state type was extracted
+    assert MyEntity._state_type is MyState
+
+
+@pytest.mark.asyncio
+async def test_typed_entity_schema_generation():
+    """Test that Pydantic schema is extracted for typed entities."""
+    from pydantic import BaseModel
+
+    class OrderState(BaseModel):
+        order_id: str = ""
+        items: list = []
+        total: float = 0.0
+        status: str = "pending"
+
+    class Order(Entity[OrderState]):
+        async def place(self, order_id: str, items: list, total: float):
+            self.state.order_id = order_id
+            self.state.items = items
+            self.state.total = total
+            self.state.status = "placed"
+
+    entity_type = EntityRegistry.get("Order")
+    definition = entity_type.build_entity_definition()
+
+    # Should have state_schema from Pydantic
+    assert "state_schema" in definition
+    schema = definition["state_schema"]
+
+    # Pydantic v2 schema format
+    assert schema.get("type") == "object" or "properties" in schema
+    assert "order_id" in schema.get("properties", {})
+
+
+# ============================================================================
+# Hash-Based Mutation Detection Tests (Phase 1B)
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_read_only_method_no_save(entity_state_manager):
+    """Test that read-only methods don't trigger state save."""
+    from pydantic import BaseModel
+
+    class ReadTestState(BaseModel):
+        value: int = 0
+
+    # Track save calls
+    save_count = 0
+    original_save = entity_state_manager.save_state
+
+    async def counting_save(*args, **kwargs):
+        nonlocal save_count
+        save_count += 1
+        return await original_save(*args, **kwargs)
+
+    entity_state_manager.save_state = counting_save
+
+    class ReadTest(Entity[ReadTestState]):
+        async def set_value(self, v: int):
+            self.state.value = v
+
+        async def get_value(self) -> int:
+            # This method only reads, should not trigger save
+            return self.state.value
+
+    test = ReadTest(key="read-test")
+
+    # First write - should save
+    await test.set_value(42)
+    assert save_count == 1
+
+    # Read - should NOT save (hash unchanged)
+    result = await test.get_value()
+    assert result == 42
+    assert save_count == 1  # Still 1, no new save
+
+
+@pytest.mark.asyncio
+async def test_mutating_method_triggers_save(entity_state_manager):
+    """Test that mutating methods trigger state save."""
+    from pydantic import BaseModel
+
+    class MutateTestState(BaseModel):
+        count: int = 0
+
+    save_count = 0
+    original_save = entity_state_manager.save_state
+
+    async def counting_save(*args, **kwargs):
+        nonlocal save_count
+        save_count += 1
+        return await original_save(*args, **kwargs)
+
+    entity_state_manager.save_state = counting_save
+
+    class MutateTest(Entity[MutateTestState]):
+        async def increment(self) -> int:
+            self.state.count += 1
+            return self.state.count
+
+    test = MutateTest(key="mutate-test")
+
+    await test.increment()
+    assert save_count == 1
+
+    await test.increment()
+    assert save_count == 2
+
+    await test.increment()
+    assert save_count == 3
+
+
+@pytest.mark.asyncio
+async def test_query_decorator_skips_save():
+    """Test that @query decorator skips persistence entirely."""
+    from agnt5 import query
+    from pydantic import BaseModel
+
+    class QueryTestState(BaseModel):
+        items: list = []
+
+    class QueryTest(Entity[QueryTestState]):
+        async def add_item(self, item: str):
+            self.state.items.append(item)
+
+        @query
+        async def count_items(self) -> int:
+            # This is explicitly marked as query - skip hash and save
+            return len(self.state.items)
+
+        @query
+        async def get_items(self) -> list:
+            return self.state.items.copy()
+
+    test = QueryTest(key="query-test")
+
+    await test.add_item("item1")
+    await test.add_item("item2")
+
+    # Query methods work correctly
+    count = await test.count_items()
+    assert count == 2
+
+    items = await test.get_items()
+    assert items == ["item1", "item2"]
+
+
+@pytest.mark.asyncio
+async def test_nested_mutation_detected():
+    """Test that nested object mutations are detected."""
+    from pydantic import BaseModel
+
+    class NestedState(BaseModel):
+        data: dict = {}
+
+    class NestedEntity(Entity[NestedState]):
+        async def set_nested(self, key: str, value: str):
+            if "nested" not in self.state.data:
+                self.state.data["nested"] = {}
+            self.state.data["nested"][key] = value
+
+        async def get_nested(self, key: str) -> str:
+            return self.state.data.get("nested", {}).get(key)
+
+    entity = NestedEntity(key="nested-test")
+
+    await entity.set_nested("a", "value_a")
+    await entity.set_nested("b", "value_b")
+
+    result = await entity.get_nested("a")
+    assert result == "value_a"
+
+    result = await entity.get_nested("b")
+    assert result == "value_b"
+
+
+@pytest.mark.asyncio
+async def test_list_append_mutation_detected():
+    """Test that list append mutations are detected."""
+    from pydantic import BaseModel
+
+    class ListState(BaseModel):
+        items: list = []
+
+    class ListEntity(Entity[ListState]):
+        async def append(self, item: str):
+            self.state.items.append(item)
+
+        async def get_all(self) -> list:
+            return self.state.items.copy()
+
+    entity = ListEntity(key="list-test")
+
+    await entity.append("first")
+    await entity.append("second")
+    await entity.append("third")
+
+    items = await entity.get_all()
+    assert items == ["first", "second", "third"]
+
+
+@pytest.mark.asyncio
+async def test_typed_entity_complex_workflow():
+    """Test a complete workflow with typed entity."""
+    from pydantic import BaseModel
+    from typing import Optional
+
+    class OrderState(BaseModel):
+        order_id: str = ""
+        customer_name: str = ""
+        items: list = []
+        subtotal: float = 0.0
+        tax: float = 0.0
+        total: float = 0.0
+        status: str = "draft"
+
+    class OrderEntity(Entity[OrderState]):
+        async def create_order(self, order_id: str, customer_name: str):
+            self.state.order_id = order_id
+            self.state.customer_name = customer_name
+            self.state.status = "created"
+
+        async def add_item(self, name: str, price: float, quantity: int):
+            self.state.items.append({
+                "name": name,
+                "price": price,
+                "quantity": quantity,
+                "line_total": price * quantity
+            })
+            self._recalculate_totals()
+
+        def _recalculate_totals(self):
+            self.state.subtotal = sum(item["line_total"] for item in self.state.items)
+            self.state.tax = self.state.subtotal * 0.1
+            self.state.total = self.state.subtotal + self.state.tax
+
+        async def place_order(self) -> dict:
+            if not self.state.items:
+                raise ValueError("Cannot place empty order")
+            self.state.status = "placed"
+            return {
+                "order_id": self.state.order_id,
+                "total": self.state.total,
+                "status": self.state.status
+            }
+
+        async def get_summary(self) -> dict:
+            return {
+                "order_id": self.state.order_id,
+                "customer": self.state.customer_name,
+                "item_count": len(self.state.items),
+                "subtotal": self.state.subtotal,
+                "tax": self.state.tax,
+                "total": self.state.total,
+                "status": self.state.status
+            }
+
+    order = OrderEntity(key="order-001")
+
+    await order.create_order("ORD-001", "Alice")
+    await order.add_item("Widget", 10.0, 2)
+    await order.add_item("Gadget", 25.0, 1)
+
+    summary = await order.get_summary()
+    assert summary["customer"] == "Alice"
+    assert summary["item_count"] == 2
+    assert summary["subtotal"] == 45.0  # 20 + 25
+    assert summary["tax"] == 4.5  # 10%
+    assert summary["total"] == 49.5
+
+    result = await order.place_order()
+    assert result["status"] == "placed"
+    assert result["total"] == 49.5

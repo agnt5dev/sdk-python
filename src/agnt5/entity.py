@@ -5,9 +5,146 @@ Entity component for stateful operations with single-writer consistency.
 import asyncio
 import contextvars
 import functools
+import hashlib
 import inspect
 import json
-from typing import Any, Dict, Optional, Tuple, get_type_hints
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
+
+from dataclasses import is_dataclass, asdict, fields as dataclass_fields
+
+try:
+    from pydantic import BaseModel as PydanticBaseModel
+    HAS_PYDANTIC = True
+except ImportError:
+    PydanticBaseModel = None  # type: ignore
+    HAS_PYDANTIC = False
+
+# TypeVar for generic Entity[StateType] support
+# StateType can be a Pydantic model, TypedDict, dataclass, or plain dict
+StateType = TypeVar("StateType")
+
+
+# ============================================================================
+# State Type Detection and Serialization Utilities
+# ============================================================================
+
+def _is_pydantic_model(obj_or_type) -> bool:
+    """Check if object or type is a Pydantic model."""
+    if not HAS_PYDANTIC:
+        return False
+    if isinstance(obj_or_type, type):
+        return issubclass(obj_or_type, PydanticBaseModel)
+    return isinstance(obj_or_type, PydanticBaseModel)
+
+
+def _is_typed_dict(type_hint) -> bool:
+    """Check if type hint is a TypedDict."""
+    if type_hint is None:
+        return False
+    # TypedDict classes have __annotations__ and __total__
+    return (
+        isinstance(type_hint, type) and
+        hasattr(type_hint, '__annotations__') and
+        hasattr(type_hint, '__total__')
+    )
+
+
+def _get_state_type_kind(state_type: Optional[Type]) -> str:
+    """
+    Determine the kind of state type.
+
+    Returns one of: 'pydantic', 'dataclass', 'typed_dict', 'untyped'
+    """
+    if state_type is None:
+        return 'untyped'
+    if _is_pydantic_model(state_type):
+        return 'pydantic'
+    if is_dataclass(state_type):
+        return 'dataclass'
+    if _is_typed_dict(state_type):
+        return 'typed_dict'
+    return 'untyped'
+
+
+def _state_to_dict(state: Any, state_type: Optional[Type]) -> Dict[str, Any]:
+    """
+    Convert state object to dictionary for persistence.
+
+    Handles Pydantic models, dataclasses, TypedDicts, and plain dicts.
+    """
+    if state is None:
+        return {}
+
+    kind = _get_state_type_kind(state_type)
+
+    if kind == 'pydantic' and _is_pydantic_model(state):
+        return state.model_dump()
+    elif kind == 'dataclass' and is_dataclass(state) and not isinstance(state, type):
+        return asdict(state)
+    elif isinstance(state, dict):
+        return state
+    else:
+        # Fallback: try to convert to dict
+        return dict(state) if hasattr(state, '__iter__') else {}
+
+
+def _dict_to_state(data: Dict[str, Any], state_type: Optional[Type]) -> Any:
+    """
+    Convert dictionary to typed state object.
+
+    Creates Pydantic model, dataclass, or returns dict based on state_type.
+    """
+    if state_type is None:
+        return data
+
+    kind = _get_state_type_kind(state_type)
+
+    if kind == 'pydantic':
+        return state_type(**data)
+    elif kind == 'dataclass':
+        # Filter to only known fields for dataclass
+        known_fields = {f.name for f in dataclass_fields(state_type)}
+        filtered_data = {k: v for k, v in data.items() if k in known_fields}
+        return state_type(**filtered_data)
+    elif kind == 'typed_dict':
+        # TypedDict is just a dict with type hints
+        return data
+    else:
+        return data
+
+
+def _compute_state_hash(state: Any, state_type: Optional[Type]) -> str:
+    """
+    Compute a hash of the state for mutation detection.
+
+    Uses JSON serialization with sorted keys for deterministic hashing.
+    """
+    kind = _get_state_type_kind(state_type)
+
+    if kind == 'pydantic' and _is_pydantic_model(state):
+        # Pydantic has optimized JSON serialization
+        json_str = state.model_dump_json(exclude_none=False)
+    elif kind == 'dataclass' and is_dataclass(state) and not isinstance(state, type):
+        json_str = json.dumps(asdict(state), sort_keys=True, default=str)
+    elif isinstance(state, dict):
+        json_str = json.dumps(state, sort_keys=True, default=str)
+    else:
+        # Fallback
+        json_str = json.dumps(_state_to_dict(state, state_type), sort_keys=True, default=str)
+
+    return hashlib.md5(json_str.encode()).hexdigest()
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .exceptions import ExecutionError
@@ -560,27 +697,195 @@ class EntityState:
         self._state.clear()
 
 
-def _create_entity_method_wrapper(entity_type: str, method):
+class TypedEntityState(Generic[StateType]):
+    """
+    Typed state wrapper for Entity instances.
+
+    Provides direct attribute access for typed state (Pydantic, dataclass)
+    while maintaining compatibility with the dict-based API.
+
+    For Pydantic/dataclass:
+        self.state.items  # Direct attribute access
+        self.state.total = 100.0  # Direct attribute mutation
+
+    For untyped (backward compat):
+        self.state.get("items", [])
+        self.state.set("items", [...])
+
+    The underlying state object is accessible via ._typed_state for typed,
+    or ._state for the dict representation.
+    """
+
+    def __init__(
+        self,
+        state_dict: Dict[str, Any],
+        state_type: Optional[Type[StateType]] = None
+    ):
+        """
+        Initialize typed state wrapper.
+
+        Args:
+            state_dict: Dictionary representation of state (for persistence)
+            state_type: Optional type class (Pydantic model, dataclass, etc.)
+        """
+        # Use object.__setattr__ to avoid triggering our custom __setattr__
+        object.__setattr__(self, '_state', state_dict)
+        object.__setattr__(self, '_state_type', state_type)
+
+        # Create typed state object if type is provided
+        if state_type is not None:
+            typed_state = _dict_to_state(state_dict, state_type)
+            object.__setattr__(self, '_typed_state', typed_state)
+        else:
+            object.__setattr__(self, '_typed_state', None)
+
+    def __getattr__(self, name: str) -> Any:
+        """
+        Get attribute from typed state or fall back to dict access.
+
+        For typed state (Pydantic/dataclass): returns attribute directly
+        For untyped: raises AttributeError (use get() instead)
+        """
+        # Don't intercept private attributes
+        if name.startswith('_'):
+            raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+        typed_state = object.__getattribute__(self, '_typed_state')
+        if typed_state is not None:
+            return getattr(typed_state, name)
+
+        # For untyped state, provide helpful error
+        raise AttributeError(
+            f"Untyped state does not support attribute access. "
+            f"Use self.state.get('{name}') instead, or define a typed state class."
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """
+        Set attribute on typed state and sync to dict.
+
+        For typed state: sets attribute and syncs to _state dict
+        For untyped: raises AttributeError (use set() instead)
+        """
+        # Don't intercept private attributes
+        if name.startswith('_'):
+            object.__setattr__(self, name, value)
+            return
+
+        typed_state = object.__getattribute__(self, '_typed_state')
+        state_type = object.__getattribute__(self, '_state_type')
+        state_dict = object.__getattribute__(self, '_state')
+
+        if typed_state is not None:
+            # Set on typed state object
+            setattr(typed_state, name, value)
+            # Sync back to dict for persistence
+            state_dict.update(_state_to_dict(typed_state, state_type))
+        else:
+            raise AttributeError(
+                f"Untyped state does not support attribute assignment. "
+                f"Use self.state.set('{name}', value) instead."
+            )
+
+    # Dict-based API (backward compatible)
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get value from state dict."""
+        return self._state.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        """Set value in state dict and sync to typed state if present."""
+        self._state[key] = value
+        # Sync to typed state if present
+        if self._typed_state is not None and self._state_type is not None:
+            object.__setattr__(
+                self,
+                '_typed_state',
+                _dict_to_state(self._state, self._state_type)
+            )
+
+    def delete(self, key: str) -> None:
+        """Delete key from state."""
+        self._state.pop(key, None)
+        # Sync to typed state if present
+        if self._typed_state is not None and self._state_type is not None:
+            object.__setattr__(
+                self,
+                '_typed_state',
+                _dict_to_state(self._state, self._state_type)
+            )
+
+    def clear(self) -> None:
+        """Clear all state."""
+        self._state.clear()
+        # Reset typed state
+        if self._state_type is not None:
+            object.__setattr__(
+                self,
+                '_typed_state',
+                _dict_to_state({}, self._state_type)
+            )
+
+    def _get_dict(self) -> Dict[str, Any]:
+        """Get the underlying dict representation (for persistence)."""
+        if self._typed_state is not None:
+            # Sync from typed state to ensure dict is up-to-date
+            return _state_to_dict(self._typed_state, self._state_type)
+        return self._state
+
+    def _get_typed(self) -> Optional[StateType]:
+        """Get the typed state object (Pydantic model, dataclass, etc.)."""
+        return self._typed_state
+
+
+# Decorator for marking read-only methods (optional optimization)
+def query(func):
+    """
+    Mark an entity method as read-only (query).
+
+    Query methods skip hash comparison and state persistence for maximum
+    performance on high-frequency reads.
+
+    Example:
+        class Counter(Entity[CounterState]):
+            @query
+            async def get_count(self) -> int:
+                return self.state.count
+
+    Note:
+        For most cases, you don't need this decorator - the Entity automatically
+        detects whether state was mutated via hash comparison. Use @query only
+        for high-frequency reads where even the hash computation overhead matters.
+    """
+    func._agnt5_method_type = 'query'
+    return func
+
+
+def _create_entity_method_wrapper(entity_type: str, method, state_type: Optional[Type] = None):
     """
     Create a wrapper for an entity method that provides single-writer consistency.
 
-    This wrapper implements hybrid locking:
+    This wrapper implements:
     1. Local lock (asyncio.Lock) for worker-scoped single-writer guarantee
     2. Optimistic concurrency (via Rust) for cross-worker conflicts
     3. Loads state via adapter (Rust handles cache + platform)
-    4. Executes the method with clean EntityState interface
-    5. Saves state via adapter (Rust handles version check + retry)
+    4. Executes the method with TypedEntityState interface
+    5. Hash-based mutation detection - only saves if state changed
+    6. Support for @query decorator to skip mutation detection entirely
 
     Args:
         entity_type: Name of the entity type (class name)
         method: The async method to wrap
+        state_type: Optional type class for typed state (Pydantic, dataclass, etc.)
 
     Returns:
-        Wrapped async method with single-writer consistency
+        Wrapped async method with single-writer consistency and mutation detection
     """
+    # Check if method is marked as @query (read-only)
+    is_query = getattr(method, '_agnt5_method_type', None) == 'query'
+
     @functools.wraps(method)
     async def entity_method_wrapper(self, *args, **kwargs):
-        """Execute entity method with hybrid locking (local + optimistic)."""
+        """Execute entity method with hybrid locking and mutation detection."""
         state_key = (entity_type, self._key)
 
         # Get state adapter
@@ -598,8 +903,23 @@ def _create_entity_method_wrapper(entity_type: str, method):
                 entity_type, self._key, current_version
             )
 
-            # Set up EntityState on instance for method access
-            self._state = EntityState(state_dict)
+            # Set up TypedEntityState on instance for method access
+            # Use the class-level state type if available
+            effective_state_type = state_type or getattr(self.__class__, '_state_type', None)
+            self._state = TypedEntityState(state_dict, effective_state_type)
+
+            # Compute hash before method execution (skip for @query methods)
+            if not is_query and effective_state_type is not None:
+                # For typed state, compute hash of the typed object
+                original_hash = _compute_state_hash(
+                    self._state._get_typed() or state_dict,
+                    effective_state_type
+                )
+            elif not is_query:
+                # For untyped state, compute hash of the dict
+                original_hash = _compute_state_hash(state_dict, None)
+            else:
+                original_hash = None  # Skip for @query
 
             try:
                 # Execute method
@@ -607,26 +927,50 @@ def _create_entity_method_wrapper(entity_type: str, method):
                 result = await method(self, *args, **kwargs)
                 logger.debug("Completed %s:%s.%s", entity_type, self._key, method.__name__)
 
-                # Save state after successful execution
-                # Rust handles optimistic locking (version check)
-                try:
-                    new_version = await adapter.save_state(
-                        entity_type,
-                        self._key,
-                        state_dict,
-                        current_version
+                # For @query methods, skip persistence entirely
+                if is_query:
+                    logger.debug(
+                        "Skipping state save for query method %s:%s.%s",
+                        entity_type, self._key, method.__name__
                     )
-                    logger.info(
-                        "Saved state for %s:%s (version %d -> %d)",
-                        entity_type, self._key, current_version, new_version
+                    return result
+
+                # Get current state dict (sync from typed state if needed)
+                current_state_dict = self._state._get_dict()
+
+                # Compute hash after method execution
+                if effective_state_type is not None:
+                    new_hash = _compute_state_hash(
+                        self._state._get_typed() or current_state_dict,
+                        effective_state_type
                     )
-                except Exception as e:
-                    logger.error(
-                        "Failed to save state for %s:%s: %s",
-                        entity_type, self._key, e
+                else:
+                    new_hash = _compute_state_hash(current_state_dict, None)
+
+                # Only save if state actually changed (hash-based mutation detection)
+                if new_hash != original_hash:
+                    try:
+                        new_version = await adapter.save_state(
+                            entity_type,
+                            self._key,
+                            current_state_dict,
+                            current_version
+                        )
+                        logger.info(
+                            "Saved state for %s:%s (version %d -> %d, hash changed)",
+                            entity_type, self._key, current_version, new_version
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to save state for %s:%s: %s",
+                            entity_type, self._key, e
+                        )
+                        # Don't fail the method execution just because persistence failed
+                else:
+                    logger.debug(
+                        "Skipping state save for %s:%s.%s (no mutation detected)",
+                        entity_type, self._key, method.__name__
                     )
-                    # Don't fail the method execution just because persistence failed
-                    # The state is still in the local dict for this execution
 
                 return result
 
@@ -646,7 +990,7 @@ def _create_entity_method_wrapper(entity_type: str, method):
     return entity_method_wrapper
 
 
-class Entity:
+class Entity(Generic[StateType]):
     """
     Base class for stateful entities with single-writer consistency.
 
@@ -656,31 +1000,61 @@ class Entity:
     - Each instance is bound to a unique key
     - Single-writer consistency per key is guaranteed automatically
 
-    Example:
+    Supports typed state with Pydantic models for IDE autocomplete and validation:
         ```python
         from agnt5 import Entity
+        from pydantic import BaseModel
 
-        class ShoppingCart(Entity):
+        class CartState(BaseModel):
+            items: dict[str, dict] = {}
+            total: float = 0.0
+
+        class ShoppingCart(Entity[CartState]):
             async def add_item(self, item_id: str, quantity: int, price: float) -> dict:
-                items = self.state.get("items", {})
-                items[item_id] = {"quantity": quantity, "price": price}
-                self.state.set("items", items)
-                return {"total_items": len(items)}
+                # IDE autocomplete works!
+                self.state.items[item_id] = {"quantity": quantity, "price": price}
+                self.state.total = sum(
+                    item["quantity"] * item["price"]
+                    for item in self.state.items.values()
+                )
+                return {"total_items": len(self.state.items)}
 
             async def get_total(self) -> float:
-                items = self.state.get("items", {})
-                return sum(item["quantity"] * item["price"] for item in items.values())
+                return self.state.total  # No save triggered (auto-detected as read)
+        ```
 
-        # Usage
-        cart = ShoppingCart(key="user-123")
-        await cart.add_item("item-abc", quantity=2, price=29.99)
-        total = await cart.get_total()
+    Also supports dataclasses:
+        ```python
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class CounterState:
+            count: int = 0
+            history: list = field(default_factory=list)
+
+        class Counter(Entity[CounterState]):
+            async def increment(self) -> int:
+                self.state.count += 1
+                return self.state.count
+        ```
+
+    And untyped state (backward compatible):
+        ```python
+        class Counter(Entity):
+            async def increment(self) -> int:
+                count = self.state.get("count", 0) + 1
+                self.state.set("count", count)
+                return count
         ```
 
     Note:
         Methods are automatically wrapped to provide single-writer consistency per key.
-        State operations are synchronous for simplicity.
+        State mutations are auto-detected via hash comparison - read-only methods
+        don't trigger persistence.
     """
+
+    # Class-level state type (set by __init_subclass__)
+    _state_type: Optional[Type] = None
 
     def __init__(self, key: str):
         """
@@ -750,10 +1124,11 @@ class Entity:
         Auto-register Entity subclasses and wrap methods.
 
         This is called automatically when a class inherits from Entity.
-        It performs three tasks:
-        1. Extracts state schema from the class
-        2. Wraps all public async methods with single-writer consistency
-        3. Registers the entity type with metadata for platform discovery
+        It performs four tasks:
+        1. Extracts state type from generic parameter (Entity[StateType])
+        2. Extracts state schema from the class or state type
+        3. Wraps all public async methods with single-writer consistency
+        4. Registers the entity type with metadata for platform discovery
         """
         super().__init_subclass__(**kwargs)
 
@@ -765,14 +1140,48 @@ class Entity:
         if cls.__name__ in ('SessionEntity', 'MemoryEntity'):
             return
 
+        # Extract state type from generic parameter (Entity[CartState])
+        state_type = None
+        if hasattr(cls, '__orig_bases__'):
+            for base in cls.__orig_bases__:
+                origin = get_origin(base)
+                if origin is Entity or (isinstance(origin, type) and issubclass(origin, Entity)):
+                    args = get_args(base)
+                    if args:
+                        state_type = args[0]
+                        break
+
+        # Store state type on the class for later use
+        cls._state_type = state_type
+
+        if state_type is not None:
+            kind = _get_state_type_kind(state_type)
+            logger.debug(
+                f"Extracted state type for {cls.__name__}: {state_type.__name__ if hasattr(state_type, '__name__') else state_type} ({kind})"
+            )
+
         # Create an EntityType for this class, storing the class reference
         entity_type = EntityType(cls.__name__, entity_class=cls)
 
-        # Extract and set state schema
-        state_schema = extract_state_schema(cls)
-        if state_schema:
-            entity_type.set_state_schema(state_schema)
-            logger.debug(f"Extracted state schema for {cls.__name__}")
+        # Extract state schema from Pydantic model if available
+        if state_type is not None and _is_pydantic_model(state_type):
+            try:
+                # Pydantic v2 has model_json_schema()
+                pydantic_schema = state_type.model_json_schema()
+                entity_type.set_state_schema(pydantic_schema)
+                logger.debug(f"Extracted Pydantic state schema for {cls.__name__}")
+            except Exception as e:
+                logger.debug(f"Could not extract Pydantic schema for {cls.__name__}: {e}")
+                # Fall back to basic schema extraction
+                state_schema = extract_state_schema(cls)
+                if state_schema:
+                    entity_type.set_state_schema(state_schema)
+        else:
+            # Fall back to basic schema extraction for non-Pydantic types
+            state_schema = extract_state_schema(cls)
+            if state_schema:
+                entity_type.set_state_schema(state_schema)
+                logger.debug(f"Extracted state schema for {cls.__name__}")
 
         # Wrap all public async methods and register them
         for name, method in inspect.getmembers(cls, predicate=inspect.iscoroutinefunction):
@@ -785,9 +1194,9 @@ class Entity:
                 entity_type._method_schemas[name] = (input_schema, output_schema)
                 entity_type._method_metadata[name] = method_metadata
 
-                # Wrap the method with single-writer consistency
-                # This happens once at class definition time (not per-call)
-                wrapped_method = _create_entity_method_wrapper(cls.__name__, method)
+                # Wrap the method with single-writer consistency and typed state
+                # Pass state_type so wrapper can use hash-based mutation detection
+                wrapped_method = _create_entity_method_wrapper(cls.__name__, method, state_type)
                 setattr(cls, name, wrapped_method)
 
         # Register the entity type
