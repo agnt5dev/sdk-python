@@ -1123,9 +1123,29 @@ class Agent:
                     },
                 ) as span:
                     all_tool_calls: List[Dict[str, Any]] = []
+                    import time as _time
+
+                    # Emit agent started checkpoint
+                    if workflow_ctx:
+                        workflow_ctx._send_checkpoint("agent.started", {
+                            "agent.name": self.name,
+                            "agent.model": self.model_name,
+                            "agent.max_iterations": self.max_iterations,
+                            "agent.tools_count": len(self.tools),
+                        })
 
                     # Reasoning loop
                     for iteration in range(self.max_iterations):
+                        iteration_start_time = _time.time()
+
+                        # Emit iteration started checkpoint
+                        if workflow_ctx:
+                            workflow_ctx._send_checkpoint("agent.iteration.started", {
+                                "agent.name": self.name,
+                                "iteration": iteration + 1,
+                                "max_iterations": self.max_iterations,
+                            })
+
                         # Build tool definitions for LLM
                         tool_defs = [
                             ToolDefinition(
@@ -1306,11 +1326,33 @@ class Agent:
                             )
                             messages.append(Message.user(f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."))
 
+                            # Emit iteration completed checkpoint (with tool calls)
+                            iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
+                            if workflow_ctx:
+                                workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                                    "agent.name": self.name,
+                                    "iteration": iteration + 1,
+                                    "duration_ms": iteration_duration_ms,
+                                    "has_tool_calls": True,
+                                    "tool_calls_count": len(tool_results),
+                                })
+
                             # Continue loop for agent to process results
 
                         else:
                             # No tool calls - agent is done
                             self.logger.debug(f"Agent completed after {iteration + 1} iterations")
+
+                            # Emit iteration completed checkpoint
+                            iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
+                            if workflow_ctx:
+                                workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                                    "agent.name": self.name,
+                                    "iteration": iteration + 1,
+                                    "duration_ms": iteration_duration_ms,
+                                    "has_tool_calls": False,
+                                })
+
                             # Save conversation before returning
                             if isinstance(context, AgentContext):
                                 await context.save_conversation_history(messages)
@@ -1333,6 +1375,15 @@ class Agent:
                     # Max iterations reached
                     self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
                     final_output = messages[-1].content if messages else "No output generated"
+
+                    # Emit max iterations reached checkpoint (separate event for metrics)
+                    if workflow_ctx:
+                        workflow_ctx._send_checkpoint("agent.max_iterations.reached", {
+                            "agent.name": self.name,
+                            "max_iterations": self.max_iterations,
+                            "tool_calls_count": len(all_tool_calls),
+                        })
+
                     # Save conversation before returning
                     if isinstance(context, AgentContext):
                         await context.save_conversation_history(messages)
