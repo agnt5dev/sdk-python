@@ -1104,15 +1104,45 @@ class Worker:
 
             # CRITICAL: Set context in contextvar so LM/Agent/Tool calls can access it
             from .context import set_current_context
+            import time as _time
             token = set_current_context(ctx)
+            workflow_start_time = _time.time()
             try:
+                # Emit workflow.started checkpoint
+                ctx._send_checkpoint("workflow.started", {
+                    "workflow.name": config.name,
+                    "run_id": request.invocation_id,
+                    "session_id": session_id,
+                    "is_replay": bool(completed_steps),
+                })
+
                 if input_dict:
                     result = await config.handler(ctx, **input_dict)
                 else:
                     result = await config.handler(ctx)
 
+                # Emit workflow.completed checkpoint
+                workflow_duration_ms = int((_time.time() - workflow_start_time) * 1000)
+                ctx._send_checkpoint("workflow.completed", {
+                    "workflow.name": config.name,
+                    "run_id": request.invocation_id,
+                    "duration_ms": workflow_duration_ms,
+                    "steps_count": len(ctx._workflow_entity._step_events),
+                })
+
                 # Note: Workflow entity persistence is handled by the @workflow decorator wrapper
                 # which persists before returning. No need to persist here.
+            except Exception as workflow_error:
+                # Emit workflow.failed checkpoint
+                workflow_duration_ms = int((_time.time() - workflow_start_time) * 1000)
+                ctx._send_checkpoint("workflow.failed", {
+                    "workflow.name": config.name,
+                    "run_id": request.invocation_id,
+                    "duration_ms": workflow_duration_ms,
+                    "error": str(workflow_error),
+                    "error_type": type(workflow_error).__name__,
+                })
+                raise
             finally:
                 # Always reset context to prevent leakage
                 from .context import _current_context
