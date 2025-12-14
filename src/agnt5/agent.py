@@ -958,6 +958,42 @@ class Agent:
 
         return handoff_tool
 
+    def _render_prompt(self, template: str, context_vars: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Render a prompt template with context variables.
+
+        Uses simple {{variable_name}} syntax for substitution.
+        Supports nested dictionaries and lists with JSON serialization.
+
+        Args:
+            template: Prompt template with {{variable}} placeholders
+            context_vars: Dictionary of variable names to values
+
+        Returns:
+            Rendered prompt string
+        """
+        import re
+
+        if not context_vars:
+            return template
+
+        result = template
+
+        for key, value in context_vars.items():
+            placeholder = "{{" + key + "}}"
+
+            # Serialize non-string values to JSON
+            if isinstance(value, (dict, list)):
+                value_str = json.dumps(value, indent=2)
+            elif value is None:
+                value_str = ""
+            else:
+                value_str = str(value)
+
+            result = result.replace(placeholder, value_str)
+
+        return result
+
     def _detect_memory_scope(self, context: Optional[Context]) -> tuple[str, str]:
         """
         Auto-detect memory scope from context for agent conversation persistence.
@@ -1003,20 +1039,44 @@ class Agent:
         self,
         user_message: str,
         context: Optional[Context] = None,
+        history: Optional[List[Message]] = None,
+        prompt_context: Optional[Dict[str, Any]] = None,
     ) -> AgentResult:
         """Run agent to completion.
 
         Args:
             user_message: User's input message
-            context: Optional context (auto-created if not provided, or read from contextvar)
+            context: Optional execution context (auto-created if not provided, or read from contextvar)
+            history: Optional conversation history to include (prepended to any stored history)
+            prompt_context: Optional context variables for system prompt template substitution.
+                Variables are substituted using {{variable_name}} syntax.
 
         Returns:
             AgentResult with output and execution details
 
         Example:
             ```python
+            # Simple usage
             result = await agent.run("Analyze recent tech news")
             print(result.output)
+
+            # With conversation history
+            result = await agent.run(
+                "Continue the analysis",
+                history=[
+                    Message.user("What are the trends?"),
+                    Message.assistant("The main trends are..."),
+                ],
+            )
+
+            # With prompt context
+            result = await agent.run(
+                "Help me with my question",
+                prompt_context={
+                    "user_preferences": "prefers concise answers",
+                    "company_docs": "Q4 budget is $500K...",
+                },
+            )
             ```
         """
         # Create or adapt context
@@ -1098,16 +1158,27 @@ class Agent:
         token = set_current_context(context)
         try:
             try:
-                # Load conversation history from state (if AgentContext)
+                # Build conversation messages
+                messages: List[Message] = []
+
+                # 1. Start with explicitly provided history (if any)
+                if history:
+                    messages.extend(history)
+                    self.logger.debug(f"Prepended {len(history)} messages from explicit history")
+
+                # 2. Load conversation history from state (if AgentContext)
                 if isinstance(context, AgentContext):
-                    messages: List[Message] = await context.get_conversation_history()
-                    # Add new user message
-                    messages.append(Message.user(user_message))
-                    # Save updated conversation
-                    await context.save_conversation_history(messages)
-                else:
-                    # Fallback for non-AgentContext (shouldn't happen with code above)
-                    messages = [Message.user(user_message)]
+                    stored_messages = await context.get_conversation_history()
+                    messages.extend(stored_messages)
+
+                # 3. Add new user message
+                messages.append(Message.user(user_message))
+
+                # 4. Save updated conversation to context storage
+                if isinstance(context, AgentContext):
+                    # Only save the stored + new message (not the explicit history)
+                    messages_to_save = stored_messages + [Message.user(user_message)] if history else messages
+                    await context.save_conversation_history(messages_to_save)
 
                 # Create span for agent execution with trace linking
                 from ._core import create_span
@@ -1133,6 +1204,11 @@ class Agent:
                             "agent.max_iterations": self.max_iterations,
                             "agent.tools_count": len(self.tools),
                         })
+
+                    # Render system prompt with context variables
+                    rendered_instructions = self._render_prompt(self.instructions, prompt_context)
+                    if prompt_context:
+                        self.logger.debug(f"Rendered system prompt with {len(prompt_context)} context variables")
 
                     # Reasoning loop
                     for iteration in range(self.max_iterations):
@@ -1170,7 +1246,7 @@ class Agent:
                             # Legacy API: use provided LanguageModel instance
                             request = GenerateRequest(
                                 model="mock-model",  # Not used by MockLanguageModel
-                                system_prompt=self.instructions,
+                                system_prompt=rendered_instructions,
                                 messages=messages,
                                 tools=tool_defs if tool_defs else [],
                             )
@@ -1187,7 +1263,7 @@ class Agent:
                             # New API: model is a string, create internal LM instance
                             request = GenerateRequest(
                                 model=self.model,
-                                system_prompt=self.instructions,
+                                system_prompt=rendered_instructions,
                                 messages=messages,
                                 tools=tool_defs if tool_defs else [],
                             )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -1055,6 +1056,9 @@ class Worker:
                     # DEBUG: Log metadata types for troubleshooting PyO3 conversion errors
                     logger.debug(f"Checkpoint metadata types: {[(k, type(v).__name__) for k, v in metadata.items()]}")
 
+                    # Get source timestamp (use from checkpoint if provided, otherwise generate now)
+                    source_timestamp_ns = checkpoint.get("source_timestamp_ns", time.time_ns())
+
                     # Queue checkpoint via Rust FFI
                     self._rust_worker.queue_workflow_checkpoint(
                         invocation_id=request.invocation_id,
@@ -1062,6 +1066,7 @@ class Worker:
                         checkpoint_data=json.dumps(checkpoint["checkpoint_data"]),
                         sequence_number=checkpoint["sequence_number"],
                         metadata=metadata,
+                        source_timestamp_ns=source_timestamp_ns,
                     )
                     logger.debug(
                         f"Queued checkpoint: type={checkpoint['checkpoint_type']} "
