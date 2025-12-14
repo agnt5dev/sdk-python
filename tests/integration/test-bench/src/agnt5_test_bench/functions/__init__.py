@@ -20,8 +20,8 @@ from .retry_functions import (
     fn_09_retry_exhausted,
 )
 from .lm_functions import (
-    fn_10_lm_simple_completion,
-    fn_11_lm_structured_output,
+    fn_10_lm_generate,
+    fn_10_lm_stream,
 )
 from .test_helpers import (
     greet,
@@ -43,9 +43,9 @@ __all__ = [
     # Retry functions (08-09)
     "fn_08_retry_succeeds_on_attempt_2",
     "fn_09_retry_exhausted",
-    # LM functions (10-11)
-    "fn_10_lm_simple_completion",
-    "fn_11_lm_structured_output",
+    # LM functions (10)
+    "fn_10_lm_generate",
+    "fn_10_lm_stream",
     # Test helpers (backward compatibility)
     "greet",
     "long_task",

@@ -464,15 +464,17 @@ class _LanguageModel(LanguageModel):
         except Exception:
             pass  # Tracing not available, continue without
 
-        # Emit started event
-        if workflow_ctx and trace_id:
-            workflow_ctx._send_checkpoint("agent.llm.call.started", {
+        # Emit started event (trace_id is optional - emit even without tracing)
+        if workflow_ctx:
+            event_data = {
                 "model": model,
                 "provider": self._provider,
-                "trace_id": trace_id,
-                "span_id": span_id,
                 "timestamp": time.time_ns() // 1_000_000,
-            })
+            }
+            if trace_id:
+                event_data["trace_id"] = trace_id
+                event_data["span_id"] = span_id
+            workflow_ctx._send_checkpoint("lm.call.started", event_data)
 
         try:
             # Call Rust implementation - it returns a proper Python coroutine now
@@ -483,14 +485,15 @@ class _LanguageModel(LanguageModel):
             response = self._convert_response(rust_response)
 
             # Emit completion event with token usage and cost
-            if workflow_ctx and trace_id:
+            if workflow_ctx:
                 event_data = {
                     "model": model,
                     "provider": self._provider,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
                     "timestamp": time.time_ns() // 1_000_000,
                 }
+                if trace_id:
+                    event_data["trace_id"] = trace_id
+                    event_data["span_id"] = span_id
 
                 # Add token usage if available
                 if response.usage:
@@ -498,24 +501,23 @@ class _LanguageModel(LanguageModel):
                     event_data["output_tokens"] = response.usage.completion_tokens
                     event_data["total_tokens"] = response.usage.total_tokens
 
-                    # Calculate cost (Rust already calculated it in span, but we can recalculate for event)
-                    # Cost will be available in the span via trace_id link
-
-                workflow_ctx._send_checkpoint("agent.llm.call.completed", event_data)
+                workflow_ctx._send_checkpoint("lm.call.completed", event_data)
 
             return response
         except Exception as e:
             # Emit failed event
-            if workflow_ctx and trace_id:
-                workflow_ctx._send_checkpoint("agent.llm.call.failed", {
+            if workflow_ctx:
+                event_data = {
                     "model": model,
                     "provider": self._provider,
                     "error": str(e),
                     "error_type": type(e).__name__,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
                     "timestamp": time.time_ns() // 1_000_000,
-                })
+                }
+                if trace_id:
+                    event_data["trace_id"] = trace_id
+                    event_data["span_id"] = span_id
+                workflow_ctx._send_checkpoint("lm.call.failed", event_data)
             raise
 
     async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
@@ -609,50 +611,54 @@ class _LanguageModel(LanguageModel):
         except Exception:
             pass  # Tracing not available, continue without
 
-        # Emit started event
-        if workflow_ctx and trace_id:
-            workflow_ctx._send_checkpoint("agent.llm.call.started", {
+        # Emit started event (trace_id is optional - emit even without tracing)
+        if workflow_ctx:
+            event_data = {
                 "model": model,
                 "provider": self._provider,
-                "streaming": True,
-                "trace_id": trace_id,
-                "span_id": span_id,
                 "timestamp": time.time_ns() // 1_000_000,
-            })
+            }
+            if trace_id:
+                event_data["trace_id"] = trace_id
+                event_data["span_id"] = span_id
+            workflow_ctx._send_checkpoint("lm.stream.started", event_data)
 
         try:
             # Call Rust implementation - it returns a proper Python coroutine now
             # Using pyo3-async-runtimes for truly async streaming without blocking
             rust_chunks = await self._rust_lm.stream(prompt=prompt, **kwargs)
 
-            # Yield each chunk
+            # Yield each delta chunk (skip the final completed chunk which contains
+            # the full accumulated text - we only want individual deltas)
             for chunk in rust_chunks:
-                if chunk.text:
+                if chunk.text and not chunk.finished:
                     yield chunk.text
 
             # Emit completion event (note: streaming doesn't provide token counts)
-            if workflow_ctx and trace_id:
-                workflow_ctx._send_checkpoint("agent.llm.call.completed", {
+            if workflow_ctx:
+                event_data = {
                     "model": model,
                     "provider": self._provider,
-                    "streaming": True,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
                     "timestamp": time.time_ns() // 1_000_000,
-                })
+                }
+                if trace_id:
+                    event_data["trace_id"] = trace_id
+                    event_data["span_id"] = span_id
+                workflow_ctx._send_checkpoint("lm.stream.completed", event_data)
         except Exception as e:
             # Emit failed event
-            if workflow_ctx and trace_id:
-                workflow_ctx._send_checkpoint("agent.llm.call.failed", {
+            if workflow_ctx:
+                event_data = {
                     "model": model,
                     "provider": self._provider,
-                    "streaming": True,
                     "error": str(e),
                     "error_type": type(e).__name__,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
                     "timestamp": time.time_ns() // 1_000_000,
-                })
+                }
+                if trace_id:
+                    event_data["trace_id"] = trace_id
+                    event_data["span_id"] = span_id
+                workflow_ctx._send_checkpoint("lm.stream.failed", event_data)
             raise
 
     def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, str]]:
@@ -962,7 +968,7 @@ async def stream(
     )
 
     # Events are emitted by _LanguageModel.stream() internally
-    # (agent.llm.call.started/completed/failed with trace linkage)
+    # (lm.stream.started/completed/failed with trace linkage)
 
     # Stream and yield chunks
     async for chunk in lm.stream(request):

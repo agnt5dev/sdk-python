@@ -205,6 +205,7 @@ impl PyWorker {
     /// * `checkpoint_data` - JSON payload as string
     /// * `sequence_number` - Monotonic sequence for ordering
     /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
+    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created (for correct logical ordering)
     fn queue_workflow_checkpoint(
         &self,
         invocation_id: String,
@@ -212,6 +213,7 @@ impl PyWorker {
         checkpoint_data: String,
         sequence_number: i64,
         metadata: HashMap<String, String>,
+        source_timestamp_ns: i64,
     ) -> PyResult<()> {
         // Convert checkpoint_data string to bytes
         let data_bytes = checkpoint_data.into_bytes();
@@ -230,6 +232,7 @@ impl PyWorker {
                 data_bytes,
                 sequence_number,
                 metadata,
+                source_timestamp_ns,
             ).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     format!("Failed to queue checkpoint: {}", e)

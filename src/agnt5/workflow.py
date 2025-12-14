@@ -6,6 +6,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
 
@@ -116,6 +117,7 @@ class WorkflowContext(Context):
                 "checkpoint_type": checkpoint_type,
                 "checkpoint_data": checkpoint_data,
                 "sequence_number": self._sequence_number,
+                "source_timestamp_ns": time.time_ns(),  # Nanosecond timestamp for correct logical ordering
             }
             self._checkpoint_callback(checkpoint)
 
@@ -139,38 +141,54 @@ class WorkflowContext(Context):
 
     # === Orchestration ===
 
-    async def task(
+    async def step(
         self,
-        handler: Union[str, Callable],
+        name_or_handler: Union[str, Callable, Awaitable[T]],
+        func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T], Any] = None,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
+    ) -> T:
         """
-        Execute a function and wait for result.
+        Execute a durable step with automatic checkpointing.
 
-        Supports two calling patterns:
+        Steps are the primary building block for durable workflows. Results are
+        automatically persisted, so if the workflow crashes and restarts, completed
+        steps return their cached result without re-executing.
 
-        1. **Type-safe with function reference (recommended)**:
+        Supports multiple calling patterns:
+
+        1. **Call a @function (recommended)**:
            ```python
-           result = await ctx.task(process_data, arg1, arg2, kwarg=value)
+           result = await ctx.step(process_data, arg1, arg2, kwarg=value)
            ```
-           Full IDE support, type checking, and refactoring safety.
+           Auto-generates step name from function. Full IDE support.
 
-        2. **Legacy string-based (backward compatible)**:
+        2. **Checkpoint an awaitable with explicit name**:
            ```python
-           result = await ctx.task("function_name", input=data)
+           result = await ctx.step("load_data", fetch_expensive_data())
            ```
-           String lookup without type safety.
+           For arbitrary async operations that aren't @functions.
+
+        3. **Checkpoint a callable with explicit name**:
+           ```python
+           result = await ctx.step("compute", my_function, arg1, arg2)
+           ```
+
+        4. **Legacy string-based @function call**:
+           ```python
+           result = await ctx.step("function_name", input=data)
+           ```
 
         Args:
-            handler: Either a @function reference (recommended) or string name (legacy)
-            *args: Positional arguments to pass to the function
-            **kwargs: Keyword arguments to pass to the function
+            name_or_handler: Step name (str), @function reference, or awaitable
+            func_or_awaitable: Function/awaitable when name is provided, or first arg
+            *args: Additional arguments for the function
+            **kwargs: Keyword arguments for the function
 
         Returns:
-            Function result
+            The step result (cached on replay)
 
-        Example (type-safe):
+        Example (@function call):
             ```python
             @function
             async def process_data(ctx: FunctionContext, data: list, multiplier: int = 2):
@@ -178,17 +196,75 @@ class WorkflowContext(Context):
 
             @workflow
             async def my_workflow(ctx: WorkflowContext):
-                # Type-safe call with positional and keyword args
-                result = await ctx.task(process_data, [1, 2, 3], multiplier=3)
+                result = await ctx.step(process_data, [1, 2, 3], multiplier=3)
                 return result
             ```
 
-        Example (legacy):
+        Example (checkpoint awaitable):
             ```python
-            result = await ctx.task("process_data", input={"data": [1, 2, 3]})
+            @workflow
+            async def my_workflow(ctx: WorkflowContext):
+                # Checkpoint expensive external call
+                data = await ctx.step("fetch_api", fetch_from_external_api())
+                return data
             ```
         """
+        import inspect
+
+        # Determine which calling pattern is being used
+        if callable(name_or_handler) and hasattr(name_or_handler, "_agnt5_config"):
+            # Pattern 1: step(handler, *args, **kwargs) - @function call
+            return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+        elif isinstance(name_or_handler, str):
+            # Check if it's a registered function name (legacy pattern)
+            from .function import FunctionRegistry
+            if FunctionRegistry.get(name_or_handler) is not None:
+                # Pattern 4: Legacy string-based function call
+                return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+            elif func_or_awaitable is not None:
+                # Pattern 2/3: step("name", awaitable) or step("name", callable, *args)
+                return await self._step_checkpoint(name_or_handler, func_or_awaitable, *args, **kwargs)
+            else:
+                # String without second arg and not a registered function
+                raise ValueError(
+                    f"Function '{name_or_handler}' not found in registry. "
+                    f"Either register it with @function decorator, or use "
+                    f"ctx.step('{name_or_handler}', awaitable) to checkpoint an arbitrary operation."
+                )
+        elif inspect.iscoroutine(name_or_handler) or inspect.isawaitable(name_or_handler):
+            # Awaitable passed directly - auto-generate name
+            coro_name = getattr(name_or_handler, '__name__', 'awaitable')
+            return await self._step_checkpoint(coro_name, name_or_handler)
+        elif callable(name_or_handler):
+            # Callable without @function decorator
+            raise ValueError(
+                f"Function '{name_or_handler.__name__}' is not a registered @function. "
+                f"Did you forget to add the @function decorator? "
+                f"Or use ctx.step('name', callable) for non-decorated functions."
+            )
+        else:
+            raise ValueError(
+                f"step() first argument must be a @function, string name, or awaitable. "
+                f"Got: {type(name_or_handler)}"
+            )
+
+    async def _step_function(
+        self,
+        handler: Union[str, Callable],
+        first_arg: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Internal: Execute a @function as a durable step.
+
+        This handles both function references and legacy string-based calls.
+        """
         from .function import FunctionRegistry
+
+        # Reconstruct args tuple (first_arg may have been split out by step())
+        if first_arg is not None:
+            args = (first_arg,) + args
 
         # Extract handler name from function reference or use string
         if callable(handler):
@@ -314,9 +390,9 @@ class WorkflowContext(Context):
                             f"Step event stack mismatch in task() error path: expected {step_event_id}, got {popped_id}"
                         )
 
-                # Emit workflow.step.error checkpoint
+                # Emit workflow.step.failed checkpoint
                 self._send_checkpoint(
-                    "workflow.step.error",
+                    "workflow.step.failed",
                     {
                         "step_name": step_name,
                         "handler_name": handler_name,
@@ -378,11 +454,48 @@ class WorkflowContext(Context):
         results = await asyncio.gather(*values)
         return dict(zip(keys, results))
 
-    async def step(
-        self, name: str, func_or_awaitable: Union[Callable[[], Awaitable[T]], Awaitable[T]]
+    async def task(
+        self,
+        handler: Union[str, Callable],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Execute a function and wait for result.
+
+        .. deprecated::
+            Use :meth:`step` instead. ``task()`` will be removed in a future version.
+
+        This method is an alias for :meth:`step` for backward compatibility.
+        New code should use ``ctx.step()`` directly.
+
+        Args:
+            handler: Either a @function reference or string name
+            *args: Positional arguments to pass to the function
+            **kwargs: Keyword arguments to pass to the function
+
+        Returns:
+            Function result
+        """
+        import warnings
+
+        warnings.warn(
+            "ctx.task() is deprecated, use ctx.step() instead. "
+            "task() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.step(handler, *args, **kwargs)
+
+    async def _step_checkpoint(
+        self,
+        name: str,
+        func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T]],
+        *args: Any,
+        **kwargs: Any,
     ) -> T:
         """
-        Checkpoint expensive operations for durability.
+        Internal: Checkpoint an arbitrary awaitable or callable for durability.
 
         If workflow crashes, won't re-execute this step on retry.
         The step result is persisted to the platform for crash recovery.
@@ -394,12 +507,11 @@ class WorkflowContext(Context):
         Args:
             name: Unique name for this checkpoint (used as step_key for memoization)
             func_or_awaitable: Either an async function or awaitable
+            *args: Arguments to pass if func_or_awaitable is callable
+            **kwargs: Keyword arguments to pass if func_or_awaitable is callable
 
         Returns:
             The result of the function/awaitable
-
-        Example:
-            result = await ctx.step("load", load_data())
         """
         import inspect
         import json
@@ -455,8 +567,15 @@ class WorkflowContext(Context):
             # Execute and checkpoint
             if inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
                 result = await func_or_awaitable
+            elif callable(func_or_awaitable):
+                # Call with args/kwargs if provided
+                call_result = func_or_awaitable(*args, **kwargs)
+                if inspect.iscoroutine(call_result) or inspect.isawaitable(call_result):
+                    result = await call_result
+                else:
+                    result = call_result
             else:
-                result = await func_or_awaitable()
+                raise ValueError(f"step() second argument must be awaitable or callable, got {type(func_or_awaitable)}")
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -523,9 +642,9 @@ class WorkflowContext(Context):
                 except Exception as cp_err:
                     self._logger.warning(f"Failed to record step failure to platform: {cp_err}")
 
-            # Emit workflow.step.error checkpoint
+            # Emit workflow.step.failed checkpoint
             self._send_checkpoint(
-                "workflow.step.error",
+                "workflow.step.failed",
                 {
                     "step_name": name,
                     "handler_name": "checkpoint",
@@ -535,6 +654,91 @@ class WorkflowContext(Context):
                 },
             )
             raise
+
+    async def sleep(self, seconds: float, name: Optional[str] = None) -> None:
+        """
+        Durable sleep that survives workflow restarts.
+
+        Unlike regular `asyncio.sleep()`, this sleep is checkpointed. If the
+        workflow crashes and restarts, it will only sleep for the remaining
+        duration (or skip entirely if the sleep period has already elapsed).
+
+        Args:
+            seconds: Duration to sleep in seconds
+            name: Optional name for the sleep checkpoint (auto-generated if not provided)
+
+        Example:
+            ```python
+            @workflow
+            async def delayed_notification(ctx: WorkflowContext, user_id: str):
+                # Send immediate acknowledgment
+                await ctx.step(send_ack, user_id)
+
+                # Wait 24 hours (survives restarts!)
+                await ctx.sleep(24 * 60 * 60, name="wait_24h")
+
+                # Send follow-up
+                await ctx.step(send_followup, user_id)
+            ```
+        """
+        import time
+
+        # Generate unique step name for this sleep
+        sleep_name = name or f"sleep_{self._step_counter}"
+        self._step_counter += 1
+        step_key = f"sleep:{sleep_name}"
+
+        # Check if sleep was already started (replay scenario)
+        if self._workflow_entity.has_completed_step(step_key):
+            sleep_record = self._workflow_entity.get_completed_step(step_key)
+            start_time = sleep_record.get("start_time", 0)
+            duration = sleep_record.get("duration", seconds)
+            elapsed = time.time() - start_time
+
+            if elapsed >= duration:
+                # Sleep period already elapsed
+                self._logger.info(f"🔄 Sleep '{sleep_name}' already completed (elapsed: {elapsed:.1f}s)")
+                return
+
+            # Sleep for remaining duration
+            remaining = duration - elapsed
+            self._logger.info(f"⏰ Resuming sleep '{sleep_name}': {remaining:.1f}s remaining")
+            await asyncio.sleep(remaining)
+            return
+
+        # Record sleep start time for replay
+        sleep_record = {
+            "start_time": time.time(),
+            "duration": seconds,
+        }
+        self._workflow_entity.record_step_completion(step_key, "sleep", None, sleep_record)
+
+        # Emit checkpoint for observability
+        step_event_id = str(uuid.uuid4())
+        self._send_checkpoint(
+            "workflow.step.started",
+            {
+                "step_name": sleep_name,
+                "handler_name": "sleep",
+                "duration_seconds": seconds,
+                "event_id": step_event_id,
+            },
+        )
+
+        self._logger.info(f"💤 Starting durable sleep '{sleep_name}': {seconds}s")
+        await asyncio.sleep(seconds)
+
+        # Emit completion checkpoint
+        self._send_checkpoint(
+            "workflow.step.completed",
+            {
+                "step_name": sleep_name,
+                "handler_name": "sleep",
+                "duration_seconds": seconds,
+                "event_id": step_event_id,
+            },
+        )
+        self._logger.info(f"⏰ Sleep '{sleep_name}' completed")
 
     async def wait_for_user(
         self, question: str, input_type: str = "text", options: Optional[List[Dict]] = None

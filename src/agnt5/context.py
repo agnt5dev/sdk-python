@@ -99,6 +99,11 @@ class Context:
         """Full logger for .debug(), .warning(), .error(), etc."""
         return self._logger
 
+    @property
+    def tenant_id(self) -> Optional[str]:
+        """Tenant identifier for multi-tenant deployments."""
+        return self._tenant_id
+
 
 def get_current_context() -> Optional[Context]:
     """

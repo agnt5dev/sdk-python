@@ -1,12 +1,23 @@
 use agnt5_sdk_core::telemetry::{
-    create_tool_execution_span, flush_telemetry, record_tool_error, record_tool_success,
+    create_tool_execution_span, record_tool_error, record_tool_success,
 };
 use agnt5_sdk_core::RuntimeContext;
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use pyo3::prelude::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Check if span export is enabled (cached for performance)
+/// Default: false (spans not exported to journal by default)
+fn is_span_export_enabled() -> bool {
+    static SPAN_EXPORT_ENABLED: OnceLock<bool> = OnceLock::new();
+    *SPAN_EXPORT_ENABLED.get_or_init(|| {
+        std::env::var("AGNT5_SPAN_EXPORT_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false) // Default: disabled
+    })
+}
 
 mod adk;
 mod checkpoint_client;
@@ -106,15 +117,18 @@ impl PySpan {
             // Span will be ended when dropped
         }
 
-        // Queue span export for background flush if streaming is enabled
+        // Queue span export for background flush if streaming AND span export are enabled
         // Uses the global SpanExportQueue which is flushed by a background task in the Worker's Tokio runtime
+        // Note: Span export is disabled by default (AGNT5_SPAN_EXPORT_ENABLED=false)
+        let span_export_enabled = is_span_export_enabled();
         tracing::debug!(
-            "🔍 CHILD-SPAN-DEBUG: PySpan.__exit__ called, is_streaming={}, run_id={:?}, name={}",
+            "🔍 CHILD-SPAN-DEBUG: PySpan.__exit__ called, is_streaming={}, span_export_enabled={}, run_id={:?}, name={}",
             self.is_streaming,
+            span_export_enabled,
             self.run_id,
             self.name
         );
-        if self.is_streaming {
+        if self.is_streaming && span_export_enabled {
             if let Some(ref run_id) = self.run_id {
                 // Get the global span export queue (set by Worker on initialization)
                 if let Some(queue) = crate::worker::get_span_export_queue() {
@@ -524,17 +538,6 @@ fn create_span(
     })
 }
 
-/// Flush all pending telemetry data (spans and logs)
-///
-/// This should be called before worker shutdown to ensure batched spans are exported.
-/// The batch span processor buffers spans with a 5-second timeout by default.
-#[pyfunction]
-fn flush_telemetry_py() -> PyResult<()> {
-    flush_telemetry().map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to flush telemetry: {}", e))
-    })
-}
-
 /// Forward Python logs to Rust tracing system for OpenTelemetry integration
 ///
 /// When is_streaming is true, logs are also exported to the journal for real-time SSE delivery.
@@ -753,7 +756,5 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
-    m.add_function(wrap_pyfunction!(flush_telemetry_py, m)?)?;
-
     Ok(())
 }

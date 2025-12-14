@@ -470,6 +470,38 @@ class Client:
         """
         return EntityProxy(self, entity_type, key)
 
+    def workflow(self, workflow_name: str) -> "WorkflowProxy":
+        """Get a proxy for invoking a workflow with fluent API.
+
+        This provides a convenient API for workflow invocations, including
+        a chat() method for multi-turn conversation workflows.
+
+        Args:
+            workflow_name: Name of the workflow to invoke
+
+        Returns:
+            WorkflowProxy that provides workflow-specific methods
+
+        Example:
+            ```python
+            # Standard workflow execution
+            result = client.workflow("order_process").run(order_id="123")
+
+            # Chat workflow with session
+            response = client.workflow("support_bot").chat(
+                message="My order hasn't arrived",
+                session_id="user-123",
+            )
+
+            # Continue conversation
+            response = client.workflow("support_bot").chat(
+                message="Can you track it?",
+                session_id="user-123",
+            )
+            ```
+        """
+        return WorkflowProxy(self, workflow_name)
+
     def session(self, session_type: str, key: str) -> "SessionProxy":
         """Get a proxy for a session entity (OpenAI/ADK-style API).
 
@@ -720,6 +752,138 @@ class SessionProxy(EntityProxy):
             ```
         """
         return self.__getattr__("clear_history")()
+
+
+class WorkflowProxy:
+    """Proxy for invoking workflows with a fluent API.
+
+    Provides convenient methods for workflow execution, including
+    a chat() method for multi-turn conversation workflows.
+
+    Example:
+        ```python
+        # Standard workflow
+        result = client.workflow("order_process").run(order_id="123")
+
+        # Chat workflow
+        response = client.workflow("support_bot").chat(
+            message="Help me",
+            session_id="user-123",
+        )
+        ```
+    """
+
+    def __init__(self, client: "Client", workflow_name: str):
+        """Initialize workflow proxy.
+
+        Args:
+            client: The AGNT5 client instance
+            workflow_name: Name of the workflow
+        """
+        self._client = client
+        self._workflow_name = workflow_name
+
+    def run(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Execute the workflow synchronously.
+
+        Args:
+            session_id: Session identifier for multi-turn workflows (optional)
+            user_id: User identifier for user-scoped memory (optional)
+            **kwargs: Input parameters for the workflow
+
+        Returns:
+            Dictionary containing the workflow's output
+
+        Example:
+            ```python
+            result = client.workflow("order_process").run(
+                order_id="123",
+                customer_id="cust-456",
+            )
+            ```
+        """
+        return self._client.run(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    def chat(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Send a message to a chat-enabled workflow.
+
+        This is a convenience method for multi-turn conversation workflows.
+        The message is passed as the 'message' input parameter.
+
+        Args:
+            message: The user's message
+            session_id: Session identifier for conversation continuity (recommended)
+            user_id: User identifier for user-scoped memory (optional)
+            **kwargs: Additional input parameters for the workflow
+
+        Returns:
+            Dictionary containing the workflow's response (typically has 'response' key)
+
+        Example:
+            ```python
+            # First message
+            result = client.workflow("support_bot").chat(
+                message="My order hasn't arrived",
+                session_id="session-123",
+            )
+            print(result.get("response"))
+
+            # Continue conversation
+            result = client.workflow("support_bot").chat(
+                message="Can you track it?",
+                session_id="session-123",
+            )
+            ```
+        """
+        # Merge message into kwargs
+        input_data = {"message": message, **kwargs}
+
+        return self._client.run(
+            component=self._workflow_name,
+            input_data=input_data,
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    def submit(self, **kwargs) -> str:
+        """Submit the workflow for async execution.
+
+        Args:
+            **kwargs: Input parameters for the workflow
+
+        Returns:
+            Run ID for tracking the execution
+
+        Example:
+            ```python
+            run_id = client.workflow("long_process").submit(data="...")
+            # Check status later
+            status = client.get_status(run_id)
+            ```
+        """
+        return self._client.submit(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+        )
 
 
 class RunError(Exception):
