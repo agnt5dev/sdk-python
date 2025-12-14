@@ -84,6 +84,15 @@ from .wf_08_hitl_workflows import (
     wf_41_multi_turn_conversation,
 )
 
+# WF_09: Entity Workflows (wf_42 - wf_46)
+from .wf_09_entity_workflows import (
+    wf_42_counter_basic,
+    wf_43_counter_persistence,
+    wf_44_multiple_counters,
+    wf_45_shopping_cart,
+    wf_46_bank_account,
+)
+
 __all__ = [
     # WF_01: Simple workflows
     "wf_01_basic_execution",
@@ -140,4 +149,10 @@ __all__ = [
     "wf_39_agent_with_ask_user_tool",
     "wf_40_agent_with_approval_tool",
     "wf_41_multi_turn_conversation",
+    # WF_09: Entity workflows
+    "wf_42_counter_basic",
+    "wf_43_counter_persistence",
+    "wf_44_multiple_counters",
+    "wf_45_shopping_cart",
+    "wf_46_bank_account",
 ]
