@@ -17,6 +17,46 @@ from . import _sentry
 logger = setup_module_logger(__name__)
 
 
+import dataclasses
+import json as _json
+
+
+class _ResultEncoder(_json.JSONEncoder):
+    """Custom JSON encoder for serializing component results.
+
+    Handles Pydantic models, dataclasses, bytes, and sets that are commonly
+    returned from functions, workflows, entities, and agents.
+    """
+    def default(self, obj):
+        # Handle Pydantic models (v2 API)
+        if hasattr(obj, 'model_dump'):
+            return obj.model_dump()
+        # Handle Pydantic models (v1 API)
+        if hasattr(obj, 'dict') and hasattr(obj, '__fields__'):
+            return obj.dict()
+        # Handle dataclasses
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return dataclasses.asdict(obj)
+        # Handle bytes
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')
+        # Handle sets
+        if isinstance(obj, set):
+            return list(obj)
+        # Fallback to default behavior
+        return super().default(obj)
+
+
+def _serialize_result(result) -> bytes:
+    """Serialize a component result to JSON bytes.
+
+    Uses _ResultEncoder to handle Pydantic models, dataclasses, and other
+    complex types that may be returned from functions, workflows, entities,
+    tools, and agents.
+    """
+    return _json.dumps(result, cls=_ResultEncoder).encode("utf-8")
+
+
 def _normalize_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
     """
     Convert metadata dictionary to Dict[str, str] for Rust FFI compatibility.
@@ -831,8 +871,8 @@ class Worker:
                 chunk_index = 0
 
                 async for chunk in result:
-                    # Serialize chunk
-                    chunk_data = json.dumps(chunk).encode("utf-8")
+                    # Serialize chunk (using _serialize_result to handle Pydantic models, etc.)
+                    chunk_data = _serialize_result(chunk)
 
                     responses.append(PyExecuteComponentResponse(
                         invocation_id=request.invocation_id,
@@ -870,7 +910,7 @@ class Worker:
                     result = await result
 
                 # Serialize result
-                output_data = json.dumps(result).encode("utf-8")
+                output_data = _serialize_result(result)
 
                 # Extract critical metadata for journal event correlation
                 response_metadata = self._extract_critical_metadata(request)
@@ -1063,7 +1103,7 @@ class Worker:
                     self._rust_worker.queue_workflow_checkpoint(
                         invocation_id=request.invocation_id,
                         checkpoint_type=checkpoint["checkpoint_type"],
-                        checkpoint_data=json.dumps(checkpoint["checkpoint_data"]),
+                        checkpoint_data=_json.dumps(checkpoint["checkpoint_data"], cls=_ResultEncoder),
                         sequence_number=checkpoint["sequence_number"],
                         metadata=metadata,
                         source_timestamp_ns=source_timestamp_ns,
@@ -1073,9 +1113,15 @@ class Worker:
                         f"seq={checkpoint['sequence_number']}"
                     )
                 except Exception as e:
+                    # Checkpoints are critical for durability - failing to persist them
+                    # means we cannot guarantee replay/recovery. Re-raise to fail the workflow.
                     logger.error(f"Failed to queue checkpoint: {e}", exc_info=True)
-                    logger.error(f"Checkpoint metadata causing error: {metadata}")
-                    logger.error(f"Checkpoint data: {checkpoint}")
+                    logger.error(f"Checkpoint metadata: {metadata}")
+                    logger.error(f"Checkpoint type: {checkpoint.get('checkpoint_type')}")
+                    raise RuntimeError(
+                        f"Failed to queue checkpoint '{checkpoint.get('checkpoint_type')}': {e}. "
+                        f"Workflow cannot continue without durable checkpoints."
+                    ) from e
 
             # Create WorkflowContext with entity, runtime_context, checkpoint callback, and checkpoint client
             ctx = WorkflowContext(
@@ -1126,6 +1172,10 @@ class Worker:
                 else:
                     result = await config.handler(ctx)
 
+                # Serialize result BEFORE emitting workflow.completed
+                # This ensures serialization errors trigger workflow.failed, not run.failed
+                output_data = _serialize_result(result)
+
                 # Emit workflow.completed checkpoint
                 workflow_duration_ms = int((_time.time() - workflow_start_time) * 1000)
                 ctx._send_checkpoint("workflow.completed", {
@@ -1155,9 +1205,6 @@ class Worker:
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout
-
-            # Serialize result
-            output_data = json.dumps(result).encode("utf-8")
 
             # Collect workflow execution metadata for durability
             metadata = {}
@@ -1290,7 +1337,7 @@ class Worker:
                 "input_type": e.input_type,
                 "options": e.options,
             }
-            output_data = json.dumps(output).encode("utf-8")
+            output_data = _serialize_result(output)
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -1367,7 +1414,7 @@ class Worker:
             result = await tool.invoke(ctx, **input_dict)
 
             # Serialize result
-            output_data = json.dumps(result).encode("utf-8")
+            output_data = _serialize_result(result)
 
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
@@ -1476,7 +1523,7 @@ class Worker:
             result = await method(**input_dict)
 
             # Serialize result
-            output_data = json.dumps(result).encode("utf-8")
+            output_data = _serialize_result(result)
 
             # Note: State persistence is now handled automatically by the entity method wrapper
             # via EntityStateAdapter which uses Rust core for optimistic locking + version tracking
@@ -1602,7 +1649,7 @@ class Worker:
             }
 
             # Serialize result
-            output_data = json.dumps(result).encode("utf-8")
+            output_data = _serialize_result(result)
 
             # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
             metadata = self._extract_critical_metadata(request)
