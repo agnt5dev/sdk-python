@@ -1363,6 +1363,17 @@ class Worker:
             # Log with full traceback
             logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
 
+            # CRITICAL: Flush all buffered checkpoints before returning error response
+            # This ensures workflow.failed checkpoint arrives at platform BEFORE run.failed event
+            # Without this, SSE clients may not receive workflow.failed events
+            try:
+                flushed_count = self._rust_worker.flush_workflow_checkpoints()
+                if flushed_count > 0:
+                    logger.info(f"✅ Flushed {flushed_count} checkpoints before error response")
+            except Exception as flush_error:
+                logger.error(f"Failed to flush checkpoints in error path: {flush_error}", exc_info=True)
+                # Continue anyway - checkpoint flushing is best-effort
+
             # Store error metadata for observability
             metadata = {
                 "error_type": type(e).__name__,
