@@ -270,6 +270,8 @@ impl EntityStateManager {
             EntityStateLoadRequest {
                 entity_type,
                 entity_key,
+                scope: String::new(),    // Default to global scope
+                scope_id: String::new(), // Empty for global scope
             },
         );
 
@@ -315,6 +317,8 @@ impl EntityStateManager {
                 entity_key: entity_key.clone(),
                 state_json: state_json.clone(),
                 expected_version,
+                scope: String::new(),    // Default to global scope
+                scope_id: String::new(), // Empty for global scope
             },
         );
 
