@@ -57,6 +57,12 @@ def pytest_addoption(parser):
         help="Use Docker containers instead of local dev server",
     )
     parser.addoption(
+        "--use-subprocess",
+        action="store_true",
+        default=False,
+        help="Start platform binary as subprocess (for CI, no Docker needed)",
+    )
+    parser.addoption(
         "--runtime-mode",
         action="store",
         default="embedded",
@@ -69,8 +75,12 @@ def pytest_generate_tests(metafunc):
     """Generate test parametrization based on command-line options."""
     if "runtime_mode" in metafunc.fixturenames:
         use_docker = metafunc.config.getoption("--use-docker")
+        use_subprocess = metafunc.config.getoption("--use-subprocess")
 
-        if use_docker:
+        if use_subprocess:
+            # Subprocess mode: start platform binary directly (for CI)
+            modes = ["subprocess"]
+        elif use_docker:
             # Docker mode: parametrize across runtime modes
             mode = metafunc.config.getoption("--runtime-mode")
             if mode == "all":
@@ -137,16 +147,23 @@ def runtime_mode(request) -> str:
 
     Parametrized across runtime modes via pytest_generate_tests:
     - local: Use already-running local dev server (fastest, default)
+    - subprocess: Start platform binary directly (for CI, no Docker)
     - embedded: SQLite + embedded journal in Docker container
     - postgres: PostgreSQL + embedded journal (community edition)
     - managed: Redpanda + CockroachDB (production-like, slowest)
 
     Default: local mode for fastest test execution.
 
-    To test with Docker:
+    Examples:
+        # Local development (requires running dev server)
+        pytest tests/integration/
+
+        # CI mode (starts binary subprocess)
+        pytest tests/integration/ --use-subprocess
+
+        # Docker mode
         pytest tests/integration/ --use-docker
         pytest tests/integration/ --use-docker --runtime-mode=postgres
-        pytest tests/integration/ --use-docker --runtime-mode=all
     """
     return request.param
 
@@ -514,6 +531,118 @@ def setup_managed_mode() -> Dict[str, any]:
     }
 
 
+def setup_subprocess_mode(data_dir: str) -> Dict[str, any]:
+    """
+    Set up Subprocess mode (start platform binary directly).
+
+    This is the recommended mode for CI:
+    - No Docker required
+    - Fast startup (~5s)
+    - Clean isolation (processes die with tests)
+    - Easy debugging (stdout/stderr captured)
+
+    Architecture:
+    - Platform: Standalone binary started as subprocess
+    - Worker: Python subprocess from examples/
+    - State: SQLite in temp directory
+    """
+    print("\n🚀 Setting up SUBPROCESS mode (direct binary execution)")
+
+    # Find the standalone binary
+    # Look in common locations relative to the test file
+    test_dir = os.path.dirname(__file__)
+    repo_root = os.path.abspath(os.path.join(test_dir, "../../../../"))
+
+    binary_paths = [
+        os.path.join(repo_root, "platform/bin/standalone"),
+        os.path.join(repo_root, "platform/standalone"),
+        # CI might build to different location
+        os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "platform/bin/standalone"),
+    ]
+
+    binary_path = None
+    for path in binary_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            binary_path = path
+            break
+
+    if not binary_path:
+        raise Exception(
+            f"Standalone binary not found. Searched:\n"
+            + "\n".join(f"  - {p}" for p in binary_paths)
+            + "\n\nBuild it with: cd platform && go build -o bin/standalone ./cmd/standalone"
+        )
+
+    print(f"   Binary: {binary_path}")
+
+    # Examples directory for the worker
+    examples_dir = os.path.abspath(os.path.join(test_dir, "../../examples"))
+    print(f"   Examples: {examples_dir}")
+    print(f"   Data dir: {data_dir}")
+
+    # Ensure data directory exists
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Start the standalone binary
+    platform_process = subprocess.Popen(
+        [
+            binary_path,
+            "--project-path", examples_dir,
+            "--data-dir", data_dir,
+            "--service-name", "agnt5-examples",
+            "--disable-worker",  # We'll start worker separately for better control
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=repo_root,
+    )
+
+    print(f"   Platform PID: {platform_process.pid}")
+
+    # Give platform time to start
+    time.sleep(3)
+
+    # Check if process is still running
+    if platform_process.poll() is not None:
+        stdout, stderr = platform_process.communicate()
+        raise Exception(
+            f"Platform process died immediately:\n"
+            f"STDOUT: {stdout.decode()}\n"
+            f"STDERR: {stderr.decode()}"
+        )
+
+    gateway_url = "http://localhost:34181"
+    coordinator_url = "http://localhost:34186"
+
+    # Wait for platform health
+    _wait_for_platform_health(gateway_url, timeout=30)
+
+    print(f"✅ Subprocess mode ready")
+    print(f"   Gateway: {gateway_url}")
+    print(f"   Coordinator: {coordinator_url}")
+
+    return {
+        "mode": "subprocess",
+        "gateway_url": gateway_url,
+        "coordinator_url": coordinator_url,
+        "gateway_http_port": 34181,
+        "gateway_grpc_port": 34182,
+        "coordinator_port": 34186,
+        "otlp_port": 4317,
+        "otlp_endpoint": "http://localhost:4317",
+        "db_url": os.path.join(data_dir, "orchestration.db"),
+        "db_type": "sqlite",
+        "journal_backend": "embedded",
+        "orchestration_backend": "sqlite",
+        "host_data_dir": data_dir,
+        "examples_dir": examples_dir,
+        "processes": {
+            "platform": platform_process,
+        },
+        "containers": {},  # No containers in subprocess mode
+    }
+
+
 def _wait_for_platform_health(gateway_url: str, timeout: int = 60, container=None):
     """Wait for platform to become healthy."""
     print(f"📡 Waiting for platform at {gateway_url}...")
@@ -567,6 +696,8 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
     # Setup platform based on runtime mode
     if runtime_mode == "local":
         platform_config = setup_local_mode()
+    elif runtime_mode == "subprocess":
+        platform_config = setup_subprocess_mode(data_dir=persistent_data_dir)
     elif runtime_mode == "embedded":
         platform_config = setup_embedded_mode(data_dir=persistent_data_dir)
     elif runtime_mode == "postgres":
@@ -578,7 +709,23 @@ def platform(runtime_mode, persistent_data_dir) -> Generator[Dict[str, any], Non
 
     yield platform_config
 
-    # Cleanup containers
+    # Cleanup processes (subprocess mode)
+    processes = platform_config.get("processes", {})
+    if processes:
+        print(f"\n🧹 Stopping {runtime_mode} mode processes...")
+        for name, process in processes.items():
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+                print(f"   Stopped {name} (PID: {process.pid})")
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                print(f"   Killed {name} (PID: {process.pid})")
+            except Exception as e:
+                print(f"⚠️  Failed to stop {name}: {e}")
+
+    # Cleanup containers (Docker modes)
     containers = platform_config.get("containers", {})
     if containers:
         print(f"\n🧹 Stopping {runtime_mode} mode containers...")
@@ -598,9 +745,9 @@ def _wait_for_worker_registration(platform: Dict[str, any], max_wait: int = 30) 
     print(f"⏳ Waiting for worker to register...")
     start_time = time.time()
 
-    # In local mode, the worker uses different tenant/deployment IDs
+    # In local/subprocess mode, the worker uses different tenant/deployment IDs
     # Use the /v1/components endpoint to verify worker is ready instead
-    if platform["mode"] == "local":
+    if platform["mode"] in ("local", "subprocess"):
         endpoint = f"{platform['gateway_url']}/v1/components"
         params = {}
     else:
@@ -617,7 +764,7 @@ def _wait_for_worker_registration(platform: Dict[str, any], max_wait: int = 30) 
                 data = response.json()
 
                 # For components endpoint, check if components exist
-                if platform["mode"] == "local":
+                if platform["mode"] in ("local", "subprocess"):
                     components = data.get("components", [])
                     if components and len(components) > 0:
                         print(f"✅ Worker registered: {len(components)} components found\n")
@@ -670,7 +817,7 @@ def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
     Start Python worker process connected to platform.
 
     In local mode, the worker is already running (started by PM2 with the dev server).
-    In Docker modes, we start a separate worker subprocess.
+    In subprocess/Docker modes, we start a separate worker subprocess.
 
     Uses session scope so the worker runs once for all tests, avoiding
     the overhead of starting/stopping the worker for each test.
@@ -682,23 +829,35 @@ def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
         yield None  # No subprocess to manage
         return
 
-    # Docker modes: start worker subprocess
-    service_path = os.path.join(os.path.dirname(__file__), "test-bench")
+    # Determine service path and script based on mode
+    if platform["mode"] == "subprocess":
+        # Subprocess mode: use examples directory
+        service_path = platform.get("examples_dir") or os.path.join(
+            os.path.dirname(__file__), "../../examples"
+        )
+        worker_script = "app.py"
+        service_name = "agnt5-examples"
+    else:
+        # Docker modes: use test-bench directory
+        service_path = os.path.join(os.path.dirname(__file__), "test-bench")
+        worker_script = "app.py"
+        service_name = "test-bench"
 
     env = {
         **os.environ,
         "AGNT5_COORDINATOR_ENDPOINT": f"http://localhost:{platform['coordinator_port']}",
-        "AGNT5_SERVICE_NAME": "test-bench",
+        "AGNT5_SERVICE_NAME": service_name,
         "AGNT5_TENANT_ID": "00000000-0000-0000-0000-000000000001",
         "AGNT5_DEPLOYMENT_ID": "00000000-0000-0000-0000-000000000002",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": platform["otlp_endpoint"],
+        "OTEL_EXPORTER_OTLP_ENDPOINT": platform.get("otlp_endpoint", "http://localhost:4317"),
     }
 
     print(f"🔌 Worker connecting to coordinator: {env['AGNT5_COORDINATOR_ENDPOINT']}")
-    print(f"📊 Worker telemetry exporting to: {env['OTEL_EXPORTER_OTLP_ENDPOINT']}")
+    print(f"📁 Worker service path: {service_path}")
+    print(f"📄 Worker script: {worker_script}")
 
     worker = subprocess.Popen(
-        ["uv", "run", "python", "app.py"],
+        ["uv", "run", "python", worker_script],
         cwd=service_path,
         env=env,
         stdout=subprocess.PIPE,
@@ -735,19 +894,26 @@ def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
                 if workers and len(workers) > 0:
                     print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
 
-                    for idx, worker_info in enumerate(workers, 1):
-                        print(f"   Worker #{idx}:")
-                        print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
-                        print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
-                        print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
+                    # Print worker details (best effort - API format may vary)
+                    try:
+                        for idx, worker_info in enumerate(workers, 1):
+                            print(f"   Worker #{idx}:")
+                            if isinstance(worker_info, dict):
+                                print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
+                                print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
+                                print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
 
-                        components = worker_info.get("components", {})
-                        if components:
-                            print(f"     • Components:")
-                            for comp_type, comp_list in components.items():
-                                if comp_list:
-                                    print(f"       - {comp_type}: {', '.join(comp_list)}")
-                        print()
+                                components = worker_info.get("components", {})
+                                if components:
+                                    print(f"     • Components:")
+                                    for comp_type, comp_list in components.items():
+                                        if comp_list:
+                                            print(f"       - {comp_type}: {', '.join(comp_list)}")
+                            else:
+                                print(f"     • {worker_info}")
+                            print()
+                    except Exception as e:
+                        print(f"   (Could not print worker details: {e})")
 
                     worker_registered = True
                     break
