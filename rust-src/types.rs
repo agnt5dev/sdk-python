@@ -445,13 +445,16 @@ pub struct PyExecuteComponentResponse {
     pub error_message: Option<String>,
     #[pyo3(get)]
     pub metadata: HashMap<String, String>,
-    // Streaming support (v1.1)
+    // Streaming support (v1.2) - typed event streaming
+    // Event type from journal taxonomy: "lm.message.delta", "output.delta", "run.completed", etc.
     #[pyo3(get)]
-    pub is_chunk: bool,
+    pub event_type: String,
+    // Index for parallel content blocks (e.g., thinking[0], message[0])
     #[pyo3(get)]
-    pub done: bool,
+    pub content_index: i32,
+    // Global sequence number for ordering and resumability
     #[pyo3(get)]
-    pub chunk_index: i64,
+    pub sequence: i64,
     // Retry orchestration
     #[pyo3(get)]
     pub attempt: i32,
@@ -468,9 +471,9 @@ impl PyExecuteComponentResponse {
         state_update: Option<PyStateUpdate>,
         error_message: Option<String>,
         metadata: Option<HashMap<String, String>>,
-        is_chunk: Option<bool>,
-        done: Option<bool>,
-        chunk_index: Option<i64>,
+        event_type: Option<String>,
+        content_index: Option<i32>,
+        sequence: Option<i64>,
         attempt: Option<i32>,
     ) -> Self {
         Self {
@@ -480,9 +483,9 @@ impl PyExecuteComponentResponse {
             state_update,
             error_message,
             metadata: metadata.unwrap_or_default(),
-            is_chunk: is_chunk.unwrap_or(false),
-            done: done.unwrap_or(true),
-            chunk_index: chunk_index.unwrap_or(0),
+            event_type: event_type.unwrap_or_default(),
+            content_index: content_index.unwrap_or(0),
+            sequence: sequence.unwrap_or(0),
             attempt: attempt.unwrap_or(0),
         }
     }
@@ -510,9 +513,9 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
             result,
             error_message: resp.error_message.unwrap_or_default(),
             metadata: resp.metadata,
-            is_chunk: resp.is_chunk,
-            done: resp.done,
-            chunk_index: resp.chunk_index,
+            event_type: resp.event_type,
+            content_index: resp.content_index,
+            sequence: resp.sequence,
             attempt: resp.attempt,
         }
     }
@@ -540,9 +543,9 @@ impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
                 Some(resp.error_message)
             },
             metadata: resp.metadata,
-            is_chunk: resp.is_chunk,
-            done: resp.done,
-            chunk_index: resp.chunk_index,
+            event_type: resp.event_type,
+            content_index: resp.content_index,
+            sequence: resp.sequence,
             attempt: resp.attempt,
         }
     }

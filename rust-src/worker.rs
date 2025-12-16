@@ -299,6 +299,60 @@ impl PyWorker {
         Ok(initial_queued as usize)
     }
 
+    /// Queue a streaming delta for immediate delivery to the coordinator
+    ///
+    /// This method enables real-time streaming by queuing deltas as soon as they
+    /// are yielded from Python async generators, instead of collecting them into
+    /// a list first. A background flush task sends them via gRPC every 10ms.
+    ///
+    /// # Arguments
+    /// * `invocation_id` - Run ID for this invocation
+    /// * `event_type` - Event type ("output.start", "output.delta", "output.stop", etc.)
+    /// * `output_data` - JSON payload as string
+    /// * `content_index` - Index for parallel content blocks
+    /// * `sequence` - Monotonic sequence number for ordering
+    /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
+    fn queue_delta(
+        &self,
+        invocation_id: String,
+        event_type: String,
+        output_data: String,
+        content_index: i32,
+        sequence: i64,
+        metadata: HashMap<String, String>,
+    ) -> PyResult<()> {
+        // Convert output_data string to bytes
+        let data_bytes = output_data.into_bytes();
+
+        // Access worker and queue delta
+        let worker_guard = self.worker.lock().map_err(|e| {
+            let err_msg = format!("Failed to lock worker: {}", e);
+            log::error!("{}", err_msg);
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
+        })?;
+
+        if let Some(ref worker) = *worker_guard {
+            worker.queue_delta(
+                invocation_id,
+                event_type,
+                data_bytes,
+                content_index,
+                sequence,
+                metadata,
+            ).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to queue delta: {}", e)
+                )
+            })?;
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Worker not initialized"
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Set the Python event loop for concurrent async execution
     ///
     /// This method stores a reference to the Python event loop via TaskLocals.
@@ -795,7 +849,14 @@ impl PyWorker {
                 let result = Python::attach(
                     |py| -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
                         let py_result = result.bind(py);
-                        // Try to extract as list first (streaming case)
+
+                        // Check if streaming was handled via delta queue (Python returns None)
+                        if py_result.is_none() {
+                            log::debug!("Streaming function completed via delta queue");
+                            return Ok(None);
+                        }
+
+                        // Try to extract as list first (legacy streaming case - kept for backward compatibility)
                         if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>() {
                                     // Send each response via tx
                                     for py_response in py_list.into_iter() {
