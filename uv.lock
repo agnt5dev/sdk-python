@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "agnt5"
-version = "0.2.8a22"
+version = "0.3.0a5"
 source = { editable = "." }
 dependencies = [
     { name = "docstring-parser" },

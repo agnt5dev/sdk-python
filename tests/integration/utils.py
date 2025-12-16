@@ -102,16 +102,14 @@ def get_entity_state_from_platform(
     try:
         backend = _detect_backend(db_url)
 
-        # Query entity_state table
-        # Note: Actual schema may differ - adjust based on platform implementation
+        # Query entities table (schema from migrations)
         if backend == "sqlite":
             # SQLite uses ? placeholders
             cursor.execute(
                 """
-                SELECT state_json, version, updated_at
-                FROM entity_states
+                SELECT current_state, state_version, updated_at
+                FROM entities
                 WHERE entity_type = ? AND entity_key = ?
-                ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 (entity_type, key)
@@ -120,10 +118,9 @@ def get_entity_state_from_platform(
             # PostgreSQL/CockroachDB use %s placeholders
             cursor.execute(
                 """
-                SELECT state_json, version, updated_at
-                FROM entity_states
+                SELECT current_state, state_version, updated_at
+                FROM entities
                 WHERE entity_type = %s AND entity_key = %s
-                ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 (entity_type, key)
@@ -132,10 +129,10 @@ def get_entity_state_from_platform(
         row = cursor.fetchone()
 
         if row:
-            state_json, version, updated_at = row
+            current_state, state_version, updated_at = row
             return {
-                "state": json.loads(state_json) if isinstance(state_json, str) else state_json,
-                "version": version,
+                "state": json.loads(current_state) if isinstance(current_state, str) else current_state,
+                "version": state_version,
                 "updated_at": updated_at
             }
 
@@ -460,3 +457,33 @@ def clear_test_data(db_url: str, tenant_id: str = "test-tenant-001"):
     finally:
         cursor.close()
         conn.close()
+
+
+def get_db_path_for_platform(platform: Dict) -> str:
+    """
+    Get the correct database path for the current platform mode.
+
+    Handles the different database path patterns across modes:
+    - Local: /tmp/agnt5/<service-name>/agnt5.db
+    - Subprocess: {data_dir}/orchestration.db
+    - Others: Use db_url directly
+
+    Args:
+        platform: Platform configuration dict from fixture
+
+    Returns:
+        Database path suitable for direct SQLite/PostgreSQL connection
+    """
+    mode = platform.get("mode")
+
+    if mode == "local":
+        # Local mode: DB is at /tmp/agnt5/<service>/agnt5.db
+        # The service name is "agnt5-python-examples" when running with `just platform standalone python`
+        service_name = "agnt5-python-examples"
+        return f"/tmp/agnt5/{service_name}/agnt5.db"
+    elif mode == "subprocess":
+        # Subprocess mode: use host_db_path or db_url
+        return platform.get("host_db_path") or platform.get("db_url")
+    else:
+        # Other modes (embedded, postgres, managed): use db_url
+        return platform.get("db_url")

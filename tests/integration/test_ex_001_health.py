@@ -8,10 +8,20 @@ Simple smoke tests to verify the platform stack is working:
 - Basic connectivity works
 
 These tests should ALWAYS pass if the infrastructure is set up correctly.
+
+Run with:
+    pytest tests/integration/test_ex_001_health.py -v
 """
 
 import pytest
 import requests
+
+
+# Valid configurations per mode
+VALID_MODES = ["local", "subprocess", "embedded", "postgres", "managed"]
+VALID_DB_TYPES = ["sqlite", "postgres", "cockroach"]
+VALID_JOURNAL_BACKENDS = ["embedded", "redpanda"]
+VALID_ORCHESTRATION_BACKENDS = ["sqlite", "postgres", "cockroach"]
 
 
 @pytest.mark.integration
@@ -25,7 +35,7 @@ def test_platform_starts_successfully(platform):
     - Platform configuration is returned
     """
     assert platform is not None
-    assert platform["mode"] in ["local", "embedded", "postgres", "managed"]
+    assert platform["mode"] in VALID_MODES
     assert "gateway_url" in platform
     assert "coordinator_url" in platform
     assert "db_url" in platform
@@ -65,20 +75,18 @@ def test_database_accessible(platform):
     Test database configuration is correct.
 
     This validates:
-    - SQLite database path is configured
-    - Platform is using correct backend
+    - Database URL/path is configured
+    - Platform is using a valid backend type
     """
     db_url = platform["db_url"]
     db_type = platform["db_type"]
 
-    assert db_type == "sqlite", f"Expected sqlite, got: {db_type}"
-    # In local mode, db is at /tmp/agnt5/...
-    # In embedded mode, db is at /data/orchestration.db (inside container)
-    assert "agnt5" in db_url or "orchestration" in db_url, f"Unexpected db_url: {db_url}"
+    assert db_type in VALID_DB_TYPES, f"Invalid db_type: {db_type}"
+    assert db_url is not None and len(db_url) > 0, "db_url should not be empty"
 
     print(f"\n✅ Database configuration correct")
     print(f"   Type: {db_type}")
-    print(f"   Path: {db_url}")
+    print(f"   URL: {db_url}")
 
 
 @pytest.mark.integration
@@ -99,19 +107,37 @@ def test_client_creation(client):
 @pytest.mark.integration
 def test_platform_mode_configuration(platform):
     """
-    Test platform is configured correctly.
+    Test platform is configured correctly for the current mode.
 
     This validates:
-    - Correct backend configuration
-    - Journal backend is embedded
-    - Orchestration backend is SQLite
+    - Mode is valid
+    - Backend configurations are consistent with mode
     """
-    assert platform["mode"] in ["local", "embedded", "postgres", "managed"]
-    assert platform["journal_backend"] == "embedded"
-    assert platform["orchestration_backend"] == "sqlite"
-    assert platform["db_type"] == "sqlite"
+    mode = platform["mode"]
+    journal_backend = platform["journal_backend"]
+    orchestration_backend = platform["orchestration_backend"]
+    db_type = platform["db_type"]
+
+    assert mode in VALID_MODES
+    assert journal_backend in VALID_JOURNAL_BACKENDS
+    assert orchestration_backend in VALID_ORCHESTRATION_BACKENDS
+    assert db_type in VALID_DB_TYPES
+
+    # Validate mode-specific configurations
+    if mode in ["local", "subprocess", "embedded"]:
+        assert db_type == "sqlite"
+        assert orchestration_backend == "sqlite"
+        assert journal_backend == "embedded"
+    elif mode == "postgres":
+        assert db_type == "postgres"
+        assert orchestration_backend == "postgres"
+    elif mode == "managed":
+        assert db_type == "cockroach"
+        assert orchestration_backend == "cockroach"
+        assert journal_backend == "redpanda"
 
     print(f"\n✅ Platform configuration correct")
-    print(f"   Mode: {platform['mode']}")
-    print(f"   Journal: {platform['journal_backend']}")
-    print(f"   Orchestration: {platform['orchestration_backend']}")
+    print(f"   Mode: {mode}")
+    print(f"   Journal: {journal_backend}")
+    print(f"   Orchestration: {orchestration_backend}")
+    print(f"   Database: {db_type}")

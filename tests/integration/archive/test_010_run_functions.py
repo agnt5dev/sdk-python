@@ -104,7 +104,6 @@ def test_function_error_handling(client, worker_process):
 
 @pytest.mark.integration
 @pytest.mark.slow
-@pytest.mark.skip(reason="TODO: Retry coordination not working between worker and execution engine - platform issue")
 def test_function_retry_logic(client, worker_process):
     """
     Test function retry mechanism.
@@ -114,9 +113,9 @@ def test_function_retry_logic(client, worker_process):
     - Retries happen automatically on failure
     - Function succeeds after configured failures
 
-    TODO: This test exposes that retry logic isn't coordinated between worker and platform.
-          Function fails on first attempt and error is returned immediately instead of retrying.
-          This is a platform execution engine issue, not a test code issue.
+    Note: This test validates the platform-level retry orchestration implemented in
+          the Worker Coordinator. On failure, the platform checks the component's
+          retry policy and schedules a retry with exponential backoff.
     """
     time.sleep(2)
 
