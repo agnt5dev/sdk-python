@@ -1,0 +1,15 @@
+[project]
+name = "agnt5-examples"
+version = "1.0.0"
+description = "AGNT5 Python SDK Examples - runnable as standalone or platform worker"
+requires-python = ">=3.11"
+dependencies = [
+    "agnt5>=0.2.8a3",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.uv.sources]
+agnt5 = { path = "../", editable = true }
+
+# No build-system - this is a script collection, not an installable package
+# uv will still create a venv and install dependencies
