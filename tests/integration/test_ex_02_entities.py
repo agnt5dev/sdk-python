@@ -1,0 +1,349 @@
+"""
+Integration Tests for ex_02_entities.py
+
+Tests entity features through the platform:
+- Counter - Basic counter with increment/decrement
+- ConversationMemory - AI conversation history management
+- KeyValueStore - Simple key-value storage
+
+Run with:
+    # Local mode (requires running dev server with examples worker)
+    pytest tests/integration/test_ex_02_entities.py -v
+
+    # Subprocess mode (for CI)
+    pytest tests/integration/test_ex_02_entities.py -v --use-subprocess
+"""
+
+import uuid
+
+import pytest
+
+
+def unique_key(prefix: str) -> str:
+    """Generate a unique entity key to ensure test isolation."""
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+# =============================================================================
+# COUNTER ENTITY
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_counter_increment(client, worker_process, platform):
+    """Test counter increment operation."""
+    counter = client.entity("Counter", unique_key("counter"))
+
+    result = counter.increment(amount=5)
+    assert result == 5
+
+    result = counter.increment(amount=3)
+    assert result == 8
+
+
+@pytest.mark.integration
+def test_counter_decrement(client, worker_process):
+    """Test counter decrement operation."""
+    counter = client.entity("Counter", unique_key("counter"))
+
+    counter.increment(amount=10)
+    result = counter.decrement(amount=3)
+    assert result == 7
+
+
+@pytest.mark.integration
+def test_counter_get_count(client, worker_process):
+    """Test counter get_count operation."""
+    counter = client.entity("Counter", unique_key("counter"))
+
+    # Initial count should be 0
+    result = counter.get_count()
+    assert result == 0
+
+    counter.increment(amount=5)
+    result = counter.get_count()
+    assert result == 5
+
+
+@pytest.mark.integration
+def test_counter_reset(client, worker_process):
+    """Test counter reset operation."""
+    counter = client.entity("Counter", unique_key("counter"))
+
+    counter.increment(amount=100)
+    result = counter.reset()
+    assert result == 0
+
+    result = counter.get_count()
+    assert result == 0
+
+
+@pytest.mark.integration
+def test_counter_state_isolation(client, worker_process):
+    """Test that different counter keys have isolated state."""
+    counter_a = client.entity("Counter", unique_key("counter-a"))
+    counter_b = client.entity("Counter", unique_key("counter-b"))
+
+    counter_a.increment(amount=10)
+    counter_b.increment(amount=5)
+
+    assert counter_a.get_count() == 10
+    assert counter_b.get_count() == 5
+
+
+# =============================================================================
+# CONVERSATION MEMORY ENTITY
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_memory_add_message(client, worker_process):
+    """Test adding messages to conversation."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    result = memory.add_message(role="user", content="Hello!")
+    assert result["action"] == "added"
+    assert result["role"] == "user"
+    assert result["message_count"] == 1
+
+    result = memory.add_message(role="assistant", content="Hi there!")
+    assert result["message_count"] == 2
+
+
+@pytest.mark.integration
+def test_memory_get_messages(client, worker_process):
+    """Test getting all messages."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Question 1")
+    memory.add_message(role="assistant", content="Answer 1")
+    memory.add_message(role="user", content="Question 2")
+
+    messages = memory.get_messages()
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "Question 1"
+
+
+@pytest.mark.integration
+def test_memory_get_messages_with_limit(client, worker_process):
+    """Test getting messages with limit."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Message 1")
+    memory.add_message(role="assistant", content="Message 2")
+    memory.add_message(role="user", content="Message 3")
+    memory.add_message(role="assistant", content="Message 4")
+
+    messages = memory.get_messages(limit=2)
+    assert len(messages) == 2
+    # Should return most recent
+    assert messages[0]["content"] == "Message 3"
+    assert messages[1]["content"] == "Message 4"
+
+
+@pytest.mark.integration
+def test_memory_get_messages_by_role(client, worker_process):
+    """Test filtering messages by role."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="User message 1")
+    memory.add_message(role="assistant", content="Assistant message")
+    memory.add_message(role="user", content="User message 2")
+
+    user_messages = memory.get_messages(roles=["user"])
+    assert len(user_messages) == 2
+    assert all(m["role"] == "user" for m in user_messages)
+
+
+@pytest.mark.integration
+def test_memory_get_last_message(client, worker_process):
+    """Test getting the last message."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="First")
+    memory.add_message(role="assistant", content="Second")
+    memory.add_message(role="user", content="Third")
+
+    last = memory.get_last_message()
+    assert last["content"] == "Third"
+
+    last_assistant = memory.get_last_message(role="assistant")
+    assert last_assistant["content"] == "Second"
+
+
+@pytest.mark.integration
+def test_memory_get_context_window(client, worker_process):
+    """Test getting context window for LLM."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Hello")
+    memory.add_message(role="assistant", content="Hi!")
+    memory.add_message(role="user", content="How are you?")
+
+    context = memory.get_context_window(max_messages=10)
+    assert len(context) == 3
+    # Should be in LLM format (role + content only)
+    assert "timestamp" not in context[0]
+    assert context[0] == {"role": "user", "content": "Hello"}
+
+
+@pytest.mark.integration
+def test_memory_summarize(client, worker_process):
+    """Test conversation summary."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Hello")
+    memory.add_message(role="assistant", content="Hi there!")
+    memory.add_message(role="user", content="Thanks")
+
+    summary = memory.summarize()
+    assert summary["message_count"] == 3
+    assert summary["role_counts"]["user"] == 2
+    assert summary["role_counts"]["assistant"] == 1
+    assert summary["total_characters"] > 0
+    assert summary["has_system_message"] is False
+
+
+@pytest.mark.integration
+def test_memory_set_system_message(client, worker_process):
+    """Test setting system message."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Hello")
+    result = memory.set_system_message(content="You are a helpful assistant.")
+    assert result["action"] == "system_message_set"
+
+    messages = memory.get_messages()
+    # System message should be first
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == "You are a helpful assistant."
+
+    summary = memory.summarize()
+    assert summary["has_system_message"] is True
+
+
+@pytest.mark.integration
+def test_memory_clear(client, worker_process):
+    """Test clearing conversation."""
+    memory = client.entity("ConversationMemory", unique_key("memory"))
+
+    memory.add_message(role="user", content="Hello")
+    memory.add_message(role="assistant", content="Hi!")
+
+    result = memory.clear()
+    assert result["action"] == "cleared"
+
+    messages = memory.get_messages()
+    assert len(messages) == 0
+
+
+@pytest.mark.integration
+def test_memory_state_isolation(client, worker_process):
+    """Test that different sessions have isolated state."""
+    memory_a = client.entity("ConversationMemory", unique_key("session-a"))
+    memory_b = client.entity("ConversationMemory", unique_key("session-b"))
+
+    memory_a.add_message(role="user", content="Message in A")
+    memory_b.add_message(role="user", content="Message in B")
+
+    assert len(memory_a.get_messages()) == 1
+    assert len(memory_b.get_messages()) == 1
+    assert memory_a.get_messages()[0]["content"] == "Message in A"
+    assert memory_b.get_messages()[0]["content"] == "Message in B"
+
+
+# =============================================================================
+# KEY-VALUE STORE ENTITY
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_kv_set_get(client, worker_process):
+    """Test setting and getting values."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    result = store.set_value(item_key="theme", value="dark")
+    assert result["action"] == "set"
+    assert result["key"] == "theme"
+
+    value = store.get_value(item_key="theme")
+    assert value == "dark"
+
+
+@pytest.mark.integration
+def test_kv_get_default(client, worker_process):
+    """Test getting nonexistent key with default."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    value = store.get_value(item_key="nonexistent", default="default_value")
+    assert value == "default_value"
+
+
+@pytest.mark.integration
+def test_kv_delete(client, worker_process):
+    """Test deleting a key."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    store.set_value(item_key="temp", value="data")
+    result = store.delete_key(item_key="temp")
+    assert result["action"] == "deleted"
+
+    value = store.get_value(item_key="temp")
+    assert value is None
+
+
+@pytest.mark.integration
+def test_kv_delete_nonexistent(client, worker_process):
+    """Test deleting nonexistent key."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    result = store.delete_key(item_key="nonexistent")
+    assert result["action"] == "not_found"
+
+
+@pytest.mark.integration
+def test_kv_keys(client, worker_process):
+    """Test listing all keys."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    store.set_value(item_key="theme", value="dark")
+    store.set_value(item_key="language", value="en")
+    store.set_value(item_key="timezone", value="UTC")
+
+    keys = store.list_keys()
+    assert set(keys) == {"theme", "language", "timezone"}
+
+
+@pytest.mark.integration
+def test_kv_clear(client, worker_process):
+    """Test clearing all data."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    store.set_value(item_key="key1", value="value1")
+    store.set_value(item_key="key2", value="value2")
+
+    result = store.clear()
+    assert result["action"] == "cleared"
+
+    keys = store.list_keys()
+    assert len(keys) == 0
+
+
+@pytest.mark.integration
+def test_kv_complex_values(client, worker_process):
+    """Test storing complex values (dicts, lists)."""
+    store = client.entity("KeyValueStore", unique_key("store"))
+
+    complex_value = {
+        "nested": {"key": "value"},
+        "list": [1, 2, 3],
+        "number": 42,
+    }
+
+    store.set_value(item_key="complex", value=complex_value)
+    result = store.get_value(item_key="complex")
+
+    assert result["nested"]["key"] == "value"
+    assert result["list"] == [1, 2, 3]
+    assert result["number"] == 42
