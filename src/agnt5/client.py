@@ -409,11 +409,17 @@ class Client:
                 )
 
             # Parse SSE stream
+            current_event = None
             for line in response.iter_lines():
                 line = line.strip()
 
                 # Skip empty lines and comments
                 if not line or line.startswith(":"):
+                    continue
+
+                # Parse event type: "event: output.delta"
+                if line.startswith("event: "):
+                    current_event = line[7:]  # Remove "event: " prefix
                     continue
 
                 # Parse SSE format: "data: {...}"
@@ -424,7 +430,7 @@ class Client:
                         data = json.loads(data_str)
 
                         # Check for completion
-                        if data.get("done"):
+                        if data.get("done") or current_event == "done":
                             return
 
                         # Check for error
@@ -434,8 +440,11 @@ class Client:
                                 run_id=data.get("runId"),
                             )
 
-                        # Yield chunk
-                        if "chunk" in data:
+                        # Yield chunk from output.delta events
+                        if current_event == "output.delta" and "content" in data:
+                            yield data["content"]
+                        # Also support legacy "chunk" format
+                        elif "chunk" in data:
                             yield data["chunk"]
 
                     except json.JSONDecodeError:

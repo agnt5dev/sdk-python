@@ -865,45 +865,92 @@ class Worker:
 
             # Check if result is an async generator (streaming function)
             if inspect.isasyncgen(result):
-                # Streaming function - return list of responses
-                # Rust bridge will send each response separately to coordinator
-                responses = []
-                chunk_index = 0
+                # Streaming function - queue deltas immediately via Rust for real-time delivery
+                # Instead of collecting into a list and returning, we send each chunk
+                # as it's yielded via the delta queue with 10ms flush interval
+                from .events import StreamEvent
+
+                sequence = 0
+                has_typed_events = False  # Track if user yields StreamEvent objects
+                first_chunk = True
+
+                # Extract metadata for delta queue (must be Dict[str, str] for Rust FFI)
+                metadata = _normalize_metadata(self._extract_critical_metadata(request))
 
                 async for chunk in result:
-                    # Serialize chunk (using _serialize_result to handle Pydantic models, etc.)
-                    chunk_data = _serialize_result(chunk)
+                    # Check if chunk is a typed StreamEvent
+                    if isinstance(chunk, StreamEvent):
+                        has_typed_events = True
+                        # Use the event's fields directly
+                        event_data = chunk.to_response_fields()
+                        output_data = event_data.get("output_data", b"")
+                        # Convert bytes to string for queue_delta
+                        output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
+                        self._rust_worker.queue_delta(
+                            invocation_id=request.invocation_id,
+                            event_type=event_data.get("event_type", ""),
+                            output_data=output_str,
+                            content_index=event_data.get("content_index", 0),
+                            sequence=sequence,
+                            metadata=metadata,
+                        )
+                    else:
+                        # Regular chunk - wrap with output events
+                        if first_chunk:
+                            # Emit output.start event before first chunk
+                            self._rust_worker.queue_delta(
+                                invocation_id=request.invocation_id,
+                                event_type="output.start",
+                                output_data="{}",
+                                content_index=0,
+                                sequence=sequence,
+                                metadata=metadata,
+                            )
+                            sequence += 1
+                            first_chunk = False
 
-                    responses.append(PyExecuteComponentResponse(
+                        # Serialize chunk (using _serialize_result to handle Pydantic models, etc.)
+                        chunk_data = _serialize_result(chunk)
+                        # Convert bytes to string for queue_delta
+                        chunk_str = chunk_data.decode("utf-8") if isinstance(chunk_data, bytes) else str(chunk_data)
+
+                        # Emit output.delta event
+                        self._rust_worker.queue_delta(
+                            invocation_id=request.invocation_id,
+                            event_type="output.delta",
+                            output_data=chunk_str,
+                            content_index=0,
+                            sequence=sequence,
+                            metadata=metadata,
+                        )
+                    sequence += 1
+
+                # Emit closing events if we had regular chunks
+                if not has_typed_events and not first_chunk:
+                    # Emit output.stop event
+                    self._rust_worker.queue_delta(
                         invocation_id=request.invocation_id,
-                        success=True,
-                        output_data=chunk_data,
-                        state_update=None,
-                        error_message=None,
-                        metadata=None,
-                        is_chunk=True,
-                        done=False,
-                        chunk_index=chunk_index,
-                        attempt=platform_attempt,
-                    ))
-                    chunk_index += 1
+                        event_type="output.stop",
+                        output_data="{}",
+                        content_index=0,
+                        sequence=sequence,
+                        metadata=metadata,
+                    )
+                    sequence += 1
 
-                # Add final "done" marker
-                responses.append(PyExecuteComponentResponse(
+                # Always emit run.completed event
+                self._rust_worker.queue_delta(
                     invocation_id=request.invocation_id,
-                    success=True,
-                    output_data=b"",
-                    state_update=None,
-                    error_message=None,
-                    metadata=None,
-                    is_chunk=True,
-                    done=True,
-                    chunk_index=chunk_index,
-                    attempt=platform_attempt,
-                ))
+                    event_type="run.completed",
+                    output_data="{}",
+                    content_index=0,
+                    sequence=sequence,
+                    metadata=metadata,
+                )
 
-                logger.debug(f"Streaming function produced {len(responses)} chunks")
-                return responses
+                logger.debug(f"Streaming function queued {sequence + 1} deltas for real-time delivery")
+                # Return None to signal that streaming was handled via delta queue
+                return None
             else:
                 # Regular function - await and return single response
                 if inspect.iscoroutine(result):
@@ -915,6 +962,7 @@ class Worker:
                 # Extract critical metadata for journal event correlation
                 response_metadata = self._extract_critical_metadata(request)
 
+                # Emit run.completed event with output
                 return PyExecuteComponentResponse(
                     invocation_id=request.invocation_id,
                     success=True,
@@ -922,9 +970,9 @@ class Worker:
                     state_update=None,
                     error_message=None,
                     metadata=response_metadata if response_metadata else None,
-                    is_chunk=False,
-                    done=True,
-                    chunk_index=0,
+                    event_type="run.completed",
+                    content_index=0,
+                    sequence=0,
                     attempt=platform_attempt,
                 )
 
@@ -958,6 +1006,7 @@ class Worker:
             # PyO3 expects HashMap<String, String>, but we may have booleans or other types
             normalized_metadata = _normalize_metadata(metadata)
 
+            # Emit run.failed event
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -965,9 +1014,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=normalized_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.failed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1271,9 +1320,9 @@ class Worker:
                 state_update=None,  # Not used for workflows (use metadata instead)
                 error_message=None,
                 metadata=metadata if metadata else None,  # Include step events + state + session_id
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.completed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1339,6 +1388,7 @@ class Worker:
             }
             output_data = _serialize_result(output)
 
+            # Emit run.paused event for HITL (human-in-the-loop)
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,  # This is a valid pause state, not an error
@@ -1346,9 +1396,9 @@ class Worker:
                 state_update=None,
                 error_message=None,
                 metadata=pause_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.paused",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1388,6 +1438,7 @@ class Worker:
             # Normalize metadata for Rust FFI compatibility
             normalized_metadata = _normalize_metadata(metadata)
 
+            # Emit run.failed event
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -1395,9 +1446,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=normalized_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.failed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1434,9 +1485,9 @@ class Worker:
                 state_update=None,
                 error_message=None,
                 metadata=None,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.completed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1468,6 +1519,7 @@ class Worker:
             # Normalize metadata for Rust FFI compatibility
             normalized_metadata = _normalize_metadata(metadata)
 
+            # Emit run.failed event
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -1475,9 +1527,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=normalized_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.failed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1549,9 +1601,9 @@ class Worker:
                 state_update=None,  # TODO: Use structured StateUpdate object
                 error_message=None,
                 metadata=metadata if metadata else None,  # Include state in metadata for Worker Coordinator
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.completed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1583,6 +1635,7 @@ class Worker:
             # Normalize metadata for Rust FFI compatibility
             normalized_metadata = _normalize_metadata(metadata)
 
+            # Emit run.failed event
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -1590,9 +1643,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=normalized_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.failed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1674,9 +1727,9 @@ class Worker:
                 state_update=None,
                 error_message=None,
                 metadata=metadata if metadata else None,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.completed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1708,6 +1761,7 @@ class Worker:
             # Normalize metadata for Rust FFI compatibility
             normalized_metadata = _normalize_metadata(metadata)
 
+            # Emit run.failed event
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=False,
@@ -1715,9 +1769,9 @@ class Worker:
                 state_update=None,
                 error_message=error_msg,
                 metadata=normalized_metadata,
-                is_chunk=False,
-                done=True,
-                chunk_index=0,
+                event_type="run.failed",
+                content_index=0,
+                sequence=0,
                 attempt=getattr(request, 'attempt', 0),
             )
 
@@ -1729,6 +1783,7 @@ class Worker:
         """Create an error response."""
         from ._core import PyExecuteComponentResponse
 
+        # Emit run.failed event
         return PyExecuteComponentResponse(
             invocation_id=request.invocation_id,
             success=False,
@@ -1736,9 +1791,9 @@ class Worker:
             state_update=None,
             error_message=error_message,
             metadata=None,
-            is_chunk=False,
-            done=True,
-            chunk_index=0,
+            event_type="run.failed",
+            content_index=0,
+            sequence=0,
             attempt=getattr(request, 'attempt', 0),
         )
 

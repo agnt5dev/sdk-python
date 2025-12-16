@@ -42,6 +42,9 @@ from .workflow import WorkflowRegistry, workflow
 # Expose simplified language model API (recommended)
 from . import lm
 
+# Expose streaming events module for typed event streaming
+from . import events
+
 # Expose Sentry utilities for custom error tracking (optional)
 from . import _sentry as sentry
 
@@ -102,6 +105,8 @@ __all__ = [
     "RunError",
     # Language Model (Simplified API)
     "lm",
+    # Streaming Events (for typed SSE events)
+    "events",
     # Sentry integration (Optional)
     "sentry",
 ]
