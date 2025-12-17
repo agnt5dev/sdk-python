@@ -25,12 +25,19 @@ Prerequisites:
 import asyncio
 import os
 
-from agnt5 import function, FunctionContext, Agent
-
+from agnt5 import Agent, FunctionContext, function
 
 # =============================================================================
 # BASIC AGENTS
 # =============================================================================
+
+simple_assistant_agent = Agent(
+    name="simple-assistant-agent",
+    model="openai/gpt-4o-mini",
+    instructions="You are a helpful assistant. Be concise and friendly.",
+    temperature=0.7,
+    max_iterations=5,
+)
 
 
 @function
@@ -51,15 +58,7 @@ async def simple_agent(ctx: FunctionContext, message: str) -> dict:
     """
     ctx.logger.info(f"[simple_agent] Processing: {message[:50]}...")
 
-    agent = Agent(
-        name="assistant",
-        model="openai/gpt-4o-mini",
-        instructions="You are a helpful assistant. Be concise and friendly.",
-        temperature=0.7,
-        max_iterations=5,
-    )
-
-    result = await agent.run(message)
+    result = await simple_assistant_agent.run_sync(message)
 
     return {
         "message": message,
@@ -92,7 +91,7 @@ async def claude_agent(ctx: FunctionContext, message: str) -> dict:
         max_iterations=5,
     )
 
-    result = await agent.run(message)
+    result = await agent.run_sync(message)
 
     return {
         "message": message,
@@ -140,7 +139,7 @@ When answering questions:
         max_iterations=5,
     )
 
-    result = await agent.run(question)
+    result = await agent.run_sync(question)
 
     return {
         "question": question,
@@ -187,7 +186,7 @@ Focus on engaging content that captivates the reader.""",
         max_iterations=5,
     )
 
-    result = await agent.run(prompt)
+    result = await agent.run_sync(prompt)
 
     return {
         "prompt": prompt,
@@ -246,7 +245,7 @@ Be helpful, engaging, and personable.""",
     conversation_history = history if history else []
 
     # Run agent with history
-    result = await agent.run(message, history=conversation_history)
+    result = await agent.run_sync(message, history=conversation_history)
 
     # Update history with new exchange
     updated_history = conversation_history + [
@@ -270,6 +269,7 @@ Be helpful, engaging, and personable.""",
 async def main() -> None:
     """Run examples standalone (without platform)."""
     import logging
+
     from agnt5 import Context
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

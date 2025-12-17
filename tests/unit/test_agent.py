@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from agnt5 import Agent, tool, Context
 from agnt5.agent import AgentResult, AgentContext, AgentRegistry, Handoff, handoff
+from agnt5.events import Event, EventType
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, MessageRole, TokenUsage
 from agnt5.tool import ToolRegistry
 
@@ -55,9 +56,33 @@ class MockLanguageModel(LanguageModel):
         )
 
     async def stream(self, request: GenerateRequest):
-        """Mock stream (not implemented)."""
-        yield "Mock"
-        yield " stream"
+        """Mock stream that yields proper Event objects."""
+        # Get response for this call (use same logic as generate)
+        response_text = self.responses[min(self.call_count, len(self.responses) - 1)]
+        self.call_count += 1
+
+        # Yield content block start
+        yield Event.message_start(index=0, sequence=0)
+
+        # Yield delta with full text
+        yield Event.message_delta(content=response_text, index=0, sequence=1)
+
+        # Yield content block stop
+        yield Event.message_stop(index=0, sequence=2)
+
+        # Yield completion event
+        yield Event(
+            event_type=EventType.LM_STREAM_COMPLETED,
+            data={
+                "text": response_text,
+                "model": "mock-model",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                },
+            },
+            sequence=3,
+        )
 
 
 # Test fixtures
@@ -102,7 +127,7 @@ def test_agent_creation(mock_lm):
 
     assert agent.name == "test_agent"
     assert agent.instructions == "You are a test agent"
-    assert agent.model is mock_lm
+    assert agent._language_model is mock_lm  # LanguageModel stored in _language_model
     assert len(agent.tools) == 0
 
 
@@ -151,19 +176,57 @@ def test_agent_configuration(mock_lm):
 # Test Agent Execution (with new string-based model API)
 
 
+class MockAsyncStreamIterator:
+    """Mock async iterator for stream_iter that yields chunks."""
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index >= len(self.chunks):
+            raise StopAsyncIteration
+        chunk = self.chunks[self.index]
+        self.index += 1
+        return chunk
+
+
 @pytest.mark.asyncio
 async def test_agent_run_simple():
     """Test simple agent run without tools using string model."""
-    # Mock the Rust LLM generate response
+    # Mock the Rust LLM with both generate and stream responses
     mock_response = MagicMock()
+    mock_response.text = "Hello! How can I help you?"
     mock_response.content = "Hello! How can I help you?"
     mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
     mock_response.tool_calls = None
     mock_response.object = None
 
+    # Create mock stream chunks (Rust stream_iter returns an async iterator)
+    class MockChunk:
+        def __init__(self, chunk_type, text="", block_type=None, index=0):
+            self.chunk_type = chunk_type
+            self.text = text
+            self.block_type = block_type
+            self.index = index
+            self.model = "mock"
+            self.finish_reason = "stop" if chunk_type == "completed" else None
+            self.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30) if chunk_type == "completed" else None
+
+    mock_chunks = [
+        MockChunk("content_block_start", block_type="text", index=0),
+        MockChunk("delta", text="Hello! How can I help you?", block_type="text", index=0),
+        MockChunk("content_block_stop", index=0),
+        MockChunk("completed", text="Hello! How can I help you?"),
+    ]
+
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_response)
+        # stream_iter returns an async iterator, not a coroutine
+        mock_instance.stream_iter = MagicMock(return_value=MockAsyncStreamIterator(mock_chunks))
         mock_rust_class.return_value = mock_instance
 
         agent = Agent(
@@ -172,7 +235,7 @@ async def test_agent_run_simple():
             instructions="Be helpful",
         )
 
-        result = await agent.run("Hi there")
+        result = await agent.run_sync("Hi there")
 
         assert isinstance(result, AgentResult)
         assert result.output == "Hello! How can I help you?"
@@ -190,7 +253,7 @@ async def test_agent_run_with_mock_lm(mock_lm):
         instructions="Be helpful",
     )
 
-    result = await agent.run("Hi there")
+    result = await agent.run_sync("Hi there")
 
     assert isinstance(result, AgentResult)
     assert result.output == "Hello! How can I help you?"
@@ -220,12 +283,12 @@ async def test_agent_run_with_agent_context(mock_lm):
 
         # First message
         ctx1 = AgentContext(run_id="session-1", agent_name="ctx_agent")
-        result1 = await agent.run("Hi there", context=ctx1)
+        result1 = await agent.run_sync("Hi there", context=ctx1)
         assert "Hello" in result1.output
 
         # Second message (should have conversation history)
         ctx2 = AgentContext(run_id="session-1", agent_name="ctx_agent")
-        result2 = await agent.run("Do you remember?", context=ctx2)
+        result2 = await agent.run_sync("Do you remember?", context=ctx2)
 
         # Check that conversation history was loaded
         history = await ctx2.get_conversation_history()
@@ -259,7 +322,7 @@ async def test_agent_with_tool_execution(sample_tool):
         tools=[sample_tool],
     )
 
-    result = await agent.run("Double the number 10")
+    result = await agent.run_sync("Double the number 10")
 
     assert "The doubled value is 20" in result.output
     assert len(result.tool_calls) == 1
@@ -301,7 +364,7 @@ async def test_agent_multiple_tool_calls():
         tools=[add, multiply],
     )
 
-    result = await agent.run("Add 10 and 15, then multiply by 2")
+    result = await agent.run_sync("Add 10 and 15, then multiply by 2")
 
     assert len(result.tool_calls) == 2
     assert result.tool_calls[0]["name"] == "add"
@@ -335,7 +398,7 @@ async def test_agent_tool_error_handling():
         tools=[failing_tool],
     )
 
-    result = await agent.run("Use the failing tool")
+    result = await agent.run_sync("Use the failing tool")
 
     # Agent should complete despite tool error
     assert result.output
@@ -363,7 +426,7 @@ async def test_agent_max_iterations():
         max_iterations=3,
     )
 
-    result = await agent.run("Keep calling tools")
+    result = await agent.run_sync("Keep calling tools")
 
     # Should stop at max_iterations
     assert len(result.tool_calls) <= 3
@@ -386,12 +449,12 @@ async def test_agent_as_tool():
     # Convert agent to tool
     specialist_tool = specialist.to_tool()
 
-    assert specialist_tool.name == "specialist"
+    assert specialist_tool.name == "ask_specialist"  # Tool name is prefixed with 'ask_'
     assert "specialist" in specialist_tool.description.lower()
 
     # Use specialist as a tool
     ctx = Context(run_id="test-123")
-    result = await specialist_tool.invoke(ctx, user_message="Test query")
+    result = await specialist_tool.invoke(ctx, message="Test query")  # Parameter is 'message'
 
     assert result == "Specialist response"
 
@@ -403,7 +466,7 @@ async def test_agent_with_agent_tools():
     coordinator_lm = MockLanguageModel(
         responses=["Using specialist", "Final answer"],
         tool_calls=[
-            [{"id": "call_1", "name": "specialist", "arguments": '{"user_message": "Help with this"}'}],
+            [{"id": "call_1", "name": "ask_specialist", "arguments": '{"message": "Help with this"}'}],
             None,
         ],
     )
@@ -421,10 +484,10 @@ async def test_agent_with_agent_tools():
         tools=[specialist],  # Pass agent directly as tool
     )
 
-    result = await coordinator.run("Need specialist help")
+    result = await coordinator.run_sync("Need specialist help")
 
     assert len(result.tool_calls) == 1
-    assert result.tool_calls[0]["name"] == "specialist"
+    assert result.tool_calls[0]["name"] == "ask_specialist"  # Tool name is prefixed with 'ask_'
 
 
 # Test Handoff Mechanism
@@ -454,7 +517,7 @@ async def test_agent_handoff():
         handoffs=[handoff(target_agent, "Transfer to target agent")],
     )
 
-    result = await source_agent.run("Need specialized help")
+    result = await source_agent.run_sync("Need specialized help")
 
     # Should have handed off to target
     assert result.handoff_to == "target"
@@ -662,7 +725,18 @@ async def test_agent_context_conversation_history():
 
 @pytest.mark.asyncio
 async def test_agent_tool_not_found():
-    """Test agent handling missing tool."""
+    """Test agent handling missing tool.
+
+    When the LLM returns a tool call for a tool that doesn't exist,
+    the agent should handle it gracefully and continue.
+    """
+    # Create a dummy tool so the agent uses generate() instead of stream()
+    # (streaming doesn't support tool calls)
+    @tool(auto_schema=True)
+    async def dummy_tool(ctx: Context, x: int) -> int:
+        """A dummy tool that's never called."""
+        return x
+
     mock_lm = MockLanguageModel(
         responses=[
             "Calling tool",
@@ -678,10 +752,10 @@ async def test_agent_tool_not_found():
         name="missing_tool_agent",
         model=mock_lm,
         instructions="Test",
-        tools=[],
+        tools=[dummy_tool],  # Need at least one tool to use generate() path
     )
 
-    result = await agent.run("Use a missing tool")
+    result = await agent.run_sync("Use a missing tool")
 
     # Should complete despite missing tool
     assert result.output
@@ -721,3 +795,115 @@ def test_agent_result_with_handoff():
 
     assert result.handoff_to == "target_agent"
     assert result.handoff_metadata["from"] == "source"
+
+
+# Test Streaming API
+
+
+@pytest.mark.asyncio
+async def test_agent_run_returns_async_generator(mock_lm):
+    """Test that agent.run() returns an async generator."""
+    mock_lm.responses = ["Hello! How can I help you?"]
+
+    agent = Agent(
+        name="streaming_agent",
+        model=mock_lm,
+        instructions="Be helpful",
+    )
+
+    # run() should return an async generator
+    result = agent.run("Hi there")
+    import inspect
+    assert inspect.isasyncgen(result)
+
+    # Clean up - consume the generator
+    async for _ in result:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_agent_run_streaming_events(mock_lm):
+    """Test that agent.run() yields correct events."""
+    mock_lm.responses = ["Hello! How can I help you?"]
+
+    agent = Agent(
+        name="streaming_agent",
+        model=mock_lm,
+        instructions="Be helpful",
+    )
+
+    events = []
+    async for event in agent.run("Hi there"):
+        events.append(event)
+
+    # Should have at least started and completed events
+    assert len(events) >= 2
+
+    # First event should be agent.started
+    assert events[0].event_type == EventType.AGENT_STARTED
+    assert events[0].data["agent_name"] == "streaming_agent"
+
+    # Last event should be agent.completed
+    assert events[-1].event_type == EventType.AGENT_COMPLETED
+    assert events[-1].data["output"] == "Hello! How can I help you?"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_streaming_with_error(mock_lm):
+    """Test that agent.run() yields agent.failed event on error."""
+    mock_lm.responses = ["Starting..."]
+
+    # Create an agent that will fail due to a mock exception
+    agent = Agent(
+        name="failing_agent",
+        model=mock_lm,
+        instructions="Test",
+    )
+
+    # Override both generate and stream to raise an exception
+    # (agent uses stream() when there are no tools)
+    async def failing_generate(request):
+        raise ValueError("Test error")
+
+    async def failing_stream(request):
+        raise ValueError("Test error")
+        yield  # Make it a generator (never reached)
+
+    mock_lm.generate = failing_generate
+    mock_lm.stream = failing_stream
+
+    events = []
+    with pytest.raises(ValueError):
+        async for event in agent.run("Hi"):
+            events.append(event)
+
+    # Should have agent.started event
+    assert len(events) >= 1
+    assert events[0].event_type == EventType.AGENT_STARTED
+
+
+@pytest.mark.asyncio
+async def test_agent_run_sync_equivalent_to_streaming(mock_lm):
+    """Test that run_sync() produces same output as consuming run()."""
+    mock_lm.responses = ["Hello! How can I help you?"]
+
+    agent = Agent(
+        name="test_agent",
+        model=mock_lm,
+        instructions="Be helpful",
+    )
+
+    # Get result via run_sync
+    result_sync = await agent.run_sync("Hi there")
+
+    # Reset mock for second call
+    mock_lm.call_count = 0
+
+    # Get result by consuming run() generator
+    final_event = None
+    async for event in agent.run("Hi there"):
+        if event.event_type == EventType.AGENT_COMPLETED:
+            final_event = event
+
+    # Both should produce same output
+    assert result_sync.output == final_event.data["output"]

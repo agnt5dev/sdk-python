@@ -52,15 +52,64 @@ def mock_rust_generate():
     return mock_response
 
 
+class MockChunk:
+    """Mock Rust StreamChunk with proper structure."""
+    def __init__(self, chunk_type, text="", block_type=None, index=0,
+                 model="mock", finish_reason=None, usage=None):
+        self.chunk_type = chunk_type
+        self.text = text
+        self.block_type = block_type
+        self.index = index
+        self.model = model
+        self.finish_reason = finish_reason
+        self.usage = usage
+
+
+class MockAsyncStreamIterator:
+    """Mock async iterator for stream_iter that yields chunks."""
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index >= len(self.chunks):
+            raise StopAsyncIteration
+        chunk = self.chunks[self.index]
+        self.index += 1
+        return chunk
+
+
 @pytest.fixture
 def mock_rust_stream_chunks():
-    """Mock Rust stream response chunks."""
-    return [
-        MagicMock(text="Hello"),
-        MagicMock(text=" "),
-        MagicMock(text="world"),
-        MagicMock(text="!"),
+    """Mock Rust stream response chunks with proper structure.
+
+    The Rust stream_iter returns an async iterator that yields chunks with:
+    - chunk_type: "content_block_start", "delta", "content_block_stop", "completed"
+    - text: content text (for delta and completed chunks)
+    - block_type: "text" or "thinking" (for start/delta chunks)
+    - index: content block index
+    - model, finish_reason, usage (for completed chunks)
+    """
+    # Create a mock usage object for the completed chunk
+    mock_usage = MagicMock()
+    mock_usage.prompt_tokens = 10
+    mock_usage.completion_tokens = 4
+    mock_usage.total_tokens = 14
+
+    chunks = [
+        MockChunk("content_block_start", block_type="text", index=0),
+        MockChunk("delta", text="Hello", block_type="text", index=0),
+        MockChunk("delta", text=" ", block_type="text", index=0),
+        MockChunk("delta", text="world", block_type="text", index=0),
+        MockChunk("delta", text="!", block_type="text", index=0),
+        MockChunk("content_block_stop", index=0),
+        MockChunk("completed", text="Hello world!", finish_reason="stop", usage=mock_usage),
     ]
+
+    return MockAsyncStreamIterator(chunks)
 
 
 # ============================================================================
@@ -173,43 +222,69 @@ async def test_generate_all_providers(mock_rust_generate):
 
 @pytest.mark.asyncio
 async def test_stream_simple(mock_rust_stream_chunks):
-    """Test basic streaming generation."""
+    """Test basic streaming generation returns Event objects."""
+    from agnt5.events import Event, EventType
+
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        # stream_iter returns an async iterator, not a coroutine
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="openai/gpt-4o-mini",
             prompt="Write a story"
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert chunks == ["Hello", " ", "world", "!"]
+        # Should have start, delta(s), stop, and completed events
+        assert len(events) >= 4  # start, delta(s), stop, completed
+        assert all(isinstance(e, Event) for e in events)
+
+        # First event should be message start
+        assert events[0].event_type == EventType.LM_MESSAGE_START
+
+        # Last event should be stream completed
+        assert events[-1].event_type == EventType.LM_STREAM_COMPLETED
+
+        # Second to last should be message stop
+        assert events[-2].event_type == EventType.LM_MESSAGE_STOP
+
+        # Middle events should be deltas
+        for event in events[1:-2]:
+            assert event.event_type == EventType.LM_MESSAGE_DELTA
 
 
 @pytest.mark.asyncio
 async def test_stream_with_messages(mock_rust_stream_chunks):
-    """Test streaming with conversation messages."""
+    """Test streaming with conversation messages returns Event objects."""
+    from agnt5.events import Event, EventType
+
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        # stream_iter returns an async iterator, not a coroutine
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
         messages = [
             {"role": "user", "content": "Tell me a joke"},
         ]
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="groq/llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.9
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert len(chunks) > 0
+        # Should have at least start, stop, and completed events
+        assert len(events) >= 4  # start, delta(s), stop, completed
+        assert all(isinstance(e, Event) for e in events)
+        assert events[0].event_type == EventType.LM_MESSAGE_START
+        assert events[-1].event_type == EventType.LM_STREAM_COMPLETED
+        assert events[-2].event_type == EventType.LM_MESSAGE_STOP
 
 
 # ============================================================================
@@ -705,24 +780,26 @@ async def test_generate_with_all_responses_api_features(mock_rust_generate):
 async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
     """Test streaming with OpenAI built-in tools."""
     from agnt5.lm import BuiltInTool
+    from agnt5.events import Event
 
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="openai/gpt-4o",
             prompt="Search and summarize AI news",
             built_in_tools=[BuiltInTool.WEB_SEARCH]
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert len(chunks) > 0
+        assert len(events) > 0
+        assert all(isinstance(e, Event) for e in events)
 
         # Verify built-in tools were passed to Rust
-        call_kwargs = mock_instance.stream.call_args.kwargs
+        call_kwargs = mock_instance.stream_iter.call_args.kwargs
         assert "built_in_tools" in call_kwargs
         built_in_tools = json.loads(call_kwargs["built_in_tools"])
         assert "web_search_preview" in built_in_tools
@@ -732,23 +809,25 @@ async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
 async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
     """Test streaming with reasoning effort for o-series models."""
     from agnt5.lm import ReasoningEffort
+    from agnt5.events import Event
 
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="openai/o1-mini",
             prompt="Solve step by step",
             reasoning_effort=ReasoningEffort.MEDIUM
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert len(chunks) > 0
+        assert len(events) > 0
+        assert all(isinstance(e, Event) for e in events)
 
-        call_kwargs = mock_instance.stream.call_args.kwargs
+        call_kwargs = mock_instance.stream_iter.call_args.kwargs
         assert call_kwargs["reasoning_effort"] == "medium"
 
 
@@ -756,23 +835,25 @@ async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
 async def test_stream_with_modalities(mock_rust_stream_chunks):
     """Test streaming with modalities specification."""
     from agnt5.lm import Modality
+    from agnt5.events import Event
 
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="openai/gpt-4o",
             prompt="Describe this scene",
             modalities=[Modality.TEXT, Modality.AUDIO]
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert len(chunks) > 0
+        assert len(events) > 0
+        assert all(isinstance(e, Event) for e in events)
 
-        call_kwargs = mock_instance.stream.call_args.kwargs
+        call_kwargs = mock_instance.stream_iter.call_args.kwargs
         assert "modalities" in call_kwargs
         modalities = json.loads(call_kwargs["modalities"])
         assert "text" in modalities
@@ -782,23 +863,26 @@ async def test_stream_with_modalities(mock_rust_stream_chunks):
 @pytest.mark.asyncio
 async def test_stream_with_store_and_previous_response(mock_rust_stream_chunks):
     """Test streaming with server-side state and continuation."""
+    from agnt5.events import Event
+
     with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
-        mock_instance.stream = AsyncMock(return_value=mock_rust_stream_chunks)
+        mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
-        chunks = []
-        async for chunk in lm.stream(
+        events = []
+        async for event in lm.stream(
             model="openai/gpt-4o-mini",
             prompt="Continue our conversation",
             store=True,
             previous_response_id="resp_abc123"
         ):
-            chunks.append(chunk)
+            events.append(event)
 
-        assert len(chunks) > 0
+        assert len(events) > 0
+        assert all(isinstance(e, Event) for e in events)
 
-        call_kwargs = mock_instance.stream.call_args.kwargs
+        call_kwargs = mock_instance.stream_iter.call_args.kwargs
         assert call_kwargs["store"] is True
         assert call_kwargs["previous_response_id"] == "resp_abc123"
 

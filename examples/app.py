@@ -19,8 +19,7 @@ from agnt5 import Worker
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -66,8 +65,19 @@ import ex_08_hitl  # noqa: F401
 # Components: stream_text, stream_story, stream_counter, stream_progress, stream_json_chunks
 import ex_09_streaming  # noqa: F401
 
-# TODO: Future examples
-# import ex_10_advanced_agents  # noqa: F401
+# 10: Structured Output
+# Components: analyze_code_with_dataclass, analyze_security_with_pydantic, etc.
+import ex_10_structured_output  # noqa: F401
+
+# 11: Agent Streaming
+# Components: stream_agent_chat, stream_agent_with_tools, stream_agent_simple
+import ex_11_agent_streaming  # noqa: F401
+
+# 12: Workflow Streaming
+# Components: research_workflow, mixed_workflow, simple_agent_workflow
+import ex_12_workflow_streaming  # noqa: F401
+
+from ex_06_agents import simple_assistant_agent  # noqa: F401
 
 SERVICE_NAME = os.getenv("AGNT5_SERVICE_NAME", "agnt5-examples")
 

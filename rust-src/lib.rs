@@ -554,7 +554,13 @@ fn log_from_python(
     run_id: Option<String>,
     is_streaming: Option<bool>,
     tenant_id: Option<String>,
+    deployment_id: Option<String>,
 ) -> PyResult<()> {
+    // Get effective tenant_id and deployment_id from parameter or global config
+    let effective_tenant_id = tenant_id
+        .or_else(|| agnt5_sdk_core::telemetry::get_tenant_id().map(|s| s.to_string()));
+    let effective_deployment_id = deployment_id
+        .or_else(|| agnt5_sdk_core::telemetry::get_deployment_id().map(|s| s.to_string()));
     // When there's an active span, emit logs within that span's context.
     // The tracing_opentelemetry layer will automatically extract the OpenTelemetry
     // trace context from the active span and populate the OTLP log record's trace_id/span_id.
@@ -611,6 +617,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "{}",
             message
         ),
@@ -621,6 +629,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "{}",
             message
         ),
@@ -631,6 +641,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "{}",
             message
         ),
@@ -641,6 +653,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "{}",
             message
         ),
@@ -651,6 +665,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "[CRITICAL] {}",
             message
         ),
@@ -661,6 +677,8 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            tenant_id = effective_tenant_id.as_deref(),
+            deployment_id = effective_deployment_id.as_deref(),
             "[{}] {}",
             level,
             message
@@ -683,7 +701,8 @@ fn log_from_python(
 
                 let request = LogExportRequest {
                     run_id: rid.clone(),
-                    tenant_id: tenant_id.clone(),
+                    tenant_id: effective_tenant_id.clone(),
+                    deployment_id: effective_deployment_id.clone(),
                     trace_id: trace_id.clone().unwrap_or_default(),
                     span_id: span_id.clone().unwrap_or_default(),
                     timestamp_ns,

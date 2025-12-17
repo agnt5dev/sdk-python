@@ -87,6 +87,7 @@ class OpenTelemetryHandler(logging.Handler):
             # Extract streaming context for real-time SSE delivery
             is_streaming = getattr(record, 'is_streaming', None)
             tenant_id = getattr(record, 'tenant_id', None)
+            deployment_id = getattr(record, 'deployment_id', None)
 
             # Forward to Rust tracing system
             # Rust side will:
@@ -107,6 +108,7 @@ class OpenTelemetryHandler(logging.Handler):
                 run_id=run_id,
                 is_streaming=is_streaming,
                 tenant_id=tenant_id,
+                deployment_id=deployment_id,
             )
         except Exception:
             # Don't let logging errors crash the application

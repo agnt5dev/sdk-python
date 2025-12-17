@@ -868,18 +868,18 @@ class Worker:
                 # Streaming function - queue deltas immediately via Rust for real-time delivery
                 # Instead of collecting into a list and returning, we send each chunk
                 # as it's yielded via the delta queue with 10ms flush interval
-                from .events import StreamEvent
+                from .events import Event
 
                 sequence = 0
-                has_typed_events = False  # Track if user yields StreamEvent objects
+                has_typed_events = False  # Track if user yields Event objects
                 first_chunk = True
 
                 # Extract metadata for delta queue (must be Dict[str, str] for Rust FFI)
                 metadata = _normalize_metadata(self._extract_critical_metadata(request))
 
                 async for chunk in result:
-                    # Check if chunk is a typed StreamEvent
-                    if isinstance(chunk, StreamEvent):
+                    # Check if chunk is a typed Event
+                    if isinstance(chunk, Event):
                         has_typed_events = True
                         # Use the event's fields directly
                         event_data = chunk.to_response_fields()
@@ -1172,6 +1172,26 @@ class Worker:
                         f"Workflow cannot continue without durable checkpoints."
                     ) from e
 
+            # Create delta callback for forwarding streaming events from nested agents/functions
+            # This is used by WorkflowContext._consume_streaming_result to forward events
+            delta_metadata = _normalize_metadata(self._extract_critical_metadata(request))
+
+            def delta_callback(event_type: str, output_data: str, content_index: int, sequence: int) -> None:
+                """Forward streaming delta event from nested component."""
+                try:
+                    self._rust_worker.queue_delta(
+                        invocation_id=request.invocation_id,
+                        event_type=event_type,
+                        output_data=output_data,
+                        content_index=content_index,
+                        sequence=sequence,
+                        metadata=delta_metadata,
+                    )
+                    logger.debug(f"Forwarded delta: type={event_type} seq={sequence}")
+                except Exception as e:
+                    # Delta forwarding is best-effort - log but don't fail the workflow
+                    logger.warning(f"Failed to forward delta event: {e}")
+
             # Create WorkflowContext with entity, runtime_context, checkpoint callback, and checkpoint client
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
@@ -1183,6 +1203,7 @@ class Worker:
                 checkpoint_client=self._checkpoint_client,  # Phase 3: platform-side memoization
                 is_streaming=is_streaming,  # For real-time SSE log delivery
                 tenant_id=tenant_id,  # For multi-tenant deployments
+                delta_callback=delta_callback,  # For forwarding streaming events from nested components
             )
 
             # NEW: Populate agent resume info if this is an agent HITL resume
@@ -1703,35 +1724,100 @@ class Worker:
             from .context import set_current_context, _current_context
             token = set_current_context(ctx)
 
-            # Execute agent - conversation history is automatically included
-            agent_result = await agent.run(user_message, context=ctx)
+            # Execute agent - now returns an async generator for streaming
+            result = agent.run(user_message, context=ctx)
 
-            # Build response with agent output and tool calls
-            result = {
-                "output": agent_result.output,
-                "tool_calls": agent_result.tool_calls,
-            }
+            # Agent.run() always returns an async generator
+            # Queue each event via delta queue for real-time delivery
+            import inspect
+            if inspect.isasyncgen(result):
+                from .events import Event, EventType
 
-            # Serialize result
-            output_data = _serialize_result(result)
+                sequence = 0
+                final_output = None
+                final_tool_calls = []
+                handoff_to = None
 
-            # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
-            metadata = self._extract_critical_metadata(request)
-            # Also include session_id for UI to persist conversation
-            metadata["session_id"] = session_id
+                # Extract metadata for delta queue (must be Dict[str, str] for Rust FFI)
+                metadata = _normalize_metadata(self._extract_critical_metadata(request))
+                metadata["session_id"] = session_id  # Include session for UI
 
-            return PyExecuteComponentResponse(
-                invocation_id=request.invocation_id,
-                success=True,
-                output_data=output_data,
-                state_update=None,
-                error_message=None,
-                metadata=metadata if metadata else None,
-                event_type="run.completed",
-                content_index=0,
-                sequence=0,
-                attempt=getattr(request, 'attempt', 0),
-            )
+                async for event in result:
+                    if isinstance(event, Event):
+                        # Queue the event via delta queue
+                        event_data = event.to_response_fields()
+                        output_data = event_data.get("output_data", b"")
+                        output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
+
+                        self._rust_worker.queue_delta(
+                            invocation_id=request.invocation_id,
+                            event_type=event_data.get("event_type", ""),
+                            output_data=output_str,
+                            content_index=event_data.get("content_index", 0),
+                            sequence=sequence,
+                            metadata=metadata,
+                        )
+                        sequence += 1
+
+                        # Capture final result from agent.completed event
+                        if event.event_type == EventType.AGENT_COMPLETED:
+                            final_output = event.data.get("output", "")
+                            final_tool_calls = event.data.get("tool_calls", [])
+                            handoff_to = event.data.get("handoff_to")
+
+                # Emit run.completed event with the final agent result
+                final_result = {
+                    "output": final_output,
+                    "tool_calls": final_tool_calls,
+                }
+                if handoff_to:
+                    final_result["handoff_to"] = handoff_to
+
+                self._rust_worker.queue_delta(
+                    invocation_id=request.invocation_id,
+                    event_type="run.completed",
+                    output_data=json.dumps(final_result),
+                    content_index=0,
+                    sequence=sequence,
+                    metadata=metadata,
+                )
+
+                logger.debug(f"Agent streaming queued {sequence + 1} deltas for real-time delivery")
+                # Return None to signal that streaming was handled via delta queue
+                return None
+            else:
+                # Fallback for non-generator (shouldn't happen but handle gracefully)
+                if inspect.iscoroutine(result):
+                    agent_result = await result
+                else:
+                    agent_result = result
+
+                # Build response with agent output and tool calls
+                result = {
+                    "output": agent_result.output,
+                    "tool_calls": agent_result.tool_calls,
+                }
+
+                # Serialize result
+                output_data = _serialize_result(result)
+
+                # CRITICAL: Propagate tenant_id and deployment_id to prevent journal corruption
+                metadata = self._extract_critical_metadata(request)
+                # Also include session_id for UI to persist conversation
+                metadata["session_id"] = session_id
+
+                return PyExecuteComponentResponse(
+                    invocation_id=request.invocation_id,
+                    success=True,
+                    output_data=output_data,
+                    state_update=None,
+                    error_message=None,
+                    metadata=metadata if metadata else None,
+                    event_type="run.completed",
+                    content_index=0,
+                    sequence=0,
+                    attempt=getattr(request, 'attempt', 0),
+                )
 
         except Exception as e:
             # Include exception type for better error messages

@@ -17,7 +17,7 @@ Prerequisites:
 
 import asyncio
 
-from agnt5 import function, FunctionContext, lm
+from agnt5 import function, FunctionContext, lm, EventType
 
 
 # =============================================================================
@@ -90,16 +90,21 @@ async def lm_stream(ctx: FunctionContext, prompt: str, model: str = "openai/gpt-
     chunks = []
     chunk_count = 0
 
-    async for chunk in lm.stream(
+    # lm.stream() yields Event objects, extract text from LM_MESSAGE_DELTA events
+    async for event in lm.stream(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     ):
-        chunks.append(chunk)
         chunk_count += 1
-        ctx.logger.info(f"[lm_stream] chunk[{chunk_count}]: '{chunk}'")
+        if event.event_type == EventType.LM_MESSAGE_DELTA:
+            content = event.data.get("content", "")
+            chunks.append(content)
+            ctx.logger.info(f"[lm_stream] chunk[{chunk_count}]: '{content}'")
+        else:
+            ctx.logger.info(f"[lm_stream] event[{chunk_count}]: {event.event_type.value}")
 
     result = "".join(chunks)
-    ctx.logger.info(f"[lm_stream] Response ({chunk_count} chunks): {result[:100]}...")
+    ctx.logger.info(f"[lm_stream] Response ({chunk_count} events, {len(chunks)} text chunks): {result[:100]}...")
 
     return {
         "prompt": prompt,

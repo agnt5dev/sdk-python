@@ -16,7 +16,7 @@ import json
 import time
 
 
-class StreamEventType(str, Enum):
+class EventType(str, Enum):
     """All streaming event types."""
 
     # Run lifecycle
@@ -68,6 +68,8 @@ class StreamEventType(str, Enum):
     AGENT_ITERATION_STARTED = "agent.iteration.started"
     AGENT_ITERATION_COMPLETED = "agent.iteration.completed"
     AGENT_MAX_ITERATIONS = "agent.max_iterations.reached"
+    AGENT_TOOL_CALL_STARTED = "agent.tool_call.started"
+    AGENT_TOOL_CALL_COMPLETED = "agent.tool_call.completed"
 
     # HITL: Approval events
     APPROVAL_REQUESTED = "approval.requested"
@@ -218,20 +220,24 @@ class ErrorDetail:
         return d
 
 
-# --- Stream Event class ---
+# --- Event class ---
 
 
 @dataclass
-class StreamEvent:
+class Event:
     """A streaming event with typed data payload.
 
     This is the primary class for emitting events during streaming execution.
     Events are serialized and sent via the gRPC response stream to the gateway,
     which then emits them as SSE events to clients.
+
+    For delta events (message_delta, thinking_delta, etc.), data should be
+    the raw content value. The gateway wraps it with {"content": <data>, "index": ...}.
+    For other events, data is typically a dict with structured information.
     """
 
-    event_type: StreamEventType
-    data: Dict[str, Any]
+    event_type: EventType
+    data: Any  # Raw value for deltas, dict for structured events
     content_index: int = 0
     sequence: int = 0
 
@@ -252,60 +258,68 @@ class StreamEvent:
         }
 
     @classmethod
-    def thinking_start(cls, index: int = 0, sequence: int = 0) -> "StreamEvent":
+    def thinking_start(cls, index: int = 0, sequence: int = 0) -> "Event":
         """Create a thinking.start event."""
         return cls(
-            event_type=StreamEventType.LM_THINKING_START,
+            event_type=EventType.LM_THINKING_START,
             data=ContentBlockStart(index=index).to_dict(),
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def thinking_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "StreamEvent":
-        """Create a thinking.delta event."""
+    def thinking_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "Event":
+        """Create a thinking.delta event.
+
+        Note: data is just the content string. Gateway wraps it with
+        {"content": <data>, "index": content_index}.
+        """
         return cls(
-            event_type=StreamEventType.LM_THINKING_DELTA,
-            data=ContentBlockDelta(content=content, index=index).to_dict(),
+            event_type=EventType.LM_THINKING_DELTA,
+            data=content,  # Raw content, gateway adds wrapper
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def thinking_stop(cls, index: int = 0, sequence: int = 0) -> "StreamEvent":
+    def thinking_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
         """Create a thinking.stop event."""
         return cls(
-            event_type=StreamEventType.LM_THINKING_STOP,
+            event_type=EventType.LM_THINKING_STOP,
             data=ContentBlockStop(index=index).to_dict(),
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def message_start(cls, index: int = 0, sequence: int = 0) -> "StreamEvent":
+    def message_start(cls, index: int = 0, sequence: int = 0) -> "Event":
         """Create a message.start event."""
         return cls(
-            event_type=StreamEventType.LM_MESSAGE_START,
+            event_type=EventType.LM_MESSAGE_START,
             data=ContentBlockStart(index=index).to_dict(),
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def message_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "StreamEvent":
-        """Create a message.delta event."""
+    def message_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "Event":
+        """Create a message.delta event.
+
+        Note: data is just the content string. Gateway wraps it with
+        {"content": <data>, "index": content_index}.
+        """
         return cls(
-            event_type=StreamEventType.LM_MESSAGE_DELTA,
-            data=ContentBlockDelta(content=content, index=index).to_dict(),
+            event_type=EventType.LM_MESSAGE_DELTA,
+            data=content,  # Raw content, gateway adds wrapper
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def message_stop(cls, index: int = 0, sequence: int = 0) -> "StreamEvent":
+    def message_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
         """Create a message.stop event."""
         return cls(
-            event_type=StreamEventType.LM_MESSAGE_STOP,
+            event_type=EventType.LM_MESSAGE_STOP,
             data=ContentBlockStop(index=index).to_dict(),
             content_index=index,
             sequence=sequence,
@@ -314,21 +328,25 @@ class StreamEvent:
     @classmethod
     def tool_call_start(
         cls, id: str, name: str, index: int = 0, sequence: int = 0
-    ) -> "StreamEvent":
+    ) -> "Event":
         """Create a tool_call.start event."""
         return cls(
-            event_type=StreamEventType.LM_TOOL_CALL_START,
+            event_type=EventType.LM_TOOL_CALL_START,
             data=ToolCallStart(id=id, name=name, index=index).to_dict(),
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def tool_call_delta(cls, input_delta: str, index: int = 0, sequence: int = 0) -> "StreamEvent":
-        """Create a tool_call.delta event."""
+    def tool_call_delta(cls, input_delta: str, index: int = 0, sequence: int = 0) -> "Event":
+        """Create a tool_call.delta event.
+
+        Note: data is just the input_delta string. Gateway wraps it with
+        {"content": <data>, "index": content_index}.
+        """
         return cls(
-            event_type=StreamEventType.LM_TOOL_CALL_DELTA,
-            data=ToolCallDelta(input_delta=input_delta, index=index).to_dict(),
+            event_type=EventType.LM_TOOL_CALL_DELTA,
+            data=input_delta,  # Raw input delta, gateway adds wrapper
             content_index=index,
             sequence=sequence,
         )
@@ -336,40 +354,44 @@ class StreamEvent:
     @classmethod
     def tool_call_stop(
         cls, id: str, name: str, input: Dict[str, Any], index: int = 0, sequence: int = 0
-    ) -> "StreamEvent":
+    ) -> "Event":
         """Create a tool_call.stop event."""
         return cls(
-            event_type=StreamEventType.LM_TOOL_CALL_STOP,
+            event_type=EventType.LM_TOOL_CALL_STOP,
             data=ToolCallStop(id=id, name=name, input=input, index=index).to_dict(),
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def output_start(cls, index: int = 0, sequence: int = 0, content_type: str = "text/plain") -> "StreamEvent":
+    def output_start(cls, index: int = 0, sequence: int = 0, content_type: str = "text/plain") -> "Event":
         """Create an output.start event for user code streaming."""
         return cls(
-            event_type=StreamEventType.OUTPUT_START,
+            event_type=EventType.OUTPUT_START,
             data={"index": index, "content_type": content_type},
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def output_delta(cls, content: Any, index: int = 0, sequence: int = 0) -> "StreamEvent":
-        """Create an output.delta event for user code streaming."""
+    def output_delta(cls, content: Any, index: int = 0, sequence: int = 0) -> "Event":
+        """Create an output.delta event for user code streaming.
+
+        Note: data is just the content value. Gateway wraps it with
+        {"content": <data>, "index": content_index}.
+        """
         return cls(
-            event_type=StreamEventType.OUTPUT_DELTA,
-            data={"content": content, "index": index},
+            event_type=EventType.OUTPUT_DELTA,
+            data=content,  # Raw content, gateway adds wrapper
             content_index=index,
             sequence=sequence,
         )
 
     @classmethod
-    def output_stop(cls, index: int = 0, sequence: int = 0) -> "StreamEvent":
+    def output_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
         """Create an output.stop event for user code streaming."""
         return cls(
-            event_type=StreamEventType.OUTPUT_STOP,
+            event_type=EventType.OUTPUT_STOP,
             data={"index": index},
             content_index=index,
             sequence=sequence,
@@ -383,10 +405,10 @@ class StreamEvent:
         current: Optional[int] = None,
         total: Optional[int] = None,
         sequence: int = 0,
-    ) -> "StreamEvent":
+    ) -> "Event":
         """Create a progress.update event."""
         return cls(
-            event_type=StreamEventType.PROGRESS_UPDATE,
+            event_type=EventType.PROGRESS_UPDATE,
             data=ProgressUpdate(
                 message=message, percent=percent, current=current, total=total
             ).to_dict(),
@@ -395,24 +417,150 @@ class StreamEvent:
         )
 
     @classmethod
-    def run_completed(cls, output: Any, usage: Optional[TokenUsage] = None, sequence: int = 0) -> "StreamEvent":
+    def run_completed(cls, output: Any, usage: Optional[TokenUsage] = None, sequence: int = 0) -> "Event":
         """Create a run.completed event."""
         data: Dict[str, Any] = {"output": output}
         if usage:
             data["usage"] = usage.to_dict()
         return cls(
-            event_type=StreamEventType.RUN_COMPLETED,
+            event_type=EventType.RUN_COMPLETED,
             data=data,
             content_index=0,
             sequence=sequence,
         )
 
     @classmethod
-    def run_failed(cls, error: ErrorDetail, sequence: int = 0) -> "StreamEvent":
+    def run_failed(cls, error: ErrorDetail, sequence: int = 0) -> "Event":
         """Create a run.failed event."""
         return cls(
-            event_type=StreamEventType.RUN_FAILED,
+            event_type=EventType.RUN_FAILED,
             data={"error": error.to_dict()},
             content_index=0,
+            sequence=sequence,
+        )
+
+    # --- Agent events ---
+
+    @classmethod
+    def agent_started(
+        cls,
+        agent_name: str,
+        model: str,
+        tools: Optional[List[str]] = None,
+        max_iterations: int = 10,
+        sequence: int = 0,
+    ) -> "Event":
+        """Create an agent.started event."""
+        return cls(
+            event_type=EventType.AGENT_STARTED,
+            data={
+                "agent_name": agent_name,
+                "model": model,
+                "tools": tools or [],
+                "max_iterations": max_iterations,
+            },
+            sequence=sequence,
+        )
+
+    @classmethod
+    def agent_completed(
+        cls,
+        output: str,
+        iterations: int = 1,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+        handoff_to: Optional[str] = None,
+        max_iterations_reached: bool = False,
+        sequence: int = 0,
+    ) -> "Event":
+        """Create an agent.completed event."""
+        return cls(
+            event_type=EventType.AGENT_COMPLETED,
+            data={
+                "output": output,
+                "iterations": iterations,
+                "tool_calls": tool_calls or [],
+                "handoff_to": handoff_to,
+                "max_iterations_reached": max_iterations_reached,
+            },
+            sequence=sequence,
+        )
+
+    @classmethod
+    def agent_failed(
+        cls,
+        error: str,
+        error_type: str,
+        agent_name: Optional[str] = None,
+        sequence: int = 0,
+    ) -> "Event":
+        """Create an agent.failed event."""
+        return cls(
+            event_type=EventType.AGENT_FAILED,
+            data={
+                "error": error,
+                "error_type": error_type,
+                "agent_name": agent_name,
+            },
+            sequence=sequence,
+        )
+
+    @classmethod
+    def agent_tool_call_started(
+        cls,
+        tool_name: str,
+        arguments: str,
+        tool_call_id: Optional[str] = None,
+        content_index: int = 0,
+        sequence: int = 0,
+    ) -> "Event":
+        """Create an agent.tool_call.started event.
+
+        Args:
+            tool_name: Name of the tool being called
+            arguments: JSON-encoded arguments string
+            tool_call_id: Optional unique ID for this tool call (from LLM)
+            content_index: Index for parallel tool calls (0-based)
+            sequence: Event sequence number
+        """
+        return cls(
+            event_type=EventType.AGENT_TOOL_CALL_STARTED,
+            data={
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "tool_call_id": tool_call_id,
+            },
+            content_index=content_index,
+            sequence=sequence,
+        )
+
+    @classmethod
+    def agent_tool_call_completed(
+        cls,
+        tool_name: str,
+        result: Any,
+        error: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        content_index: int = 0,
+        sequence: int = 0,
+    ) -> "Event":
+        """Create an agent.tool_call.completed event.
+
+        Args:
+            tool_name: Name of the tool that was called
+            result: The tool's return value (JSON-serializable)
+            error: Error message if tool failed
+            tool_call_id: Optional unique ID for this tool call (from LLM)
+            content_index: Index for parallel tool calls (must match started event)
+            sequence: Event sequence number
+        """
+        return cls(
+            event_type=EventType.AGENT_TOOL_CALL_COMPLETED,
+            data={
+                "tool_name": tool_name,
+                "result": result,
+                "error": error,
+                "tool_call_id": tool_call_id,
+            },
+            content_index=content_index,
             sequence=sequence,
         )

@@ -1,22 +1,23 @@
 use std::collections::HashMap;
 use std::env;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
 use opentelemetry::Context as OtelContext;
 use agnt5_sdk_core::lm::{
-    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, GenerateRequest, GenerateResponse,
-    GenerationConfig, GroqProvider, JsonSchemaFormat, Message, MessageRole, OpenAiProvider,
-    OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest, TokenUsage,
-    ToolChoice, ToolDefinition,
+    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, GenerateRequest,
+    GenerateResponse, GenerationConfig, GroqProvider, JsonSchemaFormat, Message, MessageRole,
+    OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest,
+    TokenUsage, ToolChoice, ToolDefinition,
 };
 use futures::StreamExt;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 use pyo3_async_runtimes::TaskLocals;
 use serde::Deserialize;
 use serde_json::{self, Value};
+use tokio::sync::mpsc;
 
 /// Internal configuration representation for the Python wrapper.
 #[derive(Clone, Default)]
@@ -273,8 +274,30 @@ impl PyLanguageModel {
             while let Some(item) = handle.next().await {
                 let chunk = item.map_err(sdk_error_to_py)?;
                 match chunk {
-                    StreamChunk::Delta { content } => {
-                        chunks.push(PyStreamChunk::delta(model_for_delta.clone(), content));
+                    StreamChunk::ContentBlockStart { index, block_type } => {
+                        chunks.push(PyStreamChunk::content_block_start(
+                            model_for_delta.clone(),
+                            index,
+                            block_type,
+                        ));
+                    }
+                    StreamChunk::Delta {
+                        content,
+                        index,
+                        block_type,
+                    } => {
+                        chunks.push(PyStreamChunk::delta(
+                            model_for_delta.clone(),
+                            content,
+                            index,
+                            block_type,
+                        ));
+                    }
+                    StreamChunk::ContentBlockStop { index } => {
+                        chunks.push(PyStreamChunk::content_block_stop(
+                            model_for_delta.clone(),
+                            index,
+                        ));
                     }
                     StreamChunk::Completed(response) => {
                         chunks.push(PyStreamChunk::from_response(response));
@@ -284,6 +307,148 @@ impl PyLanguageModel {
 
             Ok(chunks)
         })
+    }
+
+    /// Stream generation with true async iteration.
+    ///
+    /// Returns an async iterator that yields chunks one at a time as they arrive,
+    /// enabling real-time token-by-token streaming.
+    ///
+    /// Usage:
+    /// ```python
+    /// async for chunk in lm.stream_iter(prompt="Hello"):
+    ///     print(chunk.text, end="", flush=True)
+    /// ```
+    #[pyo3(signature = (prompt, **kwargs))]
+    fn stream_iter<'py>(
+        &self,
+        py: Python<'py>,
+        prompt: Py<PyAny>,
+        kwargs: Option<Bound<'py, PyDict>>,
+    ) -> PyResult<PyAsyncStreamHandle> {
+        // Parse kwargs
+        let kwargs_ref = kwargs.as_ref();
+        let model_kw = get_optional_string(kwargs_ref, "model")?;
+        let provider_kw = get_optional_string(kwargs_ref, "provider")?;
+        let system_prompt_kw = get_optional_string(kwargs_ref, "system_prompt")?;
+        let temperature = get_optional_f32(kwargs_ref, "temperature")?;
+        let top_p = get_optional_f32(kwargs_ref, "top_p")?;
+        let max_tokens = get_optional_u32(kwargs_ref, "max_tokens")?;
+        let user_id = get_optional_string(kwargs_ref, "user")?;
+        let response_format_str = get_optional_string(kwargs_ref, "response_format")?;
+        let response_schema = get_optional_string(kwargs_ref, "response_schema")?;
+        let tools_kw = get_optional_string(kwargs_ref, "tools")?;
+        let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
+
+        let response_format = parse_response_format(
+            response_format_str.as_deref(),
+            response_schema.as_deref(),
+        )?;
+        let tools = parse_tools_json(tools_kw.as_deref())?;
+        let tool_choice = parse_tool_choice_json(tool_choice_kw.as_deref())?;
+
+        let (model, provider_name) = self.resolve_model_and_provider(model_kw, provider_kw)?;
+
+        let mut request = build_request(
+            py,
+            &model,
+            &prompt,
+            system_prompt_kw,
+            temperature,
+            top_p,
+            max_tokens,
+            response_format,
+            user_id,
+        )?;
+
+        if let Some(tool_defs) = tools {
+            request = request.tools(tool_defs);
+        }
+        if let Some(choice) = tool_choice {
+            request = request.tool_choice(Some(choice));
+        }
+
+        let provider = self.get_or_init_provider(&provider_name)?;
+        let model_for_chunks = model.clone();
+
+        // Extract trace context
+        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+            otel_ctx
+        } else {
+            extract_context_from_python(py).ok()
+        };
+
+        // Create channel for streaming chunks
+        let (tx, rx) = mpsc::channel::<Result<PyStreamChunk, String>>(32);
+        let receiver = Arc::new(tokio::sync::Mutex::new(rx));
+        let exhausted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Spawn a tokio task to read from the stream and send to channel
+        let handle = PyAsyncStreamHandle {
+            receiver,
+            exhausted,
+        };
+
+        // Spawn the streaming task on the pyo3-async-runtimes managed tokio runtime
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let mut request = request;
+            request.otel_context = otel_context;
+
+            match provider.stream(request).await {
+                Ok(mut stream_handle) => {
+                    while let Some(item) = stream_handle.next().await {
+                        let chunk_result = match item {
+                            Ok(chunk) => {
+                                let py_chunk = match chunk {
+                                    StreamChunk::ContentBlockStart { index, block_type } => {
+                                        PyStreamChunk::content_block_start(
+                                            model_for_chunks.clone(),
+                                            index,
+                                            block_type,
+                                        )
+                                    }
+                                    StreamChunk::Delta {
+                                        content,
+                                        index,
+                                        block_type,
+                                    } => {
+                                        PyStreamChunk::delta(
+                                            model_for_chunks.clone(),
+                                            content,
+                                            index,
+                                            block_type,
+                                        )
+                                    }
+                                    StreamChunk::ContentBlockStop { index } => {
+                                        PyStreamChunk::content_block_stop(
+                                            model_for_chunks.clone(),
+                                            index,
+                                        )
+                                    }
+                                    StreamChunk::Completed(response) => {
+                                        PyStreamChunk::from_response(response)
+                                    }
+                                };
+                                Ok(py_chunk)
+                            }
+                            Err(err) => Err(err.to_string()),
+                        };
+
+                        // If send fails, receiver was dropped - stop streaming
+                        if tx.send(chunk_result).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(err) => {
+                    // Send error to channel
+                    let _ = tx.send(Err(err.to_string())).await;
+                }
+            }
+            // Channel will be closed when tx is dropped
+        });
+
+        Ok(handle)
     }
 
     fn list_providers(&self) -> Vec<String> {
@@ -797,22 +962,74 @@ impl PyResponse {
 }
 
 /// Wrapper for streaming chunks.
+///
+/// Chunk types:
+/// - "content_block_start": Start of a content block (text or thinking)
+/// - "delta": Incremental content within a block
+/// - "content_block_stop": End of a content block
+/// - "completed": Final response with full text, usage, and metadata
 #[pyclass(name = "StreamChunk")]
 pub struct PyStreamChunk {
+    /// Type of chunk: "content_block_start", "delta", "content_block_stop", "completed"
+    chunk_type: String,
+    /// Content text (for delta and completed chunks)
     text: String,
+    /// Model name
     model: String,
+    /// Block type: "text" or "thinking" (for start/delta chunks)
+    block_type: Option<String>,
+    /// Content block index (0-indexed)
+    index: Option<u32>,
+    /// Token usage (for completed chunks)
     usage: Option<TokenUsage>,
+    /// Whether this is the final chunk (completed)
     finished: bool,
+    /// Finish reason (for completed chunks)
     finish_reason: Option<String>,
+    /// Parsed JSON object (for completed chunks with JSON response)
     object: Option<Value>,
+    /// Raw API response (for completed chunks)
     raw: Option<Value>,
 }
 
 impl PyStreamChunk {
-    fn delta(model: String, text: String) -> Self {
+    fn content_block_start(model: String, index: u32, block_type: ContentBlockType) -> Self {
         Self {
+            chunk_type: "content_block_start".to_string(),
+            text: String::new(),
+            model,
+            block_type: Some(block_type_to_string(block_type)),
+            index: Some(index),
+            usage: None,
+            finished: false,
+            finish_reason: None,
+            object: None,
+            raw: None,
+        }
+    }
+
+    fn delta(model: String, text: String, index: u32, block_type: ContentBlockType) -> Self {
+        Self {
+            chunk_type: "delta".to_string(),
             text,
             model,
+            block_type: Some(block_type_to_string(block_type)),
+            index: Some(index),
+            usage: None,
+            finished: false,
+            finish_reason: None,
+            object: None,
+            raw: None,
+        }
+    }
+
+    fn content_block_stop(model: String, index: u32) -> Self {
+        Self {
+            chunk_type: "content_block_stop".to_string(),
+            text: String::new(),
+            model,
+            block_type: None,
+            index: Some(index),
             usage: None,
             finished: false,
             finish_reason: None,
@@ -823,8 +1040,11 @@ impl PyStreamChunk {
 
     fn from_response(response: GenerateResponse) -> Self {
         Self {
+            chunk_type: "completed".to_string(),
             text: response.text,
             model: response.model,
+            block_type: None,
+            index: None,
             usage: response.usage,
             finished: true,
             finish_reason: response.finish_reason,
@@ -834,28 +1054,64 @@ impl PyStreamChunk {
     }
 }
 
+fn block_type_to_string(block_type: ContentBlockType) -> String {
+    match block_type {
+        ContentBlockType::Text => "text".to_string(),
+        ContentBlockType::Thinking => "thinking".to_string(),
+    }
+}
+
 #[pymethods]
 impl PyStreamChunk {
+    /// Type of chunk: "content_block_start", "delta", "content_block_stop", "completed"
+    #[getter]
+    fn chunk_type(&self) -> String {
+        self.chunk_type.clone()
+    }
+
+    /// Content text (for delta and completed chunks)
     #[getter]
     fn text(&self) -> String {
         self.text.clone()
     }
 
+    /// Alias for text (backwards compatibility)
+    #[getter]
+    fn content(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Model name
     #[getter]
     fn model(&self) -> String {
         self.model.clone()
     }
 
+    /// Block type: "text" or "thinking" (for start/delta chunks)
+    #[getter]
+    fn block_type(&self) -> Option<String> {
+        self.block_type.clone()
+    }
+
+    /// Content block index (0-indexed)
+    #[getter]
+    fn index(&self) -> Option<u32> {
+        self.index
+    }
+
+    /// Whether this is the final chunk (completed)
     #[getter]
     fn finished(&self) -> bool {
         self.finished
     }
 
+    /// Finish reason (for completed chunks)
     #[getter]
     fn finish_reason(&self) -> Option<String> {
         self.finish_reason.clone()
     }
 
+    /// Token usage (for completed chunks)
     #[getter]
     fn usage(&self) -> Option<PyUsage> {
         self.usage.as_ref().map(|usage| PyUsage {
@@ -863,6 +1119,7 @@ impl PyStreamChunk {
         })
     }
 
+    /// Parsed JSON object (for completed chunks with JSON response)
     #[getter]
     fn object(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.object
@@ -871,12 +1128,74 @@ impl PyStreamChunk {
             .transpose()
     }
 
+    /// Raw API response (for completed chunks)
     #[getter]
     fn raw(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.raw
             .as_ref()
             .map(|value| json_to_py(py, value))
             .transpose()
+    }
+
+    /// Check if this is a thinking block
+    fn is_thinking(&self) -> bool {
+        self.block_type.as_deref() == Some("thinking")
+    }
+
+    /// Check if this is a text block
+    fn is_text(&self) -> bool {
+        self.block_type.as_deref() == Some("text")
+    }
+}
+
+/// Async iterator for streaming LLM responses.
+///
+/// This class implements the Python async iterator protocol (`__aiter__` and `__anext__`),
+/// enabling true token-by-token streaming instead of collecting all chunks before returning.
+///
+/// Usage:
+/// ```python
+/// async for chunk in lm.stream_iter(...):
+///     print(chunk.text, end="", flush=True)
+/// ```
+#[pyclass(name = "AsyncStreamHandle")]
+pub struct PyAsyncStreamHandle {
+    /// Channel receiver for streaming chunks
+    receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<Result<PyStreamChunk, String>>>>,
+    /// Flag to track if stream is exhausted
+    exhausted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[pymethods]
+impl PyAsyncStreamHandle {
+    /// Return self as the async iterator
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Get the next chunk from the stream
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let receiver = self.receiver.clone();
+        let exhausted = self.exhausted.clone();
+
+        // Use pyo3-async-runtimes to create a Python awaitable
+        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            // Check if already exhausted
+            if exhausted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PyStopAsyncIteration::new_err("stream exhausted"));
+            }
+
+            let mut rx = receiver.lock().await;
+            match rx.recv().await {
+                Some(Ok(chunk)) => Ok(chunk),
+                Some(Err(err)) => Err(PyValueError::new_err(err)),
+                None => {
+                    exhausted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Err(PyStopAsyncIteration::new_err("stream exhausted"))
+                }
+            }
+        })
     }
 }
 
@@ -942,6 +1261,7 @@ pub fn register_language_model(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLanguageModel>()?;
     m.add_class::<PyResponse>()?;
     m.add_class::<PyStreamChunk>()?;
+    m.add_class::<PyAsyncStreamHandle>()?;
     m.add_class::<PyUsage>()?;
     Ok(())
 }
