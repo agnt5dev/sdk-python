@@ -51,6 +51,15 @@ class KeyValueState(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class BankAccountState(BaseModel):
+    """State model for BankAccount entity."""
+    owner_name: str = ""
+    balance: float = 0.0
+    status: str = "inactive"
+    transactions: list[dict] = Field(default_factory=list)
+    created_at: str = ""
+
+
 # =============================================================================
 # COUNTER ENTITY
 # =============================================================================
@@ -277,6 +286,158 @@ class KeyValueStore(Entity[KeyValueState]):
         """Clear all data."""
         self.state.data = {}
         return {"action": "cleared"}
+
+
+# =============================================================================
+# BANK ACCOUNT ENTITY (Advanced Example)
+# =============================================================================
+
+
+class BankAccount(Entity[BankAccountState]):
+    """
+    Bank account entity with transaction management.
+
+    Demonstrates complex entity patterns:
+    - Business logic validation (insufficient funds, account status)
+    - Transaction history tracking
+    - Account lifecycle management (activate, suspend)
+
+    State:
+        owner_name: str - Account owner's name
+        balance: float - Current balance
+        status: str - Account status (active, suspended, inactive)
+        transactions: list - Transaction history
+        created_at: str - Creation timestamp
+
+    Example:
+        account = client.entity("BankAccount", "alice-001")
+        account.create_account(owner_name="Alice", initial_balance=1000.0)
+        account.deposit(amount=500.0, description="Salary")
+        account.withdraw(amount=200.0, description="ATM")
+        account.get_balance()  # Returns: 1300.0
+    """
+
+    async def create_account(self, owner_name: str, initial_balance: float = 0.0) -> dict:
+        """Initialize a new account."""
+        from datetime import datetime
+
+        if initial_balance < 0:
+            raise ValueError("Initial balance cannot be negative")
+
+        self.state.owner_name = owner_name
+        self.state.balance = initial_balance
+        self.state.created_at = datetime.now().isoformat()
+        self.state.transactions = []
+        self.state.status = "active"
+
+        return {
+            "account_id": self.key,
+            "owner_name": owner_name,
+            "balance": initial_balance,
+            "status": "active"
+        }
+
+    async def deposit(self, amount: float, description: str = "Deposit") -> dict:
+        """Deposit money into the account."""
+        from datetime import datetime
+
+        if amount <= 0:
+            raise ValueError("Deposit amount must be positive")
+
+        if self.state.status != "active":
+            raise ValueError(f"Cannot deposit to {self.state.status} account")
+
+        self.state.balance += amount
+
+        transaction = {
+            "type": "deposit",
+            "amount": amount,
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "balance_after": self.state.balance
+        }
+        self.state.transactions.append(transaction)
+
+        return {
+            "success": True,
+            "transaction": transaction,
+            "new_balance": self.state.balance
+        }
+
+    async def withdraw(self, amount: float, description: str = "Withdrawal") -> dict:
+        """Withdraw money from the account."""
+        from datetime import datetime
+
+        if amount <= 0:
+            raise ValueError("Withdrawal amount must be positive")
+
+        if self.state.status != "active":
+            raise ValueError(f"Cannot withdraw from {self.state.status} account")
+
+        if self.state.balance < amount:
+            raise ValueError(f"Insufficient funds: ${self.state.balance} < ${amount}")
+
+        self.state.balance -= amount
+
+        transaction = {
+            "type": "withdrawal",
+            "amount": amount,
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "balance_after": self.state.balance
+        }
+        self.state.transactions.append(transaction)
+
+        return {
+            "success": True,
+            "transaction": transaction,
+            "new_balance": self.state.balance
+        }
+
+    @query
+    async def get_balance(self) -> float:
+        """Get current account balance (read-only)."""
+        return self.state.balance
+
+    @query
+    async def get_transaction_history(self, limit: int = None) -> list:
+        """Get transaction history (read-only)."""
+        transactions = list(self.state.transactions)
+        if limit:
+            return transactions[-limit:]
+        return transactions
+
+    @query
+    async def get_account_info(self) -> dict:
+        """Get complete account information (read-only)."""
+        return {
+            "account_id": self.key,
+            "owner_name": self.state.owner_name,
+            "balance": self.state.balance,
+            "status": self.state.status,
+            "created_at": self.state.created_at,
+            "transaction_count": len(self.state.transactions)
+        }
+
+    async def suspend_account(self, reason: str) -> dict:
+        """Suspend the account."""
+        from datetime import datetime
+
+        self.state.status = "suspended"
+        return {
+            "success": True,
+            "status": "suspended",
+            "reason": reason,
+            "suspended_at": datetime.now().isoformat()
+        }
+
+    async def activate_account(self) -> dict:
+        """Reactivate a suspended account."""
+        if self.state.status == "active":
+            return {"success": True, "message": "Account already active"}
+
+        self.state.status = "active"
+        return {"success": True, "status": "active"}
 
 
 # =============================================================================

@@ -19,11 +19,18 @@ _current_context: contextvars.ContextVar[Optional["Context"]] = contextvars.Cont
 class _CorrelationFilter(logging.Filter):
     """Inject correlation IDs (run_id, trace_id, span_id) and streaming context into every log record."""
 
-    def __init__(self, runtime_context: Any, is_streaming: bool = False, tenant_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        runtime_context: Any,
+        is_streaming: bool = False,
+        tenant_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.runtime_context = runtime_context
         self.is_streaming = is_streaming
         self.tenant_id = tenant_id
+        self.deployment_id = deployment_id
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Add correlation IDs and streaming context as extra fields to the log record."""
@@ -35,6 +42,7 @@ class _CorrelationFilter(logging.Filter):
         # Add streaming context for journal export
         record.is_streaming = self.is_streaming
         record.tenant_id = self.tenant_id
+        record.deployment_id = self.deployment_id
         return True
 
 
@@ -59,6 +67,7 @@ class Context:
         runtime_context: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ) -> None:
         """
         Initialize base context.
@@ -69,12 +78,14 @@ class Context:
             runtime_context: RuntimeContext for trace correlation
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant ID for multi-tenant deployments
+            deployment_id: Deployment ID for tracking deployments
         """
         self._run_id = run_id
         self._attempt = attempt
         self._runtime_context = runtime_context
         self._is_streaming = is_streaming
         self._tenant_id = tenant_id
+        self._deployment_id = deployment_id
 
         # Create logger with correlation
         self._logger = logging.getLogger(f"agnt5.{run_id}")
@@ -82,7 +93,7 @@ class Context:
         setup_context_logger(self._logger)
 
         if runtime_context:
-            self._logger.addFilter(_CorrelationFilter(runtime_context, is_streaming, tenant_id))
+            self._logger.addFilter(_CorrelationFilter(runtime_context, is_streaming, tenant_id, deployment_id))
 
     @property
     def run_id(self) -> str:
@@ -103,6 +114,11 @@ class Context:
     def tenant_id(self) -> Optional[str]:
         """Tenant identifier for multi-tenant deployments."""
         return self._tenant_id
+
+    @property
+    def deployment_id(self) -> Optional[str]:
+        """Deployment identifier for tracking deployments."""
+        return self._deployment_id
 
 
 def get_current_context() -> Optional[Context]:

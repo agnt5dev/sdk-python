@@ -1,10 +1,42 @@
 """AGNT5 Client SDK for invoking components."""
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, Optional
 from urllib.parse import urljoin
 
 import httpx
+
+from .events import Event, EventType
+
+
+def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> Event:
+    """Convert SSE event type and data to typed Event object.
+
+    Args:
+        event_type_str: The event type string from SSE (e.g., "agent.started")
+        data: The parsed JSON data from the SSE data field
+
+    Returns:
+        Event object with typed event_type and data payload
+    """
+    try:
+        event_type = EventType(event_type_str)
+    except ValueError:
+        # Unknown event type - store as-is with a generic type
+        # This allows forward compatibility with new event types
+        return Event(
+            event_type=EventType.PROGRESS_UPDATE,
+            data={"_raw_event_type": event_type_str, **data},
+            content_index=data.get("index", 0),
+            sequence=data.get("sequence", 0),
+        )
+
+    return Event(
+        event_type=event_type,
+        data=data,
+        content_index=data.get("index", 0),
+        sequence=data.get("sequence", 0),
+    )
 
 
 class Client:
@@ -451,6 +483,127 @@ class Client:
                         # Skip malformed JSON
                         continue
 
+    def stream_events(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> Iterator[Event]:
+        """Stream typed Event objects from a component execution.
+
+        This method yields Event objects as they arrive from the component,
+        providing full access to the event taxonomy including agent lifecycle,
+        LM streaming, tool calls, and workflow events.
+
+        Args:
+            component: Name of the component to execute
+            input_data: Input data for the component (will be sent as JSON body)
+            component_type: Type of component - "function", "workflow", "agent", "tool"
+            session_id: Session identifier for multi-turn conversations (optional)
+            user_id: User identifier for user-scoped memory (optional)
+            timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+
+        Yields:
+            Event objects as they arrive from the stream
+
+        Raises:
+            RunError: If the component execution fails
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            from agnt5 import Client, EventType
+
+            client = Client()
+
+            # Stream agent events
+            for event in client.stream_events("my_agent", {"message": "Hi"}, "agent"):
+                if event.event_type == EventType.AGENT_STARTED:
+                    print(f"Agent started: {event.data['agent_name']}")
+                elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                    print(event.data['content'], end='', flush=True)
+                elif event.event_type == EventType.AGENT_COMPLETED:
+                    print(f"\\nDone: {event.data['output']}")
+            ```
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be a positive number")
+
+        if input_data is None:
+            input_data = {}
+
+        # Build URL with component type (using v2 streaming endpoint)
+        url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
+
+        # Build headers
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+
+        # Use streaming request
+        with self._client.stream(
+            "POST",
+            url,
+            json=input_data,
+            headers=headers,
+            timeout=timeout,
+        ) as response:
+            # Check for errors
+            if response.status_code != 200:
+                # Try to get error details from response body
+                try:
+                    error_body = response.read().decode("utf-8")
+                    error_data = json.loads(error_body)
+                    error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                    run_id = error_data.get("runId")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    error_msg = f"HTTP {response.status_code}: Streaming request failed"
+                    run_id = None
+                raise RunError(error_msg, run_id=run_id)
+
+            # Parse SSE stream
+            current_event_type: Optional[str] = None
+            for line in response.iter_lines():
+                line = line.strip()
+
+                # Skip empty lines and comments (keep-alive)
+                if not line or line.startswith(":"):
+                    continue
+
+                # Parse event type: "event: agent.started"
+                if line.startswith("event: "):
+                    current_event_type = line[7:]  # Remove "event: " prefix
+                    continue
+
+                # Parse SSE data: "data: {...}"
+                if line.startswith("data: "):
+                    data_str = line[6:]  # Remove "data: " prefix
+
+                    try:
+                        data = json.loads(data_str)
+
+                        # Check for completion signal
+                        if data.get("done") or current_event_type == "done":
+                            return
+
+                        # Check for error event
+                        if current_event_type == "error" or "error" in data:
+                            error_msg = data.get("error", "Unknown streaming error")
+                            raise RunError(error_msg, run_id=data.get("runId"))
+
+                        # Yield typed Event object
+                        if current_event_type:
+                            yield _parse_sse_to_event(current_event_type, data)
+
+                    except json.JSONDecodeError:
+                        # Skip malformed JSON
+                        continue
+
     def entity(self, entity_type: str, key: str) -> "EntityProxy":
         """Get a proxy for calling methods on a durable entity.
 
@@ -872,6 +1025,50 @@ class WorkflowProxy:
             user_id=user_id,
         )
 
+    def stream_events(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: float = 300.0,
+        **kwargs,
+    ) -> Iterator[Event]:
+        """Stream typed Event objects from workflow execution.
+
+        This method yields Event objects as they arrive from the workflow,
+        including nested events from agents and functions called within the workflow.
+
+        Args:
+            session_id: Session identifier for multi-turn workflows (optional)
+            user_id: User identifier for user-scoped memory (optional)
+            timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+            **kwargs: Input parameters for the workflow
+
+        Yields:
+            Event objects as they arrive from the stream
+
+        Example:
+            ```python
+            from agnt5 import Client, EventType
+
+            # Stream workflow events
+            for event in client.workflow("research_workflow").stream_events(query="AI"):
+                if event.event_type == EventType.WORKFLOW_STEP_STARTED:
+                    print(f"Step started: {event.data.get('step_name')}")
+                elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                    print(event.data['content'], end='', flush=True)
+                elif event.event_type == EventType.WORKFLOW_STEP_COMPLETED:
+                    print(f"\\nStep done: {event.data.get('step_name')}")
+            ```
+        """
+        return self._client.stream_events(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+            timeout=timeout,
+        )
+
     def submit(self, **kwargs) -> str:
         """Submit the workflow for async execution.
 
@@ -893,6 +1090,324 @@ class WorkflowProxy:
             input_data=kwargs,
             component_type="workflow",
         )
+
+
+class AsyncClient:
+    """Async client for invoking AGNT5 components.
+
+    This client provides an async interface for calling functions, workflows,
+    and other components deployed on AGNT5. Use this when you need to stream
+    events in an async context or integrate with async frameworks.
+
+    Example:
+        ```python
+        import asyncio
+        from agnt5 import AsyncClient, EventType
+
+        async def main():
+            async with AsyncClient() as client:
+                # Stream agent events asynchronously
+                async for event in client.stream_events("my_agent", {"msg": "Hi"}, "agent"):
+                    if event.event_type == EventType.LM_MESSAGE_DELTA:
+                        print(event.data['content'], end='', flush=True)
+
+        asyncio.run(main())
+        ```
+    """
+
+    def __init__(
+        self,
+        gateway_url: str = "http://localhost:34181",
+        timeout: float = 30.0,
+    ):
+        """Initialize the async AGNT5 client.
+
+        Args:
+            gateway_url: Base URL of the AGNT5 gateway (default: http://localhost:34181)
+            timeout: Request timeout in seconds (default: 30.0)
+        """
+        self.gateway_url = gateway_url.rstrip("/")
+        self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self) -> "AsyncClient":
+        """Async context manager entry."""
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Ensure async client is available."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying async HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    async def run(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a component asynchronously and wait for the result.
+
+        Args:
+            component: Name of the component to execute
+            input_data: Input data for the component
+            component_type: Type of component - "function", "workflow", "agent", "tool"
+            session_id: Session identifier for multi-turn conversations
+            user_id: User identifier for user-scoped memory
+
+        Returns:
+            Dictionary containing the component's output
+
+        Raises:
+            RunError: If the component execution fails
+            httpx.HTTPError: If the HTTP request fails
+        """
+        if input_data is None:
+            input_data = {}
+
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+
+        response = await client.post(url, json=input_data, headers=headers)
+
+        if response.status_code == 404:
+            try:
+                error_data = response.json()
+                raise RunError(
+                    error_data.get("error", "Component not found"),
+                    run_id=error_data.get("runId"),
+                )
+            except ValueError:
+                raise RunError(f"Component '{component}' not found")
+
+        if response.status_code in (500, 503, 504):
+            try:
+                error_data = response.json()
+                raise RunError(
+                    error_data.get("error", "Unknown error"),
+                    run_id=error_data.get("runId"),
+                )
+            except ValueError:
+                response.raise_for_status()
+        else:
+            response.raise_for_status()
+
+        data = response.json()
+        if data.get("status") == "failed":
+            raise RunError(data.get("error", "Unknown error"), run_id=data.get("runId"))
+
+        return data.get("output", {})
+
+    async def stream_events(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> AsyncIterator[Event]:
+        """Async stream typed Event objects from a component execution.
+
+        This method yields Event objects as they arrive from the component,
+        providing full access to the event taxonomy including agent lifecycle,
+        LM streaming, tool calls, and workflow events.
+
+        Args:
+            component: Name of the component to execute
+            input_data: Input data for the component
+            component_type: Type of component - "function", "workflow", "agent", "tool"
+            session_id: Session identifier for multi-turn conversations
+            user_id: User identifier for user-scoped memory
+            timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+
+        Yields:
+            Event objects as they arrive from the stream
+
+        Raises:
+            RunError: If the component execution fails
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            async with AsyncClient() as client:
+                async for event in client.stream_events("my_agent", {"msg": "Hi"}, "agent"):
+                    if event.event_type == EventType.AGENT_STARTED:
+                        print(f"Agent started: {event.data['agent_name']}")
+                    elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                        print(event.data['content'], end='', flush=True)
+            ```
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be a positive number")
+
+        if input_data is None:
+            input_data = {}
+
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+
+        async with client.stream(
+            "POST",
+            url,
+            json=input_data,
+            headers=headers,
+            timeout=timeout,
+        ) as response:
+            if response.status_code != 200:
+                # Try to get error details from response body
+                try:
+                    error_body = (await response.aread()).decode("utf-8")
+                    error_data = json.loads(error_body)
+                    error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                    run_id = error_data.get("runId")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    error_msg = f"HTTP {response.status_code}: Streaming request failed"
+                    run_id = None
+                raise RunError(error_msg, run_id=run_id)
+
+            current_event_type: Optional[str] = None
+            async for line in response.aiter_lines():
+                line = line.strip()
+
+                # Skip empty lines and comments (keep-alive)
+                if not line or line.startswith(":"):
+                    continue
+
+                # Parse event type: "event: agent.started"
+                if line.startswith("event: "):
+                    current_event_type = line[7:]
+                    continue
+
+                # Parse SSE data: "data: {...}"
+                if line.startswith("data: "):
+                    data_str = line[6:]
+
+                    try:
+                        data = json.loads(data_str)
+
+                        # Check for completion signal
+                        if data.get("done") or current_event_type == "done":
+                            return
+
+                        # Check for error event
+                        if current_event_type == "error" or "error" in data:
+                            error_msg = data.get("error", "Unknown streaming error")
+                            raise RunError(error_msg, run_id=data.get("runId"))
+
+                        # Yield typed Event object
+                        if current_event_type:
+                            yield _parse_sse_to_event(current_event_type, data)
+
+                    except json.JSONDecodeError:
+                        continue
+
+    async def submit(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
+    ) -> str:
+        """Submit a component for async execution and return immediately.
+
+        Args:
+            component: Name of the component to execute
+            input_data: Input data for the component
+            component_type: Type of component
+
+        Returns:
+            String containing the run ID
+        """
+        if input_data is None:
+            input_data = {}
+
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
+
+        response = await client.post(
+            url,
+            json=input_data,
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        return data.get("runId", "")
+
+    async def get_status(self, run_id: str) -> Dict[str, Any]:
+        """Get the current status of a run.
+
+        Args:
+            run_id: The run ID returned from submit()
+
+        Returns:
+            Dictionary containing status information
+        """
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
+
+        response = await client.get(url)
+        response.raise_for_status()
+
+        return response.json()
+
+    async def get_result(self, run_id: str) -> Dict[str, Any]:
+        """Get the result of a completed run.
+
+        Args:
+            run_id: The run ID returned from submit()
+
+        Returns:
+            Dictionary containing the component's output
+
+        Raises:
+            RunError: If the run failed or is not yet complete
+        """
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
+
+        response = await client.get(url)
+
+        if response.status_code == 404:
+            error_data = response.json()
+            error_msg = error_data.get("error", "Run not found or not complete")
+            current_status = error_data.get("status", "unknown")
+            raise RunError(f"{error_msg} (status: {current_status})", run_id=run_id)
+
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") == "failed":
+            raise RunError(data.get("error", "Unknown error"), run_id=run_id)
+
+        return data.get("output", {})
 
 
 class RunError(Exception):

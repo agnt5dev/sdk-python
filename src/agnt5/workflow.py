@@ -59,6 +59,7 @@ class WorkflowContext(Context):
         checkpoint_client: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
+        delta_callback: Optional[Callable[[str, str, int, int], None]] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -74,6 +75,8 @@ class WorkflowContext(Context):
             checkpoint_client: Optional CheckpointClient for platform-side memoization
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant identifier for multi-tenant deployments
+            delta_callback: Optional callback for forwarding streaming events from nested components
+                           (event_type, output_data, content_index, sequence) -> None
         """
         super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
         self._workflow_entity = workflow_entity
@@ -81,6 +84,8 @@ class WorkflowContext(Context):
         self._sequence_number: int = 0  # Global sequence for checkpoints
         self._checkpoint_callback = checkpoint_callback
         self._checkpoint_client = checkpoint_client
+        self._delta_callback = delta_callback
+        self._delta_sequence: int = 0  # Sequence for delta events (separate from checkpoint sequence)
 
         # Memory scoping identifiers
         self.session_id = session_id or run_id  # Default: session = run (ephemeral)
@@ -91,6 +96,99 @@ class WorkflowContext(Context):
         self._step_event_stack: List[str] = []
 
     # === State Management ===
+
+    def _forward_delta(self, event_type: str, output_data: str, content_index: int = 0) -> None:
+        """
+        Forward a streaming delta event from a nested component.
+
+        Used by step executors to forward events from streaming agents/functions
+        to the client via the delta queue.
+
+        Args:
+            event_type: Event type (e.g., "agent.started", "lm.message.delta")
+            output_data: JSON-serialized event data
+            content_index: Content index for parallel events (default: 0)
+        """
+        if self._delta_callback:
+            self._delta_callback(event_type, output_data, content_index, self._delta_sequence)
+            self._delta_sequence += 1
+
+    async def _consume_streaming_result(self, async_gen: Any, step_name: str) -> Any:
+        """
+        Consume an async generator while forwarding streaming events to the client.
+
+        This method handles streaming from nested agents and functions within
+        workflow steps. Events are forwarded via the delta queue while the
+        final result is collected and returned for the next step.
+
+        For agents, the final output is extracted from the agent.completed event.
+        For functions, the last yielded value (or collected output) is returned.
+
+        Args:
+            async_gen: Async generator yielding Event objects or raw values
+            step_name: Name of the current step (for logging)
+
+        Returns:
+            The final result to pass to the next step:
+            - For agents: The output from agent.completed event
+            - For functions: The last yielded value or collected output
+        """
+        import json
+        from .events import Event, EventType
+
+        final_result = None
+        collected_output = []  # For streaming functions that yield chunks
+
+        async for item in async_gen:
+            if isinstance(item, Event):
+                # Forward typed Event via delta queue
+                event_data = item.to_response_fields()
+                output_data = event_data.get("output_data", b"")
+                output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
+
+                self._forward_delta(
+                    event_type=event_data.get("event_type", ""),
+                    output_data=output_str,
+                    content_index=event_data.get("content_index", 0),
+                )
+
+                # Capture final result from specific event types
+                if item.event_type == EventType.AGENT_COMPLETED:
+                    # For agents, extract the output from completed event
+                    final_result = item.data.get("output", "")
+                    logger.debug(f"Step '{step_name}': Captured agent output from agent.completed")
+                elif item.event_type == EventType.OUTPUT_STOP:
+                    # For streaming functions, the collected output is the result
+                    # (already collected from delta events)
+                    pass
+
+            else:
+                # Raw value (non-Event) - streaming function output
+                # Forward as output.delta and collect for final result
+                try:
+                    chunk_json = json.dumps(item)
+                except (TypeError, ValueError):
+                    chunk_json = str(item)
+
+                self._forward_delta(
+                    event_type="output.delta",
+                    output_data=chunk_json,
+                )
+                collected_output.append(item)
+
+        # Determine final result
+        if final_result is not None:
+            # Agent result was captured from agent.completed event
+            return final_result
+        elif collected_output:
+            # Streaming function - return collected chunks
+            # If single item, return it directly; otherwise return list
+            if len(collected_output) == 1:
+                return collected_output[0]
+            return collected_output
+        else:
+            # Empty generator
+            return None
 
     def _send_checkpoint(self, checkpoint_type: str, checkpoint_data: dict) -> None:
         """
@@ -341,10 +439,19 @@ class WorkflowContext(Context):
                 if len(args) == 0 and "input" in kwargs:
                     # Legacy pattern - single input parameter
                     input_data = kwargs.pop("input")  # Remove from kwargs
-                    result = await func_config.handler(func_ctx, input_data, **kwargs)
+                    handler_result = func_config.handler(func_ctx, input_data, **kwargs)
                 else:
                     # Type-safe pattern - pass all args/kwargs
-                    result = await func_config.handler(func_ctx, *args, **kwargs)
+                    handler_result = func_config.handler(func_ctx, *args, **kwargs)
+
+                # Check if result is an async generator (streaming function or agent)
+                # If so, consume it while forwarding events via delta queue
+                if inspect.isasyncgen(handler_result):
+                    result = await self._consume_streaming_result(handler_result, step_name)
+                elif inspect.iscoroutine(handler_result):
+                    result = await handler_result
+                else:
+                    result = handler_result
 
                 # Add output data to span
                 try:
@@ -565,12 +672,18 @@ class WorkflowContext(Context):
         start_time = time.time()
         try:
             # Execute and checkpoint
-            if inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
+            if inspect.isasyncgen(func_or_awaitable):
+                # Direct async generator - consume while forwarding events
+                result = await self._consume_streaming_result(func_or_awaitable, name)
+            elif inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
                 result = await func_or_awaitable
             elif callable(func_or_awaitable):
                 # Call with args/kwargs if provided
                 call_result = func_or_awaitable(*args, **kwargs)
-                if inspect.iscoroutine(call_result) or inspect.isawaitable(call_result):
+                if inspect.isasyncgen(call_result):
+                    # Callable returned async generator - consume while forwarding events
+                    result = await self._consume_streaming_result(call_result, name)
+                elif inspect.iscoroutine(call_result) or inspect.isawaitable(call_result):
                     result = await call_result
                 else:
                     result = call_result

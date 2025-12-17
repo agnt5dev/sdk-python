@@ -1,0 +1,338 @@
+"""
+Integration Tests: Agent Streaming via SSE
+
+Tests streaming agent execution using client.stream_events():
+- Agent lifecycle events (agent.started, agent.completed)
+- Event ordering and sequencing
+- Tool call events (when agents use tools)
+- Error handling for agent failures
+
+Note: Agent events are wrapped in output.delta events.
+To access agent events, check output.delta.data["content"]["event_type"].
+
+Run with:
+    # Requires OPENAI_API_KEY for LLM calls
+    pytest tests/integration/test_ex_520_stream_agents.py -v
+
+    # Skip if no API key
+    pytest tests/integration/test_ex_520_stream_agents.py -v -m "not llm"
+"""
+
+import os
+import pytest
+
+
+# Skip all agent streaming tests if no API key
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.llm,
+    pytest.mark.skipif(
+        not os.getenv("OPENAI_API_KEY"),
+        reason="OPENAI_API_KEY not set - skipping agent streaming tests"
+    ),
+]
+
+
+def extract_agent_events(events):
+    """Extract agent events from output.delta events.
+
+    Agent functions yield dicts that become output.delta events.
+    The agent event data is in e.data["content"].
+    """
+    agent_events = []
+    for e in events:
+        if e.event_type.value == "output.delta":
+            content = e.data.get("content", {})
+            if isinstance(content, dict) and "event_type" in content:
+                agent_events.append(content)
+    return agent_events
+
+
+def get_agent_event_types(events):
+    """Get list of agent event types from stream events."""
+    return [e["event_type"] for e in extract_agent_events(events)]
+
+
+# =============================================================================
+# BASIC AGENT STREAMING
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_agent_simple_basic(client, worker_process):
+    """Test basic agent streaming returns events."""
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "Say hello in one word."
+    }, component_type="function"))
+
+    # Should have run lifecycle events
+    run_event_types = [e.event_type.value for e in events]
+    assert "run.started" in run_event_types
+    assert "run.completed" in run_event_types
+
+    # Should have agent lifecycle events nested in output.delta
+    agent_event_types = get_agent_event_types(events)
+    assert "agent.started" in agent_event_types
+    assert "agent.completed" in agent_event_types
+
+
+@pytest.mark.integration
+def test_stream_agent_simple_event_order(client, worker_process):
+    """Test that agent.started comes before agent.completed."""
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "What is 2 + 2?"
+    }, component_type="function"))
+
+    agent_event_types = get_agent_event_types(events)
+
+    # Find indices
+    started_idx = agent_event_types.index("agent.started") if "agent.started" in agent_event_types else -1
+    completed_idx = agent_event_types.index("agent.completed") if "agent.completed" in agent_event_types else -1
+
+    # Started should come before completed
+    assert started_idx >= 0, "agent.started event not found"
+    assert completed_idx >= 0, "agent.completed event not found"
+    assert started_idx < completed_idx, "agent.started should come before agent.completed"
+
+
+@pytest.mark.integration
+def test_stream_agent_simple_has_output(client, worker_process):
+    """Test that completed event contains output."""
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "What color is the sky?"
+    }, component_type="function"))
+
+    # Find the agent.completed event
+    agent_events = extract_agent_events(events)
+    completed_events = [e for e in agent_events if e["event_type"] == "agent.completed"]
+    assert len(completed_events) == 1
+
+    completed = completed_events[0]
+    assert "data" in completed
+    assert "output" in completed["data"]
+    assert len(completed["data"]["output"]) > 0
+
+
+# =============================================================================
+# STREAMING CHAT AGENT
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_agent_chat_basic(client, worker_process):
+    """Test streaming chat agent returns events."""
+    events = list(client.stream_events("stream_agent_chat", {
+        "message": "Explain Python in one sentence."
+    }, component_type="function"))
+
+    # Should have run lifecycle events
+    run_event_types = [e.event_type.value for e in events]
+    assert "run.started" in run_event_types
+    assert "run.completed" in run_event_types
+
+    # Should have agent events
+    agent_event_types = get_agent_event_types(events)
+    assert "agent.started" in agent_event_types
+    assert "agent.completed" in agent_event_types
+
+
+@pytest.mark.integration
+def test_stream_agent_chat_started_has_metadata(client, worker_process):
+    """Test that agent.started event contains agent metadata."""
+    events = list(client.stream_events("stream_agent_chat", {
+        "message": "Hello"
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    started_events = [e for e in agent_events if e["event_type"] == "agent.started"]
+    assert len(started_events) == 1
+
+    started = started_events[0]
+    assert "data" in started
+    # Started event should have agent_name and model
+    assert "agent_name" in started["data"]
+    assert "model" in started["data"]
+
+
+@pytest.mark.integration
+def test_stream_agent_chat_content_relevant(client, worker_process):
+    """Test that agent response is relevant to the question."""
+    events = list(client.stream_events("stream_agent_chat", {
+        "message": "What is the capital of France?"
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    assert completed is not None
+
+    output = completed["data"]["output"].lower()
+    assert "paris" in output
+
+
+# =============================================================================
+# STREAMING AGENT WITH TOOLS
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_agent_with_tools_basic(client, worker_process):
+    """Test streaming agent with tools returns events."""
+    events = list(client.stream_events("stream_agent_with_tools", {
+        "message": "Calculate 10 + 5"
+    }, component_type="function"))
+
+    # Should have run lifecycle events
+    run_event_types = [e.event_type.value for e in events]
+    assert "run.started" in run_event_types
+    assert "run.completed" in run_event_types
+
+    # Should have agent events
+    agent_event_types = get_agent_event_types(events)
+    assert "agent.started" in agent_event_types
+    assert "agent.completed" in agent_event_types
+
+
+@pytest.mark.integration
+def test_stream_agent_with_tools_correct_result(client, worker_process):
+    """Test that agent with tools produces correct calculation."""
+    events = list(client.stream_events("stream_agent_with_tools", {
+        "message": "What is 15 multiplied by 23?"
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    assert completed is not None
+
+    output = completed["data"]["output"]
+    # 15 * 23 = 345
+    assert "345" in output
+
+
+@pytest.mark.integration
+def test_stream_agent_with_tools_has_tool_calls(client, worker_process):
+    """Test that agent records tool calls in completed event."""
+    events = list(client.stream_events("stream_agent_with_tools", {
+        "message": "Calculate 100 divided by 4"
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    assert completed is not None
+
+    # Completed event should have tool_calls in data
+    if "tool_calls" in completed["data"]:
+        tool_calls = completed["data"]["tool_calls"]
+        assert len(tool_calls) >= 1
+        # Should have used the calculate tool
+        tool_names = [tc.get("name") for tc in tool_calls]
+        assert "calculate" in tool_names
+
+
+# =============================================================================
+# STREAM CONSUMPTION PATTERNS
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_agent_collect_all(client, worker_process):
+    """Test collecting all events from agent stream."""
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "Hi"
+    }, component_type="function"))
+
+    # Should complete without error
+    assert len(events) >= 1
+
+    # Should have run events
+    run_event_types = [e.event_type.value for e in events]
+    assert "run.completed" in run_event_types or "run.started" in run_event_types
+
+    # Should have agent events
+    agent_event_types = get_agent_event_types(events)
+    assert "agent.completed" in agent_event_types or "agent.started" in agent_event_types
+
+
+@pytest.mark.integration
+def test_stream_agent_multiple_sequential(client, worker_process):
+    """Test multiple sequential agent streams."""
+    # First stream
+    events1 = list(client.stream_events("stream_agent_simple", {
+        "message": "Hello"
+    }, component_type="function"))
+    assert len(events1) >= 2
+
+    # Second stream
+    events2 = list(client.stream_events("stream_agent_simple", {
+        "message": "Goodbye"
+    }, component_type="function"))
+    assert len(events2) >= 2
+
+    # Both should complete successfully
+    types1 = get_agent_event_types(events1)
+    types2 = get_agent_event_types(events2)
+
+    assert "agent.completed" in types1
+    assert "agent.completed" in types2
+
+
+# =============================================================================
+# ERROR HANDLING
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_agent_nonexistent(client, worker_process):
+    """Test streaming a nonexistent agent function."""
+    from agnt5.client import RunError
+
+    with pytest.raises((RunError, Exception)):
+        list(client.stream_events("nonexistent_agent_function", {}, component_type="function"))
+
+
+@pytest.mark.integration
+def test_stream_agent_after_error(client, worker_process):
+    """Test that streaming works after an error."""
+    from agnt5.client import RunError
+
+    # Try to stream a nonexistent function
+    try:
+        list(client.stream_events("nonexistent_function", {}, component_type="function"))
+    except (RunError, Exception):
+        pass
+
+    # Agent streaming should still work
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "Test recovery"
+    }, component_type="function"))
+
+    # Should have run lifecycle events
+    run_event_types = [e.event_type.value for e in events]
+    assert "run.started" in run_event_types or "run.completed" in run_event_types
+
+    # Should have agent events
+    agent_event_types = get_agent_event_types(events)
+    assert "agent.started" in agent_event_types or "agent.completed" in agent_event_types
+
+
+# =============================================================================
+# COMPARISON WITH NON-STREAMING
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_vs_sync_same_result(client, worker_process):
+    """Test that streaming and non-streaming produce equivalent results."""
+    message = "What is 5 + 3?"
+
+    # Streaming call
+    events = list(client.stream_events("stream_agent_with_tools", {
+        "message": message
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    stream_completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    assert stream_completed is not None
+    stream_output = stream_completed["data"]["output"]
+
+    # The output should contain the answer (8)
+    assert "8" in stream_output

@@ -8,7 +8,7 @@ with built-in durability guarantees and state management.
 from ._compat import _import_error, _rust_available
 from .agent import Agent, AgentContext, AgentRegistry, AgentResult, Handoff, agent, handoff
 from .checkpoint import CheckpointClient
-from .client import Client, RunError
+from .client import AsyncClient, Client, RunError
 from .context import Context
 from .function import FunctionContext
 from .workflow import WorkflowContext
@@ -44,6 +44,7 @@ from . import lm
 
 # Expose streaming events module for typed event streaming
 from . import events
+from .events import Event, EventType
 
 # Expose Sentry utilities for custom error tracking (optional)
 from . import _sentry as sentry
@@ -60,6 +61,7 @@ __all__ = [
     "AgentContext",
     "CheckpointClient",
     "Client",
+    "AsyncClient",
     "Worker",
     "function",
     "FunctionRegistry",
@@ -107,6 +109,8 @@ __all__ = [
     "lm",
     # Streaming Events (for typed SSE events)
     "events",
+    "Event",
+    "EventType",
     # Sentry integration (Optional)
     "sentry",
 ]

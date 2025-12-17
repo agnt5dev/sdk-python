@@ -46,6 +46,7 @@ try:
     from ._core import LanguageModelConfig as RustLanguageModelConfig
     from ._core import Response as RustResponse
     from ._core import StreamChunk as RustStreamChunk
+    from ._core import AsyncStreamHandle as RustAsyncStreamHandle
     from ._core import Usage as RustUsage
     _RUST_AVAILABLE = True
 except ImportError:
@@ -54,6 +55,7 @@ except ImportError:
     RustLanguageModelConfig = None
     RustResponse = None
     RustStreamChunk = None
+    RustAsyncStreamHandle = None
     RustUsage = None
 
 
@@ -290,14 +292,19 @@ class LanguageModel(ABC):
         pass
 
     @abstractmethod
-    async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
-        """Stream completion from LLM.
+    async def stream(self, request: GenerateRequest) -> AsyncIterator["Event"]:
+        """Stream completion from LLM as Event objects.
+
+        Yields typed Event objects for real-time SSE streaming:
+        - lm.message.start: Beginning of message content
+        - lm.message.delta: Token chunk with incremental text
+        - lm.message.stop: End of message content
 
         Args:
             request: Generation request with model, messages, and configuration
 
         Yields:
-            Text chunks as they are generated
+            Event objects for streaming
         """
         pass
 
@@ -520,15 +527,36 @@ class _LanguageModel(LanguageModel):
                 workflow_ctx._send_checkpoint("lm.call.failed", event_data)
             raise
 
-    async def stream(self, request: GenerateRequest) -> AsyncIterator[str]:
-        """Stream completion from LLM.
+    async def stream(self, request: GenerateRequest) -> AsyncIterator["Event"]:
+        """Stream completion from LLM as Event objects for SSE delivery.
+
+        This method yields typed Event objects suitable for real-time streaming
+        via SSE. It emits content block events following the pattern:
+        - lm.message.start / lm.thinking.start: Beginning of content block
+        - lm.message.delta / lm.thinking.delta: Token chunk with incremental text
+        - lm.message.stop / lm.thinking.stop: End of content block
+
+        Extended thinking models (Claude with extended thinking) emit thinking blocks
+        before text blocks, allowing you to see the model's reasoning process.
 
         Args:
             request: Generation request with model, messages, and configuration
 
         Yields:
-            Text chunks as they are generated
+            Event objects for streaming
+
+        Example:
+            ```python
+            async for event in lm_instance.stream(request):
+                if event.event_type == EventType.LM_MESSAGE_DELTA:
+                    print(event.data.get("content", ""), end="", flush=True)
+                elif event.event_type == EventType.LM_THINKING_DELTA:
+                    # Handle thinking content (optional)
+                    pass
+            ```
         """
+        from .events import Event, EventType
+
         # Convert Python request to structured format for Rust
         prompt = self._build_prompt_messages(request)
 
@@ -541,8 +569,6 @@ class _LanguageModel(LanguageModel):
         }
 
         # Always pass provider explicitly if set
-        # For gateway providers like OpenRouter, this allows them to handle
-        # models with provider prefixes (e.g., openrouter can handle anthropic/claude-3.5-haiku)
         if self._provider:
             kwargs["provider"] = self._provider
 
@@ -559,7 +585,6 @@ class _LanguageModel(LanguageModel):
 
         # Pass Responses API specific parameters
         if request.config.built_in_tools:
-            # Serialize built-in tools to JSON for Rust
             built_in_tools_list = [tool.value for tool in request.config.built_in_tools]
             kwargs["built_in_tools"] = json.dumps(built_in_tools_list)
 
@@ -578,7 +603,6 @@ class _LanguageModel(LanguageModel):
 
         # Pass tools and tool_choice to Rust
         if request.tools:
-            # Serialize tools to JSON for Rust
             tools_list = [
                 {
                     "name": tool.name,
@@ -590,75 +614,102 @@ class _LanguageModel(LanguageModel):
             kwargs["tools"] = json.dumps(tools_list)
 
         if request.tool_choice:
-            # Serialize tool_choice to JSON for Rust
             kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
-        # Emit checkpoint if called within a workflow context
-        from .context import get_workflow_context
         import time
-        workflow_ctx = get_workflow_context()
-
-        # Get trace context for event linkage
-        trace_id = None
-        span_id = None
-        try:
-            from opentelemetry import trace
-            span = trace.get_current_span()
-            if span.is_recording():
-                span_context = span.get_span_context()
-                trace_id = format(span_context.trace_id, '032x')
-                span_id = format(span_context.span_id, '016x')
-        except Exception:
-            pass  # Tracing not available, continue without
-
-        # Emit started event (trace_id is optional - emit even without tracing)
-        if workflow_ctx:
-            event_data = {
-                "model": model,
-                "provider": self._provider,
-                "timestamp": time.time_ns() // 1_000_000,
-            }
-            if trace_id:
-                event_data["trace_id"] = trace_id
-                event_data["span_id"] = span_id
-            workflow_ctx._send_checkpoint("lm.stream.started", event_data)
+        sequence = 0
+        # Track block types by index since content_block_stop doesn't include block_type
+        block_types: Dict[int, str] = {}
 
         try:
-            # Call Rust implementation - it returns a proper Python coroutine now
-            # Using pyo3-async-runtimes for truly async streaming without blocking
-            rust_chunks = await self._rust_lm.stream(prompt=prompt, **kwargs)
+            # Use stream_iter for true async streaming - yields chunks as they arrive
+            # instead of collecting all chunks first
+            async for chunk in self._rust_lm.stream_iter(prompt=prompt, **kwargs):
+                chunk_type = chunk.chunk_type
+                block_type = chunk.block_type  # "text" or "thinking" (None for stop/completed)
+                index = chunk.index if chunk.index is not None else 0
 
-            # Yield each delta chunk (skip the final completed chunk which contains
-            # the full accumulated text - we only want individual deltas)
-            for chunk in rust_chunks:
-                if chunk.text and not chunk.finished:
-                    yield chunk.text
+                if chunk_type == "content_block_start":
+                    # Track block type for this index
+                    block_types[index] = block_type or "text"
+                    # Emit start event based on block type
+                    if block_type == "thinking":
+                        yield Event.thinking_start(
+                            index=index,
+                            sequence=sequence,
+                        )
+                    else:
+                        yield Event.message_start(
+                            index=index,
+                            sequence=sequence,
+                        )
+                    sequence += 1
 
-            # Emit completion event (note: streaming doesn't provide token counts)
-            if workflow_ctx:
-                event_data = {
-                    "model": model,
-                    "provider": self._provider,
-                    "timestamp": time.time_ns() // 1_000_000,
-                }
-                if trace_id:
-                    event_data["trace_id"] = trace_id
-                    event_data["span_id"] = span_id
-                workflow_ctx._send_checkpoint("lm.stream.completed", event_data)
+                elif chunk_type == "delta":
+                    # Emit delta event based on block type
+                    if block_type == "thinking":
+                        yield Event.thinking_delta(
+                            content=chunk.text,
+                            index=index,
+                            sequence=sequence,
+                        )
+                    else:
+                        yield Event.message_delta(
+                            content=chunk.text,
+                            index=index,
+                            sequence=sequence,
+                        )
+                    sequence += 1
+
+                elif chunk_type == "content_block_stop":
+                    # Look up block type from when we saw content_block_start
+                    tracked_block_type = block_types.get(index, "text")
+                    # Emit stop event based on tracked block type
+                    if tracked_block_type == "thinking":
+                        yield Event.thinking_stop(
+                            index=index,
+                            sequence=sequence,
+                        )
+                    else:
+                        yield Event.message_stop(
+                            index=index,
+                            sequence=sequence,
+                        )
+                    sequence += 1
+
+                elif chunk_type == "completed":
+                    # Final response - emit completion event
+                    completion_data = {
+                        "text": chunk.text,
+                        "model": chunk.model,
+                        "timestamp": time.time_ns() // 1_000_000,
+                    }
+                    if chunk.finish_reason:
+                        completion_data["finish_reason"] = chunk.finish_reason
+                    if chunk.usage:
+                        completion_data["usage"] = {
+                            "prompt_tokens": chunk.usage.prompt_tokens,
+                            "completion_tokens": chunk.usage.completion_tokens,
+                            "total_tokens": chunk.usage.total_tokens,
+                        }
+                    yield Event(
+                        event_type=EventType.LM_STREAM_COMPLETED,
+                        data=completion_data,
+                        sequence=sequence,
+                    )
+                    sequence += 1
+
         except Exception as e:
-            # Emit failed event
-            if workflow_ctx:
-                event_data = {
-                    "model": model,
-                    "provider": self._provider,
+            # Emit error as a failed event (caller can handle)
+            yield Event(
+                event_type=EventType.LM_STREAM_FAILED,
+                data={
                     "error": str(e),
                     "error_type": type(e).__name__,
                     "timestamp": time.time_ns() // 1_000_000,
-                }
-                if trace_id:
-                    event_data["trace_id"] = trace_id
-                    event_data["span_id"] = span_id
-                workflow_ctx._send_checkpoint("lm.stream.failed", event_data)
+                },
+                sequence=sequence,
+            )
             raise
 
     def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, str]]:
@@ -872,11 +923,16 @@ async def stream(
     modalities: Optional[List[Modality]] = None,
     store: Optional[bool] = None,
     previous_response_id: Optional[str] = None,
-) -> AsyncIterator[str]:
-    """Stream text using any LLM provider (simplified API).
+) -> AsyncIterator["Event"]:
+    """Stream LLM completion as Event objects (simplified API).
 
     This is the recommended way to use streaming. Provider is auto-detected
     from the model prefix (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-5-haiku').
+
+    Yields Event objects for real-time SSE streaming:
+    - lm.message.start: Beginning of message content
+    - lm.message.delta: Token chunk with incremental text
+    - lm.message.stop: End of message content
 
     Args:
         model: Model identifier with provider prefix (e.g., 'openai/gpt-4o-mini')
@@ -893,26 +949,28 @@ async def stream(
         previous_response_id: Continue from previous response (OpenAI Responses API only)
 
     Yields:
-        Text chunks as they are generated
+        Event objects for streaming
 
     Examples:
         Simple streaming:
-        >>> async for chunk in stream(
+        >>> from agnt5.events import EventType
+        >>> async for event in stream(
         ...     model="openai/gpt-4o-mini",
         ...     prompt="Write a story"
         ... ):
-        ...     print(chunk, end="", flush=True)
+        ...     if event.event_type == EventType.LM_MESSAGE_DELTA:
+        ...         print(event.data.get("content", ""), end="", flush=True)
 
         Streaming conversation:
-        >>> async for chunk in stream(
+        >>> async for event in stream(
         ...     model="groq/llama-3.3-70b-versatile",
-        ...     messages=[
-        ...         {"role": "user", "content": "Tell me a joke"}
-        ...     ],
+        ...     messages=[{"role": "user", "content": "Tell me a joke"}],
         ...     temperature=0.9
         ... ):
-        ...     print(chunk, end="")
+        ...     if event.event_type == EventType.LM_MESSAGE_DELTA:
+        ...         print(event.data.get("content", ""), end="")
     """
+    from .events import Event
     # Validate input
     if not prompt and not messages:
         raise ValueError("Either 'prompt' or 'messages' must be provided")
