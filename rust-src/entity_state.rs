@@ -259,19 +259,23 @@ impl EntityStateManager {
         &self,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
     ) -> Result<EntityLoadResult, EntityError> {
         log::info!(
-            "EntityStateManager: Loading from platform {}:{}",
+            "EntityStateManager: Loading from platform {}:{} (scope: {}, scope_id: {})",
             entity_type,
-            entity_key
+            entity_key,
+            scope,
+            scope_id
         );
 
         let operation = runtime_service_request::Operation::EntityStateLoad(
             EntityStateLoadRequest {
                 entity_type,
                 entity_key,
-                scope: String::new(),    // Default to global scope
-                scope_id: String::new(), // Empty for global scope
+                scope,
+                scope_id,
             },
         );
 
@@ -303,12 +307,16 @@ impl EntityStateManager {
         entity_key: String,
         state_json: Vec<u8>,
         expected_version: i64,
+        scope: String,
+        scope_id: String,
     ) -> Result<EntitySaveResult, EntityError> {
         log::info!(
-            "EntityStateManager: Saving to platform {}:{} (expected version: {})",
+            "EntityStateManager: Saving to platform {}:{} (expected version: {}, scope: {}, scope_id: {})",
             entity_type,
             entity_key,
-            expected_version
+            expected_version,
+            scope,
+            scope_id
         );
 
         let operation = runtime_service_request::Operation::EntityStateSave(
@@ -317,8 +325,8 @@ impl EntityStateManager {
                 entity_key: entity_key.clone(),
                 state_json: state_json.clone(),
                 expected_version,
-                scope: String::new(),    // Default to global scope
-                scope_id: String::new(), // Empty for global scope
+                scope,
+                scope_id,
             },
         );
 
@@ -359,7 +367,10 @@ impl EntityStateManager {
         &self,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
     ) -> Result<(Vec<u8>, i64), EntityError> {
+        // Cache key includes scope info for proper isolation
         let state_key = (entity_type.clone(), entity_key.clone());
 
         // Check cache first
@@ -391,7 +402,12 @@ impl EntityStateManager {
             entity_key
         );
 
-        let result = self.load_from_platform(entity_type.clone(), entity_key.clone()).await?;
+        let result = self.load_from_platform(
+            entity_type.clone(),
+            entity_key.clone(),
+            scope,
+            scope_id,
+        ).await?;
 
         // Update cache if found
         if result.found {
@@ -415,12 +431,16 @@ impl EntityStateManager {
         entity_key: String,
         state_json: Vec<u8>,
         expected_version: i64,
+        scope: String,
+        scope_id: String,
     ) -> Result<i64, EntityError> {
         let result = self.save_to_platform(
             entity_type,
             entity_key,
             state_json,
-            expected_version
+            expected_version,
+            scope,
+            scope_id,
         ).await?;
 
         Ok(result.new_version)
@@ -439,6 +459,8 @@ impl EntityStateManager {
         &self,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
         update_fn: F,
     ) -> Result<i64, EntityError>
     where
@@ -451,7 +473,9 @@ impl EntityStateManager {
             // Load current state
             let (current_state, current_version) = self.get_cached_or_load(
                 entity_type.clone(),
-                entity_key.clone()
+                entity_key.clone(),
+                scope.clone(),
+                scope_id.clone(),
             ).await?;
 
             // Apply update function
@@ -462,7 +486,9 @@ impl EntityStateManager {
                 entity_type.clone(),
                 entity_key.clone(),
                 new_state,
-                current_version
+                current_version,
+                scope.clone(),
+                scope_id.clone(),
             ).await {
                 Ok(new_version) => {
                     log::info!(
@@ -552,16 +578,19 @@ impl EntityStateManager {
     /// Load entity state (Python-facing async method)
     ///
     /// Returns tuple: (found, state_json, version)
+    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new()))]
     pub fn py_load_state<'py>(
         &self,
         py: Python<'py>,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = manager.load_from_platform(entity_type, entity_key).await
+            let result = manager.load_from_platform(entity_type, entity_key, scope, scope_id).await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             // Return tuple: (found, state_json, version)
@@ -572,6 +601,7 @@ impl EntityStateManager {
     /// Save entity state (Python-facing async method)
     ///
     /// Returns new_version
+    #[pyo3(signature = (entity_type, entity_key, state_json, expected_version, scope = String::new(), scope_id = String::new()))]
     pub fn py_save_state<'py>(
         &self,
         py: Python<'py>,
@@ -579,6 +609,8 @@ impl EntityStateManager {
         entity_key: String,
         state_json: Vec<u8>,
         expected_version: i64,
+        scope: String,
+        scope_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
@@ -587,7 +619,9 @@ impl EntityStateManager {
                 entity_type,
                 entity_key,
                 state_json,
-                expected_version
+                expected_version,
+                scope,
+                scope_id,
             ).await
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
@@ -599,16 +633,19 @@ impl EntityStateManager {
     /// Get cached state or load from platform (Python-facing async method)
     ///
     /// Returns tuple: (state_json, version)
+    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new()))]
     pub fn py_get_cached_or_load<'py>(
         &self,
         py: Python<'py>,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (state_json, version) = manager.get_cached_or_load(entity_type, entity_key).await
+            let (state_json, version) = manager.get_cached_or_load(entity_type, entity_key, scope, scope_id).await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             Ok((state_json, version))

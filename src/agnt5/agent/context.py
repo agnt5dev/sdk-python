@@ -189,7 +189,13 @@ class AgentContext(Context):
         entity_key = self._entity_key
 
         # Load session data via adapter (Rust handles cache + platform load)
-        session_data = await self._state_adapter.load_state(entity_type, entity_key)
+        # Use session scope with session_id for proper entity isolation
+        session_data = await self._state_adapter.load_state(
+            entity_type,
+            entity_key,
+            scope="session",
+            scope_id=self._session_id,
+        )
 
         # Extract messages from session object
         if isinstance(session_data, dict) and "messages" in session_data:
@@ -293,8 +299,12 @@ class AgentContext(Context):
         entity_key = self._entity_key
 
         # Load current state with version for optimistic locking
+        # Use session scope with session_id for proper entity isolation
         current_state, current_version = await self._state_adapter.load_with_version(
-            entity_type, entity_key
+            entity_type,
+            entity_key,
+            scope="session",
+            scope_id=self._session_id,
         )
 
         # Build session object with metadata
@@ -314,12 +324,15 @@ class AgentContext(Context):
         }
 
         # Save to platform via adapter (Rust handles optimistic locking)
+        # Use session scope with session_id for proper entity isolation
         try:
             new_version = await self._state_adapter.save_state(
                 entity_type,
                 entity_key,
                 session_data,
-                current_version
+                current_version,
+                scope="session",
+                scope_id=self._session_id,
             )
             logger.info(
                 f"Persisted conversation history: {entity_key} "
@@ -381,8 +394,13 @@ class AgentContext(Context):
         entity_type = "AgentSession"
         entity_key = self._entity_key
 
-        # Load session data
-        session_data = await self._state_adapter.load_state(entity_type, entity_key)
+        # Load session data with session scope
+        session_data = await self._state_adapter.load_state(
+            entity_type,
+            entity_key,
+            scope="session",
+            scope_id=self._session_id,
+        )
 
         if not session_data:
             # No conversation exists yet - return defaults
