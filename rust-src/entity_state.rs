@@ -50,8 +50,8 @@ impl CachedState {
     }
 }
 
-/// Key for entity state (type, key)
-type StateKey = (String, String);
+/// Key for entity state (type, key, scope, scope_id) - includes scope for proper isolation
+type StateKey = (String, String, String, String);
 
 /// Result type for entity state operations
 #[derive(Debug)]
@@ -114,7 +114,7 @@ pub struct EntityStateManager {
     /// Tenant ID for multi-tenancy
     pub(crate) tenant_id: String,
 
-    /// In-memory cache: (entity_type, entity_key) -> cached state with version
+    /// In-memory cache: (entity_type, entity_key, scope, scope_id) -> cached state with version
     pub(crate) cache: Arc<RwLock<HashMap<StateKey, CachedState>>>,
 
     /// Pending requests awaiting responses (request_id -> oneshot sender)
@@ -325,8 +325,8 @@ impl EntityStateManager {
                 entity_key: entity_key.clone(),
                 state_json: state_json.clone(),
                 expected_version,
-                scope,
-                scope_id,
+                scope: scope.clone(),
+                scope_id: scope_id.clone(),
             },
         );
 
@@ -340,8 +340,8 @@ impl EntityStateManager {
                     result.new_version
                 );
 
-                // Update cache with new state and version
-                let state_key = (entity_type, entity_key);
+                // Update cache with new state and version (include scope for isolation)
+                let state_key = (entity_type, entity_key, scope, scope_id);
                 let cached = CachedState::new(state_json, result.new_version);
                 {
                     let mut cache = self.cache.write().await;
@@ -371,7 +371,7 @@ impl EntityStateManager {
         scope_id: String,
     ) -> Result<(Vec<u8>, i64), EntityError> {
         // Cache key includes scope info for proper isolation
-        let state_key = (entity_type.clone(), entity_key.clone());
+        let state_key = (entity_type.clone(), entity_key.clone(), scope.clone(), scope_id.clone());
 
         // Check cache first
         {
@@ -528,8 +528,8 @@ impl EntityStateManager {
 
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
-                    // Invalidate cache to force reload
-                    self.invalidate_cache(&entity_type, &entity_key).await;
+                    // Invalidate cache to force reload (include scope for proper isolation)
+                    self.invalidate_cache(&entity_type, &entity_key, &scope, &scope_id).await;
                 }
                 Err(e) => {
                     // Other errors are not retryable
@@ -539,15 +539,17 @@ impl EntityStateManager {
         }
     }
 
-    /// Invalidate cache entry for specific entity
-    pub async fn invalidate_cache(&self, entity_type: &str, entity_key: &str) {
-        let state_key = (entity_type.to_string(), entity_key.to_string());
+    /// Invalidate cache entry for specific entity (includes scope for proper isolation)
+    pub async fn invalidate_cache(&self, entity_type: &str, entity_key: &str, scope: &str, scope_id: &str) {
+        let state_key = (entity_type.to_string(), entity_key.to_string(), scope.to_string(), scope_id.to_string());
         let mut cache = self.cache.write().await;
         cache.remove(&state_key);
         log::debug!(
-            "EntityStateManager: Invalidated cache for {}:{}",
+            "EntityStateManager: Invalidated cache for {}:{} (scope: {}, scope_id: {})",
             entity_type,
-            entity_key
+            entity_key,
+            scope,
+            scope_id
         );
     }
 
@@ -658,11 +660,13 @@ impl EntityStateManager {
         py: Python<'py>,
         entity_type: String,
         entity_key: String,
+        scope: String,
+        scope_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            manager.invalidate_cache(&entity_type, &entity_key).await;
+            manager.invalidate_cache(&entity_type, &entity_key, &scope, &scope_id).await;
             Ok(())
         })
     }
