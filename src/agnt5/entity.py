@@ -212,7 +212,13 @@ class EntityStateAdapter:
             self._local_locks[state_key] = asyncio.Lock()
         return self._local_locks[state_key]
 
-    async def load_state(self, entity_type: str, entity_key: str) -> Dict[str, Any]:
+    async def load_state(
+        self,
+        entity_type: str,
+        entity_key: str,
+        scope: str = "global",
+        scope_id: str = "",
+    ) -> Dict[str, Any]:
         """
         Load entity state (Rust handles cache-first logic and platform load).
 
@@ -221,6 +227,8 @@ class EntityStateAdapter:
         Args:
             entity_type: Type of entity (e.g., "ShoppingCart", "Counter")
             entity_key: Unique key for entity instance
+            scope: Entity scope ("global", "session", "run", "user")
+            scope_id: Scope identifier (session_id, run_id, user_id) - empty for global
 
         Returns:
             State dictionary (empty dict if not found)
@@ -232,7 +240,9 @@ class EntityStateAdapter:
 
         try:
             # Rust checks cache first, loads from platform if needed
-            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(entity_type, entity_key)
+            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(
+                entity_type, entity_key, scope, scope_id
+            )
 
             # Convert bytes to dict
             if state_json_bytes:
@@ -249,7 +259,9 @@ class EntityStateAdapter:
         entity_type: str,
         entity_key: str,
         state: Dict[str, Any],
-        expected_version: int
+        expected_version: int,
+        scope: str = "global",
+        scope_id: str = "",
     ) -> int:
         """
         Save entity state (Rust handles version check and platform save).
@@ -261,6 +273,8 @@ class EntityStateAdapter:
             entity_key: Unique key for entity instance
             state: State dictionary to save
             expected_version: Expected current version (for optimistic locking)
+            scope: Entity scope ("global", "session", "run", "user")
+            scope_id: Scope identifier (session_id, run_id, user_id) - empty for global
 
         Returns:
             New version number after save
@@ -293,12 +307,20 @@ class EntityStateAdapter:
             entity_type,
             entity_key,
             state_json,
-            expected_version
+            expected_version,
+            scope,
+            scope_id,
         )
 
         return new_version
 
-    async def load_with_version(self, entity_type: str, entity_key: str) -> Tuple[Dict[str, Any], int]:
+    async def load_with_version(
+        self,
+        entity_type: str,
+        entity_key: str,
+        scope: str = "global",
+        scope_id: str = "",
+    ) -> Tuple[Dict[str, Any], int]:
         """
         Load entity state with version (for update operations).
 
@@ -307,6 +329,8 @@ class EntityStateAdapter:
         Args:
             entity_type: Type of entity
             entity_key: Unique key for entity instance
+            scope: Entity scope ("global", "session", "run", "user")
+            scope_id: Scope identifier (session_id, run_id, user_id) - empty for global
 
         Returns:
             Tuple of (state_dict, version)
@@ -319,7 +343,9 @@ class EntityStateAdapter:
             return state, version
 
         try:
-            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(entity_type, entity_key)
+            state_json_bytes, version = await self._rust_core.py_get_cached_or_load(
+                entity_type, entity_key, scope, scope_id
+            )
 
             if state_json_bytes:
                 state_json = state_json_bytes.decode('utf-8') if isinstance(state_json_bytes, bytes) else state_json_bytes
