@@ -244,40 +244,278 @@ class ConversationMemory:
         return [m.to_lm_message() for m in messages]
 
 
-# Placeholder for Phase 3: SemanticMemory
+class MemoryScope:
+    """Memory scope for semantic memory.
+
+    Scopes determine the isolation level of memories:
+    - USER: Isolated per user (most common)
+    - TENANT: Shared across users in a tenant
+    - AGENT: Isolated per agent instance
+    - SESSION: Isolated per session (ephemeral)
+    - GLOBAL: Shared across all users/tenants
+    """
+    USER = "user"
+    TENANT = "tenant"
+    AGENT = "agent"
+    SESSION = "session"
+    GLOBAL = "global"
+
+    @classmethod
+    def valid_scopes(cls) -> List[str]:
+        """Return list of valid scope strings."""
+        return [cls.USER, cls.TENANT, cls.AGENT, cls.SESSION, cls.GLOBAL]
+
+
+@dataclass
+class MemoryResult:
+    """Result from semantic memory search.
+
+    Attributes:
+        id: Unique identifier for this memory
+        content: The original text content that was stored
+        score: Similarity score (0.0 to 1.0, higher is more similar)
+        metadata: Optional metadata associated with the memory
+    """
+    id: str
+    content: str
+    score: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MemoryMetadata:
+    """Metadata for storing with a memory.
+
+    Attributes:
+        source: Optional source identifier (e.g., "chat", "document", "api")
+        created_at: Optional timestamp string
+        extra: Additional key-value metadata
+    """
+    source: Optional[str] = None
+    created_at: Optional[str] = None
+    extra: Dict[str, str] = field(default_factory=dict)
+
+
 class SemanticMemory:
     """Vector-backed semantic memory for user/tenant knowledge.
 
-    NOT YET IMPLEMENTED - Placeholder for Phase 3.
+    Provides semantic search capabilities over stored memories using
+    vector embeddings. Memories are automatically embedded and indexed
+    for fast similarity search.
 
-    Will provide:
-    - Vector similarity search for relevant memories
-    - Scoped to user or tenant
-    - Integration with embeddings (OpenAI, local models)
+    Requires:
+    - OPENAI_API_KEY for embeddings
+    - One of: QDRANT_URL, PINECONE_API_KEY+PINECONE_HOST, or POSTGRES_URL for vector storage
+
+    Example:
+        ```python
+        from agnt5 import SemanticMemory, MemoryScope
+
+        # Create memory scoped to a user
+        memory = SemanticMemory(MemoryScope.USER, "user-123")
+
+        # Store some memories
+        await memory.store("User prefers dark mode")
+        await memory.store("User's favorite color is blue")
+
+        # Search for relevant memories
+        results = await memory.search("color preferences")
+        for result in results:
+            print(f"{result.content} (score: {result.score:.2f})")
+
+        # Delete a memory
+        await memory.forget(results[0].id)
+        ```
     """
 
     def __init__(self, scope: str, scope_id: str) -> None:
         """Initialize semantic memory for a scope.
 
         Args:
-            scope: Memory scope ("user" or "tenant")
-            scope_id: The user_id or tenant_id
+            scope: Memory scope (use MemoryScope constants: USER, TENANT, AGENT, SESSION, GLOBAL)
+            scope_id: The unique identifier for the scope (e.g., user_id, tenant_id)
+
+        Raises:
+            ValueError: If scope is not a valid scope string
         """
+        if scope not in MemoryScope.valid_scopes():
+            raise ValueError(
+                f"Invalid scope '{scope}'. Must be one of: {MemoryScope.valid_scopes()}"
+            )
         self.scope = scope
         self.scope_id = scope_id
-        raise NotImplementedError(
-            "SemanticMemory is not yet implemented. "
-            "See Phase 3 of entity-memory-dx-improvements for details."
+        self._inner = None  # Lazy initialization
+
+    async def _get_inner(self):
+        """Get or create the underlying Rust SemanticMemory instance."""
+        if self._inner is None:
+            try:
+                from ._core import PySemanticMemory, PyMemoryScope
+            except ImportError as e:
+                raise ImportError(
+                    "SemanticMemory requires the agnt5 Rust extension. "
+                    f"Import error: {e}"
+                ) from e
+
+            # Map scope string to PyMemoryScope
+            scope_map = {
+                MemoryScope.USER: PyMemoryScope.user(),
+                MemoryScope.TENANT: PyMemoryScope.tenant(),
+                MemoryScope.AGENT: PyMemoryScope.agent(),
+                MemoryScope.SESSION: PyMemoryScope.session(),
+                MemoryScope.GLOBAL: PyMemoryScope.global_(),
+            }
+            py_scope = scope_map.get(self.scope)
+            if py_scope is None:
+                py_scope = PyMemoryScope.from_str(self.scope)
+
+            self._inner = await PySemanticMemory.from_env(py_scope, self.scope_id)
+        return self._inner
+
+    async def store(self, content: str, metadata: Optional[MemoryMetadata] = None) -> str:
+        """Store content in semantic memory.
+
+        The content is automatically embedded and indexed for semantic search.
+
+        Args:
+            content: Text content to store
+            metadata: Optional metadata to associate with the memory
+
+        Returns:
+            The unique ID of the stored memory
+
+        Raises:
+            RuntimeError: If embedder or vector database is not configured
+        """
+        inner = await self._get_inner()
+        if metadata is not None:
+            from ._core import PyMemoryMetadata
+            py_metadata = PyMemoryMetadata(
+                source=metadata.source,
+                created_at=metadata.created_at,
+                extra=metadata.extra,
+            )
+            return await inner.store_with_metadata(content, py_metadata)
+        return await inner.store(content)
+
+    async def store_batch(
+        self,
+        contents: List[str],
+        metadata: Optional[List[MemoryMetadata]] = None,
+    ) -> List[str]:
+        """Store multiple contents in batch (more efficient for RAG indexing).
+
+        Uses batch embedding and batch upsert for better performance when
+        indexing many documents.
+
+        Args:
+            contents: List of text contents to store
+            metadata: Optional list of metadata (must match contents length)
+
+        Returns:
+            List of unique IDs for all stored memories
+
+        Raises:
+            RuntimeError: If embedder or vector database is not configured
+            ValueError: If metadata length doesn't match contents length
+
+        Example:
+            ```python
+            # Index documents in batch
+            docs = ["Doc 1 content...", "Doc 2 content...", "Doc 3 content..."]
+            ids = await memory.store_batch(docs)
+
+            # With metadata for source tracking
+            metadata = [
+                MemoryMetadata(source="file1.pdf"),
+                MemoryMetadata(source="file2.pdf"),
+                MemoryMetadata(source="file3.pdf"),
+            ]
+            ids = await memory.store_batch(docs, metadata=metadata)
+            ```
+        """
+        inner = await self._get_inner()
+        if metadata is not None:
+            if len(metadata) != len(contents):
+                raise ValueError(
+                    f"Metadata length ({len(metadata)}) must match contents length ({len(contents)})"
+                )
+            from ._core import PyMemoryMetadata
+            py_metadata = [
+                PyMemoryMetadata(
+                    source=m.source,
+                    created_at=m.created_at,
+                    extra=m.extra,
+                )
+                for m in metadata
+            ]
+            return await inner.store_batch_with_metadata(contents, py_metadata)
+        return await inner.store_batch(contents)
+
+    async def search(self, query: str, limit: int = 10, min_score: Optional[float] = None) -> List[MemoryResult]:
+        """Search for relevant memories using vector similarity.
+
+        Args:
+            query: Search query text (will be embedded)
+            limit: Maximum number of results to return (default: 10)
+            min_score: Optional minimum similarity score filter (0.0 to 1.0)
+
+        Returns:
+            List of MemoryResult objects, ranked by similarity score (highest first)
+
+        Raises:
+            RuntimeError: If embedder or vector database is not configured
+        """
+        inner = await self._get_inner()
+        if min_score is not None:
+            results = await inner.search_with_options(query, limit, min_score)
+        else:
+            results = await inner.search(query, limit)
+
+        return [
+            MemoryResult(
+                id=r.id,
+                content=r.content,
+                score=r.score,
+                metadata=dict(r.metadata.extra) if r.metadata else {},
+            )
+            for r in results
+        ]
+
+    async def forget(self, memory_id: str) -> bool:
+        """Delete a memory by its ID.
+
+        Args:
+            memory_id: The unique ID of the memory to delete
+
+        Returns:
+            True if the memory was deleted, False if it wasn't found
+
+        Raises:
+            RuntimeError: If vector database is not configured
+        """
+        inner = await self._get_inner()
+        return await inner.forget(memory_id)
+
+    async def get(self, memory_id: str) -> Optional[MemoryResult]:
+        """Get a specific memory by ID.
+
+        Args:
+            memory_id: The unique ID of the memory to retrieve
+
+        Returns:
+            MemoryResult if found, None otherwise
+
+        Raises:
+            RuntimeError: If vector database is not configured
+        """
+        inner = await self._get_inner()
+        result = await inner.get(memory_id)
+        if result is None:
+            return None
+        return MemoryResult(
+            id=result.id,
+            content=result.content,
+            score=result.score,
+            metadata=dict(result.metadata.extra) if result.metadata else {},
         )
-
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search for relevant memories using vector similarity."""
-        raise NotImplementedError("SemanticMemory.search() not yet implemented")
-
-    async def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Add content to memory, returns memory_id."""
-        raise NotImplementedError("SemanticMemory.add() not yet implemented")
-
-    async def delete(self, memory_id: str) -> bool:
-        """Delete a specific memory."""
-        raise NotImplementedError("SemanticMemory.delete() not yet implemented")

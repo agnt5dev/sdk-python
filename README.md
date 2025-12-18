@@ -33,6 +33,49 @@ async def analyze_document(ctx: Context, document_id: str) -> dict:
 
 Functions automatically retry on failure. Use `ctx.step()` to checkpoint progress.
 
+## Client Authentication
+
+The AGNT5 client supports two authentication methods:
+
+### Subdomain URLs (Recommended)
+
+Access your deployment directly via its unique subdomain:
+
+```python
+from agnt5 import Client
+
+# Production environment
+client = Client("https://myproject-prod.run.agnt5.com")
+
+# Staging environment
+client = Client("https://myproject-stg.run.agnt5.com")
+
+# Run a workflow
+result = client.run("my_workflow", {"input": "data"})
+```
+
+### API Keys
+
+For programmatic access, use service keys:
+
+```python
+from agnt5 import Client
+
+# Option 1: Pass api_key directly
+client = Client(
+    gateway_url="https://api.agnt5.com",
+    api_key="agnt5_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+)
+
+# Option 2: Use AGNT5_API_KEY environment variable
+# export AGNT5_API_KEY=agnt5_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+client = Client(gateway_url="https://api.agnt5.com")
+
+result = client.run("my_workflow", {"input": "data"})
+```
+
+See the [Authentication Guide](https://agnt5.com/docs/guide/authentication) for more details.
+
 ## Core Components
 
 ### Functions
