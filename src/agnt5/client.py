@@ -1,12 +1,16 @@
 """AGNT5 Client SDK for invoking components."""
 
 import json
+import os
 from typing import Any, AsyncIterator, Dict, Iterator, Optional
 from urllib.parse import urljoin
 
 import httpx
 
 from .events import Event, EventType
+
+# Environment variable for API key
+AGNT5_API_KEY_ENV = "AGNT5_API_KEY"
 
 
 def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> Event:
@@ -49,9 +53,20 @@ class Client:
         ```python
         from agnt5 import Client
 
+        # Local development (no auth needed)
         client = Client("http://localhost:34181")
         result = client.run("greet", {"name": "Alice"})
         print(result)  # {"message": "Hello, Alice!"}
+
+        # Production with API key
+        client = Client(
+            gateway_url="https://api.agnt5.com",
+            api_key="agnt5_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        )
+
+        # Or use AGNT5_API_KEY environment variable
+        # export AGNT5_API_KEY=agnt5_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        client = Client(gateway_url="https://api.agnt5.com")
         ```
     """
 
@@ -59,16 +74,44 @@ class Client:
         self,
         gateway_url: str = "http://localhost:34181",
         timeout: float = 30.0,
+        api_key: Optional[str] = None,
     ):
         """Initialize the AGNT5 client.
 
         Args:
             gateway_url: Base URL of the AGNT5 gateway (default: http://localhost:34181)
             timeout: Request timeout in seconds (default: 30.0)
+            api_key: Service key for authentication. If not provided, falls back to
+                     AGNT5_API_KEY environment variable. Keys start with "agnt5_sk_".
         """
         self.gateway_url = gateway_url.rstrip("/")
         self.timeout = timeout
+        # Use provided api_key or fallback to environment variable
+        self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
         self._client = httpx.Client(timeout=timeout)
+
+    def _build_headers(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Build request headers with authentication and optional session/user context.
+
+        Args:
+            session_id: Session identifier for multi-turn conversations
+            user_id: User identifier for user-scoped memory
+
+        Returns:
+            Dictionary of HTTP headers
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-KEY"] = self.api_key
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+        return headers
 
     def run(
         self,
@@ -120,18 +163,11 @@ class Client:
         # Build URL with component type
         url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
 
-        # Build headers with memory scoping identifiers
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = session_id
-        if user_id:
-            headers["X-User-ID"] = user_id
-
-        # Make request
+        # Make request with auth and session headers
         response = self._client.post(
             url,
             json=input_data,
-            headers=headers,
+            headers=self._build_headers(session_id=session_id, user_id=user_id),
         )
 
         # Handle errors
@@ -231,11 +267,11 @@ class Client:
         # Build URL with component type
         url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
 
-        # Make request
+        # Make request with auth headers
         response = self._client.post(
             url,
             json=input_data,
-            headers={"Content-Type": "application/json"},
+            headers=self._build_headers(),
         )
 
         # Handle errors
@@ -272,7 +308,7 @@ class Client:
         """
         url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
 
-        response = self._client.get(url)
+        response = self._client.get(url, headers=self._build_headers())
         response.raise_for_status()
 
         return response.json()
@@ -306,7 +342,7 @@ class Client:
         """
         url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
 
-        response = self._client.get(url)
+        response = self._client.get(url, headers=self._build_headers())
 
         # Handle 404 - run not complete or not found
         if response.status_code == 404:
@@ -423,12 +459,12 @@ class Client:
         # Build URL
         url = urljoin(self.gateway_url + "/", f"v1/stream/{component}")
 
-        # Use streaming request
+        # Use streaming request with auth headers
         with self._client.stream(
             "POST",
             url,
             json=input_data,
-            headers={"Content-Type": "application/json"},
+            headers=self._build_headers(),
             timeout=300.0,  # 5 minute timeout for streaming
         ) as response:
             # Check for errors
@@ -538,19 +574,12 @@ class Client:
         # Build URL with component type (using v2 streaming endpoint)
         url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
 
-        # Build headers
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = session_id
-        if user_id:
-            headers["X-User-ID"] = user_id
-
-        # Use streaming request
+        # Use streaming request with auth and session headers
         with self._client.stream(
             "POST",
             url,
             json=input_data,
-            headers=headers,
+            headers=self._build_headers(session_id=session_id, user_id=user_id),
             timeout=timeout,
         ) as response:
             # Check for errors
@@ -778,11 +807,11 @@ class EntityProxy:
                 f"v1/entity/{self._entity_type}/{self._key}/{method_name}",
             )
 
-            # Make request with method parameters as JSON body
+            # Make request with method parameters as JSON body and auth headers
             response = self._client._client.post(
                 url,
                 json=kwargs,
-                headers={"Content-Type": "application/json"},
+                headers=self._client._build_headers(),
             )
 
             # Handle errors
@@ -1119,16 +1148,44 @@ class AsyncClient:
         self,
         gateway_url: str = "http://localhost:34181",
         timeout: float = 30.0,
+        api_key: Optional[str] = None,
     ):
         """Initialize the async AGNT5 client.
 
         Args:
             gateway_url: Base URL of the AGNT5 gateway (default: http://localhost:34181)
             timeout: Request timeout in seconds (default: 30.0)
+            api_key: Service key for authentication. If not provided, falls back to
+                     AGNT5_API_KEY environment variable. Keys start with "agnt5_sk_".
         """
         self.gateway_url = gateway_url.rstrip("/")
         self.timeout = timeout
+        # Use provided api_key or fallback to environment variable
+        self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
         self._client: Optional[httpx.AsyncClient] = None
+
+    def _build_headers(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Build request headers with authentication and optional session/user context.
+
+        Args:
+            session_id: Session identifier for multi-turn conversations
+            user_id: User identifier for user-scoped memory
+
+        Returns:
+            Dictionary of HTTP headers
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-KEY"] = self.api_key
+        if session_id:
+            headers["X-Session-ID"] = session_id
+        if user_id:
+            headers["X-User-ID"] = user_id
+        return headers
 
     async def __aenter__(self) -> "AsyncClient":
         """Async context manager entry."""
@@ -1183,13 +1240,11 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
 
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = session_id
-        if user_id:
-            headers["X-User-ID"] = user_id
-
-        response = await client.post(url, json=input_data, headers=headers)
+        response = await client.post(
+            url,
+            json=input_data,
+            headers=self._build_headers(session_id=session_id, user_id=user_id),
+        )
 
         if response.status_code == 404:
             try:
@@ -1268,17 +1323,11 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
 
-        headers = {"Content-Type": "application/json"}
-        if session_id:
-            headers["X-Session-ID"] = session_id
-        if user_id:
-            headers["X-User-ID"] = user_id
-
         async with client.stream(
             "POST",
             url,
             json=input_data,
-            headers=headers,
+            headers=self._build_headers(session_id=session_id, user_id=user_id),
             timeout=timeout,
         ) as response:
             if response.status_code != 200:
@@ -1354,7 +1403,7 @@ class AsyncClient:
         response = await client.post(
             url,
             json=input_data,
-            headers={"Content-Type": "application/json"},
+            headers=self._build_headers(),
         )
         response.raise_for_status()
 
@@ -1373,7 +1422,7 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
 
-        response = await client.get(url)
+        response = await client.get(url, headers=self._build_headers())
         response.raise_for_status()
 
         return response.json()
@@ -1393,7 +1442,7 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
 
-        response = await client.get(url)
+        response = await client.get(url, headers=self._build_headers())
 
         if response.status_code == 404:
             error_data = response.json()

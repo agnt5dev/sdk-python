@@ -23,6 +23,7 @@ mod adk;
 mod checkpoint_client;
 mod entity_state;
 mod language_model;
+mod memory;
 mod types;
 mod worker;
 use entity_state::EntityStateManager;
@@ -765,6 +766,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Checkpoint client for step-level memoization (Phase 3)
     checkpoint_client::register_checkpoint_client(m)?;
+
+    // Semantic memory
+    memory::register_memory(m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;

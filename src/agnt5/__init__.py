@@ -32,7 +32,7 @@ from .exceptions import (
     WaitingForUserInputException,
 )
 from .function import FunctionRegistry, function
-from .memory import ConversationMemory, MemoryMessage, SemanticMemory
+from .memory import ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory
 from .tool import AskUserTool, RequestApprovalTool, Tool, ToolRegistry, tool
 from .types import BackoffPolicy, BackoffType, FunctionConfig, RetryPolicy, WorkflowConfig
 from .version import _get_version
@@ -89,6 +89,9 @@ __all__ = [
     # Memory
     "ConversationMemory",
     "MemoryMessage",
+    "MemoryMetadata",
+    "MemoryResult",
+    "MemoryScope",
     "SemanticMemory",
     # Types
     "RetryPolicy",
