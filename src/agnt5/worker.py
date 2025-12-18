@@ -291,6 +291,13 @@ class Worker:
 
         # Component registration: auto-discover or explicit
         if auto_register:
+            # Warn if explicit components are passed with auto_register=True
+            if any([functions, workflows, entities, agents, tools]):
+                logger.warning(
+                    "auto_register=True ignores explicit functions/workflows/entities/agents/tools parameters. "
+                    "Remove explicit params or set auto_register=False to use explicit registration."
+                )
+
             # Auto-registration mode: discover from source paths
             if auto_register_paths:
                 source_paths = auto_register_paths
@@ -551,9 +558,9 @@ class Worker:
         components = []
         import json
 
-        # Import registries
+        # Import registries and types
         from .entity import EntityRegistry
-        from .tool import ToolRegistry
+        from .tool import ToolRegistry, Tool
 
         # Track all components (explicit + auto-included)
         all_functions = set(self._explicit_components['functions'])
@@ -694,6 +701,14 @@ class Worker:
 
         # Process tools (explicit + auto-included)
         for tool in all_tools:
+            # Validate that item is a Tool instance
+            if not isinstance(tool, Tool):
+                logger.warning(
+                    f"Skipping non-Tool item in tools collection: {type(tool).__name__}. "
+                    f"Use @tool decorator or pass Tool instances."
+                )
+                continue
+
             input_schema_str = json.dumps(tool.input_schema) if hasattr(tool, 'input_schema') and tool.input_schema else None
             output_schema_str = json.dumps(tool.output_schema) if hasattr(tool, 'output_schema') and tool.output_schema else None
 
@@ -1108,10 +1123,13 @@ class Worker:
 
             # Create WorkflowEntity for state management with memory scoping
             # Entity key will be scoped based on priority: user_id > session_id > run_id
+            # For session scope, include component_name to enable listing sessions by workflow
+            component_name = getattr(request, 'component_name', None)
             workflow_entity = WorkflowEntity(
                 run_id=request.invocation_id,
                 session_id=session_id,
                 user_id=user_id,
+                component_name=component_name,
             )
 
             # Load replay data into entity if provided
