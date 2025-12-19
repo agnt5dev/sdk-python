@@ -21,6 +21,35 @@ from .registry import AgentRegistry
 logger = setup_module_logger(__name__)
 
 
+def _serialize_tool_result(result: Any) -> str:
+    """Serialize a tool result to JSON string, handling Pydantic models and other complex types.
+
+    Args:
+        result: The tool execution result (may be Pydantic model, dataclass, dict, etc.)
+
+    Returns:
+        JSON string representation of the result
+    """
+    if result is None:
+        return "null"
+
+    # Handle Pydantic models (v2 API)
+    if hasattr(result, 'model_dump'):
+        return json.dumps(result.model_dump())
+
+    # Handle Pydantic models (v1 API)
+    if hasattr(result, 'dict') and hasattr(result, '__fields__'):
+        return json.dumps(result.dict())
+
+    # Handle dataclasses
+    import dataclasses as dc
+    if dc.is_dataclass(result) and not isinstance(result, type):
+        return json.dumps(dc.asdict(result))
+
+    # Default JSON serialization
+    return json.dumps(result)
+
+
 @dataclass
 class _StreamedLMResponse:
     """Result from streaming LLM call - contains collected text and any tool calls."""
@@ -601,7 +630,7 @@ class Agent:
                                         # Yield tool completed and final result
                                         yield Event.agent_tool_call_completed(
                                             tool_name=tool_name,
-                                            result=json.dumps(result["output"]),
+                                            result=_serialize_tool_result(result["output"]),
                                             tool_call_id=tool_call_id,
                                             content_index=tool_idx,
                                             sequence=sequence,
@@ -617,7 +646,7 @@ class Agent:
                                         )
                                         return
 
-                                    result_text = json.dumps(result) if result else "null"
+                                    result_text = _serialize_tool_result(result)
 
                                 tool_results.append({
                                     "tool": tool_name,
@@ -1295,7 +1324,7 @@ class Agent:
                                                 handoff_metadata=result,
                                             )
 
-                                        result_text = json.dumps(result) if result else "null"
+                                        result_text = _serialize_tool_result(result)
 
                                     tool_results.append(
                                         {"tool": tool_name, "result": result_text, "error": None}
@@ -1652,7 +1681,7 @@ class Agent:
                                     handoff_metadata=result,
                                 )
 
-                            result_text = json.dumps(result) if result else "null"
+                            result_text = _serialize_tool_result(result)
 
                         tool_results.append(
                             {"tool": tool_name, "result": result_text, "error": None}

@@ -1003,6 +1003,7 @@ class WorkflowEntity(Entity):
         run_id: str,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        component_name: Optional[str] = None,
     ):
         """
         Initialize workflow entity with memory scope.
@@ -1011,18 +1012,28 @@ class WorkflowEntity(Entity):
             run_id: Unique workflow run identifier
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            component_name: Workflow component name for session-scoped entities (optional)
 
         Memory Scope Priority:
-            - user_id present → key: user:{user_id}
-            - session_id present (and != run_id) → key: session:{session_id}
+            - user_id present → key: user:{user_id} (shared across workflows)
+            - session_id present (and != run_id) → key: workflow:{component_name}:session:{session_id}
             - else → key: run:{run_id}
+
+        Note: For session scope, component_name enables listing sessions by workflow name.
+        User scope is shared across all workflows (not per-workflow).
         """
         # Determine entity key based on memory scope priority
         if user_id:
+            # User scope: shared across all workflows (not per-workflow)
             entity_key = f"user:{user_id}"
             memory_scope = "user"
         elif session_id and session_id != run_id:
-            entity_key = f"session:{session_id}"
+            # Session scope: include workflow name for queryability
+            if component_name:
+                entity_key = f"workflow:{component_name}:session:{session_id}"
+            else:
+                # Fallback for backward compatibility
+                entity_key = f"session:{session_id}"
             memory_scope = "session"
         else:
             entity_key = f"run:{run_id}"
@@ -1034,6 +1045,7 @@ class WorkflowEntity(Entity):
         # Store run_id separately for tracking (even if key is session/user scoped)
         self._run_id = run_id
         self._memory_scope = memory_scope
+        self._component_name = component_name
 
         # Step tracking for replay and recovery
         self._step_events: list[Dict[str, Any]] = []
@@ -1042,7 +1054,7 @@ class WorkflowEntity(Entity):
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []
 
-        logger.debug(f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}")
+        logger.debug(f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}, component={component_name}")
 
     @property
     def run_id(self) -> str:
