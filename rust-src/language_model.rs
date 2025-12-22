@@ -181,14 +181,27 @@ impl PyLanguageModel {
 
         let provider = self.get_or_init_provider(&provider_name)?;
 
-        // IMPORTANT: Extract trace context from Python's contextvar
-        // The contextvar system provides automatic context propagation from workflow/agent/tool
-        // to enable proper parent-child span linking in distributed traces.
-        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
-            otel_ctx
-        } else {
-            // Fallback to old trace metadata contextvar for backwards compatibility
-            extract_context_from_python(py).ok()
+        // IMPORTANT: Extract trace context from Python's CURRENT OpenTelemetry span
+        // This ensures LLM spans are children of the currently active span
+        // (e.g., python_component_execution) rather than the original gateway span.
+        let otel_context = match extract_current_span_context_from_python(py) {
+            Ok(Some(ctx)) => Some(ctx),
+            Ok(None) => {
+                // Fallback to old methods if no current span
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
+            Err(_) => {
+                // If extraction fails, try legacy methods
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
         };
 
         // Use pyo3-async-runtimes with proper runtime context
@@ -252,14 +265,24 @@ impl PyLanguageModel {
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_delta = model.clone();
 
-        // IMPORTANT: Extract trace context from Python's contextvar
-        // The contextvar system provides automatic context propagation from workflow/agent/tool
-        // to enable proper parent-child span linking in distributed traces.
-        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
-            otel_ctx
-        } else {
-            // Fallback to old trace metadata contextvar for backwards compatibility
-            extract_context_from_python(py).ok()
+        // IMPORTANT: Extract trace context from Python's CURRENT OpenTelemetry span
+        // This ensures LLM spans are children of the currently active span
+        let otel_context = match extract_current_span_context_from_python(py) {
+            Ok(Some(ctx)) => Some(ctx),
+            Ok(None) => {
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
+            Err(_) => {
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
         };
 
         // Use pyo3-async-runtimes with proper runtime context for streaming
@@ -371,11 +394,23 @@ impl PyLanguageModel {
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_chunks = model.clone();
 
-        // Extract trace context
-        let otel_context = if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
-            otel_ctx
-        } else {
-            extract_context_from_python(py).ok()
+        // Extract trace context from Python's CURRENT OpenTelemetry span
+        let otel_context = match extract_current_span_context_from_python(py) {
+            Ok(Some(ctx)) => Some(ctx),
+            Ok(None) => {
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
+            Err(_) => {
+                if let Some((otel_ctx, _, _)) = crate::get_runtime_context_from_contextvar(py)? {
+                    otel_ctx
+                } else {
+                    extract_context_from_python(py).ok()
+                }
+            }
         };
 
         // Create channel for streaming chunks
@@ -1233,7 +1268,7 @@ impl PyUsage {
     }
 }
 
-/// Extract OpenTelemetry context from Python's contextvar
+/// Extract OpenTelemetry context from Python's contextvar (legacy)
 ///
 /// The Rust worker injects traceparent into request metadata, and the Python worker
 /// stores it in a contextvar named _trace_metadata. This function reads that contextvar
@@ -1253,6 +1288,52 @@ fn extract_context_from_python(py: Python<'_>) -> PyResult<OtelContext> {
     let ctx = agnt5_sdk_core::extract_context_from_runtime_message(&metadata);
 
     Ok(ctx)
+}
+
+/// Extract the CURRENT OpenTelemetry span context from Python's OpenTelemetry SDK
+///
+/// This gets the currently active span (e.g., python_component_execution) from Python's
+/// OpenTelemetry SDK, ensuring LLM spans are created as children of the current execution
+/// span rather than the original gateway span.
+fn extract_current_span_context_from_python(py: Python<'_>) -> PyResult<Option<OtelContext>> {
+    // Import opentelemetry.trace module
+    let trace_module = py.import("opentelemetry.trace")?;
+
+    // Call get_current_span()
+    let current_span = trace_module.call_method0("get_current_span")?;
+
+    // Get the span context
+    let span_context = current_span.call_method0("get_span_context")?;
+
+    // Check if the span context is valid
+    let is_valid: bool = span_context.call_method0("is_valid")?.extract()?;
+    if !is_valid {
+        return Ok(None);
+    }
+
+    // Extract trace_id and span_id
+    let trace_id_obj = span_context.getattr("trace_id")?;
+    let span_id_obj = span_context.getattr("span_id")?;
+    let trace_flags_obj = span_context.getattr("trace_flags")?;
+
+    // Convert to integers
+    let trace_id: u128 = trace_id_obj.extract()?;
+    let span_id: u64 = span_id_obj.extract()?;
+    let trace_flags: u8 = trace_flags_obj.extract()?;
+
+    // Convert to hex strings for traceparent format
+    let trace_id_hex = format!("{:032x}", trace_id);
+    let span_id_hex = format!("{:016x}", span_id);
+    let traceparent = format!("00-{}-{}-{:02x}", trace_id_hex, span_id_hex, trace_flags);
+
+    // Create a metadata map with the traceparent
+    let mut metadata = HashMap::new();
+    metadata.insert("traceparent".to_string(), traceparent);
+
+    // Use the sdk-core function to extract context from metadata
+    let ctx = agnt5_sdk_core::extract_context_from_runtime_message(&metadata);
+
+    Ok(Some(ctx))
 }
 
 /// Register the language model bindings with the Python module.

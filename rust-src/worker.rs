@@ -777,6 +777,41 @@ impl PyWorker {
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
+                        // CRITICAL: Update Python's _trace_metadata contextvar with the current span context
+                        // Inside this instrumented async block, the python_component_execution span is active.
+                        // We need to inject its traceparent into Python's context so LLM spans become children
+                        // of this execution span, not the original gateway span.
+                        {
+                            use opentelemetry::propagation::Injector;
+
+                            // Get the current OpenTelemetry context (should have python_component_execution)
+                            let current_ctx = opentelemetry::Context::current();
+
+                            // Create a new metadata map for the current span context
+                            let mut updated_metadata: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+                            struct HashMapInjector<'a>(&'a mut std::collections::HashMap<String, String>);
+                            impl<'a> Injector for HashMapInjector<'a> {
+                                fn set(&mut self, key: &str, value: String) {
+                                    self.0.insert(key.to_string(), value);
+                                }
+                            }
+
+                            let mut injector = HashMapInjector(&mut updated_metadata);
+                            opentelemetry::global::get_text_map_propagator(|propagator| {
+                                propagator.inject_context(&current_ctx, &mut injector);
+                            });
+
+                            // Update Python's _trace_metadata contextvar with the execution span's traceparent
+                            if let Ok(worker_module) = py.import("agnt5.worker") {
+                                if let Ok(trace_metadata_var) = worker_module.getattr("_trace_metadata") {
+                                    if let Err(e) = trace_metadata_var.call_method1("set", (updated_metadata,)) {
+                                        log::warn!("Failed to update _trace_metadata with execution span: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
                         // Call the Python handler
                         let py_result = handler.call1(py, (py_request,))
                             .map_err(|e| {
