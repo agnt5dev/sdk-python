@@ -6,8 +6,10 @@ with automatic schema generation from Python type hints and docstrings.
 """
 
 import asyncio
+import dataclasses as dc
 import functools
 import inspect
+import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_args, get_origin
 
@@ -21,6 +23,39 @@ logger = setup_module_logger(__name__)
 
 T = TypeVar("T")
 ToolHandler = Callable[..., Awaitable[T]]
+
+
+def _serialize_for_span(value: Any) -> str:
+    """Serialize a value to JSON string for span attributes.
+
+    Handles Pydantic models, dataclasses, and other complex types.
+
+    Args:
+        value: The value to serialize
+
+    Returns:
+        JSON string representation of the value
+    """
+    if value is None:
+        return "null"
+
+    # Handle Pydantic models (v2 API)
+    if hasattr(value, 'model_dump'):
+        return json.dumps(value.model_dump())
+
+    # Handle Pydantic models (v1 API)
+    if hasattr(value, 'dict') and hasattr(value, '__fields__'):
+        return json.dumps(value.dict())
+
+    # Handle dataclasses
+    if dc.is_dataclass(value) and not isinstance(value, type):
+        return json.dumps(dc.asdict(value))
+
+    # Default JSON serialization
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 def _python_type_to_json_schema(py_type: Any) -> Dict[str, Any]:
@@ -265,10 +300,14 @@ class Tool:
                     {
                         "tool.name": self.name,
                         "tool.args": ",".join(kwargs.keys()),
+                        "input.data": _serialize_for_span(kwargs),
                     },
                 ) as span:
                     # Handler is already async (validated in tool() decorator)
                     result = await self.handler(ctx, **kwargs)
+
+                    # Add output data to span for trace visibility
+                    span.set_attribute("output.data", _serialize_for_span(result))
 
                     logger.debug(f"Tool '{self.name}' completed successfully")
 

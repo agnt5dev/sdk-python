@@ -522,6 +522,7 @@ class Agent:
                     "agent.name": self.name,
                     "agent.model": self.model_name,
                     "agent.max_iterations": str(self.max_iterations),
+                    "input.data": _serialize_tool_result({"message": user_message}),
                 },
             ) as span:
                 all_tool_calls: List[Dict[str, Any]] = []
@@ -636,6 +637,9 @@ class Agent:
                                             sequence=sequence,
                                         )
                                         sequence += 1
+
+                                        # Add output data to span for trace visibility
+                                        span.set_attribute("output.data", _serialize_tool_result(result["output"]))
 
                                         yield AgentResult(
                                             output=result["output"],
@@ -757,6 +761,9 @@ class Agent:
                                 "output_length": len(response_text),
                             })
 
+                        # Add output data to span for trace visibility
+                        span.set_attribute("output.data", _serialize_tool_result(response_text))
+
                         yield AgentResult(
                             output=response_text,
                             tool_calls=all_tool_calls,
@@ -786,6 +793,9 @@ class Agent:
                         "agent.max_iterations_reached": True,
                         "output_length": len(final_output),
                     })
+
+                # Add output data to span for trace visibility
+                span.set_attribute("output.data", _serialize_tool_result(final_output))
 
                 yield AgentResult(
                     output=final_output,
@@ -1173,6 +1183,7 @@ class Agent:
                         "agent.name": self.name,
                         "agent.model": self.model_name,  # Use model_name (always a string)
                         "agent.max_iterations": str(self.max_iterations),
+                        "input.data": _serialize_tool_result({"message": user_message}),
                     },
                 ) as span:
                     all_tool_calls: List[Dict[str, Any]] = []
@@ -1315,6 +1326,8 @@ class Agent:
                                             # Save conversation before returning
                                             if isinstance(context, AgentContext):
                                                 await context.save_conversation_history(messages)
+                                            # Add output data to span for trace visibility
+                                            span.set_attribute("output.data", _serialize_tool_result(result["output"]))
                                             # Return immediately with handoff result
                                             return AgentResult(
                                                 output=result["output"],
@@ -1424,6 +1437,9 @@ class Agent:
                                     "output_length": len(response.text),
                                 })
 
+                            # Add output data to span for trace visibility
+                            span.set_attribute("output.data", _serialize_tool_result(response.text))
+
                             return AgentResult(
                                 output=response.text,
                                 tool_calls=all_tool_calls,
@@ -1455,6 +1471,9 @@ class Agent:
                             "agent.max_iterations_reached": True,
                             "output_length": len(final_output),
                         })
+
+                    # Add output data to span for trace visibility
+                    span.set_attribute("output.data", _serialize_tool_result(final_output))
 
                     return AgentResult(
                         output=final_output,
