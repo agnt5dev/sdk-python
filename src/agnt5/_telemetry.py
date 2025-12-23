@@ -5,8 +5,91 @@ This module bridges Python's standard logging to Rust's tracing/OpenTelemetry sy
 ensuring all logs from ctx.logger are sent to both the console and OTLP exporters.
 """
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Dict, MutableMapping, Optional
+
+
+# Standard logging kwargs that should NOT be treated as custom attributes
+_STANDARD_LOGGING_KWARGS = frozenset({
+    'exc_info', 'stack_info', 'stacklevel', 'extra'
+})
+
+
+class ContextLogger(logging.LoggerAdapter):
+    """
+    Logger adapter that allows passing arbitrary keyword arguments as log attributes.
+
+    This enables the convenient API:
+        ctx.logger.info("message", attr1="value1", attr2="value2")
+
+    Instead of the verbose standard logging approach:
+        ctx.logger.info("message", extra={"attr1": "value1", "attr2": "value2"})
+
+    The custom attributes are passed through to the Rust OpenTelemetry system
+    for structured logging and will appear as log record attributes in OTLP exports.
+
+    Example:
+        >>> ctx.logger.info("Processing request", request_id="abc123", user_id="user456")
+        >>> ctx.logger.error("Failed to connect", host="example.com", port=8080, retries=3)
+    """
+
+    def __init__(self, logger: logging.Logger, extra: Optional[Dict[str, Any]] = None):
+        """Initialize the ContextLogger.
+
+        Args:
+            logger: The underlying logger to wrap
+            extra: Optional default extra attributes to include in all log records
+        """
+        super().__init__(logger, extra or {})
+
+    def process(
+        self, msg: str, kwargs: MutableMapping[str, Any]
+    ) -> tuple[str, MutableMapping[str, Any]]:
+        """Process the logging call to extract custom attributes.
+
+        This method intercepts logging calls and extracts any keyword arguments
+        that are not standard logging parameters, storing them in the 'extra'
+        dict under the key 'agnt5_attrs'.
+
+        Args:
+            msg: The log message
+            kwargs: Keyword arguments passed to the logging method
+
+        Returns:
+            Tuple of (message, updated_kwargs)
+        """
+        # Extract custom attributes (any kwargs that aren't standard logging params)
+        custom_attrs = {}
+        standard_kwargs = {}
+
+        for key, value in kwargs.items():
+            if key in _STANDARD_LOGGING_KWARGS:
+                standard_kwargs[key] = value
+            else:
+                # Convert non-string values to their string representation
+                if isinstance(value, (dict, list)):
+                    custom_attrs[key] = json.dumps(value)
+                elif not isinstance(value, str):
+                    custom_attrs[key] = str(value)
+                else:
+                    custom_attrs[key] = value
+
+        # Merge with any existing extra dict
+        extra = standard_kwargs.get('extra', {})
+        if isinstance(extra, dict):
+            extra = dict(extra)  # Make a copy
+        else:
+            extra = {}
+
+        # Add custom attributes and any default extra from adapter
+        if custom_attrs:
+            extra['agnt5_attrs'] = custom_attrs
+        if self.extra:
+            extra.update(self.extra)
+
+        standard_kwargs['extra'] = extra
+        return msg, standard_kwargs
 
 
 class OpenTelemetryHandler(logging.Handler):
@@ -89,6 +172,10 @@ class OpenTelemetryHandler(logging.Handler):
             tenant_id = getattr(record, 'tenant_id', None)
             deployment_id = getattr(record, 'deployment_id', None)
 
+            # Extract custom attributes from ContextLogger
+            # These are stored in the 'agnt5_attrs' key of the extra dict
+            attributes = getattr(record, 'agnt5_attrs', None)
+
             # Forward to Rust tracing system
             # Rust side will:
             # - Add to current span context (inherits invocation.id)
@@ -109,6 +196,7 @@ class OpenTelemetryHandler(logging.Handler):
                 is_streaming=is_streaming,
                 tenant_id=tenant_id,
                 deployment_id=deployment_id,
+                attributes=attributes,
             )
         except Exception:
             # Don't let logging errors crash the application

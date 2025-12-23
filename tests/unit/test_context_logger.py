@@ -1,0 +1,184 @@
+"""Unit tests for ContextLogger."""
+
+import importlib.util
+import logging
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# Import _telemetry module directly without triggering the full agnt5 package
+# This avoids dependencies on docstring_parser, etc.
+_telemetry_path = Path(__file__).parent.parent.parent / "src" / "agnt5" / "_telemetry.py"
+spec = importlib.util.spec_from_file_location("_telemetry", _telemetry_path)
+_telemetry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(_telemetry)
+
+ContextLogger = _telemetry.ContextLogger
+
+
+class TestContextLogger:
+    """Test ContextLogger functionality."""
+
+    def test_process_extracts_custom_attributes(self):
+        """Test that custom attributes are extracted from kwargs."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process("test message", {"attr1": "value1", "attr2": "value2"})
+
+        assert msg == "test message"
+        assert "extra" in kwargs
+        assert "agnt5_attrs" in kwargs["extra"]
+        assert kwargs["extra"]["agnt5_attrs"] == {"attr1": "value1", "attr2": "value2"}
+
+    def test_process_preserves_standard_kwargs(self):
+        """Test that standard logging kwargs are preserved."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process(
+            "test message",
+            {"attr1": "value1", "exc_info": True, "stack_info": False}
+        )
+
+        assert msg == "test message"
+        assert kwargs.get("exc_info") is True
+        assert kwargs.get("stack_info") is False
+        assert "extra" in kwargs
+        assert kwargs["extra"]["agnt5_attrs"] == {"attr1": "value1"}
+
+    def test_process_converts_non_string_values(self):
+        """Test that non-string values are converted to strings."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process(
+            "test message",
+            {"count": 42, "active": True, "ratio": 3.14}
+        )
+
+        assert msg == "test message"
+        attrs = kwargs["extra"]["agnt5_attrs"]
+        assert attrs["count"] == "42"
+        assert attrs["active"] == "True"
+        assert attrs["ratio"] == "3.14"
+
+    def test_process_serializes_dict_and_list(self):
+        """Test that dict and list values are JSON serialized."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process(
+            "test message",
+            {
+                "data": {"key": "value"},
+                "items": [1, 2, 3]
+            }
+        )
+
+        assert msg == "test message"
+        attrs = kwargs["extra"]["agnt5_attrs"]
+        assert attrs["data"] == '{"key": "value"}'
+        assert attrs["items"] == "[1, 2, 3]"
+
+    def test_process_merges_with_existing_extra(self):
+        """Test that custom attrs are merged with existing extra dict."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process(
+            "test message",
+            {
+                "attr1": "value1",
+                "extra": {"existing_key": "existing_value"}
+            }
+        )
+
+        assert msg == "test message"
+        assert kwargs["extra"]["existing_key"] == "existing_value"
+        assert kwargs["extra"]["agnt5_attrs"] == {"attr1": "value1"}
+
+    def test_process_empty_kwargs(self):
+        """Test that empty kwargs are handled correctly."""
+        base_logger = logging.getLogger("test")
+        logger = ContextLogger(base_logger)
+
+        msg, kwargs = logger.process("test message", {})
+
+        assert msg == "test message"
+        assert "extra" in kwargs
+        # No custom attrs, so agnt5_attrs should not be present
+        assert "agnt5_attrs" not in kwargs["extra"]
+
+    def test_logging_methods_work(self):
+        """Test that standard logging methods work with custom attributes."""
+        base_logger = logging.getLogger("test_logging_methods")
+        base_logger.handlers = []  # Clear existing handlers
+        base_logger.setLevel(logging.DEBUG)
+
+        # Create a mock handler to capture log records
+        handler = logging.Handler()
+        handler.setLevel(logging.DEBUG)
+        records = []
+        handler.emit = lambda r: records.append(r)
+        base_logger.addHandler(handler)
+
+        logger = ContextLogger(base_logger)
+
+        # Test info
+        logger.info("info message", request_id="abc123")
+        assert len(records) == 1
+        assert records[0].msg == "info message"
+        assert hasattr(records[0], "agnt5_attrs")
+        assert records[0].agnt5_attrs == {"request_id": "abc123"}
+
+        # Test debug
+        records.clear()
+        logger.debug("debug message", count=42)
+        assert len(records) == 1
+        assert records[0].msg == "debug message"
+        assert records[0].agnt5_attrs == {"count": "42"}
+
+        # Test warning
+        records.clear()
+        logger.warning("warning message", severity="high")
+        assert len(records) == 1
+        assert records[0].msg == "warning message"
+        assert records[0].agnt5_attrs == {"severity": "high"}
+
+        # Test error
+        records.clear()
+        logger.error("error message", error_code="E001")
+        assert len(records) == 1
+        assert records[0].msg == "error message"
+        assert records[0].agnt5_attrs == {"error_code": "E001"}
+
+    def test_real_world_usage(self):
+        """Test a real-world usage pattern like the issue description."""
+        base_logger = logging.getLogger("test_real_world")
+        base_logger.handlers = []
+        base_logger.setLevel(logging.DEBUG)
+
+        records = []
+        handler = logging.Handler()
+        handler.setLevel(logging.DEBUG)
+        handler.emit = lambda r: records.append(r)
+        base_logger.addHandler(handler)
+
+        logger = ContextLogger(base_logger)
+
+        # This is the usage pattern from the issue
+        logger.info(
+            "Workflow execution started",
+            scoping_prompt="Generate a comprehensive analysis",
+            topic="AI research"
+        )
+
+        assert len(records) == 1
+        assert records[0].msg == "Workflow execution started"
+        assert hasattr(records[0], "agnt5_attrs")
+        attrs = records[0].agnt5_attrs
+        assert attrs["scoping_prompt"] == "Generate a comprehensive analysis"
+        assert attrs["topic"] == "AI research"

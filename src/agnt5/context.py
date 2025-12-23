@@ -6,6 +6,8 @@ import contextvars
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 
+from ._telemetry import ContextLogger
+
 T = TypeVar("T")
 
 # Task-local context variable for automatic context propagation
@@ -88,12 +90,16 @@ class Context:
         self._deployment_id = deployment_id
 
         # Create logger with correlation
-        self._logger = logging.getLogger(f"agnt5.{run_id}")
+        base_logger = logging.getLogger(f"agnt5.{run_id}")
         from ._telemetry import setup_context_logger
-        setup_context_logger(self._logger)
+        setup_context_logger(base_logger)
 
         if runtime_context:
-            self._logger.addFilter(_CorrelationFilter(runtime_context, is_streaming, tenant_id, deployment_id))
+            base_logger.addFilter(_CorrelationFilter(runtime_context, is_streaming, tenant_id, deployment_id))
+
+        # Wrap with ContextLogger to support arbitrary keyword arguments
+        # This enables: ctx.logger.info("message", attr1="value1", attr2="value2")
+        self._logger = ContextLogger(base_logger)
 
     @property
     def run_id(self) -> str:
@@ -106,8 +112,12 @@ class Context:
         return self._attempt
 
     @property
-    def logger(self) -> logging.Logger:
-        """Full logger for .debug(), .warning(), .error(), etc."""
+    def logger(self) -> ContextLogger:
+        """Full logger for .debug(), .warning(), .error(), etc.
+
+        Supports passing arbitrary keyword arguments as log attributes:
+            ctx.logger.info("message", attr1="value1", attr2="value2")
+        """
         return self._logger
 
     @property

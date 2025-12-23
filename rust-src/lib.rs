@@ -6,6 +6,7 @@ use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Check if span export is enabled (cached for performance)
@@ -543,6 +544,7 @@ fn create_span(
 ///
 /// When is_streaming is true, logs are also exported to the journal for real-time SSE delivery.
 #[pyfunction]
+#[pyo3(signature = (level, message, target=None, module_path=None, filename=None, line=None, trace_id=None, span_id=None, run_id=None, is_streaming=None, tenant_id=None, deployment_id=None, attributes=None))]
 fn log_from_python(
     level: &str,
     message: String,
@@ -556,6 +558,7 @@ fn log_from_python(
     is_streaming: Option<bool>,
     tenant_id: Option<String>,
     deployment_id: Option<String>,
+    attributes: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     // Get effective tenant_id and deployment_id from parameter or global config
     let effective_tenant_id = tenant_id
@@ -607,6 +610,12 @@ fn log_from_python(
         None
     };
 
+    // Serialize attributes to JSON for structured logging
+    // Tracing macros require compile-time known fields, so we serialize to a single JSON string
+    let attrs_json = attributes.as_ref().map(|attrs| {
+        serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string())
+    });
+
     // Emit log at appropriate level through Rust tracing
     // The opentelemetry_appender_tracing layer will now extract trace_id/span_id
     // from the attached OpenTelemetry context above
@@ -620,6 +629,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "{}",
             message
         ),
@@ -632,6 +642,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "{}",
             message
         ),
@@ -644,6 +655,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "{}",
             message
         ),
@@ -656,6 +668,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "{}",
             message
         ),
@@ -668,6 +681,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "[CRITICAL] {}",
             message
         ),
@@ -680,6 +694,7 @@ fn log_from_python(
             run_id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
+            log_attributes = attrs_json.as_deref(),
             "[{}] {}",
             level,
             message
@@ -709,7 +724,7 @@ fn log_from_python(
                     timestamp_ns,
                     severity: level.to_string(),
                     body: message.clone(),
-                    attributes: None, // TODO: capture log attributes
+                    attributes: attributes.clone(),
                     queued_at: std::time::Instant::now(),
                 };
 
