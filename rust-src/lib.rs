@@ -46,16 +46,39 @@ struct PySpan {
     name: String,
     component_type: String,
     start_time_ns: i64,
+    // Parent span ID for maintaining trace hierarchy in journal export
+    parent_span_id: Option<String>,
+    // This span's trace_id and span_id for Python contextvar propagation
+    trace_id: String,
+    span_id: String,
 }
 
 #[pymethods]
 impl PySpan {
-    /// Context manager entry - returns self
+    /// Get the trace ID for this span (for Python contextvar propagation)
+    #[getter]
+    fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    /// Get the span ID for this span (for Python contextvar propagation)
+    #[getter]
+    fn span_id(&self) -> &str {
+        &self.span_id
+    }
+
+    /// Get the parent span ID (if any)
+    #[getter]
+    fn parent_span_id(&self) -> Option<&str> {
+        self.parent_span_id.as_deref()
+    }
+
+    /// Context manager entry - returns self (Python wrapper handles contextvar)
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
-    /// Context manager exit - ends the span
+    /// Context manager exit - ends the span (Python wrapper handles contextvar)
     fn __exit__(
         &self,
         exc_type: Option<&Bound<'_, PyAny>>,
@@ -141,7 +164,7 @@ impl PySpan {
                         tenant_id: self.tenant_id.clone(),
                         trace_id: trace_id_str.clone(),
                         span_id: span_id_str.clone(),
-                        parent_span_id: None, // TODO: track parent span ID
+                        parent_span_id: self.parent_span_id.clone(),
                         name: self.name.clone(),
                         kind: self.component_type.clone(),
                         start_time_ns: self.start_time_ns,
@@ -450,18 +473,25 @@ pub(crate) fn get_runtime_context_from_contextvar(py: Python) -> PyResult<Option
 /// * `component_type` - Component type (e.g., "task", "workflow", "agent", "function")
 /// * `runtime_context` - Optional RuntimeContext providing trace context for span linkage
 /// * `attributes` - Optional key-value attributes for the span
+/// * `parent_trace_id` - Optional parent trace ID (from Python contextvar, for proper nesting)
+/// * `parent_span_id` - Optional parent span ID (from Python contextvar, for proper nesting)
 /// * `py` - Python GIL token (automatically provided by PyO3)
 ///
 /// # Returns
 /// A PySpan that can be used as a context manager in Python
 #[pyfunction]
+#[pyo3(signature = (name, component_type, runtime_context=None, attributes=None, parent_trace_id=None, parent_span_id=None))]
 fn create_span(
     py: Python,
     name: String,
     component_type: String,
     runtime_context: Option<&PyRuntimeContext>,
     attributes: Option<std::collections::HashMap<String, String>>,
+    parent_trace_id: Option<String>,
+    parent_span_id: Option<String>,
 ) -> PyResult<PySpan> {
+    use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+
     let metadata = attributes.unwrap_or_default();
 
     // Extract parent context and metadata from RuntimeContext
@@ -482,26 +512,50 @@ fn create_span(
     // Extract streaming context for journal export
     let (is_streaming, run_id_opt, tenant_id_opt) = if let Some(ctx) = runtime_context {
         let streaming = ctx.inner.is_streaming;
-        tracing::debug!(
-            "🔍 CHILD-SPAN-DEBUG: create_span called with runtime_context, is_streaming={}, run_id={}, name={}",
-            streaming,
-            ctx.inner.run_id,
-            name
-        );
         (
             streaming,
             Some(ctx.inner.run_id.clone()),
             Some(ctx.inner.tenant_id.clone()),
         )
     } else {
-        tracing::debug!(
-            "🔍 CHILD-SPAN-DEBUG: create_span called WITHOUT runtime_context, name={}",
-            name
-        );
         (false, None, None)
     };
 
-    let (parent_context, service_name, run_id) = if let Some(ctx) = runtime_context {
+    // PRIORITY ORDER for parent context:
+    // 1. Explicit parent_trace_id/parent_span_id (from Python contextvar - async-safe!)
+    // 2. RuntimeContext.otel_context (initial context from worker)
+    // 3. Python contextvar fallback
+    let parent_context_from_ids = if let (Some(ref trace_id_str), Some(ref span_id_str)) = (&parent_trace_id, &parent_span_id) {
+        // Parse trace_id and span_id from hex strings
+        let trace_id = TraceId::from_hex(trace_id_str).unwrap_or(TraceId::INVALID);
+        let span_id = SpanId::from_hex(span_id_str).unwrap_or(SpanId::INVALID);
+
+        if trace_id != TraceId::INVALID && span_id != SpanId::INVALID {
+            // Create a SpanContext from the IDs
+            let span_context = SpanContext::new(
+                trace_id,
+                span_id,
+                TraceFlags::SAMPLED,
+                true, // is_remote
+                TraceState::default(),
+            );
+            // Create a Context with this remote span context for proper parent-child linking
+            Some(Context::new().with_remote_span_context(span_context))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let from_contextvar = parent_context_from_ids.is_some();
+
+    let (parent_context, service_name, run_id) = if let Some(ctx) = parent_context_from_ids {
+        // Use the context from Python contextvar - ensures proper async-safe nesting
+        let svc = runtime_context.map(|c| c.inner.service_name.as_str()).unwrap_or("");
+        let rid = runtime_context.map(|c| c.inner.run_id.as_str()).unwrap_or("");
+        (Some(ctx), svc, rid)
+    } else if let Some(ctx) = runtime_context {
         (
             ctx.get_otel_context(),
             ctx.inner.service_name.as_str(),
@@ -513,15 +567,46 @@ fn create_span(
         (None, "", "")
     };
 
+    // Use provided parent_span_id or extract from parent context
+    let parent_span_id_for_journal = parent_span_id.clone().or_else(|| {
+        parent_context.as_ref().and_then(|ctx| {
+            let span = ctx.span();
+            let span_ctx = span.span_context();
+            if span_ctx.is_valid() {
+                Some(span_ctx.span_id().to_string())
+            } else {
+                None
+            }
+        })
+    });
+
+    tracing::debug!(
+        "🔍 CHILD-SPAN-DEBUG: create_span called, name={}, parent_span_id={:?}, from_contextvar={}, is_streaming={}",
+        name,
+        parent_span_id_for_journal,
+        from_contextvar,
+        is_streaming
+    );
+
     let span = agnt5_sdk_core::create_component_span(
         &name,
         &component_type,
         service_name,
         "", // worker_id - not needed for Python-initiated spans
         run_id,
-        parent_context, // ✅ Linked to parent span if runtime_context provided!
+        parent_context, // ✅ Linked to proper parent span!
         Some(&metadata),
     );
+
+    // Extract this span's trace_id and span_id for Python contextvar propagation
+    let (new_trace_id, new_span_id) = {
+        let span_ctx = span.span_context();
+        if span_ctx.is_valid() {
+            (span_ctx.trace_id().to_string(), span_ctx.span_id().to_string())
+        } else {
+            (String::new(), String::new())
+        }
+    };
 
     // Capture start time for journal span data
     let start_time_ns = std::time::SystemTime::now()
@@ -537,6 +622,9 @@ fn create_span(
         name: name.clone(),
         component_type: component_type.clone(),
         start_time_ns,
+        parent_span_id: parent_span_id_for_journal,
+        trace_id: new_trace_id,
+        span_id: new_span_id,
     })
 }
 

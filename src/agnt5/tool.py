@@ -287,12 +287,13 @@ class Tool:
         token = set_current_context(ctx)
         try:
             try:
-                # Create span for tool execution with trace linking
-                from ._core import create_span
+                # Create span for tool execution (uses contextvar for async-safe parent-child linking)
+                from .tracing import create_span
 
                 logger.debug(f"Invoking tool '{self.name}' with args: {list(kwargs.keys())}")
 
                 # Create span with runtime_context for parent-child span linking
+                # contextvar handles proper nesting for parallel async operations
                 with create_span(
                     self.name,
                     "tool",

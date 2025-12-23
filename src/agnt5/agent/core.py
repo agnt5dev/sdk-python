@@ -511,8 +511,8 @@ class Agent:
                 messages_to_save = stored_messages + [Message.user(user_message)] if history else messages
                 await context.save_conversation_history(messages_to_save)
 
-            # Create span for tracing
-            from .._core import create_span
+            # Create span for tracing (uses contextvar for async-safe parent-child linking)
+            from ..tracing import create_span
 
             with create_span(
                 self.name,
@@ -1172,8 +1172,8 @@ class Agent:
                     messages_to_save = stored_messages + [Message.user(user_message)] if history else messages
                     await context.save_conversation_history(messages_to_save)
 
-                # Create span for agent execution with trace linking
-                from .._core import create_span
+                # Create span for agent execution (uses contextvar for async-safe parent-child linking)
+                from ..tracing import create_span
 
                 with create_span(
                     self.name,

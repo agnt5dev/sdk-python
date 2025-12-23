@@ -408,14 +408,14 @@ class WorkflowContext(Context):
         if func_config is None:
             raise ValueError(f"Function '{handler_name}' not found in registry")
 
-        # Import span creation utility and JSON serialization
-        from ._core import create_span
+        # Import span creation utility (uses contextvar for async-safe parent-child linking)
+        from .tracing import create_span
         import json
 
         # Serialize input data for span attributes
         input_repr = json.dumps({"args": args, "kwargs": kwargs}) if args or kwargs else "{}"
 
-        # Create span for task execution
+        # Create span for task execution (contextvar handles parent-child linking)
         with create_span(
             f"workflow.task.{handler_name}",
             "function",
