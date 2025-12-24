@@ -73,10 +73,6 @@ def test_claude_generate_custom_model(client, worker_process):
 # =============================================================================
 
 
-@pytest.mark.xfail(
-    reason="Rust SDK core doesn't handle Anthropic 'ping' events - see sdk-core/src/lm/anthropic.rs",
-    strict=False,
-)
 def test_claude_stream_basic(client, worker_process):
     """Test streaming Claude generation."""
     result = client.run("claude_stream", {
@@ -93,10 +89,6 @@ def test_claude_stream_basic(client, worker_process):
     assert "3" in result["response"]
 
 
-@pytest.mark.xfail(
-    reason="Rust SDK core doesn't handle Anthropic 'ping' events - see sdk-core/src/lm/anthropic.rs",
-    strict=False,
-)
 def test_claude_stream_produces_chunks(client, worker_process):
     """Test that streaming produces multiple chunks."""
     result = client.run("claude_stream", {
