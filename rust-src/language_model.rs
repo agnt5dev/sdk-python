@@ -1290,41 +1290,38 @@ fn extract_context_from_python(py: Python<'_>) -> PyResult<OtelContext> {
     Ok(ctx)
 }
 
-/// Extract the CURRENT OpenTelemetry span context from Python's OpenTelemetry SDK
+/// Extract the CURRENT span context from Python's agnt5.tracing contextvar
 ///
-/// This gets the currently active span (e.g., python_component_execution) from Python's
-/// OpenTelemetry SDK, ensuring LLM spans are created as children of the current execution
-/// span rather than the original gateway span.
+/// This gets the currently active span from AGNT5's own contextvar system (not Python's
+/// OpenTelemetry SDK), ensuring LLM spans are created as children of the current execution
+/// span (e.g., agent.calculator) rather than the original gateway span.
+///
+/// The agnt5.tracing module uses a contextvar `_current_span` that tracks SpanInfo(trace_id, span_id)
+/// which is properly set when entering span context managers created via create_span().
 fn extract_current_span_context_from_python(py: Python<'_>) -> PyResult<Option<OtelContext>> {
-    // Import opentelemetry.trace module
-    let trace_module = py.import("opentelemetry.trace")?;
+    // Import agnt5.tracing module to access get_current_span_info()
+    let tracing_module = py.import("agnt5.tracing")?;
 
-    // Call get_current_span()
-    let current_span = trace_module.call_method0("get_current_span")?;
+    // Call get_current_span_info() which reads from the _current_span contextvar
+    let span_info = tracing_module.call_method0("get_current_span_info")?;
 
-    // Get the span context
-    let span_context = current_span.call_method0("get_span_context")?;
-
-    // Check if the span context is valid
-    let is_valid: bool = span_context.call_method0("is_valid")?.extract()?;
-    if !is_valid {
+    // Check if we got None (no current span)
+    if span_info.is_none() {
         return Ok(None);
     }
 
-    // Extract trace_id and span_id
-    let trace_id_obj = span_context.getattr("trace_id")?;
-    let span_id_obj = span_context.getattr("span_id")?;
-    let trace_flags_obj = span_context.getattr("trace_flags")?;
+    // Extract trace_id and span_id from SpanInfo dataclass
+    let trace_id_str: String = span_info.getattr("trace_id")?.extract()?;
+    let span_id_str: String = span_info.getattr("span_id")?.extract()?;
 
-    // Convert to integers
-    let trace_id: u128 = trace_id_obj.extract()?;
-    let span_id: u64 = span_id_obj.extract()?;
-    let trace_flags: u8 = trace_flags_obj.extract()?;
+    // Check for empty strings (invalid span)
+    if trace_id_str.is_empty() || span_id_str.is_empty() {
+        return Ok(None);
+    }
 
-    // Convert to hex strings for traceparent format
-    let trace_id_hex = format!("{:032x}", trace_id);
-    let span_id_hex = format!("{:016x}", span_id);
-    let traceparent = format!("00-{}-{}-{:02x}", trace_id_hex, span_id_hex, trace_flags);
+    // Create traceparent format: "00-{trace_id}-{span_id}-01"
+    // trace_id is already 32 hex chars, span_id is already 16 hex chars
+    let traceparent = format!("00-{}-{}-01", trace_id_str, span_id_str);
 
     // Create a metadata map with the traceparent
     let mut metadata = HashMap::new();

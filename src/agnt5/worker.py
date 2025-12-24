@@ -860,6 +860,19 @@ class Worker:
             from .context import set_current_context, _current_context
             token = set_current_context(ctx)
 
+            # Set up _current_span contextvar for proper trace parent-child linking
+            # The Rust worker creates spans (python_component_execution) and passes trace context
+            # via runtime_context. We need to set this in Python's _current_span contextvar
+            # so that spans created in Python (e.g., agent.calculator) become proper children.
+            from .tracing import _current_span, SpanInfo
+            span_token = None
+            if request.runtime_context:
+                trace_id = request.runtime_context.trace_id
+                span_id = request.runtime_context.span_id
+                if trace_id and span_id:
+                    span_info = SpanInfo(trace_id=trace_id, span_id=span_id)
+                    span_token = _current_span.set(span_info)
+
             # Execute function directly - Rust bridge handles tracing
             # Note: Removed Python-level span creation to avoid duplicate spans.
             # The Rust worker bridge (sdk-python/rust-src/worker.rs:413-659) already
@@ -1245,6 +1258,20 @@ class Worker:
             from .context import set_current_context
             import time as _time
             token = set_current_context(ctx)
+
+            # Set up _current_span contextvar for proper trace parent-child linking
+            # The Rust worker creates spans and passes trace context via runtime_context.
+            # We need to set this in Python's _current_span contextvar so that spans
+            # created in Python (e.g., agent spans, nested function calls) become proper children.
+            from .tracing import _current_span, SpanInfo
+            span_token = None
+            if request.runtime_context:
+                trace_id = request.runtime_context.trace_id
+                span_id = request.runtime_context.span_id
+                if trace_id and span_id:
+                    span_info = SpanInfo(trace_id=trace_id, span_id=span_id)
+                    span_token = _current_span.set(span_info)
+
             workflow_start_time = _time.time()
             try:
                 # Emit workflow.started checkpoint
