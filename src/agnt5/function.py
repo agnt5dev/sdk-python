@@ -158,6 +158,7 @@ def function(
     name: Optional[str] = None,
     retries: Optional[Union[int, Dict[str, Any], RetryPolicy]] = None,
     backoff: Optional[Union[str, Dict[str, Any], BackoffPolicy]] = None,
+    timeout_ms: Optional[int] = None,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as an AGNT5 durable function.
@@ -172,6 +173,8 @@ def function(
             - str: backoff type ("constant", "linear", "exponential")
             - dict: BackoffPolicy params (e.g., {"type": "exponential", "multiplier": 2.0})
             - BackoffPolicy: full policy object
+        timeout_ms: Maximum execution time in milliseconds. If the function
+            takes longer than this, it raises asyncio.TimeoutError.
 
     Note:
         Sync Functions: Synchronous functions are automatically executed in a thread pool
@@ -262,6 +265,7 @@ def function(
             handler=handler_func,
             retries=retry_policy,
             backoff=backoff_policy,
+            timeout_ms=timeout_ms,
             input_schema=input_schema,
             output_schema=output_schema,
             metadata=metadata,
@@ -306,6 +310,7 @@ def function(
                     config.retries or RetryPolicy(),
                     config.backoff or BackoffPolicy(),
                     needs_context,
+                    config.timeout_ms,
                     *func_args,
                     **kwargs,
                 )

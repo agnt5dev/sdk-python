@@ -74,6 +74,8 @@ class Message:
 
     role: MessageRole
     content: str
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
     @staticmethod
     def system(content: str) -> Message:
@@ -86,9 +88,26 @@ class Message:
         return Message(role=MessageRole.USER, content=content)
 
     @staticmethod
-    def assistant(content: str) -> Message:
-        """Create assistant message."""
-        return Message(role=MessageRole.ASSISTANT, content=content)
+    def assistant(
+        content: str = "",
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+    ) -> Message:
+        """Create assistant message, optionally with tool calls."""
+        return Message(role=MessageRole.ASSISTANT, content=content, tool_calls=tool_calls)
+
+    @staticmethod
+    def tool_result(tool_call_id: str, content: str) -> Message:
+        """Create tool result message.
+
+        Args:
+            tool_call_id: The ID of the tool call this is a response to
+            content: The result of the tool execution
+        """
+        return Message(
+            role=MessageRole.USER,  # Tool results are sent as user messages in most APIs
+            content=content,
+            tool_call_id=tool_call_id,
+        )
 
 
 @dataclass
@@ -712,25 +731,34 @@ class _LanguageModel(LanguageModel):
             )
             raise
 
-    def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, str]]:
+    def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, Any]]:
         """Build structured message list for Rust.
 
-        Rust expects a list of dicts with 'role' and 'content' keys.
+        Rust expects a list of dicts with 'role', 'content', and optional fields:
+        - tool_calls: List of tool calls for assistant messages
+        - tool_call_id: ID of the tool call this message responds to
         System prompt is passed separately via kwargs.
 
         Args:
             request: Generation request with messages
 
         Returns:
-            List of message dicts with role and content
+            List of message dicts with role, content, and optional tool fields
         """
-        # Convert messages to Rust format (list of dicts with role and content)
+        # Convert messages to Rust format (list of dicts with role, content, and optional fields)
         messages = []
         for msg in request.messages:
-            messages.append({
+            msg_dict: Dict[str, Any] = {
                 "role": msg.role.value,  # "system", "user", or "assistant"
                 "content": msg.content
-            })
+            }
+            # Include tool_calls for assistant messages that have them
+            if msg.tool_calls:
+                msg_dict["tool_calls"] = msg.tool_calls
+            # Include tool_call_id for tool result messages
+            if msg.tool_call_id:
+                msg_dict["tool_call_id"] = msg.tool_call_id
+            messages.append(msg_dict)
 
         # If no messages and no system prompt, return a default user message
         if not messages and not request.system_prompt:
@@ -757,9 +785,10 @@ class _LanguageModel(LanguageModel):
             tool_calls = rust_response.tool_calls
 
         # Extract response_id from Rust response (for Responses API)
+        # PyResponse exposes .id which is the response ID for conversation continuation
         response_id = None
-        if hasattr(rust_response, 'response_id') and rust_response.response_id:
-            response_id = rust_response.response_id
+        if hasattr(rust_response, 'id') and rust_response.id:
+            response_id = rust_response.id
 
         return GenerateResponse(
             text=rust_response.content,

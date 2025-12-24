@@ -5,7 +5,8 @@ Tests real Anthropic API connections to catch breaking changes.
 Run weekly via CI to ensure SDK compatibility with Anthropic APIs.
 
 Models tested:
-- claude-3-haiku-20240307 (cheapest, fastest - primary test model)
+- claude-3-haiku-20240307 (cheapest, fastest)
+- claude-sonnet-4-20250514 (flagship model)
 
 Test categories:
 - Basic generation (non-streaming)
@@ -42,20 +43,27 @@ pytestmark = [
     skip_without_anthropic,
 ]
 
-# Use cheapest model for testing
-MODEL = "anthropic/claude-3-haiku-20240307"
+# Models to test - covering different model families and versions
+ANTHROPIC_MODELS = [
+    "anthropic/claude-3-haiku-20240307",   # Claude 3 - fast/cheap
+    "anthropic/claude-sonnet-4-20250514",  # Claude 4 - flagship
+]
+
+# Default model for non-parameterized tests
+MODEL = ANTHROPIC_MODELS[0]
 
 
 # =============================================================================
-# Basic Generation Tests
+# Basic Generation Tests (parameterized across all models)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_generate_basic(simple_prompt):
-    """Test basic text generation."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_basic(simple_prompt, model):
+    """Test basic text generation across all Anthropic models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt=simple_prompt,
     )
 
@@ -67,10 +75,11 @@ async def test_generate_basic(simple_prompt):
 
 
 @pytest.mark.asyncio
-async def test_generate_with_system_prompt():
-    """Test generation with system prompt."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_with_system_prompt(model):
+    """Test generation with system prompt across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt="What color is the sky?",
         system_prompt="You are a helpful assistant. Always respond in exactly one word.",
     )
@@ -82,10 +91,11 @@ async def test_generate_with_system_prompt():
 
 
 @pytest.mark.asyncio
-async def test_generate_with_temperature():
-    """Test generation with temperature parameter."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_with_temperature(model):
+    """Test generation with temperature parameter across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt="Say hello",
         temperature=0.0,
     )
@@ -95,10 +105,11 @@ async def test_generate_with_temperature():
 
 
 @pytest.mark.asyncio
-async def test_generate_with_max_tokens():
-    """Test generation with max_tokens limit."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_with_max_tokens(model):
+    """Test generation with max_tokens limit across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt="Write a very long story about a dragon",
         max_tokens=10,
     )
@@ -110,15 +121,16 @@ async def test_generate_with_max_tokens():
 
 
 # =============================================================================
-# Multi-turn Conversation Tests
+# Multi-turn Conversation Tests (parameterized)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_generate_multi_turn(multi_turn_messages):
-    """Test multi-turn conversation."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_multi_turn(multi_turn_messages, model):
+    """Test multi-turn conversation across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         messages=multi_turn_messages,
     )
 
@@ -129,18 +141,19 @@ async def test_generate_multi_turn(multi_turn_messages):
 
 
 # =============================================================================
-# Streaming Tests
+# Streaming Tests (parameterized)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_stream_basic(streaming_prompt):
-    """Test basic streaming generation."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_stream_basic(streaming_prompt, model):
+    """Test basic streaming generation across all models."""
     chunks = []
     full_text = ""
 
     async for event in lm.stream(
-        model=MODEL,
+        model=model,
         prompt=streaming_prompt,
     ):
         chunks.append(event)
@@ -159,12 +172,13 @@ async def test_stream_basic(streaming_prompt):
 
 
 @pytest.mark.asyncio
-async def test_stream_with_system_prompt():
-    """Test streaming with system prompt."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_stream_with_system_prompt(model):
+    """Test streaming with system prompt across all models."""
     chunks = []
 
     async for event in lm.stream(
-        model=MODEL,
+        model=model,
         prompt="Say hello",
         system_prompt="You are a pirate. Always say 'Arrr' first.",
     ):
@@ -174,7 +188,7 @@ async def test_stream_with_system_prompt():
 
 
 # =============================================================================
-# Structured Output Tests
+# Structured Output Tests (parameterized)
 # =============================================================================
 
 
@@ -186,10 +200,11 @@ class MathResult:
 
 
 @pytest.mark.asyncio
-async def test_generate_structured_output():
-    """Test structured output with dataclass."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_structured_output(model):
+    """Test structured output with dataclass across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt="What is 15 + 27?",
         response_format=MathResult,
     )
@@ -211,41 +226,17 @@ class SentimentResult:
 
 
 @pytest.mark.asyncio
-async def test_generate_structured_sentiment():
-    """Test structured output for sentiment analysis."""
+@pytest.mark.parametrize("model", ANTHROPIC_MODELS)
+async def test_generate_structured_sentiment(model):
+    """Test structured output for sentiment analysis across all models."""
     response = await lm.generate(
-        model=MODEL,
+        model=model,
         prompt="Analyze the sentiment: 'I love this product!'",
         response_format=SentimentResult,
     )
 
     assert response is not None
     assert response.text is not None
-
-
-# =============================================================================
-# Claude-specific Features
-# =============================================================================
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="Claude 3.5 Sonnet model requires additional API access - using Haiku for regular tests")
-async def test_generate_sonnet():
-    """Test with Claude Sonnet model.
-
-    Note: This test is skipped because Claude 3.5 Sonnet requires
-    additional API access or the model ID has changed. The core
-    functionality is tested via Haiku model tests.
-    """
-    response = await lm.generate(
-        model="anthropic/claude-3-5-sonnet-latest",
-        prompt="What is 2+2? Reply with just the number.",
-        max_tokens=10,
-    )
-
-    assert response is not None
-    assert response.text is not None
-    assert "4" in response.text
 
 
 # =============================================================================
@@ -274,13 +265,14 @@ async def test_empty_prompt_error():
 
 
 # =============================================================================
-# Tool Calling / Function Calling Tests
+# Tool Calling / Function Calling Tests (parameterized)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_function_calling_basic():
-    """Test basic function calling with a simple tool."""
+@pytest.mark.parametrize("model_name", ANTHROPIC_MODELS)
+async def test_function_calling_basic(model_name):
+    """Test basic function calling with a simple tool across all models."""
     weather_tool = ToolDefinition(
         name="get_weather",
         description="Get the current weather for a location",
@@ -298,7 +290,7 @@ async def test_function_calling_basic():
 
     model = _LanguageModel(provider="anthropic", default_model=None)
     request = GenerateRequest(
-        model=MODEL,
+        model=model_name,
         messages=[Message.user("What's the weather like in Paris?")],
         tools=[weather_tool],
         tool_choice=ToolChoice.AUTO,
@@ -313,8 +305,9 @@ async def test_function_calling_basic():
 
 
 @pytest.mark.asyncio
-async def test_function_calling_multiple_tools():
-    """Test function calling with multiple tools available."""
+@pytest.mark.parametrize("model_name", ANTHROPIC_MODELS)
+async def test_function_calling_multiple_tools(model_name):
+    """Test function calling with multiple tools available across all models."""
     tools = [
         ToolDefinition(
             name="get_weather",
@@ -342,7 +335,7 @@ async def test_function_calling_multiple_tools():
 
     model = _LanguageModel(provider="anthropic", default_model=None)
     request = GenerateRequest(
-        model=MODEL,
+        model=model_name,
         messages=[Message.user("What time is it in Tokyo?")],
         tools=tools,
         tool_choice=ToolChoice.AUTO,
@@ -355,3 +348,181 @@ async def test_function_calling_multiple_tools():
     # Model should pick the appropriate tool or respond
     if response.tool_calls:
         assert response.tool_calls[0]["name"] == "get_time"
+
+
+# =============================================================================
+# Agentic Workflow Tests - Agent Loop (parameterized)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ANTHROPIC_MODELS)
+async def test_agent_loop_single_tool(calculator_tool, tool_executor, model_name):
+    """Test agent loop: tool call -> execute -> continue with result.
+
+    This tests the core agentic pattern where:
+    1. Model decides to call a tool
+    2. We execute the tool and get a result
+    3. We send the result back to the model
+    4. Model generates final response using the tool result
+    """
+    model = _LanguageModel(provider="anthropic", default_model=None)
+
+    # Step 1: Initial request that should trigger tool use
+    messages = [Message.user("What is 15 * 7? Use the calculator tool.")]
+    request = GenerateRequest(
+        model=model_name,
+        messages=messages,
+        tools=[calculator_tool],
+        tool_choice=ToolChoice.AUTO,
+        config=GenerationConfig(max_tokens=200),
+    )
+
+    response = await model.generate(request)
+    assert response is not None
+
+    # If model called a tool, continue the loop
+    if response.tool_calls:
+        tool_call = response.tool_calls[0]
+        assert tool_call["name"] == "calculate"
+
+        # Step 2: Execute the tool
+        tool_result = tool_executor(tool_call["name"], tool_call["arguments"])
+
+        # Step 3: Send tool result back to model
+        messages.append(Message.assistant(
+            content=response.text or "",
+            tool_calls=response.tool_calls
+        ))
+        messages.append(Message.tool_result(
+            tool_call_id=tool_call.get("id", "tool_0"),
+            content=tool_result
+        ))
+
+        # Step 4: Get final response
+        continuation_request = GenerateRequest(
+            model=model_name,
+            messages=messages,
+            tools=[calculator_tool],
+            tool_choice=ToolChoice.AUTO,
+            config=GenerationConfig(max_tokens=200),
+        )
+
+        final_response = await model.generate(continuation_request)
+        assert final_response is not None
+        assert final_response.text is not None
+        # Should contain the result (105)
+        assert "105" in final_response.text
+    else:
+        # Model answered directly (acceptable behavior)
+        assert response.text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ANTHROPIC_MODELS)
+async def test_agent_loop_multi_step(multi_tool_set, tool_executor, model_name):
+    """Test multi-step agent loop with multiple sequential tool calls.
+
+    This tests a more complex agentic pattern where the model may need
+    to call multiple tools in sequence to complete a task.
+    """
+    model = _LanguageModel(provider="anthropic", default_model=None)
+    messages = [Message.user(
+        "First calculate 25 * 4, then tell me what the weather is like in Paris. "
+        "Use the appropriate tools for each task."
+    )]
+
+    max_iterations = 5
+    tools_called = []
+
+    for iteration in range(max_iterations):
+        request = GenerateRequest(
+            model=model_name,
+            messages=messages,
+            tools=multi_tool_set,
+            tool_choice=ToolChoice.AUTO,
+            config=GenerationConfig(max_tokens=300),
+        )
+
+        response = await model.generate(request)
+        assert response is not None
+
+        if not response.tool_calls:
+            # Model finished - it may answer directly without tools (acceptable behavior)
+            # The test validates the SDK can handle multi-step tool loops when the model uses them
+            break
+
+        # Process tool calls
+        for tool_call in response.tool_calls:
+            tools_called.append(tool_call["name"])
+            tool_result = tool_executor(tool_call["name"], tool_call["arguments"])
+
+            messages.append(Message.assistant(
+                content=response.text or "",
+                tool_calls=[tool_call]
+            ))
+            messages.append(Message.tool_result(
+                tool_call_id=tool_call.get("id", f"tool_{iteration}"),
+                content=tool_result
+            ))
+    else:
+        # Exceeded max iterations - this is fine, the test validates SDK can handle loops
+        pytest.fail("Agent loop exceeded maximum iterations without completing")
+
+
+# =============================================================================
+# Parallel Tool Calls Tests (parameterized)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ANTHROPIC_MODELS)
+async def test_parallel_tool_calls(multi_tool_set, tool_executor, model_name):
+    """Test model's ability to call multiple tools in parallel.
+
+    Claude can request multiple tool calls in a single response.
+    """
+    model = _LanguageModel(provider="anthropic", default_model=None)
+
+    messages = [Message.user(
+        "I need to know both: what is 10 + 20, AND what's the weather in Tokyo? "
+        "Please use the calculator and weather tools."
+    )]
+
+    request = GenerateRequest(
+        model=model_name,
+        messages=messages,
+        tools=multi_tool_set,
+        tool_choice=ToolChoice.AUTO,
+        config=GenerationConfig(max_tokens=300),
+    )
+
+    response = await model.generate(request)
+    assert response is not None
+
+    # Check if model made tool calls
+    if response.tool_calls:
+        # Process all tool results
+        messages.append(Message.assistant(
+            content=response.text or "",
+            tool_calls=response.tool_calls
+        ))
+
+        for i, tool_call in enumerate(response.tool_calls):
+            tool_result = tool_executor(tool_call["name"], tool_call["arguments"])
+            messages.append(Message.tool_result(
+                tool_call_id=tool_call.get("id", f"tool_{i}"),
+                content=tool_result
+            ))
+
+        # Get final response
+        continuation = GenerateRequest(
+            model=model_name,
+            messages=messages,
+            tools=multi_tool_set,
+            tool_choice=ToolChoice.AUTO,
+            config=GenerationConfig(max_tokens=300),
+        )
+
+        final_response = await model.generate(continuation)
+        assert final_response is not None

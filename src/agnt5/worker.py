@@ -883,9 +883,21 @@ class Worker:
             # - If platform_attempt > 0: Platform is orchestrating retries, execute once
             # - If platform_attempt == 0: Local retry loop in decorator wrapper handles retries
             if input_dict:
-                result = config.handler(ctx, **input_dict)
+                coro = config.handler(ctx, **input_dict)
             else:
-                result = config.handler(ctx)
+                coro = config.handler(ctx)
+
+            # Apply timeout if specified in function config
+            if hasattr(config, 'timeout_ms') and config.timeout_ms is not None:
+                timeout_seconds = config.timeout_ms / 1000.0
+                try:
+                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    raise asyncio.TimeoutError(
+                        f"Function '{config.name}' execution timed out after {config.timeout_ms}ms"
+                    )
+            else:
+                result = await coro
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout

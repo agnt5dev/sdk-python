@@ -187,6 +187,73 @@ async def retry_always_fails(ctx: FunctionContext) -> dict:
 
 
 # =============================================================================
+# TIMEOUT FUNCTIONS
+# =============================================================================
+
+
+@function(timeout_ms=2000)
+async def slow_function(ctx: FunctionContext, sleep_seconds: float) -> dict:
+    """
+    Function that sleeps for a specified duration, for testing timeout.
+
+    Use this to test timeout behavior:
+    - Completes successfully if sleep_seconds < 2.0 (within timeout)
+    - Times out if sleep_seconds >= 2.0 (exceeds timeout)
+
+    Args:
+        sleep_seconds: Number of seconds to sleep
+
+    Returns:
+        Dict with sleep duration
+
+    Example:
+        # This should succeed (within timeout)
+        result = client.run("slow_function", {"sleep_seconds": 1.0})
+
+        # This should timeout
+        try:
+            client.run("slow_function", {"sleep_seconds": 3.0})
+        except RunError as e:
+            print(f"Timed out: {e}")
+    """
+    ctx.logger.info(f"Sleeping for {sleep_seconds} seconds (timeout: 2000ms)")
+    await asyncio.sleep(sleep_seconds)
+    ctx.logger.info(f"Woke up after {sleep_seconds} seconds")
+    return {"slept": sleep_seconds}
+
+
+@function(timeout_ms=1000, retries={"max_attempts": 3, "initial_interval_ms": 100})
+async def timeout_with_retry(ctx: FunctionContext, sleep_seconds: float) -> dict:
+    """
+    Function that times out and retries.
+
+    Use this to test timeout + retry behavior:
+    - Each attempt will timeout if sleep_seconds >= 1.0
+    - Retries up to 3 times before final failure
+
+    Args:
+        sleep_seconds: Number of seconds to sleep
+
+    Returns:
+        Dict with sleep duration and attempt count
+
+    Example:
+        # This should succeed on first attempt
+        result = client.run("timeout_with_retry", {"sleep_seconds": 0.5})
+
+        # This should exhaust all 3 retries
+        try:
+            client.run("timeout_with_retry", {"sleep_seconds": 2.0})
+        except RunError as e:
+            print(f"Exhausted retries: {e}")
+    """
+    ctx.logger.info(f"Attempt {ctx.attempt + 1}/3 - sleeping {sleep_seconds}s (timeout: 1000ms)")
+    await asyncio.sleep(sleep_seconds)
+    ctx.logger.info(f"Completed attempt {ctx.attempt + 1}")
+    return {"slept": sleep_seconds, "attempts": ctx.attempt + 1}
+
+
+# =============================================================================
 # STANDALONE EXECUTION
 # =============================================================================
 

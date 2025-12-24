@@ -58,6 +58,7 @@ class FunctionConfig:
     handler: HandlerFunc
     retries: Optional[RetryPolicy] = None
     backoff: Optional[BackoffPolicy] = None
+    timeout_ms: Optional[int] = None
     input_schema: Optional[Dict[str, Any]] = None
     output_schema: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, str]] = None

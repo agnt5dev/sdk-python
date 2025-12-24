@@ -100,10 +100,11 @@ async def execute_with_retry(
     retry_policy: RetryPolicy,
     backoff_policy: BackoffPolicy,
     needs_context: bool,
+    timeout_ms: Optional[int],
     *args: Any,
     **kwargs: Any,
 ) -> Any:
-    """Execute handler with retry logic.
+    """Execute handler with retry logic and optional timeout.
 
     Args:
         handler: The function handler to execute
@@ -111,6 +112,7 @@ async def execute_with_retry(
         retry_policy: Retry configuration
         backoff_policy: Backoff configuration
         needs_context: Whether handler accepts ctx parameter
+        timeout_ms: Maximum execution time in milliseconds (None for no timeout)
         *args: Arguments to pass to handler (excluding ctx if needs_context=False)
         **kwargs: Keyword arguments to pass to handler
 
@@ -119,6 +121,7 @@ async def execute_with_retry(
 
     Raises:
         RetryError: If all retry attempts fail
+        asyncio.TimeoutError: If function execution exceeds timeout_ms
     """
     # Import here to avoid circular dependency
     from .function import FunctionContext
@@ -139,9 +142,23 @@ async def execute_with_retry(
 
             # Execute handler (pass context only if needed)
             if needs_context:
-                result = await handler(attempt_ctx, *args, **kwargs)
+                coro = handler(attempt_ctx, *args, **kwargs)
             else:
-                result = await handler(*args, **kwargs)
+                coro = handler(*args, **kwargs)
+
+            # Apply timeout if specified
+            if timeout_ms is not None:
+                timeout_seconds = timeout_ms / 1000.0
+                try:
+                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    # Re-raise with more context
+                    raise asyncio.TimeoutError(
+                        f"Function execution timed out after {timeout_ms}ms"
+                    )
+            else:
+                result = await coro
+
             return result
 
         except Exception as e:

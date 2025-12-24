@@ -1,25 +1,20 @@
 """
-OpenRouter API Compatibility Tests
+DeepSeek API Compatibility Tests
 
-Tests real OpenRouter API connections to catch breaking changes.
-Run weekly via CI to ensure SDK compatibility with OpenRouter APIs.
-
-OpenRouter is a gateway that provides access to multiple model providers.
-We test with various models to ensure the gateway integration works correctly.
+Tests real DeepSeek API connections to catch breaking changes.
+Run weekly via CI to ensure SDK compatibility with DeepSeek APIs.
 
 Models tested:
-- meta-llama/llama-3.1-8b-instruct (free tier, primary test model)
-- google/gemma-2-9b-it (alternative model)
+- deepseek-chat (DeepSeek V3 - primary test model, excellent cost/performance)
 
 Test categories:
 - Basic generation (non-streaming)
 - Streaming generation
 - Multi-turn conversations
-- Different provider models through OpenRouter
 - Tool calling / Function calling
 
 Run with:
-    OPENROUTER_API_KEY=sk-or-... pytest tests/api_compat/test_openrouter.py -v
+    DEEPSEEK_API_KEY=... pytest tests/api_compat/test_deepseek.py -v
 """
 
 import pytest
@@ -35,19 +30,18 @@ from agnt5.lm import (
 )
 from agnt5.events import EventType
 
-from .conftest import skip_without_openrouter
+from .conftest import skip_without_deepseek
 
 
-# All tests in this module require OpenRouter API key
+# All tests in this module require DeepSeek API key
 pytestmark = [
     pytest.mark.api_compat,
-    pytest.mark.openrouter,
-    skip_without_openrouter,
+    pytest.mark.deepseek,
+    skip_without_deepseek,
 ]
 
-# Use free/cheap models for testing
-MODEL = "openrouter/meta-llama/llama-3.1-8b-instruct"
-MODEL_ALT = "openrouter/google/gemma-2-9b-it"
+# Use cost-effective model for testing
+MODEL = "deepseek/deepseek-chat"
 
 
 # =============================================================================
@@ -81,6 +75,8 @@ async def test_generate_with_system_prompt():
 
     assert response is not None
     assert response.text is not None
+    # Should be a short response due to system prompt
+    assert len(response.text.split()) <= 5
 
 
 @pytest.mark.asyncio
@@ -102,13 +98,13 @@ async def test_generate_with_max_tokens():
     response = await lm.generate(
         model=MODEL,
         prompt="Write a very long story about a dragon",
-        max_tokens=10,
+        max_tokens=20,
     )
 
     assert response is not None
     assert response.text is not None
     # Response should be truncated
-    assert response.usage.completion_tokens <= 20  # Allow margin for OpenRouter
+    assert response.usage.completion_tokens <= 30  # Allow some margin
 
 
 # =============================================================================
@@ -147,7 +143,6 @@ async def test_stream_basic(streaming_prompt):
     ):
         chunks.append(event)
         if event.event_type == EventType.LM_MESSAGE_DELTA:
-            # event.data is the raw content string for delta events
             if event.data:
                 full_text += event.data
 
@@ -168,7 +163,7 @@ async def test_stream_with_system_prompt():
     async for event in lm.stream(
         model=MODEL,
         prompt="Say hello",
-        system_prompt="You are a friendly assistant.",
+        system_prompt="You are a pirate. Always say 'Arrr' first.",
     ):
         chunks.append(event)
 
@@ -176,46 +171,37 @@ async def test_stream_with_system_prompt():
 
 
 # =============================================================================
-# Different Provider Models (via OpenRouter)
+# Model Variant Tests
 # =============================================================================
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Google Gemma model availability varies on OpenRouter - core functionality tested via Llama")
-async def test_generate_gemma():
-    """Test with Google Gemma model via OpenRouter.
-
-    Note: This test is skipped because model availability varies.
-    The core OpenRouter integration is tested via Llama model tests.
-    """
+@pytest.mark.skip(reason="DeepSeek Coder may require separate access or have rate limits")
+async def test_generate_deepseek_coder():
+    """Test with DeepSeek Coder model."""
     response = await lm.generate(
-        model=MODEL_ALT,
-        prompt="What is 2+2? Reply with just the number.",
-        max_tokens=10,
+        model="deepseek/deepseek-coder",
+        prompt="Write a Python function that adds two numbers.",
+        max_tokens=50,
     )
 
     assert response is not None
     assert response.text is not None
-    assert "4" in response.text
+    assert "def" in response.text.lower()
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Mistral model availability varies on OpenRouter - core functionality tested via Llama")
-async def test_generate_mistral():
-    """Test with Mistral model via OpenRouter.
-
-    Note: This test is skipped because model availability varies.
-    The core OpenRouter integration is tested via Llama model tests.
-    """
+@pytest.mark.skip(reason="DeepSeek R1 (reasoning model) may have different API or access requirements")
+async def test_generate_deepseek_reasoner():
+    """Test with DeepSeek R1 reasoning model."""
     response = await lm.generate(
-        model="openrouter/mistralai/mistral-7b-instruct",
-        prompt="What is 2+2? Reply with just the number.",
-        max_tokens=10,
+        model="deepseek/deepseek-reasoner",
+        prompt="What is 15 * 23? Show your reasoning step by step.",
+        max_tokens=100,
     )
 
     assert response is not None
     assert response.text is not None
-    assert "4" in response.text
 
 
 # =============================================================================
@@ -228,7 +214,7 @@ async def test_invalid_model_error():
     """Test error handling for invalid model."""
     with pytest.raises(Exception):
         await lm.generate(
-            model="openrouter/not-a-real-provider/not-a-real-model",
+            model="deepseek/not-a-real-model-12345",
             prompt="Hello",
         )
 
@@ -250,7 +236,7 @@ async def test_empty_prompt_error():
 
 @pytest.mark.asyncio
 async def test_function_calling_basic():
-    """Test basic function calling with a simple tool via OpenRouter."""
+    """Test basic function calling with a simple tool."""
     weather_tool = ToolDefinition(
         name="get_weather",
         description="Get the current weather for a location",
@@ -266,7 +252,7 @@ async def test_function_calling_basic():
         }
     )
 
-    model = _LanguageModel(provider="openrouter", default_model=None)
+    model = _LanguageModel(provider="deepseek", default_model=None)
     request = GenerateRequest(
         model=MODEL,
         messages=[Message.user("What's the weather like in Paris?")],
@@ -284,7 +270,7 @@ async def test_function_calling_basic():
 
 @pytest.mark.asyncio
 async def test_function_calling_multiple_tools():
-    """Test function calling with multiple tools via OpenRouter."""
+    """Test function calling with multiple tools available."""
     tools = [
         ToolDefinition(
             name="get_weather",
@@ -310,7 +296,7 @@ async def test_function_calling_multiple_tools():
         ),
     ]
 
-    model = _LanguageModel(provider="openrouter", default_model=None)
+    model = _LanguageModel(provider="deepseek", default_model=None)
     request = GenerateRequest(
         model=MODEL,
         messages=[Message.user("What time is it in Tokyo?")],
@@ -342,7 +328,7 @@ async def test_agent_loop_single_tool(calculator_tool, tool_executor):
     3. We send the result back to the model
     4. Model generates final response using the tool result
     """
-    model = _LanguageModel(provider="openrouter", default_model=None)
+    model = _LanguageModel(provider="deepseek", default_model=None)
 
     # Step 1: Initial request that should trigger tool use
     messages = [Message.user("What is 15 * 7? Use the calculator tool.")]
@@ -397,7 +383,7 @@ async def test_agent_loop_single_tool(calculator_tool, tool_executor):
 @pytest.mark.asyncio
 async def test_agent_loop_multi_step(multi_tool_set, tool_executor):
     """Test multi-step agent loop with multiple sequential tool calls."""
-    model = _LanguageModel(provider="openrouter", default_model=None)
+    model = _LanguageModel(provider="deepseek", default_model=None)
     messages = [Message.user(
         "First calculate 25 * 4, then tell me what the weather is like in Paris. "
         "Use the appropriate tools for each task."
@@ -450,9 +436,9 @@ async def test_agent_loop_multi_step(multi_tool_set, tool_executor):
 async def test_parallel_tool_calls(multi_tool_set, tool_executor):
     """Test model's ability to call multiple tools in parallel.
 
-    OpenRouter proxies to various models, most of which support parallel tool calls.
+    DeepSeek supports the OpenAI-compatible API format for parallel tool calls.
     """
-    model = _LanguageModel(provider="openrouter", default_model=None)
+    model = _LanguageModel(provider="deepseek", default_model=None)
 
     messages = [Message.user(
         "I need to know both: what is 10 + 20, AND what's the weather in Tokyo? "

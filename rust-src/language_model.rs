@@ -5,10 +5,11 @@ use std::sync::{Arc, Mutex};
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
 use opentelemetry::Context as OtelContext;
 use agnt5_sdk_core::lm::{
-    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, GenerateRequest,
-    GenerateResponse, GenerationConfig, GroqProvider, JsonSchemaFormat, Message, MessageRole,
-    OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest,
-    TokenUsage, ToolChoice, ToolDefinition,
+    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, DeepSeekProvider,
+    GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider, GroqProvider,
+    JsonSchemaFormat, Message, MessageRole, MistralProvider, OllamaProvider, OpenAiProvider,
+    OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
 use pyo3::exceptions::{PyStopAsyncIteration, PyValueError};
@@ -75,8 +76,13 @@ enum ProviderKind {
     Azure(AzureOpenAiProvider),
     Bedrock(BedrockProvider),
     Anthropic(AnthropicProvider),
+    DeepSeek(DeepSeekProvider),
+    Google(GoogleProvider),
     Groq(GroqProvider),
+    Mistral(MistralProvider),
+    Ollama(OllamaProvider),
     OpenRouter(OpenRouterProvider),
+    Xai(XaiProvider),
 }
 
 impl ProviderKind {
@@ -86,8 +92,13 @@ impl ProviderKind {
             ProviderKind::Azure(provider) => provider.generate(request).await,
             ProviderKind::Bedrock(provider) => provider.generate(request).await,
             ProviderKind::Anthropic(provider) => provider.generate(request).await,
+            ProviderKind::DeepSeek(provider) => provider.generate(request).await,
+            ProviderKind::Google(provider) => provider.generate(request).await,
             ProviderKind::Groq(provider) => provider.generate(request).await,
+            ProviderKind::Mistral(provider) => provider.generate(request).await,
+            ProviderKind::Ollama(provider) => provider.generate(request).await,
             ProviderKind::OpenRouter(provider) => provider.generate(request).await,
+            ProviderKind::Xai(provider) => provider.generate(request).await,
         }
     }
 
@@ -97,8 +108,13 @@ impl ProviderKind {
             ProviderKind::Azure(provider) => provider.stream(request).await,
             ProviderKind::Bedrock(provider) => provider.stream(request).await,
             ProviderKind::Anthropic(provider) => provider.stream(request).await,
+            ProviderKind::DeepSeek(provider) => provider.stream(request).await,
+            ProviderKind::Google(provider) => provider.stream(request).await,
             ProviderKind::Groq(provider) => provider.stream(request).await,
+            ProviderKind::Mistral(provider) => provider.stream(request).await,
+            ProviderKind::Ollama(provider) => provider.stream(request).await,
             ProviderKind::OpenRouter(provider) => provider.stream(request).await,
+            ProviderKind::Xai(provider) => provider.stream(request).await,
         }
     }
 }
@@ -151,6 +167,7 @@ impl PyLanguageModel {
         let response_schema_kw = get_optional_string(kwargs_ref, "response_schema_kw")?;
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
+        let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -177,6 +194,11 @@ impl PyLanguageModel {
 
         if let Some(choice) = tool_choice {
             request = request.tool_choice(Some(choice));
+        }
+
+        // Set previous_response_id for OpenAI Responses API conversation continuation
+        if let Some(prev_id) = previous_response_id_kw {
+            request.previous_response_id = Some(prev_id);
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -234,6 +256,7 @@ impl PyLanguageModel {
         let response_schema_kw = get_optional_string(kwargs_ref, "response_schema_kw")?;
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
+        let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -260,6 +283,11 @@ impl PyLanguageModel {
 
         if let Some(choice) = tool_choice {
             request = request.tool_choice(Some(choice));
+        }
+
+        // Set previous_response_id for OpenAI Responses API conversation continuation
+        if let Some(prev_id) = previous_response_id_kw {
+            request.previous_response_id = Some(prev_id);
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -362,6 +390,7 @@ impl PyLanguageModel {
         let response_schema = get_optional_string(kwargs_ref, "response_schema")?;
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
+        let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
 
         let response_format = parse_response_format(
             response_format_str.as_deref(),
@@ -389,6 +418,11 @@ impl PyLanguageModel {
         }
         if let Some(choice) = tool_choice {
             request = request.tool_choice(Some(choice));
+        }
+
+        // Set previous_response_id for OpenAI Responses API conversation continuation
+        if let Some(prev_id) = previous_response_id_kw {
+            request.previous_response_id = Some(prev_id);
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -501,11 +535,27 @@ impl PyLanguageModel {
         if env::var("ANTHROPIC_API_KEY").is_ok() {
             providers.push("anthropic".to_string());
         }
+        if env::var("DEEPSEEK_API_KEY").is_ok() {
+            providers.push("deepseek".to_string());
+        }
+        if env::var("GOOGLE_API_KEY").is_ok() || env::var("GEMINI_API_KEY").is_ok() {
+            providers.push("google".to_string());
+        }
         if env::var("GROQ_API_KEY").is_ok() {
             providers.push("groq".to_string());
         }
+        if env::var("MISTRAL_API_KEY").is_ok() {
+            providers.push("mistral".to_string());
+        }
+        // Ollama doesn't require an API key - check for OLLAMA_HOST or assume localhost
+        if env::var("OLLAMA_HOST").is_ok() || env::var("OLLAMA_BASE_URL").is_ok() {
+            providers.push("ollama".to_string());
+        }
         if env::var("OPENROUTER_API_KEY").is_ok() {
             providers.push("openrouter".to_string());
+        }
+        if env::var("XAI_API_KEY").is_ok() {
+            providers.push("xai".to_string());
         }
 
         providers
@@ -584,8 +634,13 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
         "azure" => Ok(ProviderKind::Azure(AzureOpenAiProvider::from_env()?)),
         "bedrock" => Ok(ProviderKind::Bedrock(BedrockProvider::from_env()?)),
         "anthropic" => Ok(ProviderKind::Anthropic(AnthropicProvider::from_env()?)),
+        "deepseek" => Ok(ProviderKind::DeepSeek(DeepSeekProvider::from_env()?)),
+        "google" | "gemini" => Ok(ProviderKind::Google(GoogleProvider::from_env()?)),
         "groq" => Ok(ProviderKind::Groq(GroqProvider::from_env()?)),
+        "mistral" => Ok(ProviderKind::Mistral(MistralProvider::from_env()?)),
+        "ollama" => Ok(ProviderKind::Ollama(OllamaProvider::from_env()?)),
         "openrouter" => Ok(ProviderKind::OpenRouter(OpenRouterProvider::from_env()?)),
+        "xai" => Ok(ProviderKind::Xai(XaiProvider::from_env()?)),
         other => Err(SdkError::Configuration {
             message: format!("Unsupported provider `{other}`"),
             field: Some("provider".to_string()),
@@ -604,22 +659,36 @@ fn build_request(
     response_format: Option<ResponseFormat>,
     user_id: Option<String>,
 ) -> PyResult<GenerateRequest> {
-    let pairs = parse_prompt(py, prompt)?;
+    let parsed_messages = parse_prompt(py, prompt)?;
 
     let mut system_prompt = system_prompt_kw;
     let mut messages = Vec::new();
 
-    for (role, content) in pairs {
-        match role {
+    for parsed in parsed_messages {
+        match parsed.role {
             MessageRole::System => {
                 if system_prompt.is_none() {
-                    system_prompt = Some(content);
+                    system_prompt = Some(parsed.content);
                 } else {
-                    messages.push(Message::system(content));
+                    messages.push(Message::system(parsed.content));
                 }
             }
-            MessageRole::User => messages.push(Message::user(content)),
-            MessageRole::Assistant => messages.push(Message::assistant(content)),
+            MessageRole::User => {
+                // Check if this is a tool result message
+                if let Some(tool_call_id) = parsed.tool_call_id {
+                    messages.push(Message::tool_result(tool_call_id, parsed.content));
+                } else {
+                    messages.push(Message::user(parsed.content));
+                }
+            }
+            MessageRole::Assistant => {
+                // Check if this is an assistant message with tool calls
+                if let Some(tool_calls) = parsed.tool_calls {
+                    messages.push(Message::assistant_with_tool_calls(parsed.content, tool_calls));
+                } else {
+                    messages.push(Message::assistant(parsed.content));
+                }
+            }
         }
     }
 
@@ -656,9 +725,22 @@ fn build_request(
     Ok(request)
 }
 
-fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<(MessageRole, String)>> {
+/// Parsed message from Python including all fields for agentic workflows
+struct ParsedMessage {
+    role: MessageRole,
+    content: String,
+    tool_calls: Option<Vec<ToolCall>>,
+    tool_call_id: Option<String>,
+}
+
+fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessage>> {
     if let Ok(text) = prompt.extract::<String>(py) {
-        return Ok(vec![(MessageRole::User, text)]);
+        return Ok(vec![ParsedMessage {
+            role: MessageRole::User,
+            content: text,
+            tool_calls: None,
+            tool_call_id: None,
+        }]);
     }
 
     if let Ok(list) = prompt.cast_bound::<PyList>(py) {
@@ -669,10 +751,13 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<(MessageRole
                     .get_item("role")?
                     .ok_or_else(|| PyValueError::new_err("Chat message missing 'role' field"))?;
                 let role: String = role_value.extract()?;
-                let content_value = dict
+
+                // Content can be optional for assistant messages with only tool_calls
+                let content: String = dict
                     .get_item("content")?
-                    .ok_or_else(|| PyValueError::new_err("Chat message missing 'content' field"))?;
-                let content: String = content_value.extract()?;
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_default();
 
                 let role = match role.to_lowercase().as_str() {
                     "system" => MessageRole::System,
@@ -685,9 +770,74 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<(MessageRole
                     }
                 };
 
-                messages.push((role, content));
+                // Extract tool_calls if present (for assistant messages)
+                let tool_calls: Option<Vec<ToolCall>> = if let Some(tc_value) = dict.get_item("tool_calls")? {
+                    if tc_value.is_none() {
+                        None
+                    } else {
+                        // tool_calls is a list of dicts with id, name, arguments
+                        let tc_list = tc_value.downcast::<PyList>().map_err(|_| {
+                            PyValueError::new_err("tool_calls must be a list")
+                        })?;
+                        let mut calls = Vec::with_capacity(tc_list.len());
+                        for tc_item in tc_list.iter() {
+                            let tc_dict = tc_item.downcast::<PyDict>().map_err(|_| {
+                                PyValueError::new_err("Each tool_call must be a dict")
+                            })?;
+
+                            let id: String = tc_dict
+                                .get_item("id")?
+                                .ok_or_else(|| PyValueError::new_err("tool_call missing 'id'"))?
+                                .extract()?;
+                            let name: String = tc_dict
+                                .get_item("name")?
+                                .ok_or_else(|| PyValueError::new_err("tool_call missing 'name'"))?
+                                .extract()?;
+
+                            // arguments can be string (JSON) or dict
+                            let arguments_value = tc_dict
+                                .get_item("arguments")?
+                                .ok_or_else(|| PyValueError::new_err("tool_call missing 'arguments'"))?;
+                            let arguments: String = if let Ok(s) = arguments_value.extract::<String>() {
+                                s
+                            } else {
+                                // Convert dict/other to JSON string
+                                let json_mod = py.import("json")?;
+                                json_mod.call_method1("dumps", (arguments_value,))?.extract()?
+                            };
+
+                            calls.push(ToolCall { id, name, arguments });
+                        }
+                        Some(calls)
+                    }
+                } else {
+                    None
+                };
+
+                // Extract tool_call_id if present (for tool result messages)
+                let tool_call_id: Option<String> = if let Some(tcid_value) = dict.get_item("tool_call_id")? {
+                    if tcid_value.is_none() {
+                        None
+                    } else {
+                        Some(tcid_value.extract()?)
+                    }
+                } else {
+                    None
+                };
+
+                messages.push(ParsedMessage {
+                    role,
+                    content,
+                    tool_calls,
+                    tool_call_id,
+                });
             } else if let Ok(text) = item.extract::<String>() {
-                messages.push((MessageRole::User, text));
+                messages.push(ParsedMessage {
+                    role: MessageRole::User,
+                    content: text,
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
             } else {
                 return Err(PyValueError::new_err(
                     "Each chat message must be a dict with 'role' and 'content' or a string",
@@ -878,6 +1028,7 @@ fn parse_tool_choice_json(json: Option<&str>) -> PyResult<Option<ToolChoice>> {
         Value::String(s) => match s.as_str() {
             "auto" => Ok(Some(ToolChoice::Auto)),
             "none" => Ok(Some(ToolChoice::None)),
+            "required" => Ok(Some(ToolChoice::Required)),
             name => Ok(Some(ToolChoice::Tool {
                 name: name.to_string(),
             })),
