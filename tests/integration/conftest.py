@@ -880,47 +880,81 @@ def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
             )
 
         try:
-            response = requests.get(
-                f"{platform['gateway_url']}/v1/workers",
-                params={
-                    "tenant_id": "00000000-0000-0000-0000-000000000001",
-                    "deployment_id": "00000000-0000-0000-0000-000000000002",
-                },
-                timeout=2,
-            )
-            print(f"   Worker check: status={response.status_code}")
-            if response.status_code == 200:
-                workers = response.json()
-                if workers and len(workers) > 0:
-                    print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
+            # For subprocess mode, check /v1/components endpoint (more reliable)
+            # The /v1/workers endpoint may not reflect worker registration in dev mode
+            if platform["mode"] == "subprocess":
+                response = requests.get(
+                    f"{platform['gateway_url']}/v1/components",
+                    timeout=2,
+                )
+                print(f"   Component check: status={response.status_code}")
+                if response.status_code == 200:
+                    data = response.json()
+                    components = data.get("components", [])
+                    if components and len(components) > 0:
+                        print(f"✅ Worker registered: {len(components)} components found\n")
 
-                    # Print worker details (best effort - API format may vary)
-                    try:
-                        for idx, worker_info in enumerate(workers, 1):
-                            print(f"   Worker #{idx}:")
-                            if isinstance(worker_info, dict):
-                                print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
-                                print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
-                                print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
+                        # Group components by type for display
+                        by_type = {}
+                        for comp in components:
+                            comp_type = comp.get("component_type", "unknown")
+                            if comp_type not in by_type:
+                                by_type[comp_type] = []
+                            by_type[comp_type].append(comp.get("component_name", "unknown"))
 
-                                components = worker_info.get("components", {})
-                                if components:
-                                    print(f"     • Components:")
-                                    for comp_type, comp_list in components.items():
-                                        if comp_list:
-                                            print(f"       - {comp_type}: {', '.join(comp_list)}")
-                            else:
-                                print(f"     • {worker_info}")
-                            print()
-                    except Exception as e:
-                        print(f"   (Could not print worker details: {e})")
+                        for comp_type, names in by_type.items():
+                            print(f"   • {comp_type}: {len(names)} components")
 
-                    worker_registered = True
-                    break
+                        worker_registered = True
+                        break
+                    else:
+                        print(f"   No components registered yet")
                 else:
-                    print(f"   Empty workers list")
+                    print(f"   Component check failed: {response.status_code}")
             else:
-                print(f"   Worker check failed: {response.status_code} - {response.text[:200]}")
+                # For Docker modes, use /v1/workers endpoint
+                response = requests.get(
+                    f"{platform['gateway_url']}/v1/workers",
+                    params={
+                        "tenant_id": "00000000-0000-0000-0000-000000000001",
+                        "deployment_id": "00000000-0000-0000-0000-000000000002",
+                    },
+                    timeout=2,
+                )
+                print(f"   Worker check: status={response.status_code}")
+                if response.status_code == 200:
+                    data = response.json()
+                    workers = data.get("workers", [])
+                    if workers and len(workers) > 0:
+                        print(f"✅ Worker registered: {len(workers)} worker(s) found\n")
+
+                        # Print worker details (best effort - API format may vary)
+                        try:
+                            for idx, worker_info in enumerate(workers, 1):
+                                print(f"   Worker #{idx}:")
+                                if isinstance(worker_info, dict):
+                                    print(f"     • ID: {worker_info.get('worker_id', 'N/A')}")
+                                    print(f"     • Service: {worker_info.get('service_name', 'N/A')}")
+                                    print(f"     • Health: {worker_info.get('health_status', 'N/A')}")
+
+                                    components = worker_info.get("components", {})
+                                    if components:
+                                        print(f"     • Components:")
+                                        for comp_type, comp_list in components.items():
+                                            if comp_list:
+                                                print(f"       - {comp_type}: {', '.join(comp_list)}")
+                                else:
+                                    print(f"     • {worker_info}")
+                                print()
+                        except Exception as e:
+                            print(f"   (Could not print worker details: {e})")
+
+                        worker_registered = True
+                        break
+                    else:
+                        print(f"   Empty workers list")
+                else:
+                    print(f"   Worker check failed: {response.status_code} - {response.text[:200]}")
         except Exception as e:
             print(f"   Worker check error: {type(e).__name__}: {e}")
 
