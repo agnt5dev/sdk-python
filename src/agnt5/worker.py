@@ -1168,15 +1168,18 @@ class Worker:
                 logger.debug(f"Injected user response into workflow entity")
 
             if initial_state:
-                # Load initial state into entity's state adapter
+                # Load initial state into entity's state adapter AND workflow entity's state
                 state_adapter = _get_state_adapter()
                 if hasattr(state_adapter, '_standalone_states'):
-                    # Standalone mode - set state directly
+                    # Standalone mode - set state directly in adapter
                     state_adapter._standalone_states[workflow_entity._state_key] = initial_state
-                    logger.debug(f"Loaded initial state with {len(initial_state)} keys into workflow entity (standalone)")
-                else:
-                    # Production mode - state is managed by Rust core
-                    logger.debug(f"Initial state will be loaded from platform (production mode)")
+                    logger.debug(f"Loaded initial state with {len(initial_state)} keys into state adapter (standalone)")
+
+                # Also initialize the workflow entity's internal state with the loaded data
+                # This ensures workflow_entity.state.get() returns the persisted values
+                from .workflow import WorkflowState
+                workflow_entity._state = WorkflowState(initial_state.copy(), workflow_entity)
+                logger.info(f"🔄 Initialized workflow entity state with {len(initial_state)} keys from session")
 
             # Create checkpoint callback for real-time streaming
             def checkpoint_callback(checkpoint: dict) -> None:

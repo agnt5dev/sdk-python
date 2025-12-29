@@ -1046,6 +1046,9 @@ class WorkflowEntity(Entity):
         self._run_id = run_id
         self._memory_scope = memory_scope
         self._component_name = component_name
+        # Store scope identifiers for proper scope-based persistence
+        self._session_id = session_id
+        self._user_id = user_id
 
         # Step tracking for replay and recovery
         self._step_events: list[Dict[str, Any]] = []
@@ -1205,15 +1208,30 @@ class WorkflowEntity(Entity):
             state_dict = self.state.get_state_snapshot()
             logger.info(f"🔍 DEBUG: State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
 
-            logger.info(f"🔍 DEBUG: Loading current version for optimistic locking...")
-            # Load current version (for optimistic locking)
-            _, current_version = await adapter.load_with_version(self._entity_type, self._key)
+            # Determine scope and scope_id based on memory scope
+            scope = self._memory_scope  # "session", "user", or "run"
+            scope_id = ""
+            if self._memory_scope == "session" and self._session_id:
+                scope_id = self._session_id
+            elif self._memory_scope == "user" and self._user_id:
+                scope_id = self._user_id
+            elif self._memory_scope == "run":
+                scope_id = self._run_id
+
+            logger.info(f"🔍 DEBUG: Loading current version for optimistic locking (scope={scope}, scope_id={scope_id})...")
+            # Load current version (for optimistic locking) with proper scope
+            _, current_version = await adapter.load_with_version(
+                self._entity_type, self._key, scope=scope, scope_id=scope_id
+            )
             logger.info(f"🔍 DEBUG: Current version: {current_version}")
 
             logger.info(f"🔍 DEBUG: Saving state to database...")
-            # Save state with version check
+
+            logger.info(f"🔍 DEBUG: Using scope={scope}, scope_id={scope_id}")
+            # Save state with version check and proper scope
             new_version = await adapter.save_state(
-                self._entity_type, self._key, state_dict, current_version
+                self._entity_type, self._key, state_dict, current_version,
+                scope=scope, scope_id=scope_id
             )
 
             logger.info(

@@ -179,7 +179,7 @@ async def simple_agent_workflow(ctx: WorkflowContext, message: str = "Hello") ->
 
 
 @workflow(chat=True)
-async def chat_assistant(ctx: WorkflowContext, message: str) -> dict:
+async def chat_assistant(ctx: WorkflowContext, message: str, **kwargs) -> dict:
     """
     Chat-enabled workflow for multi-turn conversations.
 
@@ -201,6 +201,9 @@ async def chat_assistant(ctx: WorkflowContext, message: str) -> dict:
     """
     ctx.logger.info(f"Chat assistant: {message}")
 
+    # Load history from workflow state
+    messages = ctx.state.get("messages", [])
+
     agent = Agent(
         name="chat_assistant",
         model="openai/gpt-4o-mini",
@@ -208,11 +211,16 @@ async def chat_assistant(ctx: WorkflowContext, message: str) -> dict:
         temperature=0.7,
     )
 
-    # Stream response through the agent
+    # Pass message as string, history as separate parameter
     response = await ctx.step(
         "respond",
-        agent.run(message, context=ctx),
+        agent.run(message, history=messages, context=ctx),
     )
+
+    # Update history with this turn
+    messages.append({"role": "user", "content": message})
+    messages.append({"role": "assistant", "content": response})
+    ctx.state.set("messages", messages)
 
     return {
         "message": message,
