@@ -77,6 +77,21 @@ import ex_11_agent_streaming  # noqa: F401
 # Components: research_workflow, mixed_workflow, simple_agent_workflow
 import ex_12_workflow_streaming  # noqa: F401
 
+# 13: Context Propagation
+# Components: sequential_context_workflow, parallel_context_workflow, ctx_state_pipeline, etc.
+import ex_13_context_propagation  # noqa: F401
+
+# 14: Parallel Tool Calls
+# Components: parallel_tool_execution, timing_comparison, sequential_tool_chain, etc.
+import ex_14_parallel_tool_calls  # noqa: F401
+
+# 15: Advanced Handoffs (if exists)
+# import ex_15_advanced_handoffs  # noqa: F401
+
+# 16: Multi-Agent Orchestration
+# Components: supervisor_worker_workflow, debate_agents, consensus_agents, pipeline_agents
+import ex_16_multi_agent_orchestration  # noqa: F401
+
 from ex_06_agents import simple_assistant_agent  # noqa: F401
 
 SERVICE_NAME = os.getenv("AGNT5_SERVICE_NAME", "agnt5-examples")

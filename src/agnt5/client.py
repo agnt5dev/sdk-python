@@ -429,6 +429,7 @@ class Client:
         self,
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
     ):
         """Stream responses from a component using Server-Sent Events (SSE).
 
@@ -438,6 +439,7 @@ class Client:
         Args:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
+            component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
 
         Yields:
             String chunks as they arrive from the component
@@ -456,8 +458,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component}")
+        # Build URL with component type
+        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
 
         # Use streaming request with auth headers
         with self._client.stream(
@@ -509,8 +511,19 @@ class Client:
                             )
 
                         # Yield chunk from output.delta events
-                        if current_event == "output.delta" and "content" in data:
-                            yield data["content"]
+                        if current_event == "output.delta":
+                            # Try different content field formats
+                            if "content" in data:
+                                yield data["content"]
+                            elif "output_data" in data:
+                                # output_data is base64 encoded - decode it
+                                import base64
+                                try:
+                                    decoded = base64.b64decode(data["output_data"]).decode("utf-8")
+                                    yield decoded
+                                except Exception:
+                                    # Fallback: yield as-is if base64 decode fails
+                                    yield data["output_data"]
                         # Also support legacy "chunk" format
                         elif "chunk" in data:
                             yield data["chunk"]
@@ -571,8 +584,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type (using v2 streaming endpoint)
-        url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
+        # Build URL with component type (using streaming endpoint)
+        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
 
         # Use streaming request with auth and session headers
         with self._client.stream(
@@ -1321,7 +1334,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/streamv2/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
 
         async with client.stream(
             "POST",

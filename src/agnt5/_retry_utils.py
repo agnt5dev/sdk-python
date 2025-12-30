@@ -7,6 +7,7 @@ and executing functions with retry logic.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any, Dict, Optional, Union
 
 from .exceptions import RetryError
@@ -142,22 +143,28 @@ async def execute_with_retry(
 
             # Execute handler (pass context only if needed)
             if needs_context:
-                coro = handler(attempt_ctx, *args, **kwargs)
+                result = handler(attempt_ctx, *args, **kwargs)
             else:
-                coro = handler(*args, **kwargs)
+                result = handler(*args, **kwargs)
 
-            # Apply timeout if specified
-            if timeout_ms is not None:
-                timeout_seconds = timeout_ms / 1000.0
-                try:
-                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
-                except asyncio.TimeoutError:
-                    # Re-raise with more context
-                    raise asyncio.TimeoutError(
-                        f"Function execution timed out after {timeout_ms}ms"
-                    )
-            else:
-                result = await coro
+            # Check if result is an async generator (streaming function)
+            # Async generators cannot be retried - return immediately for streaming consumption
+            if inspect.isasyncgen(result):
+                return result
+
+            # For coroutines, apply timeout and await
+            if inspect.iscoroutine(result):
+                if timeout_ms is not None:
+                    timeout_seconds = timeout_ms / 1000.0
+                    try:
+                        result = await asyncio.wait_for(result, timeout=timeout_seconds)
+                    except asyncio.TimeoutError:
+                        # Re-raise with more context
+                        raise asyncio.TimeoutError(
+                            f"Function execution timed out after {timeout_ms}ms"
+                        )
+                else:
+                    result = await result
 
             return result
 

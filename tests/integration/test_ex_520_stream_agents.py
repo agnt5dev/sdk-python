@@ -7,8 +7,8 @@ Tests streaming agent execution using client.stream_events():
 - Tool call events (when agents use tools)
 - Error handling for agent failures
 
-Note: Agent events are wrapped in output.delta events.
-To access agent events, check output.delta.data["content"]["event_type"].
+Note: Agent events come as top-level SSE events with event_type like 'agent.started', 'agent.completed'.
+The actual event data is in the 'output_data' field, which may be base64-encoded JSON or a dict.
 
 Run with:
     # Requires OPENAI_API_KEY for LLM calls
@@ -18,6 +18,8 @@ Run with:
     pytest tests/integration/test_ex_520_stream_agents.py -v -m "not llm"
 """
 
+import base64
+import json
 import os
 import pytest
 
@@ -33,18 +35,56 @@ pytestmark = [
 ]
 
 
-def extract_agent_events(events):
-    """Extract agent events from output.delta events.
+def _decode_output_data(data: dict) -> dict:
+    """Decode output_data field from event data.
 
-    Agent functions yield dicts that become output.delta events.
-    The agent event data is in e.data["content"].
+    The gateway wraps event payloads in a structure with metadata.
+    The actual event data is in 'output_data', which may be:
+    - A base64-encoded JSON string (from SSE stream)
+    - Already a dict (from journal/replay)
+    """
+    output_data = data.get("output_data")
+    if output_data is None:
+        return data
+
+    # If already a dict, return it
+    if isinstance(output_data, dict):
+        return output_data
+
+    # If a string, decode from base64 and parse as JSON
+    if isinstance(output_data, str):
+        try:
+            decoded = base64.b64decode(output_data).decode("utf-8")
+            return json.loads(decoded)
+        except (ValueError, json.JSONDecodeError):
+            return data
+
+    return data
+
+
+def extract_agent_events(events):
+    """Extract agent events from stream events.
+
+    Agent events come as top-level events with event_type like 'agent.started', 'agent.completed'.
+    The actual event data is decoded from the 'output_data' field.
+    Returns list of dicts with {"event_type": str, "data": dict}.
+
+    Note: Deduplicates events by hashing the decoded data to avoid duplicates
+    from journal replay (which sends both SSE stream events and journal events).
     """
     agent_events = []
+    seen = set()  # Track seen events to avoid duplicates from journal replay
     for e in events:
-        if e.event_type.value == "output.delta":
-            content = e.data.get("content", {})
-            if isinstance(content, dict) and "event_type" in content:
-                agent_events.append(content)
+        if e.event_type.value.startswith('agent.'):
+            decoded_data = _decode_output_data(e.data)
+            # Deduplicate by hashing the decoded data (handles different sequence key names)
+            event_key = (e.event_type.value, json.dumps(decoded_data, sort_keys=True))
+            if event_key not in seen:
+                seen.add(event_key)
+                agent_events.append({
+                    "event_type": e.event_type.value,
+                    "data": decoded_data
+                })
     return agent_events
 
 

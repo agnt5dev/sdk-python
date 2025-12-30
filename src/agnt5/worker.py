@@ -883,21 +883,27 @@ class Worker:
             # - If platform_attempt > 0: Platform is orchestrating retries, execute once
             # - If platform_attempt == 0: Local retry loop in decorator wrapper handles retries
             if input_dict:
-                coro = config.handler(ctx, **input_dict)
+                result = config.handler(ctx, **input_dict)
             else:
-                coro = config.handler(ctx)
+                result = config.handler(ctx)
 
-            # Apply timeout if specified in function config
-            if hasattr(config, 'timeout_ms') and config.timeout_ms is not None:
-                timeout_seconds = config.timeout_ms / 1000.0
-                try:
-                    result = await asyncio.wait_for(coro, timeout=timeout_seconds)
-                except asyncio.TimeoutError:
-                    raise asyncio.TimeoutError(
-                        f"Function '{config.name}' execution timed out after {config.timeout_ms}ms"
-                    )
-            else:
-                result = await coro
+            # Check if result is an async generator BEFORE awaiting
+            # Async generators (streaming functions) cannot be awaited directly
+            if inspect.isasyncgen(result):
+                # result is already an async generator, proceed to streaming handling below
+                pass
+            elif inspect.iscoroutine(result):
+                # Apply timeout if specified in function config
+                if hasattr(config, 'timeout_ms') and config.timeout_ms is not None:
+                    timeout_seconds = config.timeout_ms / 1000.0
+                    try:
+                        result = await asyncio.wait_for(result, timeout=timeout_seconds)
+                    except asyncio.TimeoutError:
+                        raise asyncio.TimeoutError(
+                            f"Function '{config.name}' execution timed out after {config.timeout_ms}ms"
+                        )
+                else:
+                    result = await result
 
             # Note: Removed flush_telemetry_py() call here - it was causing 2-second blocking delay!
             # The batch span processor handles flushing automatically with 5s timeout
@@ -949,10 +955,18 @@ class Worker:
                             sequence += 1
                             first_chunk = False
 
-                        # Serialize chunk (using _serialize_result to handle Pydantic models, etc.)
-                        chunk_data = _serialize_result(chunk)
-                        # Convert bytes to string for queue_delta
-                        chunk_str = chunk_data.decode("utf-8") if isinstance(chunk_data, bytes) else str(chunk_data)
+                        # Serialize chunk for streaming
+                        # Strings are passed through directly to avoid double-encoding
+                        # (functions may yield pre-formatted JSON strings)
+                        # Other types (dicts, Pydantic models, etc.) are JSON-serialized
+                        if isinstance(chunk, str):
+                            chunk_str = chunk
+                        elif isinstance(chunk, bytes):
+                            chunk_str = chunk.decode("utf-8")
+                        else:
+                            # Use _serialize_result for complex types (dicts, Pydantic models, etc.)
+                            chunk_data = _serialize_result(chunk)
+                            chunk_str = chunk_data.decode("utf-8") if isinstance(chunk_data, bytes) else str(chunk_data)
 
                         # Emit output.delta event
                         self._rust_worker.queue_delta(

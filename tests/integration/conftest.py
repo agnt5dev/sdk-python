@@ -765,7 +765,8 @@ def _wait_for_worker_registration(platform: Dict[str, any], max_wait: int = 30) 
 
                 # For components endpoint, check if components exist
                 if platform["mode"] in ("local", "subprocess"):
-                    components = data.get("components", [])
+                    # API returns list directly, not wrapped in an object
+                    components = data if isinstance(data, list) else data.get("components", [])
                     if components and len(components) > 0:
                         print(f"✅ Worker registered: {len(components)} components found\n")
 
