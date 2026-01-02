@@ -543,7 +543,7 @@ class _LanguageModel(LanguageModel):
                 provider=self._provider or "unknown",
                 temperature=request.config.temperature,
                 max_tokens=request.config.max_tokens,
-                tools_count=len(request.config.tools) if request.config.tools else 0,
+                tools_count=len(request.tools) if request.tools else 0,
                 timestamp_ns=start_time_ns,
             )
             await write_lm_call_started(

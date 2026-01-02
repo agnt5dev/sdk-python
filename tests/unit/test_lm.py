@@ -1262,3 +1262,117 @@ async def test_live_stream_with_modalities():
     assert len(full_text) > 0
     assert "sunset" in full_text.lower() or "sun" in full_text.lower()
     print(f"\n\nTotal chunks: {len(chunks)}")
+
+
+# ============================================================================
+# Regression Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_request_agnt5_183(mock_rust_generate):
+    """Regression test for AGNT5-183: tools_count should access request.tools, not request.config.tools.
+
+    This test ensures that GenerateRequest.tools is correctly accessed when calculating
+    tools_count for LMCallStartedEvent observability logging.
+
+    The bug was accessing request.config.tools instead of request.tools, causing
+    AttributeError when agents with tools tried to make LLM calls.
+    """
+    from agnt5.lm import (
+        GenerateRequest,
+        GenerationConfig,
+        ToolDefinition,
+        Message,
+        MessageRole,
+        _LanguageModel,
+    )
+
+    # Create a request with tools to exercise the tools_count code path
+    weather_tool = ToolDefinition(
+        name="get_weather",
+        description="Get the current weather for a location",
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "City name"}
+            },
+            "required": ["location"]
+        }
+    )
+
+    request = GenerateRequest(
+        model="openai/gpt-4o-mini",
+        messages=[Message(role=MessageRole.USER, content="What's the weather in Paris?")],
+        tools=[weather_tool],  # Tools are on request, NOT request.config
+        config=GenerationConfig(temperature=0.7, max_tokens=100)
+    )
+
+    # Verify the structure: tools should be on request, not on config
+    assert hasattr(request, 'tools'), "GenerateRequest must have 'tools' attribute"
+    assert not hasattr(request.config, 'tools'), "GenerationConfig should NOT have 'tools' attribute"
+    assert len(request.tools) == 1
+    assert request.tools[0].name == "get_weather"
+
+    # Now test that generate() doesn't crash when tools are present
+    # This exercises the tools_count calculation at line 546
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        # Create _LanguageModel instance (internal class used by the module)
+        lm_instance = _LanguageModel(provider="openai")
+
+        # This should NOT raise AttributeError: 'GenerationConfig' object has no attribute 'tools'
+        response = await lm_instance.generate(request)
+
+        assert response is not None
+        assert response.text == "This is a test response."
+
+
+@pytest.mark.asyncio
+async def test_generate_without_tools_request():
+    """Test that generate works correctly when no tools are provided.
+
+    Complement to AGNT5-183 regression test - ensure tools_count=0 path works.
+    """
+    from agnt5.lm import (
+        GenerateRequest,
+        GenerationConfig,
+        Message,
+        MessageRole,
+        _LanguageModel,
+    )
+
+    # Mock response
+    mock_response = MagicMock()
+    mock_response.content = "Response without tools"
+    mock_response.usage = MagicMock(
+        prompt_tokens=5,
+        completion_tokens=10,
+        total_tokens=15
+    )
+    mock_response.object = None
+    mock_response.tool_calls = None
+
+    request = GenerateRequest(
+        model="openai/gpt-4o-mini",
+        messages=[Message(role=MessageRole.USER, content="Hello")],
+        tools=[],  # Empty tools list
+        config=GenerationConfig(temperature=0.5)
+    )
+
+    # tools should be empty list, not None
+    assert request.tools == []
+
+    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_response)
+        mock_rust_class.return_value = mock_instance
+
+        lm_instance = _LanguageModel(provider="openai")
+        response = await lm_instance.generate(request)
+
+        assert response is not None
+        assert response.text == "Response without tools"
