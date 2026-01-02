@@ -59,7 +59,7 @@ class WorkflowContext(Context):
         checkpoint_client: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
-        delta_callback: Optional[Callable[[str, str, int, int], None]] = None,
+        delta_callback: Optional[Callable[[str, str, int, int, int], None]] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -76,20 +76,26 @@ class WorkflowContext(Context):
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant identifier for multi-tenant deployments
             delta_callback: Optional callback for forwarding streaming events from nested components
-                           (event_type, output_data, content_index, sequence) -> None
+                           (event_type, output_data, content_index, sequence, source_timestamp_ns) -> None
         """
-        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
+        super().__init__(
+            run_id=run_id,
+            attempt=attempt,
+            runtime_context=runtime_context,
+            is_streaming=is_streaming,
+            tenant_id=tenant_id,
+            checkpoint_callback=checkpoint_callback,
+            delta_callback=delta_callback,
+        )
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
-        self._checkpoint_callback = checkpoint_callback
         self._checkpoint_client = checkpoint_client
-        self._delta_callback = delta_callback
         self._delta_sequence: int = 0  # Sequence for delta events (separate from checkpoint sequence)
 
-        # Memory scoping identifiers
-        self.session_id = session_id or run_id  # Default: session = run (ephemeral)
-        self.user_id = user_id  # Optional: user-scoped memory
+        # Memory scoping identifiers (use private attrs since properties are read-only)
+        self._session_id = session_id or run_id  # Default: session = run (ephemeral)
+        self._user_id = user_id  # Optional: user-scoped memory
 
         # Step hierarchy tracking - for nested step visualization
         # Stack of event IDs for currently executing steps
@@ -97,7 +103,7 @@ class WorkflowContext(Context):
 
     # === State Management ===
 
-    def _forward_delta(self, event_type: str, output_data: str, content_index: int = 0) -> None:
+    def _forward_delta(self, event_type: str, output_data: str, content_index: int = 0, source_timestamp_ns: int = 0) -> None:
         """
         Forward a streaming delta event from a nested component.
 
@@ -108,9 +114,10 @@ class WorkflowContext(Context):
             event_type: Event type (e.g., "agent.started", "lm.message.delta")
             output_data: JSON-serialized event data
             content_index: Content index for parallel events (default: 0)
+            source_timestamp_ns: Nanosecond timestamp when event was created (default: 0, will be generated if not provided)
         """
         if self._delta_callback:
-            self._delta_callback(event_type, output_data, content_index, self._delta_sequence)
+            self._delta_callback(event_type, output_data, content_index, self._delta_sequence, source_timestamp_ns)
             self._delta_sequence += 1
 
     async def _consume_streaming_result(self, async_gen: Any, step_name: str) -> Any:
@@ -150,6 +157,7 @@ class WorkflowContext(Context):
                     event_type=event_data.get("event_type", ""),
                     output_data=output_str,
                     content_index=event_data.get("content_index", 0),
+                    source_timestamp_ns=item.source_timestamp_ns,
                 )
 
                 # Capture final result from specific event types
@@ -173,6 +181,7 @@ class WorkflowContext(Context):
                 self._forward_delta(
                     event_type="output.delta",
                     output_data=chunk_json,
+                    source_timestamp_ns=time.time_ns(),
                 )
                 collected_output.append(item)
 
@@ -192,7 +201,11 @@ class WorkflowContext(Context):
 
     def _send_checkpoint(self, checkpoint_type: str, checkpoint_data: dict) -> None:
         """
-        Send a checkpoint via the checkpoint callback.
+        Send a checkpoint via the unified event emission API.
+
+        This method uses ctx.emit for consistent event routing:
+        - Streaming mode: immediate delivery via delta queue
+        - Non-streaming mode: buffered delivery via checkpoint queue
 
         Automatically adds parent_event_id from the step event stack if we're
         currently executing inside a nested step call.
@@ -201,23 +214,16 @@ class WorkflowContext(Context):
             checkpoint_type: Type of checkpoint (e.g., "workflow.state.changed")
             checkpoint_data: Checkpoint payload (should include event_id if needed)
         """
-        if self._checkpoint_callback:
-            self._sequence_number += 1
-
-            # Add parent_event_id if we're in a nested step
-            if self._step_event_stack:
-                checkpoint_data = {
-                    **checkpoint_data,
-                    "parent_event_id": self._step_event_stack[-1],
-                }
-
-            checkpoint = {
-                "checkpoint_type": checkpoint_type,
-                "checkpoint_data": checkpoint_data,
-                "sequence_number": self._sequence_number,
-                "source_timestamp_ns": time.time_ns(),  # Nanosecond timestamp for correct logical ordering
+        # Add parent_event_id if we're in a nested step
+        if self._step_event_stack:
+            checkpoint_data = {
+                **checkpoint_data,
+                "parent_event_id": self._step_event_stack[-1],
             }
-            self._checkpoint_callback(checkpoint)
+
+        # Use unified emit API for consistent event routing
+        # The emit property handles streaming vs non-streaming routing
+        self.emit.emit(checkpoint_type, checkpoint_data)
 
     @property
     def state(self):
@@ -906,13 +912,18 @@ class WorkflowContext(Context):
         from .exceptions import WaitingForUserInputException
 
         # Generate unique step name for this user input request
-        # Using run_id ensures uniqueness across workflow execution
-        response_key = f"user_response:{self.run_id}"
+        # Each wait_for_user call gets a unique key based on pause_index
+        # This allows multi-step HITL workflows where each pause gets its own response
+        pause_index = self._workflow_entity._pause_index
+        response_key = f"user_response:{self.run_id}:{pause_index}"
+
+        # Increment pause index for next call (whether we replay or pause)
+        self._workflow_entity._pause_index += 1
 
         # Check if we already have the user's response (replay scenario)
         if self._workflow_entity.has_completed_step(response_key):
             response = self._workflow_entity.get_completed_step(response_key)
-            self._logger.info("🔄 Replaying user response from checkpoint")
+            self._logger.info(f"🔄 Replaying user response from checkpoint (pause {pause_index})")
             return response
 
         # No response yet - pause execution
@@ -928,6 +939,7 @@ class WorkflowContext(Context):
             input_type=input_type,
             options=options,
             checkpoint_state=checkpoint_state,
+            pause_index=pause_index,  # Pass the pause index for multi-step HITL
         )
 
 
@@ -1054,6 +1066,9 @@ class WorkflowEntity(Entity):
         self._step_events: list[Dict[str, Any]] = []
         self._completed_steps: Dict[str, Any] = {}
 
+        # HITL pause tracking - each wait_for_user gets unique index
+        self._pause_index: int = 0
+
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []
 
@@ -1116,6 +1131,10 @@ class WorkflowEntity(Entity):
         with the user's response. It stores the response as if it was a
         completed step, allowing wait_for_user() to retrieve it on replay.
 
+        The response is injected at the current pause_index (which should be
+        restored from metadata before calling this method for multi-step HITL).
+        This matches the key format used by wait_for_user().
+
         Args:
             response: User's response to inject
 
@@ -1124,9 +1143,20 @@ class WorkflowEntity(Entity):
             workflow_entity.inject_user_response("yes")
             # On replay, wait_for_user() returns "yes" from cache
         """
-        response_key = f"user_response:{self.run_id}"
+        # Inject at current pause_index (restored from metadata for multi-step HITL)
+        response_key = f"user_response:{self.run_id}:{self._pause_index}"
         self._completed_steps[response_key] = response
-        logger.info(f"Injected user response for {self.run_id}: {response}")
+
+        # Also add to step_events so it gets serialized to metadata on next pause
+        # This ensures previous user responses are preserved across resumes
+        self._step_events.append({
+            "step_name": response_key,
+            "handler_name": "user_response",
+            "input": None,
+            "result": response,
+        })
+
+        logger.info(f"Injected user response for {self.run_id} at pause {self._pause_index}: {response}")
 
     def get_agent_data(self, agent_name: str) -> Dict[str, Any]:
         """

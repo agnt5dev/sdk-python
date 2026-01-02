@@ -240,6 +240,7 @@ class Event:
     data: Any  # Raw value for deltas, dict for structured events
     content_index: int = 0
     sequence: int = 0
+    source_timestamp_ns: int = field(default_factory=time.time_ns)
 
     def to_response_fields(self) -> Dict[str, Any]:
         """Convert to fields for ExecuteComponentResponse proto.

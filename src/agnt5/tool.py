@@ -265,7 +265,27 @@ class Tool:
 
         Raises:
             ConfigurationError: If tool requires confirmation (not yet implemented)
+
+        Note:
+            If memoization is enabled on the context, this method will check
+            the journal for cached results before executing and cache results
+            after successful execution.
         """
+        # Check for memoization before tool execution
+        step_key = None
+        content_hash = None
+        memo = None
+
+        if hasattr(ctx, '_memo') and ctx._memo:
+            memo = ctx._memo
+            step_key, content_hash = memo.tool_call_key(self.name, kwargs)
+
+            # Check cache first - skip execution if cached
+            found, cached_result = await memo.get_cached_tool_result(step_key, content_hash)
+            if found:
+                logger.debug(f"Tool call {step_key} served from memoization cache")
+                return cached_result
+
         if self.confirmation:
             # TODO: Implement actual confirmation workflow
             # For now, just log a warning
@@ -318,6 +338,10 @@ class Tool:
                             "tool.name": self.name,
                             "tool.success": True,
                         })
+
+                    # Cache result for replay if memoization is enabled
+                    if memo and step_key:
+                        await memo.cache_tool_result(step_key, content_hash, result)
 
                     return result
             except Exception as e:

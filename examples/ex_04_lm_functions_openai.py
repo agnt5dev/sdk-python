@@ -91,13 +91,15 @@ async def lm_stream(ctx: FunctionContext, prompt: str, model: str = "openai/gpt-
     chunk_count = 0
 
     # lm.stream() yields Event objects, extract text from LM_MESSAGE_DELTA events
+    # For delta events, event.data is the raw content string (not a dict)
     async for event in lm.stream(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     ):
         chunk_count += 1
         if event.event_type == EventType.LM_MESSAGE_DELTA:
-            content = event.data.get("content", "")
+            # event.data is the raw content string for delta events
+            content = event.data if isinstance(event.data, str) else ""
             chunks.append(content)
             ctx.logger.info(f"[lm_stream] chunk[{chunk_count}]: '{content}'")
         else:

@@ -3,12 +3,12 @@ Integration Tests: Workflow Streaming via SSE
 
 Tests streaming from workflows that contain streaming agents:
 - Workflow steps auto-detect async generators
-- Agent events are forwarded via delta queue
+- Agent events are forwarded as top-level SSE events
 - Final agent output is extracted for next step
 - Mixed streaming/non-streaming steps
 
-Note: Agent events within workflows are wrapped in output.delta events.
-To access agent events, check output.delta.data["content"]["event_type"].
+Agent events are now top-level events (agent.started, agent.completed, etc.)
+with their payload in the output_data field.
 
 Run with:
     # Requires OPENAI_API_KEY for LLM calls
@@ -33,24 +33,24 @@ pytestmark = [
 ]
 
 
-def extract_nested_events(events):
-    """Extract nested events from output.delta events.
+def get_agent_event_types(events):
+    """Get list of agent event types from stream events.
 
-    Workflows yield dicts that become output.delta events.
-    The nested event data is in e.data["content"].
+    Agent events are now top-level events (agent.started, agent.completed, etc.)
     """
-    nested_events = []
+    agent_types = []
     for e in events:
-        if e.event_type.value == "output.delta":
-            content = e.data.get("content", {})
-            if isinstance(content, dict) and "event_type" in content:
-                nested_events.append(content)
-    return nested_events
+        if e.event_type.value.startswith("agent."):
+            agent_types.append(e.event_type.value)
+    return agent_types
 
 
-def get_nested_event_types(events):
-    """Get list of nested event types from stream events."""
-    return [e["event_type"] for e in extract_nested_events(events)]
+def get_agent_event_data(event):
+    """Get the payload data from an agent event.
+
+    Agent events have their payload in the output_data field.
+    """
+    return event.data.get("output_data", {})
 
 
 # =============================================================================
@@ -69,14 +69,16 @@ def test_stream_simple_agent_workflow_basic(client, worker_process):
     run_event_types = [e.event_type.value for e in events]
     assert "run.started" in run_event_types or "run.completed" in run_event_types
 
-    # Check for agent lifecycle events (forwarded from nested agent)
-    nested_types = get_nested_event_types(events)
+    # Check for agent lifecycle events (now top-level events)
+    agent_types = get_agent_event_types(events)
     has_agent_events = (
-        "agent.started" in nested_types or
-        "agent.completed" in nested_types or
-        len(nested_types) > 0
+        "agent.started" in agent_types or
+        "agent.completed" in agent_types
     )
-    assert has_agent_events or len(events) >= 1
+    # Workflow should produce agent events since it contains a streaming agent
+    assert has_agent_events, (
+        f"Expected agent.started or agent.completed events, got agent types: {agent_types}"
+    )
 
 
 @pytest.mark.integration
@@ -88,11 +90,11 @@ def test_stream_simple_agent_workflow_has_output(client, worker_process):
 
     # Check for run.completed or agent.completed
     run_event_types = [e.event_type.value for e in events]
-    nested_types = get_nested_event_types(events)
+    agent_types = get_agent_event_types(events)
 
     has_completion = (
         "run.completed" in run_event_types or
-        "agent.completed" in nested_types
+        "agent.completed" in agent_types
     )
     assert has_completion
 
@@ -168,12 +170,12 @@ def test_stream_research_workflow_event_order(client, worker_process):
         "topic": "Python"
     }, component_type="workflow"))
 
-    nested_types = get_nested_event_types(events)
+    agent_types = get_agent_event_types(events)
 
     # If we have both started and completed, check order
-    if "agent.started" in nested_types and "agent.completed" in nested_types:
-        first_started = nested_types.index("agent.started")
-        first_completed = nested_types.index("agent.completed")
+    if "agent.started" in agent_types and "agent.completed" in agent_types:
+        first_started = agent_types.index("agent.started")
+        first_completed = agent_types.index("agent.completed")
         assert first_started < first_completed, "agent.started should come before agent.completed"
 
 
@@ -237,3 +239,118 @@ def test_stream_workflow_multiple_sequential(client, worker_process):
     has_completion2 = "run.completed" in types2 or "run.started" in types2
 
     assert has_completion1 or has_completion2
+
+
+# =============================================================================
+# RUN COMPLETION VALIDATION (P1.7)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_workflow_requires_run_completed(client, worker_process):
+    """Test that workflow stream MUST include run.completed event (P1.7).
+
+    Validates:
+    - run.completed event is present (not just run.started)
+    - run.completed includes output field
+    - Output contains workflow result
+    """
+    events = list(client.stream_events("mixed_workflow", {
+        "x": 10,
+        "y": 5
+    }, component_type="workflow"))
+
+    run_event_types = [e.event_type.value for e in events]
+
+    # MUST have run.completed (not just run.started)
+    assert "run.completed" in run_event_types, (
+        f"Workflow stream MUST include 'run.completed' event. "
+        f"Got event types: {run_event_types}"
+    )
+
+    # Find the run.completed event
+    completed = next(
+        (e for e in events if e.event_type.value == "run.completed"),
+        None
+    )
+    assert completed is not None
+
+    # run.completed MUST have data
+    assert completed.data is not None, (
+        "run.completed event should have data"
+    )
+
+    # data should include output (may be in various formats)
+    data = completed.data
+    has_output = (
+        isinstance(data, dict) and (
+            "output" in data or
+            "result" in data or
+            "data" in data
+        )
+    )
+    # This is important for downstream consumers
+    if isinstance(data, dict):
+        assert has_output or len(data) > 0, (
+            f"run.completed should have output. Got: {data}"
+        )
+
+
+@pytest.mark.integration
+def test_stream_workflow_event_ordering(client, worker_process):
+    """Test workflow stream events are in correct order (P1.7).
+
+    Validates:
+    - run.started comes before run.completed
+    - Events maintain temporal ordering
+    """
+    events = list(client.stream_events("mixed_workflow", {
+        "x": 3,
+        "y": 4
+    }, component_type="workflow"))
+
+    run_event_types = [e.event_type.value for e in events]
+
+    # Check if we have both started and completed
+    has_started = "run.started" in run_event_types
+    has_completed = "run.completed" in run_event_types
+
+    if has_started and has_completed:
+        started_idx = run_event_types.index("run.started")
+        completed_idx = run_event_types.index("run.completed")
+
+        assert started_idx < completed_idx, (
+            f"run.started should come before run.completed. "
+            f"Started at index {started_idx}, completed at {completed_idx}"
+        )
+
+    # At minimum, we need either started or completed
+    assert has_started or has_completed, (
+        f"Workflow stream should have run.started or run.completed. "
+        f"Got: {run_event_types}"
+    )
+
+
+@pytest.mark.integration
+def test_stream_workflow_nested_agent_event_ordering(client, worker_process):
+    """Test agent events within workflow maintain order (P1.7).
+
+    When a workflow contains an agent, the agent events should
+    appear in logical order (started before completed).
+    """
+    events = list(client.stream_events("simple_agent_workflow", {
+        "message": "Test ordering"
+    }, component_type="workflow"))
+
+    agent_types = get_agent_event_types(events)
+
+    # If we have agent events, verify their order
+    if "agent.started" in agent_types and "agent.completed" in agent_types:
+        first_started = agent_types.index("agent.started")
+        first_completed = agent_types.index("agent.completed")
+
+        assert first_started < first_completed, (
+            f"agent.started should come before agent.completed. "
+            f"Started at index {first_started}, completed at {first_completed}. "
+            f"Full order: {agent_types}"
+        )

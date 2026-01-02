@@ -882,5 +882,55 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
+    m.add_function(wrap_pyfunction!(write_journal_event, m)?)?;
     Ok(())
+}
+
+/// Write a journal event for LLM observability (lm.call.*, output.*, etc.)
+///
+/// This writes events directly to the AGNT5 journal for real-time streaming
+/// and observability. Use this for LLM call tracking, not for memoization.
+///
+/// # Arguments
+/// * `run_id` - The run ID to associate the event with
+/// * `event_type` - Event type (e.g., "lm.call.started", "lm.call.completed")
+/// * `data` - JSON-serialized event data as bytes
+/// * `trace_id` - Trace ID for correlation
+/// * `span_id` - Span ID for correlation
+/// * `tenant_id` - Optional tenant ID
+/// * `source_timestamp_ns` - Source timestamp in nanoseconds since Unix epoch
+#[pyfunction]
+#[pyo3(signature = (run_id, event_type, data, trace_id, span_id, tenant_id=None, source_timestamp_ns=None))]
+fn write_journal_event<'py>(
+    py: Python<'py>,
+    run_id: String,
+    event_type: String,
+    data: Vec<u8>,
+    trace_id: String,
+    span_id: String,
+    tenant_id: Option<String>,
+    source_timestamp_ns: Option<i64>,
+) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3_async_runtimes::tokio::future_into_py;
+
+    let timestamp = source_timestamp_ns.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0)
+    });
+
+    future_into_py(py, async move {
+        agnt5_sdk_core::journal_exporter::write_event(
+            &run_id,
+            &event_type,
+            &data,
+            &trace_id,
+            &span_id,
+            tenant_id.as_deref(),
+            timestamp,
+        )
+        .await
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Journal write failed: {}", e)))
+    })
 }

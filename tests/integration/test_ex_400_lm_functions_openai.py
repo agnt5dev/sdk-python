@@ -155,3 +155,110 @@ def test_lm_classify_custom_categories(client, worker_process):
 
     assert "category" in result
     assert result["category"] == "finance"
+
+
+# =============================================================================
+# IMPROVED LM FUNCTION TESTS (P2.4)
+# =============================================================================
+
+
+def test_lm_generate_with_json_format(client, worker_process):
+    """Test LLM generation requesting JSON output (P2.4).
+
+    Validates:
+    - Model can return structured JSON
+    - JSON is valid and parseable
+    - Contains expected fields
+    """
+    import json
+
+    result = client.run("lm_generate", {
+        "prompt": 'Return a JSON object with fields "name" and "age". Example: {"name": "Alice", "age": 30}',
+        "model": "openai/gpt-4o-mini",
+    })
+
+    assert "response" in result
+
+    # Try to parse as JSON (strip markdown code blocks if present)
+    response = result["response"]
+    if "```" in response:
+        # Extract JSON from markdown code block
+        import re
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
+        if match:
+            response = match.group(1)
+
+    try:
+        parsed = json.loads(response.strip())
+        assert "name" in parsed or "age" in parsed, (
+            f"JSON should contain 'name' or 'age'. Got: {parsed}"
+        )
+    except json.JSONDecodeError:
+        # Model might not always return valid JSON, but it should try
+        assert "{" in response and "}" in response, (
+            f"Response should look like JSON. Got: {response}"
+        )
+
+
+def test_lm_generate_returns_structured_response(client, worker_process):
+    """Test LLM generate returns properly structured response (P2.4).
+
+    Validates:
+    - Response contains all expected fields
+    - Fields have correct types
+    - No missing metadata
+    """
+    result = client.run("lm_generate", {
+        "prompt": "Say hello.",
+        "model": "openai/gpt-4o-mini",
+    })
+
+    # Required fields
+    assert "response" in result, "Missing 'response' field"
+    assert "method" in result, "Missing 'method' field"
+    assert "model" in result, "Missing 'model' field"
+
+    # Type validation
+    assert isinstance(result["response"], str), "response should be string"
+    assert isinstance(result["method"], str), "method should be string"
+    assert isinstance(result["model"], str), "model should be string"
+
+    # Value validation
+    assert result["method"] == "generate", f"Expected method='generate', got {result['method']}"
+    assert len(result["response"]) > 0, "Response should not be empty"
+
+
+def test_lm_summarize_preserves_key_info(client, worker_process):
+    """Test summarization preserves key information (P2.4).
+
+    Validates:
+    - Summary mentions key concepts from original
+    - Summary is significantly shorter than original
+    """
+    original_text = """
+    The Apollo 11 mission was the American spaceflight that first landed humans on the Moon.
+    Commander Neil Armstrong and lunar module pilot Buzz Aldrin landed the Apollo Lunar Module
+    Eagle on July 20, 1969. Armstrong became the first person to step onto the lunar surface
+    six hours and 39 minutes later. Aldrin joined him 19 minutes later.
+    """
+
+    result = client.run("lm_summarize", {
+        "text": original_text,
+        "max_words": 20,
+    })
+
+    assert "summary" in result
+    summary = result["summary"].lower()
+
+    # Should preserve key information
+    key_terms = ["moon", "armstrong", "apollo", "1969", "lunar"]
+    found_terms = [term for term in key_terms if term in summary]
+
+    assert len(found_terms) >= 2, (
+        f"Summary should mention key terms. Found: {found_terms}. Summary: {summary}"
+    )
+
+    # Summary should be much shorter
+    assert len(result["summary"]) < len(original_text) / 2, (
+        "Summary should be significantly shorter than original"
+    )

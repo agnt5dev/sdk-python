@@ -162,3 +162,74 @@ def test_parallel_context_repeated_words(client, worker_process):
     parallel = result["parallel_results"]
     assert parallel["length_analysis"]["word_count"] == 6
     assert parallel["content_analysis"]["unique_words"] == 3  # the, cat, sat
+
+
+# =============================================================================
+# UNICODE / INTERNATIONALIZATION (P1.5)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_sequential_context_unicode_input(client, worker_process):
+    """Test sequential context with Unicode input (P1.5).
+
+    Validates:
+    - CJK characters propagate through workflow steps
+    - Mixed scripts are handled correctly
+    - Unicode is preserved in all transformation steps
+    """
+    # Test with mixed Unicode content
+    unicode_input = "Hello 世界 café"
+
+    result = client.run(
+        "sequential_context_workflow",
+        {"input_data": unicode_input},
+        component_type="workflow"
+    )
+
+    # Verify input preserved
+    assert result["input"] == unicode_input
+
+    # Verify parsed step handles Unicode
+    assert result["parsed"]["uppercase"] == unicode_input.upper()
+    assert result["parsed"]["length"] == len(unicode_input)
+
+    # Words should be split correctly (space-separated)
+    assert len(result["parsed"]["words"]) == 3  # "Hello", "世界", "café"
+
+    # Verify analysis uses correct counts
+    assert result["analysis"]["char_count"] == len(unicode_input)
+    assert result["analysis"]["word_count"] == 3
+
+
+@pytest.mark.integration
+def test_parallel_context_unicode_input(client, worker_process):
+    """Test parallel context with Unicode input (P1.5).
+
+    Validates:
+    - Unicode text is correctly analyzed in parallel branches
+    - Character and word counts handle multi-byte characters
+    """
+    # Japanese text with punctuation
+    unicode_input = "こんにちは世界。今日は良い天気です。"
+
+    result = client.run(
+        "parallel_context_workflow",
+        {"text": unicode_input},
+        component_type="workflow"
+    )
+
+    # Verify input preserved
+    assert result["input"] == unicode_input
+
+    # Verify parallel results exist
+    parallel = result["parallel_results"]
+    assert "length_analysis" in parallel
+    assert "content_analysis" in parallel
+    assert "structure_analysis" in parallel
+
+    # Character count should handle Unicode correctly
+    assert parallel["length_analysis"]["char_count"] == len(unicode_input)
+
+    # Should detect punctuation
+    assert parallel["structure_analysis"]["has_punctuation"] is True

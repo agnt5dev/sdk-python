@@ -259,13 +259,20 @@ def test_stream_agent_with_tools_has_tool_calls(client, worker_process):
     completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
     assert completed is not None
 
-    # Completed event should have tool_calls in data
-    if "tool_calls" in completed["data"]:
-        tool_calls = completed["data"]["tool_calls"]
-        assert len(tool_calls) >= 1
-        # Should have used the calculate tool
-        tool_names = [tc.get("name") for tc in tool_calls]
-        assert "calculate" in tool_names
+    # Completed event MUST have tool_calls for tool-using agents (P1.3)
+    assert "tool_calls" in completed["data"], (
+        "Expected 'tool_calls' in agent.completed data. "
+        "Tool-using agents must record their tool calls."
+    )
+    tool_calls = completed["data"]["tool_calls"]
+    assert len(tool_calls) >= 1, (
+        "Expected at least one tool call for math calculation request"
+    )
+    # Should have used the calculate tool
+    tool_names = [tc.get("name") for tc in tool_calls]
+    assert "calculate" in tool_names, (
+        f"Expected 'calculate' tool in tool_calls, got: {tool_names}"
+    )
 
 
 # =============================================================================

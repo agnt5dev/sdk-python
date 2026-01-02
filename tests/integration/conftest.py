@@ -3,10 +3,11 @@ Integration Test Fixtures
 
 Provides platform infrastructure for E2E testing across multiple modes:
 
-1. Local - Use already-running dev server (fastest, recommended for development)
-2. Embedded - Dev server in Docker with SQLite + embedded journal
-3. Postgres - Community edition with PostgreSQL backend
-4. Managed - Production mode with Redpanda + CockroachDB
+1. Subprocess - Start platform binary directly (default, no Docker needed)
+2. Local - Use already-running dev server (for development with `just platform standalone python`)
+3. Embedded - Dev server in Docker with SQLite + embedded journal
+4. Postgres - Community edition with PostgreSQL backend
+5. Managed - Production mode with Redpanda + CockroachDB
 
 Fixtures:
 - runtime_mode: Parametrized fixture for testing across all modes
@@ -15,8 +16,10 @@ Fixtures:
 - client: Create agnt5.Client instance for testing
 
 Command-line options:
-- --use-local-server: Use already-running local dev server (default: True)
-- --runtime-mode: Specify runtime mode (embedded|postgres|managed|all) - only when not using local server
+- --use-subprocess: Start platform binary as subprocess (default: True)
+- --use-local-server: Use already-running local dev server
+- --use-docker: Use Docker containers
+- --runtime-mode: Specify runtime mode (embedded|postgres|managed|all) - only with --use-docker
 """
 
 import os
@@ -47,20 +50,20 @@ def pytest_addoption(parser):
     parser.addoption(
         "--use-local-server",
         action="store_true",
-        default=True,
-        help="Use already-running local dev server instead of Docker containers (default: True)",
+        default=False,
+        help="Use already-running local dev server instead of subprocess",
     )
     parser.addoption(
         "--use-docker",
         action="store_true",
         default=False,
-        help="Use Docker containers instead of local dev server",
+        help="Use Docker containers instead of subprocess",
     )
     parser.addoption(
         "--use-subprocess",
         action="store_true",
-        default=False,
-        help="Start platform binary as subprocess (for CI, no Docker needed)",
+        default=True,
+        help="Start platform binary as subprocess (default: True)",
     )
     parser.addoption(
         "--runtime-mode",
@@ -74,12 +77,12 @@ def pytest_addoption(parser):
 def pytest_generate_tests(metafunc):
     """Generate test parametrization based on command-line options."""
     if "runtime_mode" in metafunc.fixturenames:
+        use_local = metafunc.config.getoption("--use-local-server")
         use_docker = metafunc.config.getoption("--use-docker")
-        use_subprocess = metafunc.config.getoption("--use-subprocess")
 
-        if use_subprocess:
-            # Subprocess mode: start platform binary directly (for CI)
-            modes = ["subprocess"]
+        if use_local:
+            # Local server mode: use already-running dev server
+            modes = ["local"]
         elif use_docker:
             # Docker mode: parametrize across runtime modes
             mode = metafunc.config.getoption("--runtime-mode")
@@ -88,8 +91,8 @@ def pytest_generate_tests(metafunc):
             else:
                 modes = [mode]
         else:
-            # Local server mode: single "local" mode
-            modes = ["local"]
+            # Subprocess mode (default): start platform binary directly
+            modes = ["subprocess"]
 
         metafunc.parametrize("runtime_mode", modes, scope="session", indirect=True)
 
@@ -995,8 +998,9 @@ def client(platform):
     """
     from agnt5 import Client
 
-    client = Client(platform["gateway_url"])
-    print(f"✅ Client created: {platform['gateway_url']}")
+    # Use longer timeout for integration tests (HITL workflows may take time to pause)
+    client = Client(platform["gateway_url"], timeout=60.0)
+    print(f"✅ Client created: {platform['gateway_url']} (timeout=60s)")
 
     return client
 

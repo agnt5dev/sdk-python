@@ -91,6 +91,44 @@ def test_counter_state_isolation(client, worker_process):
     assert counter_b.get_count() == 5
 
 
+@pytest.mark.integration
+def test_counter_concurrent_increments(client, worker_process):
+    """Test concurrent increments maintain consistency.
+
+    This test validates that the entity's single-writer semantics
+    correctly serialize concurrent operations.
+
+    10 threads × 50 increments each = 500 total expected count.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    counter = client.entity("Counter", unique_key("counter-concurrent"))
+
+    num_threads = 10
+    increments_per_thread = 50
+
+    def increment_many():
+        """Each thread increments 50 times."""
+        for _ in range(increments_per_thread):
+            counter.increment(amount=1)
+
+    # Run concurrent increments
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(increment_many) for _ in range(num_threads)]
+        # Wait for all to complete
+        for future in futures:
+            future.result()
+
+    # Verify final count
+    final_count = counter.get_count()
+    expected_count = num_threads * increments_per_thread  # 10 * 50 = 500
+
+    assert final_count == expected_count, (
+        f"Expected {expected_count} after {num_threads} threads × {increments_per_thread} increments, "
+        f"got {final_count} (lost {expected_count - final_count} increments)"
+    )
+
+
 # =============================================================================
 # CONVERSATION MEMORY ENTITY
 # =============================================================================
@@ -253,6 +291,48 @@ def test_memory_state_isolation(client, worker_process):
     assert memory_b.get_messages()[0]["content"] == "Message in B"
 
 
+@pytest.mark.integration
+def test_memory_unicode_content(client, worker_process):
+    """Test ConversationMemory with Unicode content (P1.5).
+
+    Validates:
+    - CJK characters in messages
+    - Arabic script
+    - Emoji
+    - Mixed scripts
+    - Retrieval preserves exact Unicode
+    """
+    memory = client.entity("ConversationMemory", unique_key("memory-unicode"))
+
+    # Add messages with various Unicode content
+    unicode_messages = [
+        {"role": "user", "content": "你好，世界！"},  # Chinese
+        {"role": "assistant", "content": "こんにちは！お手伝いできることはありますか？"},  # Japanese
+        {"role": "user", "content": "مرحبا، كيف حالك؟"},  # Arabic
+        {"role": "assistant", "content": "Hello! 🌍🚀 I can help with café recommendations"},  # Mixed
+        {"role": "user", "content": "Привет! Спасибо за помощь"},  # Russian
+    ]
+
+    for msg in unicode_messages:
+        memory.add_message(role=msg["role"], content=msg["content"])
+
+    # Retrieve and verify
+    messages = memory.get_messages()
+    assert len(messages) == len(unicode_messages), (
+        f"Expected {len(unicode_messages)} messages, got {len(messages)}"
+    )
+
+    # Verify each message content is preserved exactly
+    for i, expected in enumerate(unicode_messages):
+        assert messages[i]["role"] == expected["role"], (
+            f"Message {i}: role mismatch"
+        )
+        assert messages[i]["content"] == expected["content"], (
+            f"Message {i}: Unicode content not preserved. "
+            f"Expected '{expected['content']}', got '{messages[i]['content']}'"
+        )
+
+
 # =============================================================================
 # KEY-VALUE STORE ENTITY
 # =============================================================================
@@ -347,3 +427,186 @@ def test_kv_complex_values(client, worker_process):
     assert result["nested"]["key"] == "value"
     assert result["list"] == [1, 2, 3]
     assert result["number"] == 42
+
+
+# =============================================================================
+# INVALID INPUT HANDLING (P2.3)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_counter_large_increment(client, worker_process):
+    """Test counter with very large increment values.
+
+    Validates:
+    - Large numbers are handled correctly
+    - No overflow or precision loss
+    """
+    counter = client.entity("Counter", unique_key("counter-large"))
+
+    # Test with large number
+    large_value = 10**12  # 1 trillion
+    result = counter.increment(amount=large_value)
+    assert result == large_value, f"Large increment failed: expected {large_value}, got {result}"
+
+    # Increment again
+    result = counter.increment(amount=large_value)
+    assert result == 2 * large_value, f"Double increment failed: expected {2 * large_value}, got {result}"
+
+
+@pytest.mark.integration
+def test_counter_negative_increment(client, worker_process):
+    """Test counter with negative increment (effectively decrement).
+
+    Validates:
+    - Negative increments work as expected
+    - Counter can go below zero
+    """
+    counter = client.entity("Counter", unique_key("counter-negative"))
+
+    counter.increment(amount=10)
+    result = counter.increment(amount=-15)
+
+    # Should be 10 + (-15) = -5
+    assert result == -5, f"Negative increment failed: expected -5, got {result}"
+
+
+@pytest.mark.integration
+def test_memory_empty_content(client, worker_process):
+    """Test conversation memory with empty content.
+
+    Validates:
+    - Empty messages are handled
+    - Message count is correct
+    """
+    memory = client.entity("ConversationMemory", unique_key("memory-empty"))
+
+    result = memory.add_message(role="user", content="")
+    assert result["message_count"] == 1
+
+    messages = memory.get_messages()
+    assert len(messages) == 1
+    assert messages[0]["content"] == ""
+
+
+@pytest.mark.integration
+def test_memory_very_long_content(client, worker_process):
+    """Test conversation memory with very long content.
+
+    Validates:
+    - Long messages are stored completely
+    - No truncation occurs
+    """
+    memory = client.entity("ConversationMemory", unique_key("memory-long"))
+
+    long_content = "word " * 10000  # ~50KB of text
+    result = memory.add_message(role="user", content=long_content)
+    assert result["message_count"] == 1
+
+    messages = memory.get_messages()
+    assert len(messages) == 1
+    assert len(messages[0]["content"]) == len(long_content), (
+        "Long content was truncated"
+    )
+
+
+@pytest.mark.integration
+def test_kv_special_key_characters(client, worker_process):
+    """Test key-value store with special characters in keys.
+
+    Validates:
+    - Keys with special characters work
+    - No encoding issues
+    """
+    store = client.entity("KeyValueStore", unique_key("store-special"))
+
+    special_keys = [
+        "key-with-dash",
+        "key.with.dots",
+        "key_with_underscore",
+        "key:with:colons",
+        "key/with/slashes",
+        "key@with@at",
+    ]
+
+    for key in special_keys:
+        store.set_value(item_key=key, value=f"value_for_{key}")
+
+    for key in special_keys:
+        value = store.get_value(item_key=key)
+        assert value == f"value_for_{key}", (
+            f"Failed for special key '{key}': got {value}"
+        )
+
+
+@pytest.mark.integration
+def test_kv_large_value(client, worker_process):
+    """Test storing large nested object (P1.4).
+
+    Validates:
+    - Large nested structures can be stored and retrieved
+    - Deep nesting is handled correctly
+    - Large arrays are preserved
+    """
+    store = client.entity("KeyValueStore", unique_key("store-large"))
+
+    # Create a large nested object (~100KB when serialized)
+    large_value = {
+        "metadata": {
+            "version": "1.0",
+            "timestamp": "2024-01-01T00:00:00Z",
+        },
+        # Large array of items
+        "items": [
+            {
+                "id": i,
+                "name": f"Item {i}",
+                "description": "x" * 100,  # 100 chars each
+                "tags": [f"tag{j}" for j in range(10)],
+            }
+            for i in range(500)  # 500 items
+        ],
+        # Large string field
+        "raw_data": "y" * 10_000,
+    }
+
+    store.set_value(item_key="large_object", value=large_value)
+    result = store.get_value(item_key="large_object")
+
+    # Verify structure preserved
+    assert result["metadata"]["version"] == "1.0"
+    assert len(result["items"]) == 500
+    assert result["items"][0]["id"] == 0
+    assert result["items"][499]["id"] == 499
+    assert len(result["items"][0]["tags"]) == 10
+    assert len(result["raw_data"]) == 10_000
+
+
+@pytest.mark.integration
+def test_kv_deep_nesting(client, worker_process):
+    """Test storing deeply nested object (P1.4).
+
+    Validates:
+    - 10+ levels of nesting are handled
+    - Values at deep levels are preserved
+    """
+    store = client.entity("KeyValueStore", unique_key("store-deep"))
+
+    # Create deeply nested structure (10 levels)
+    deep_value = {"level": 0, "value": "root"}
+    current = deep_value
+    for i in range(1, 11):
+        current["child"] = {"level": i, "value": f"level_{i}"}
+        current = current["child"]
+
+    store.set_value(item_key="deep_object", value=deep_value)
+    result = store.get_value(item_key="deep_object")
+
+    # Traverse and verify
+    assert result["level"] == 0
+    current = result
+    for i in range(1, 11):
+        assert "child" in current, f"Missing child at level {i-1}"
+        current = current["child"]
+        assert current["level"] == i
+        assert current["value"] == f"level_{i}"

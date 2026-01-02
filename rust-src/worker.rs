@@ -1,7 +1,7 @@
 use crate::entity_state::EntityStateManager;
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::pb::{
-    runtime_message, ComponentInfo, ComponentType, ExecuteComponentResponse, RuntimeMessage,
+    runtime_message, ComponentInfo, ComponentType, DispatchComponentResponse, RuntimeMessage,
     ServiceMessage,
 };
 use agnt5_sdk_core::span_export_queue::{LogExportQueue, SpanExportQueue};
@@ -299,6 +299,80 @@ impl PyWorker {
         Ok(initial_queued as usize)
     }
 
+    /// Queue a journal event through the unified event emission API
+    ///
+    /// This method provides a single entry point for all event emission,
+    /// routing to either immediate (streaming) or buffered (checkpoint) delivery
+    /// based on the is_streaming flag.
+    ///
+    /// # Arguments
+    /// * `invocation_id` - Run ID for this invocation
+    /// * `event_type` - Event type (e.g., "workflow.step.started", "agent.completed")
+    /// * `event_data` - JSON payload as string
+    /// * `content_index` - Index for parallel content blocks (streaming only)
+    /// * `sequence` - Monotonic sequence number for ordering
+    /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
+    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created
+    /// * `is_streaming` - If true, use immediate delivery; otherwise buffered
+    fn queue_event(
+        &self,
+        invocation_id: String,
+        event_type: String,
+        event_data: String,
+        content_index: i32,
+        sequence: i64,
+        metadata: HashMap<String, String>,
+        source_timestamp_ns: i64,
+        is_streaming: bool,
+    ) -> PyResult<()> {
+        let data_bytes = event_data.into_bytes();
+
+        let worker_guard = self.worker.lock().map_err(|e| {
+            let err_msg = format!("Failed to lock worker: {}", e);
+            log::error!("{}", err_msg);
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
+        })?;
+
+        if let Some(ref worker) = *worker_guard {
+            if is_streaming {
+                // Immediate delivery via delta queue
+                worker.queue_delta(
+                    invocation_id,
+                    event_type,
+                    data_bytes,
+                    content_index,
+                    sequence,
+                    metadata,
+                    source_timestamp_ns,
+                ).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to queue event (streaming): {}", e)
+                    )
+                })?;
+            } else {
+                // Buffered delivery via checkpoint queue
+                worker.queue_checkpoint(
+                    invocation_id,
+                    event_type,
+                    data_bytes,
+                    sequence,
+                    metadata,
+                    source_timestamp_ns,
+                ).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to queue event (buffered): {}", e)
+                    )
+                })?;
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Worker not initialized"
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Queue a streaming delta for immediate delivery to the coordinator
     ///
     /// This method enables real-time streaming by queuing deltas as soon as they
@@ -312,6 +386,7 @@ impl PyWorker {
     /// * `content_index` - Index for parallel content blocks
     /// * `sequence` - Monotonic sequence number for ordering
     /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
+    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created at SDK
     fn queue_delta(
         &self,
         invocation_id: String,
@@ -320,6 +395,7 @@ impl PyWorker {
         content_index: i32,
         sequence: i64,
         metadata: HashMap<String, String>,
+        source_timestamp_ns: i64,
     ) -> PyResult<()> {
         // Convert output_data string to bytes
         let data_bytes = output_data.into_bytes();
@@ -339,6 +415,7 @@ impl PyWorker {
                 content_index,
                 sequence,
                 metadata,
+                source_timestamp_ns,
             ).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     format!("Failed to queue delta: {}", e)
@@ -556,7 +633,7 @@ impl PyWorker {
 
         // Handle the message based on type
         match runtime_message.message_data {
-            Some(runtime_message::MessageData::ExecuteComponent(invoke_request)) => {
+            Some(runtime_message::MessageData::DispatchComponent(invoke_request)) => {
                 // Create tracing span with invocation_id that will be inherited by all logs
                 let invocation_span = tracing::info_span!(
                     "execute_component",
@@ -897,7 +974,7 @@ impl PyWorker {
                                     for py_response in py_list.into_iter() {
 
                                         // Convert to Rust types
-                                        let rust_response: ExecuteComponentResponse =
+                                        let rust_response: DispatchComponentResponse =
                                             py_response.into();
 
                                         // Create ServiceMessage
@@ -988,7 +1065,7 @@ impl PyWorker {
                                         }
 
                                         // Convert back to Rust types
-                                        let rust_response: ExecuteComponentResponse =
+                                        let rust_response: DispatchComponentResponse =
                                             py_response.into();
 
                                         // Create ServiceMessage

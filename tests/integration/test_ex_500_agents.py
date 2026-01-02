@@ -40,7 +40,7 @@ def test_simple_agent_basic(client, worker_process):
     """Test basic agent response."""
     result = client.run("simple_agent", {
         "message": "What is 2 + 2?",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "4" in result["response"]
@@ -51,7 +51,7 @@ def test_simple_agent_longer_question(client, worker_process):
     """Test agent with a longer question."""
     result = client.run("simple_agent", {
         "message": "Explain what an API is in one sentence.",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert len(result["response"]) > 10
@@ -67,7 +67,7 @@ def test_code_assistant_python(client, worker_process):
     result = client.run("code_assistant", {
         "question": "How do I read a file in Python?",
         "language": "python",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["language"] == "python"
@@ -81,7 +81,7 @@ def test_code_assistant_javascript(client, worker_process):
     result = client.run("code_assistant", {
         "question": "How do I declare a variable?",
         "language": "javascript",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["language"] == "javascript"
@@ -100,7 +100,7 @@ def test_creative_writer_neutral(client, worker_process):
     result = client.run("creative_writer", {
         "prompt": "Write a one-sentence description of a sunset.",
         "style": "neutral",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["style"] == "neutral"
@@ -112,7 +112,7 @@ def test_creative_writer_humorous(client, worker_process):
     result = client.run("creative_writer", {
         "prompt": "Write a short joke about programming.",
         "style": "humorous",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["style"] == "humorous"
@@ -123,7 +123,7 @@ def test_creative_writer_formal(client, worker_process):
     result = client.run("creative_writer", {
         "prompt": "Write a brief announcement about a product launch.",
         "style": "formal",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["style"] == "formal"
@@ -138,7 +138,7 @@ def test_conversation_agent_single_turn(client, worker_process):
     """Test single-turn conversation."""
     result = client.run("conversation_agent", {
         "message": "Hello, my name is Alice.",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "history" in result
@@ -151,7 +151,7 @@ def test_conversation_agent_multi_turn(client, worker_process):
     # Turn 1
     result1 = client.run("conversation_agent", {
         "message": "My favorite color is blue.",
-    })
+    }, component_type="workflow")
 
     assert result1["turn_count"] == 1
 
@@ -159,7 +159,7 @@ def test_conversation_agent_multi_turn(client, worker_process):
     result2 = client.run("conversation_agent", {
         "message": "What is my favorite color?",
         "history": result1["history"],
-    })
+    }, component_type="workflow")
 
     assert result2["turn_count"] == 2
     # Agent should remember the color
@@ -171,7 +171,7 @@ def test_conversation_agent_empty_history(client, worker_process):
     result = client.run("conversation_agent", {
         "message": "Hi there!",
         "history": [],
-    })
+    }, component_type="workflow")
 
     assert result["turn_count"] == 1
     assert len(result["history"]) == 2
@@ -186,15 +186,11 @@ def test_conversation_agent_empty_history(client, worker_process):
     not os.getenv("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set"
 )
-@pytest.mark.xfail(
-    reason="Rust SDK core doesn't handle Anthropic 'ping' events - see sdk-core/src/lm/anthropic.rs",
-    strict=False,
-)
 def test_claude_agent_basic(client, worker_process):
     """Test Claude agent response."""
     result = client.run("claude_agent", {
         "message": "What is 3 + 3?",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "6" in result["response"]
@@ -205,15 +201,98 @@ def test_claude_agent_basic(client, worker_process):
     not os.getenv("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set"
 )
-@pytest.mark.xfail(
-    reason="Rust SDK core doesn't handle Anthropic 'ping' events - see sdk-core/src/lm/anthropic.rs",
-    strict=False,
-)
 def test_claude_agent_explanation(client, worker_process):
     """Test Claude agent with explanation task."""
     result = client.run("claude_agent", {
         "message": "Explain what recursion is in one sentence.",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert len(result["response"]) > 20
+
+
+# =============================================================================
+# AGENT CONTENT VALIDATION (P2.5)
+# =============================================================================
+
+
+def test_simple_agent_validates_content(client, worker_process):
+    """Test agent response is relevant to the question (P2.5).
+
+    Validates:
+    - Response addresses the specific question asked
+    - Response contains relevant keywords
+    - Response is not generic filler
+    """
+    result = client.run("simple_agent", {
+        "message": "What programming language is known for its use in data science?",
+    }, component_type="workflow")
+
+    assert "response" in result
+    response = result["response"].lower()
+
+    # Should mention data science related languages
+    data_science_langs = ["python", "r", "julia", "sql", "scala"]
+    found_langs = [lang for lang in data_science_langs if lang in response]
+
+    assert len(found_langs) >= 1, (
+        f"Response should mention data science languages. Got: {result['response']}"
+    )
+
+
+def test_code_assistant_includes_code_example(client, worker_process):
+    """Test code assistant includes actual code in response (P2.5).
+
+    Validates:
+    - Response contains code-like patterns
+    - Code is relevant to the question
+    """
+    result = client.run("code_assistant", {
+        "question": "Write a function to calculate factorial",
+        "language": "python",
+    }, component_type="workflow")
+
+    assert "response" in result
+    response = result["response"]
+
+    # Should contain function definition or code patterns
+    code_patterns = ["def ", "function", "=>", "return", "factorial"]
+    found_patterns = [p for p in code_patterns if p in response]
+
+    assert len(found_patterns) >= 2, (
+        f"Response should include code. Found patterns: {found_patterns}. Response: {response[:200]}"
+    )
+
+
+def test_creative_writer_style_affects_output(client, worker_process):
+    """Test creative writer style parameter affects output (P2.5).
+
+    Validates:
+    - Different styles produce noticeably different outputs
+    - Style is reflected in the content
+    """
+    prompt = "Describe a rainy day."
+
+    # Get formal style
+    formal = client.run("creative_writer", {
+        "prompt": prompt,
+        "style": "formal",
+    }, component_type="workflow")
+
+    # Get humorous style
+    humorous = client.run("creative_writer", {
+        "prompt": prompt,
+        "style": "humorous",
+    }, component_type="workflow")
+
+    assert formal["response"] != humorous["response"], (
+        "Different styles should produce different outputs"
+    )
+
+    # Formal should be more... formal
+    formal_text = formal["response"].lower()
+    humorous_text = humorous["response"].lower()
+
+    # At least the outputs should be non-empty and different lengths or content
+    assert len(formal_text) > 10
+    assert len(humorous_text) > 10

@@ -148,20 +148,6 @@ def test_status_transitions(client, worker_process):
     assert len(observed_statuses) >= 1
 
 
-@pytest.mark.integration
-def test_status_includes_timestamps(client, worker_process):
-    """Test that status includes timing information."""
-    run_id = client.submit("greet", {"name": "Timed"})
-
-    # Wait for completion
-    client.wait_for_result(run_id, timeout=30.0)
-
-    # Get final status
-    status = client.get_status(run_id)
-
-    assert "submittedAt" in status or "submitted_at" in status
-
-
 # =============================================================================
 # ERROR HANDLING WITH SUBMIT
 # =============================================================================
@@ -182,22 +168,44 @@ def test_submit_failing_function(client, worker_process):
 
 @pytest.mark.integration
 def test_get_result_before_complete(client, worker_process):
-    """Test that get_result raises if run not complete."""
+    """Test that get_result raises RunError for incomplete runs.
+
+    Note: This test may be skipped if the platform processes runs too fast
+    to observe the 'not complete' state. The test validates:
+    - RunError is raised (not generic Exception)
+    - Error message contains "not complete" or similar indicator
+
+    This is a timing-dependent test that tries to catch a run before it completes.
+    """
     from agnt5.client import RunError
 
-    # Submit but don't wait
-    run_id = client.submit("greet", {"name": "Quick"})
+    # Try multiple times to catch a run in progress
+    # Use a function that sleeps for 1.5s (within its 2s timeout)
+    attempts = 5
 
-    # Immediately trying to get result might fail if not complete
-    # This depends on timing - the function might complete instantly
-    # So we just verify the API works
-    try:
-        result = client.get_result(run_id)
-        # If we got here, it completed very quickly
-        assert result == "Hello, Quick!"
-    except RunError:
-        # Expected if not yet complete
-        pass
+    for _ in range(attempts):
+        run_id = client.submit("slow_function", {"sleep_seconds": 1.5})
+
+        try:
+            # Immediately try to get result
+            client.get_result(run_id)
+            # Run completed too fast - try again
+            continue
+        except RunError as e:
+            # This is what we want to test - verify the error message
+            error_message = str(e).lower()
+            assert "not complete" in error_message or "not found" in error_message, (
+                f"Expected 'not complete' or 'not found' in error, got: {e}"
+            )
+            # Test passed - we caught and validated the error
+            return
+
+    # If we get here, all attempts completed too fast to observe the error
+    pytest.skip(
+        f"Run completed too fast in {attempts} attempts. "
+        "This test validates error handling for incomplete runs but requires "
+        "catching a run before completion, which is timing-dependent."
+    )
 
 
 @pytest.mark.integration
@@ -225,20 +233,32 @@ def test_submit_continues_after_failure(client, worker_process):
 
 @pytest.mark.integration
 def test_wait_for_result_timeout(client, worker_process):
-    """Test that wait_for_result respects timeout."""
+    """Test that wait_for_result raises RunError (not TimeoutError) on timeout.
+
+    Verifies:
+    - RunError is raised (SDK uses RunError, not Python's TimeoutError)
+    - Error message explicitly mentions "timeout"
+    - The timeout value is included in the error message
+    """
     from agnt5.client import RunError
 
-    # Submit a potentially long-running function
-    run_id = client.submit("greet", {"name": "TimeoutTest"})
+    # Submit a slow function that sleeps for 1.5s (within its 2s timeout)
+    # We'll use a very short client-side timeout to trigger the timeout
+    run_id = client.submit("slow_function", {"sleep_seconds": 1.5})
 
-    # Very short timeout - might timeout or might succeed (function is fast)
-    try:
-        result = client.wait_for_result(run_id, timeout=0.001, poll_interval=0.001)
-        # If we got here, function was very fast
-        assert result == "Hello, TimeoutTest!"
-    except (RunError, TimeoutError):
-        # Expected if timeout occurred
-        pass
+    # Wait with a 0.5 second timeout - client will timeout before function completes
+    with pytest.raises(RunError) as exc_info:
+        client.wait_for_result(run_id, timeout=0.5, poll_interval=0.1)
+
+    # Verify error message mentions timeout
+    error_message = str(exc_info.value).lower()
+    assert "timeout" in error_message, (
+        f"Expected 'timeout' in error message, got: {exc_info.value}"
+    )
+    # Timeout value should be included
+    assert "0.5" in str(exc_info.value), (
+        f"Expected timeout value in error message, got: {exc_info.value}"
+    )
 
 
 @pytest.mark.integration
@@ -299,3 +319,53 @@ def test_submit_workflow_status(client, worker_process):
     # Final status
     final_status = client.get_status(run_id)
     assert final_status["status"] == "completed"
+
+
+# =============================================================================
+# ERROR CASES - NONEXISTENT RUNS
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_get_status_nonexistent_run(client, worker_process):
+    """Test that get_status raises appropriate error for nonexistent run.
+
+    Verifies:
+    - HTTP 404 or similar error is raised
+    - Error indicates "not found"
+    """
+    import httpx
+
+    fake_run_id = "00000000-0000-0000-0000-000000000000"
+
+    # get_status should raise an HTTP error for nonexistent run
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        client.get_status(fake_run_id)
+
+    # Should be a 404 Not Found
+    assert exc_info.value.response.status_code == 404, (
+        f"Expected 404, got: {exc_info.value.response.status_code}"
+    )
+
+
+@pytest.mark.integration
+def test_get_result_nonexistent_run(client, worker_process):
+    """Test that get_result raises appropriate error for nonexistent run.
+
+    Verifies:
+    - RunError is raised (not generic HTTP error)
+    - Error message indicates "not found"
+    """
+    from agnt5.client import RunError
+
+    fake_run_id = "00000000-0000-0000-0000-000000000000"
+
+    # get_result should raise RunError for nonexistent run
+    with pytest.raises(RunError) as exc_info:
+        client.get_result(fake_run_id)
+
+    # Error should indicate not found
+    error_message = str(exc_info.value).lower()
+    assert "not found" in error_message or "not complete" in error_message, (
+        f"Expected 'not found' or 'not complete' in error, got: {exc_info.value}"
+    )

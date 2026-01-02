@@ -289,7 +289,7 @@ After gathering enough information, provide a complete plan.""",
         max_iterations=15,
     )
 
-    result = await planner.run(task, context=ctx)
+    result = await planner.run_sync(task, context=ctx)
 
     # Count questions asked
     questions_asked = [

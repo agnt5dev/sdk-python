@@ -450,15 +450,8 @@ class Agent:
                 runtime_context=getattr(context, '_runtime_context', None),
             )
 
-        # Emit checkpoint if in workflow context
-        if workflow_ctx is not None:
-            workflow_ctx._send_checkpoint("agent.started", {
-                "agent.name": self.name,
-                "agent.model": self.model_name,
-                "agent.tools": list(self.tools.keys()),
-                "agent.max_iterations": self.max_iterations,
-                "user_message": user_message,
-            })
+        # NOTE: agent.started checkpoint is NOT sent here - it's sent by run() which yields Event.agent_started
+        # This avoids duplicate agent.started events in the journal
 
         # Check for HITL resume
         if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
@@ -753,13 +746,8 @@ class Agent:
                         if isinstance(context, AgentContext):
                             await context.save_conversation_history(messages)
 
-                        if workflow_ctx:
-                            workflow_ctx._send_checkpoint("agent.completed", {
-                                "agent.name": self.name,
-                                "agent.iterations": iteration + 1,
-                                "agent.tool_calls_count": len(all_tool_calls),
-                                "output_length": len(response_text),
-                            })
+                        # NOTE: agent.completed is NOT sent here - it's sent by run() which yields Event.agent_completed()
+                        # This avoids duplicate agent.completed events in the journal
 
                         # Add output data to span for trace visibility
                         span.set_attribute("output.data", _serialize_tool_result(response_text))
@@ -785,14 +773,8 @@ class Agent:
                 if isinstance(context, AgentContext):
                     await context.save_conversation_history(messages)
 
-                if workflow_ctx:
-                    workflow_ctx._send_checkpoint("agent.completed", {
-                        "agent.name": self.name,
-                        "agent.iterations": self.max_iterations,
-                        "agent.tool_calls_count": len(all_tool_calls),
-                        "agent.max_iterations_reached": True,
-                        "output_length": len(final_output),
-                    })
+                # NOTE: agent.completed is NOT sent here - it's sent by run() which yields Event.agent_completed()
+                # This avoids duplicate agent.completed events in the journal
 
                 # Add output data to span for trace visibility
                 span.set_attribute("output.data", _serialize_tool_result(final_output))
@@ -1120,15 +1102,9 @@ class Agent:
                 runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
 
-        # Emit checkpoint if called within a workflow context
-        if workflow_ctx is not None:
-            workflow_ctx._send_checkpoint("agent.started", {
-                "agent.name": self.name,
-                "agent.model": self.model_name,
-                "agent.tools": list(self.tools.keys()),
-                "agent.max_iterations": self.max_iterations,
-                "user_message": user_message,
-            })
+        # NOTE: agent.started checkpoint is NOT sent here
+        # run_sync() calls run() which yields Event.agent_started
+        # The worker processes this and sends the checkpoint
 
         # NEW: Check if this is a resume from HITL
         if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
@@ -1189,14 +1165,8 @@ class Agent:
                     all_tool_calls: List[Dict[str, Any]] = []
                     import time as _time
 
-                    # Emit agent started checkpoint
-                    if workflow_ctx:
-                        workflow_ctx._send_checkpoint("agent.started", {
-                            "agent.name": self.name,
-                            "agent.model": self.model_name,
-                            "agent.max_iterations": self.max_iterations,
-                            "agent.tools_count": len(self.tools),
-                        })
+                    # NOTE: agent.started checkpoint is NOT sent here
+                    # The caller (run()) yields Event.agent_started which the worker processes
 
                     # Render system prompt with context variables
                     rendered_instructions = self._render_prompt(self.instructions, prompt_context)

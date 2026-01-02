@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import contextvars
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, TYPE_CHECKING
 
 from ._telemetry import ContextLogger
+from .emit import EventEmitter, JournalEvent
+
+if TYPE_CHECKING:
+    from .memoization import MemoizationManager
+    from .emit import CheckpointCallback, DeltaCallback
 
 T = TypeVar("T")
 
@@ -56,10 +61,12 @@ class Context:
     - Logging with correlation IDs
     - Execution metadata (run_id, attempt)
     - Runtime context for tracing
+    - Optional memoization for LLM/tool calls
 
     Extended by:
     - FunctionContext: Minimal context for stateless functions
     - WorkflowContext: Context for durable workflows
+    - AgentContext: Context for AI agents (memoization enabled by default)
     """
 
     def __init__(
@@ -70,6 +77,10 @@ class Context:
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        enable_memoization: bool = False,
+        checkpoint_callback: Optional["CheckpointCallback"] = None,
+        delta_callback: Optional["DeltaCallback"] = None,
     ) -> None:
         """
         Initialize base context.
@@ -81,6 +92,10 @@ class Context:
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant ID for multi-tenant deployments
             deployment_id: Deployment ID for tracking deployments
+            session_id: Session ID for multi-turn conversations (optional)
+            enable_memoization: Whether to enable LLM/tool call memoization
+            checkpoint_callback: Callback for buffered event delivery
+            delta_callback: Callback for streaming event delivery
         """
         self._run_id = run_id
         self._attempt = attempt
@@ -88,6 +103,19 @@ class Context:
         self._is_streaming = is_streaming
         self._tenant_id = tenant_id
         self._deployment_id = deployment_id
+        self._session_id = session_id
+        self._checkpoint_callback = checkpoint_callback
+        self._delta_callback = delta_callback
+
+        # Lazily initialized event emitter
+        self._emitter: Optional[EventEmitter] = None
+
+        # Initialize memoization if enabled
+        if enable_memoization:
+            from .memoization import MemoizationManager
+            self._memo: Optional["MemoizationManager"] = MemoizationManager(self)
+        else:
+            self._memo = None
 
         # Create logger with correlation
         base_logger = logging.getLogger(f"agnt5.{run_id}")
@@ -129,6 +157,46 @@ class Context:
     def deployment_id(self) -> Optional[str]:
         """Deployment identifier for tracking deployments."""
         return self._deployment_id
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Session identifier for multi-turn conversations."""
+        return self._session_id
+
+    @property
+    def emit(self) -> EventEmitter:
+        """Unified event emission API.
+
+        Provides a consistent way to emit events throughout the SDK.
+        Events are automatically timestamped with nanosecond precision
+        and routed to the appropriate delivery mechanism.
+
+        Streaming mode (is_streaming=True):
+            Events are delivered immediately via the delta queue.
+
+        Non-streaming mode (is_streaming=False):
+            Events are buffered and delivered via the checkpoint queue.
+
+        Example:
+            # Emit workflow events
+            ctx.emit.emit("workflow.step.started", {"step_name": "process"})
+
+            # Emit agent events
+            ctx.emit.emit("agent.completed", {"output": result})
+
+            # Emit LM events with memoization key
+            ctx.emit.emit("lm.call.started", {...}, step_key="lm_call_1")
+
+        Returns:
+            EventEmitter instance for emitting events
+        """
+        if self._emitter is None:
+            self._emitter = EventEmitter(
+                checkpoint_callback=self._checkpoint_callback,
+                delta_callback=self._delta_callback,
+                is_streaming=self._is_streaming,
+            )
+        return self._emitter
 
 
 def get_current_context() -> Optional[Context]:

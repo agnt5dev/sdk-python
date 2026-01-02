@@ -23,9 +23,21 @@ Prerequisites:
 
 import asyncio
 import os
+import unicodedata
 from typing import Any, Dict, List
 
 from agnt5 import Agent, Context, FunctionContext, WorkflowContext, function, workflow
+
+
+def is_punctuation(char: str) -> bool:
+    """Check if a character is punctuation (Unicode-aware)."""
+    return unicodedata.category(char).startswith('P')
+
+
+def is_sentence_ender(char: str) -> bool:
+    """Check if a character ends a sentence (Unicode-aware)."""
+    # ASCII + common Unicode sentence enders
+    return char in ".!?。！？⁈⁉‽"
 
 
 # =============================================================================
@@ -301,8 +313,8 @@ async def parallel_context_workflow(ctx: WorkflowContext, text: str) -> dict:
     async def analyze_structure():
         await asyncio.sleep(0.05)  # Simulate work
         return {
-            "sentences": text.count(".") + text.count("!") + text.count("?"),
-            "has_punctuation": any(c in text for c in ".,!?;:"),
+            "sentences": sum(1 for c in text if is_sentence_ender(c)),
+            "has_punctuation": any(is_punctuation(c) for c in text),
             "starts_uppercase": text[0].isupper() if text else False,
         }
 

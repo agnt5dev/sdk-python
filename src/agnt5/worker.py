@@ -939,6 +939,7 @@ class Worker:
                             content_index=event_data.get("content_index", 0),
                             sequence=sequence,
                             metadata=metadata,
+                            source_timestamp_ns=chunk.source_timestamp_ns,
                         )
                     else:
                         # Regular chunk - wrap with output events
@@ -951,6 +952,7 @@ class Worker:
                                 content_index=0,
                                 sequence=sequence,
                                 metadata=metadata,
+                                source_timestamp_ns=time.time_ns(),
                             )
                             sequence += 1
                             first_chunk = False
@@ -976,6 +978,7 @@ class Worker:
                             content_index=0,
                             sequence=sequence,
                             metadata=metadata,
+                            source_timestamp_ns=time.time_ns(),
                         )
                     sequence += 1
 
@@ -989,6 +992,7 @@ class Worker:
                         content_index=0,
                         sequence=sequence,
                         metadata=metadata,
+                        source_timestamp_ns=time.time_ns(),
                     )
                     sequence += 1
 
@@ -1000,6 +1004,7 @@ class Worker:
                     content_index=0,
                     sequence=sequence,
                     metadata=metadata,
+                    source_timestamp_ns=time.time_ns(),
                 )
 
                 logger.debug(f"Streaming function queued {sequence + 1} deltas for real-time delivery")
@@ -1105,11 +1110,13 @@ class Worker:
 
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
+            step_events = []  # Raw step_events list for serialization on next pause
             initial_state = {}
             user_response = None
 
             if hasattr(request, 'metadata') and request.metadata:
-                # Parse completed steps for replay
+                # Parse completed steps for replay (from crash recovery or HITL resume)
+                # Try both formats: completed_steps (dict) and step_events (list from pause)
                 if "completed_steps" in request.metadata:
                     completed_steps_json = request.metadata["completed_steps"]
                     if completed_steps_json:
@@ -1118,6 +1125,21 @@ class Worker:
                             logger.info(f"🔄 Replaying workflow with {len(completed_steps)} cached steps")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse completed_steps from metadata")
+                elif "step_events" in request.metadata:
+                    # Convert step_events list to completed_steps dict for HITL resume
+                    step_events_json = request.metadata["step_events"]
+                    if step_events_json:
+                        try:
+                            step_events_list = json.loads(step_events_json)
+                            # Convert list format to dict: {step_name: result, ...}
+                            for event in step_events_list:
+                                if "step_name" in event and "result" in event:
+                                    completed_steps[event["step_name"]] = event["result"]
+                            # Also preserve raw step_events list for serialization on next pause
+                            step_events = step_events_list
+                            logger.info(f"🔄 Resuming workflow with {len(completed_steps)} completed steps from pause")
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse step_events from metadata")
 
                 # Parse initial workflow state for replay
                 if "workflow_state" in request.metadata:
@@ -1176,10 +1198,33 @@ class Worker:
                 workflow_entity._completed_steps = completed_steps
                 logger.debug(f"Loaded {len(completed_steps)} completed steps into workflow entity")
 
+            # Restore raw step_events list for serialization on next pause
+            # This ensures previous user responses are preserved across multiple resumes
+            if step_events:
+                workflow_entity._step_events = step_events
+                logger.debug(f"Restored {len(step_events)} step events into workflow entity")
+
             # Inject user response if resuming from pause
             if user_response:
+                # Restore pause_index from metadata for multi-step HITL
+                # This ensures we inject at the correct position in the pause sequence
+                if hasattr(request, 'metadata') and request.metadata:
+                    pause_index_str = request.metadata.get("pause_index", "0")
+                    try:
+                        workflow_entity._pause_index = int(pause_index_str)
+                        logger.debug(f"Restored pause_index={workflow_entity._pause_index} for resume")
+                    except ValueError:
+                        logger.warning(f"Invalid pause_index in metadata: {pause_index_str}, using 0")
+                        workflow_entity._pause_index = 0
+
                 workflow_entity.inject_user_response(user_response)
-                logger.debug(f"Injected user response into workflow entity")
+                logger.debug(f"Injected user response into workflow entity at pause {workflow_entity._pause_index}")
+
+                # IMPORTANT: Reset pause_index to 0 for replay
+                # The workflow replays from the beginning, so the first wait_for_user
+                # should check at index 0, not at the stored index
+                workflow_entity._pause_index = 0
+                logger.debug("Reset pause_index to 0 for replay")
 
             if initial_state:
                 # Load initial state into entity's state adapter AND workflow entity's state
@@ -1236,9 +1281,11 @@ class Worker:
             # This is used by WorkflowContext._consume_streaming_result to forward events
             delta_metadata = _normalize_metadata(self._extract_critical_metadata(request))
 
-            def delta_callback(event_type: str, output_data: str, content_index: int, sequence: int) -> None:
+            def delta_callback(event_type: str, output_data: str, content_index: int, sequence: int, source_timestamp_ns: int = 0) -> None:
                 """Forward streaming delta event from nested component."""
                 try:
+                    # Use provided timestamp or generate one if not provided
+                    ts = source_timestamp_ns if source_timestamp_ns > 0 else time.time_ns()
                     self._rust_worker.queue_delta(
                         invocation_id=request.invocation_id,
                         event_type=event_type,
@@ -1246,6 +1293,7 @@ class Worker:
                         content_index=content_index,
                         sequence=sequence,
                         metadata=delta_metadata,
+                        source_timestamp_ns=ts,
                     )
                     logger.debug(f"Forwarded delta: type={event_type} seq={sequence}")
                 except Exception as e:
@@ -1310,6 +1358,11 @@ class Worker:
                     "session_id": session_id,
                     "is_replay": bool(completed_steps),
                 })
+
+                # CRITICAL: Flush immediately to ensure workflow.started arrives at platform
+                # BEFORE handler runs. Without this, nested events (agent.started, lm.call.started)
+                # which use direct journal writes would arrive before workflow.started which is queued.
+                self._rust_worker.flush_workflow_checkpoints()
 
                 if input_dict:
                     result = await config.handler(ctx, **input_dict)
@@ -1433,6 +1486,7 @@ class Worker:
                 "question": e.question,
                 "input_type": e.input_type,
                 "pause_type": pause_type,  # NEW: Indicates workflow vs agent pause
+                "pause_index": str(e.pause_index),  # Store pause index for multi-step HITL
             }
 
             # CRITICAL: Propagate tenant_id even when pausing
@@ -1830,6 +1884,7 @@ class Worker:
                             content_index=event_data.get("content_index", 0),
                             sequence=sequence,
                             metadata=metadata,
+                            source_timestamp_ns=event.source_timestamp_ns,
                         )
                         sequence += 1
 
@@ -1854,6 +1909,7 @@ class Worker:
                     content_index=0,
                     sequence=sequence,
                     metadata=metadata,
+                    source_timestamp_ns=time.time_ns(),
                 )
 
                 logger.debug(f"Agent streaming queued {sequence + 1} deltas for real-time delivery")

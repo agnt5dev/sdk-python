@@ -51,7 +51,7 @@ def test_supervisor_worker_basic(client, worker_process):
 
     assert result["pattern"] == "supervisor_worker"
     assert len(result["final_output"]) > 0
-    assert result["tool_calls"] >= 0  # May or may not use tools
+    assert result["tool_calls"] >= 1, "Supervisor should call at least one tool to delegate to workers"
 
 
 def test_supervisor_worker_complex_task(client, worker_process):
@@ -198,3 +198,101 @@ def test_pipeline_agents_longer_content(client, worker_process):
 
     assert result["pattern"] == "pipeline"
     assert len(result["stages"]) == 4
+
+
+# =============================================================================
+# MULTI-AGENT IMPROVEMENTS (P2.7)
+# =============================================================================
+
+
+def test_debate_references_topic(client, worker_process):
+    """Test debate agents reference the specific topic (P2.7).
+
+    Validates:
+    - Pro arguments reference the topic
+    - Con arguments reference the topic
+    - Judgment references the topic
+    """
+    topic = "Should remote work become the default for tech companies?"
+    result = client.run(
+        "debate_agents",
+        {"topic": topic},
+        component_type="workflow"
+    )
+
+    if result.get("status") == "skipped":
+        pytest.skip(result.get("reason", "API key not configured"))
+
+    assert result["pattern"] == "debate"
+    assert result["topic"] == topic
+
+    # Check that arguments reference remote work concepts
+    pro_args = result["pro_arguments"].lower()
+    con_args = result["con_arguments"].lower()
+    judgment = result["judgment"].lower()
+
+    remote_work_terms = ["remote", "work", "office", "home", "flexible", "commute"]
+
+    # Pro arguments should mention remote work concepts
+    pro_found = [term for term in remote_work_terms if term in pro_args]
+    assert len(pro_found) >= 1, (
+        f"Pro arguments should reference topic. Found: {pro_found}"
+    )
+
+    # Con arguments should mention remote work concepts
+    con_found = [term for term in remote_work_terms if term in con_args]
+    assert len(con_found) >= 1, (
+        f"Con arguments should reference topic. Found: {con_found}"
+    )
+
+
+def test_consensus_votes_sum_correctly(client, worker_process):
+    """Test consensus voting math is correct (P2.7).
+
+    Validates:
+    - Vote counts add up correctly
+    - Each agent votes exactly once
+    - Decision matches vote majority
+    """
+    result = client.run(
+        "consensus_agents",
+        {"question": "Should we adopt TypeScript for new projects?"},
+        component_type="workflow"
+    )
+
+    if result.get("status") == "skipped":
+        pytest.skip(result.get("reason", "API key not configured"))
+
+    assert result["pattern"] == "consensus"
+
+    # Should have exactly 5 votes (5 agents)
+    votes = result["votes"]
+    assert len(votes) == 5, f"Expected 5 votes, got {len(votes)}"
+
+    # Count votes (workflow returns uppercase YES/NO/ABSTAIN)
+    yes_count = sum(1 for v in votes if v["vote"] == "YES")
+    no_count = sum(1 for v in votes if v["vote"] == "NO")
+
+    # Vote summary should match
+    assert result["vote_summary"]["yes"] == yes_count, (
+        f"Yes summary mismatch: {result['vote_summary']['yes']} != {yes_count}"
+    )
+    assert result["vote_summary"]["no"] == no_count, (
+        f"No summary mismatch: {result['vote_summary']['no']} != {no_count}"
+    )
+
+    # Total votes should equal 5 (some might be abstain/other)
+    total_votes = yes_count + no_count
+    assert total_votes <= 5, f"Total votes ({total_votes}) exceeds agent count"
+
+    # Decision should match majority
+    decision = result["consensus_decision"]
+    if yes_count > no_count and yes_count >= 3:
+        assert decision == "YES", f"Expected YES with {yes_count} votes, got {decision}"
+    elif no_count > yes_count and no_count >= 3:
+        assert decision == "NO", f"Expected NO with {no_count} votes, got {decision}"
+    else:
+        # No clear majority
+        assert decision in ["YES", "NO", "NO_CONSENSUS"], (
+            f"Unexpected decision: {decision}"
+        )

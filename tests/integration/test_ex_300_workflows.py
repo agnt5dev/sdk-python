@@ -231,3 +231,86 @@ def test_workflow_handles_special_characters(client, worker_process):
     )
 
     assert result["source"] == "db-prod/users@2024"
+
+
+# =============================================================================
+# WORKFLOW ERROR PATHS (P2.1)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_order_fulfillment_empty_items(client, worker_process):
+    """Test order fulfillment with empty items list.
+
+    Validates:
+    - Workflow handles edge case of no items
+    - Returns meaningful response or error
+    """
+    from agnt5.client import RunError
+
+    try:
+        result = client.run(
+            "order_fulfillment",
+            {"order_id": "EMPTY-001", "items": []},
+            component_type="workflow"
+        )
+        # If it succeeds, items_count should be 0
+        assert result["items_count"] == 0
+    except RunError as e:
+        # If it fails, should have a meaningful error
+        assert "items" in str(e).lower() or "empty" in str(e).lower(), (
+            f"Error should mention items or empty. Got: {e}"
+        )
+
+
+@pytest.mark.integration
+def test_data_pipeline_validates_output_shape(client, worker_process):
+    """Test data pipeline returns expected output structure.
+
+    Validates:
+    - Output contains all required fields
+    - Fields have correct types
+    - Transformed data is a list of integers
+    """
+    result = client.run(
+        "data_pipeline",
+        {"source": "test"},
+        component_type="workflow"
+    )
+
+    # Validate required fields exist
+    required_fields = ["source", "original_count", "transformed", "valid"]
+    for field in required_fields:
+        assert field in result, f"Missing required field: {field}"
+
+    # Validate field types
+    assert isinstance(result["source"], str), "source should be string"
+    assert isinstance(result["original_count"], int), "original_count should be int"
+    assert isinstance(result["transformed"], list), "transformed should be list"
+    assert isinstance(result["valid"], bool), "valid should be bool"
+
+    # Validate transformed data contains numbers
+    assert all(isinstance(x, (int, float)) for x in result["transformed"]), (
+        "transformed should contain only numbers"
+    )
+
+
+@pytest.mark.integration
+def test_workflow_nonexistent_returns_error(client, worker_process):
+    """Test calling nonexistent workflow returns proper error.
+
+    Validates:
+    - RunError is raised (not generic Exception)
+    - Error message is descriptive
+    """
+    from agnt5.client import RunError
+
+    with pytest.raises(RunError) as exc_info:
+        client.run(
+            "nonexistent_workflow_xyz",
+            {},
+            component_type="workflow"
+        )
+
+    error_msg = str(exc_info.value)
+    assert len(error_msg) > 5, f"Error should be descriptive. Got: {error_msg}"

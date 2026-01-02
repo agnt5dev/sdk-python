@@ -1,6 +1,6 @@
 use agnt5_sdk_core::pb::{
-    execute_component_response, ComponentInfo, ComponentSchema, ComponentType,
-    ExecuteComponentRequest, ExecuteComponentResponse, StateTransition, StateUpdate,
+    dispatch_component_response, ComponentInfo, ComponentSchema, ComponentType,
+    DispatchComponentRequest, DispatchComponentResponse, StateTransition, StateUpdate,
     StepCheckpoint,
 };
 use pyo3::prelude::*;
@@ -362,8 +362,8 @@ impl PyExecuteComponentRequest {
     }
 }
 
-impl From<ExecuteComponentRequest> for PyExecuteComponentRequest {
-    fn from(req: ExecuteComponentRequest) -> Self {
+impl From<DispatchComponentRequest> for PyExecuteComponentRequest {
+    fn from(req: DispatchComponentRequest) -> Self {
         let component_type =
             match ComponentType::try_from(req.component_type).unwrap_or(ComponentType::Function) {
                 ComponentType::Function => "function",
@@ -491,15 +491,15 @@ impl PyExecuteComponentResponse {
     }
 }
 
-impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
+impl From<PyExecuteComponentResponse> for DispatchComponentResponse {
     fn from(resp: PyExecuteComponentResponse) -> Self {
         let result = if resp.success {
             if let Some(update) = resp.state_update.clone() {
-                Some(execute_component_response::Result::StateUpdate(
+                Some(dispatch_component_response::Result::StateUpdate(
                     update.into(),
                 ))
             } else {
-                Some(execute_component_response::Result::OutputData(
+                Some(dispatch_component_response::Result::OutputData(
                     resp.output_data.clone(),
                 ))
             }
@@ -517,18 +517,19 @@ impl From<PyExecuteComponentResponse> for ExecuteComponentResponse {
             content_index: resp.content_index,
             sequence: resp.sequence,
             attempt: resp.attempt,
+            source_timestamp_ns: 0, // Not used when converting from Python
         }
     }
 }
 
-impl From<ExecuteComponentResponse> for PyExecuteComponentResponse {
-    fn from(resp: ExecuteComponentResponse) -> Self {
+impl From<DispatchComponentResponse> for PyExecuteComponentResponse {
+    fn from(resp: DispatchComponentResponse) -> Self {
         let (output_data, state_update) = match resp.result {
-            Some(execute_component_response::Result::OutputData(data)) => (data, None),
-            Some(execute_component_response::Result::StateUpdate(update)) => {
+            Some(dispatch_component_response::Result::OutputData(data)) => (data, None),
+            Some(dispatch_component_response::Result::StateUpdate(update)) => {
                 (Vec::new(), Some(PyStateUpdate::from(update)))
             }
-            Some(execute_component_response::Result::FlowContinuation(_)) => (Vec::new(), None),
+            Some(dispatch_component_response::Result::FlowContinuation(_)) => (Vec::new(), None),
             None => (Vec::new(), None),
         };
 

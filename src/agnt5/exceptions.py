@@ -48,11 +48,15 @@ class NotImplementedError(AGNT5Error):
     pass
 
 
-class WaitingForUserInputException(AGNT5Error):
+class WaitingForUserInputException(BaseException):
     """Raised when workflow needs to pause for user input.
 
     This exception is used internally by ctx.wait_for_user() to signal
     that a workflow execution should pause and wait for user input.
+
+    IMPORTANT: This inherits from BaseException (not Exception) to prevent
+    accidental catching by broad `except Exception:` blocks. This is the same
+    pattern Python uses for KeyboardInterrupt and SystemExit.
 
     The platform catches this exception and:
     1. Saves the workflow checkpoint state
@@ -65,6 +69,7 @@ class WaitingForUserInputException(AGNT5Error):
         input_type: Type of input ("text", "approval", or "choice")
         options: List of options for approval/choice inputs
         checkpoint_state: Current workflow state for resume
+        pause_index: The index of this pause point (for multi-step HITL)
         agent_context: Optional agent execution state for agent-level HITL
             Contains: agent_name, iteration, messages, tool_results, pending_tool_call, etc.
     """
@@ -75,6 +80,7 @@ class WaitingForUserInputException(AGNT5Error):
         input_type: str,
         options: Optional[List[Dict]],
         checkpoint_state: Dict,
+        pause_index: int = 0,
         agent_context: Optional[Dict] = None,
     ) -> None:
         """Initialize WaitingForUserInputException.
@@ -84,6 +90,7 @@ class WaitingForUserInputException(AGNT5Error):
             input_type: Type of input - "text", "approval", or "choice"
             options: List of option dicts (for approval/choice)
             checkpoint_state: Workflow state snapshot for resume
+            pause_index: Index of this pause point (0-indexed, for multi-step HITL)
             agent_context: Optional agent execution state for resuming agents
                 Required fields when provided:
                 - agent_name: Name of the agent that paused
@@ -99,4 +106,5 @@ class WaitingForUserInputException(AGNT5Error):
         self.input_type = input_type
         self.options = options or []
         self.checkpoint_state = checkpoint_state
+        self.pause_index = pause_index
         self.agent_context = agent_context

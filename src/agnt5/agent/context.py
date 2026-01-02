@@ -1,7 +1,9 @@
 """Agent execution context with conversation state management."""
 
 import logging
+import os
 import time
+import warnings
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..context import Context
@@ -11,6 +13,9 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# Gateway URL for session history API (defaults to localhost dev server)
+DEFAULT_GATEWAY_URL = "http://localhost:34181"
 
 
 class AgentContext(Context):
@@ -74,7 +79,17 @@ class AgentContext(Context):
         if parent_context and not tenant_id:
             tenant_id = getattr(parent_context, '_tenant_id', None)
 
-        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
+        # Initialize parent Context with memoization enabled by default for agents
+        # This ensures LLM and tool calls are automatically journaled for replay
+        super().__init__(
+            run_id=run_id,
+            attempt=attempt,
+            runtime_context=runtime_context,
+            is_streaming=is_streaming,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            enable_memoization=True,  # Agents get memoization by default
+        )
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id
@@ -161,10 +176,13 @@ class AgentContext(Context):
 
     async def get_conversation_history(self) -> List[Message]:
         """
-        Retrieve conversation history from state, loading from database if needed.
+        Retrieve conversation history, preferring runs-based history from the platform.
 
-        Uses the EntityStateAdapter which delegates to Rust core for cache-first loading.
-        If running within a workflow, loads from workflow entity state instead.
+        Load order (as of Phase 5.2 - runs-first architecture):
+        1. For workflow mode: Load from workflow entity state (shared state)
+        2. For standalone mode:
+           a. Try loading from runs via gateway API (/v1/sessions/{id}/history)
+           b. Fall back to entity storage for legacy sessions (with deprecation warning)
 
         Returns:
             List of Message objects from conversation history
@@ -172,7 +190,21 @@ class AgentContext(Context):
         if self._storage_mode == "workflow":
             return await self._load_from_workflow_state()
         else:
-            return await self._load_from_entity_storage()
+            # Try runs-based API first (Phase 5.2 architecture)
+            messages = await self._load_from_runs_api()
+            if messages:
+                return messages
+
+            # Fall back to entity storage for legacy sessions
+            legacy_messages = await self._load_from_entity_storage()
+            if legacy_messages:
+                warnings.warn(
+                    "Loading conversation history from entity storage is deprecated. "
+                    "New sessions use runs-based history. Consider migrating this session.",
+                    DeprecationWarning,
+                    stacklevel=2
+                )
+            return legacy_messages
 
     async def _load_from_workflow_state(self) -> List[Message]:
         """Load conversation history from workflow entity state."""
@@ -182,6 +214,82 @@ class AgentContext(Context):
 
         # Convert dict representations back to Message objects
         return self._convert_dicts_to_messages(messages_data)
+
+    async def _load_from_runs_api(self) -> List[Message]:
+        """
+        Load conversation history from runs via gateway API.
+
+        This is the new Phase 5.2 architecture where conversation history
+        is derived from runs (each run = one conversation turn) rather than
+        stored in entity state.
+
+        Returns:
+            List of Message objects, or empty list if no runs found or API fails
+        """
+        import httpx
+
+        gateway_url = os.environ.get("AGNT5_GATEWAY_URL", DEFAULT_GATEWAY_URL)
+        tenant_id = self._tenant_id
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = f"{gateway_url}/v1/sessions/{self._session_id}/history"
+                headers = {}
+                if tenant_id:
+                    headers["X-TENANT-ID"] = tenant_id
+
+                response = await client.get(url, headers=headers)
+
+                if response.status_code == 404:
+                    # Session not found - this might be a new session or legacy session
+                    logger.debug(f"Session {self._session_id} not found in runs API")
+                    return []
+
+                if response.status_code != 200:
+                    logger.warning(
+                        f"Failed to load session history from runs API: "
+                        f"status={response.status_code}"
+                    )
+                    return []
+
+                data = response.json()
+                messages_data = data.get("messages", [])
+
+                if not messages_data:
+                    return []
+
+                # Convert API response to Message objects
+                messages = []
+                for msg in messages_data:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+
+                    # Content might be JSON-encoded if it was stored as structured data
+                    if isinstance(content, dict):
+                        # Extract text content if it's a structured message
+                        content = content.get("text", content.get("message", str(content)))
+
+                    if role == "user":
+                        messages.append(Message.user(content))
+                    elif role == "assistant":
+                        messages.append(Message.assistant(content))
+                    else:
+                        # Handle other roles (system, etc.)
+                        from ..lm import MessageRole
+                        msg_role = MessageRole(role) if role in ("user", "assistant", "system") else MessageRole.USER
+                        messages.append(Message(role=msg_role, content=content))
+
+                logger.debug(
+                    f"Loaded {len(messages)} messages from runs API for session {self._session_id}"
+                )
+                return messages
+
+        except httpx.HTTPError as e:
+            logger.debug(f"HTTP error loading from runs API: {e}")
+            return []
+        except Exception as e:
+            logger.debug(f"Error loading from runs API: {e}")
+            return []
 
     async def _load_from_entity_storage(self) -> List[Message]:
         """Load conversation history from AgentSession entity (standalone mode)."""
@@ -285,7 +393,22 @@ class AgentContext(Context):
         logger.info(f"Saved conversation to workflow state: {key} ({len(messages_data)} messages)")
 
     async def _save_to_entity_storage(self, messages: List[Message]) -> None:
-        """Save conversation history to AgentSession entity (standalone mode)."""
+        """
+        Save conversation history to AgentSession entity (standalone mode).
+
+        DEPRECATED: This method saves to entity storage which is the legacy approach.
+        In the Phase 5.2 architecture, conversation history is derived from runs
+        (each run = one turn). New conversations should not need to call this
+        as the platform automatically records run inputs/outputs.
+        """
+        warnings.warn(
+            "Saving conversation history to entity storage is deprecated. "
+            "In the new architecture, conversation history is derived from runs. "
+            "This method will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=3
+        )
+
         # Convert Message objects to dict for JSON serialization
         messages_data = []
         for msg in messages:

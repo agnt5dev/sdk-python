@@ -7,8 +7,8 @@ Tests the new stream_events() method that yields typed Event objects:
 - WorkflowProxy.stream_events() for workflow streaming
 - Event type parsing and handling
 
-Note: Agent events are wrapped in output.delta events.
-To access agent events, check output.delta.data["content"]["event_type"].
+Agent events are top-level events (EventType.AGENT_STARTED, etc.).
+The actual event payload is in the `output_data` field as proper JSON.
 
 Run with:
     # Requires OPENAI_API_KEY for LLM calls
@@ -36,24 +36,34 @@ pytestmark = [
 ]
 
 
-def extract_agent_events(events):
-    """Extract agent events from output.delta events.
-
-    Agent functions yield dicts that become output.delta events.
-    The agent event data is in e.data["content"].
-    """
-    agent_events = []
-    for e in events:
-        if e.event_type == EventType.OUTPUT_DELTA:
-            content = e.data.get("content", {})
-            if isinstance(content, dict) and "event_type" in content:
-                agent_events.append(content)
-    return agent_events
-
-
 def get_agent_event_types(events):
-    """Get list of agent event types from stream events."""
-    return [e["event_type"] for e in extract_agent_events(events)]
+    """Get list of agent event types from stream events.
+
+    Agent events are now top-level events (EventType.AGENT_STARTED, etc.)
+    not nested in output.delta.
+    """
+    agent_types = []
+    for e in events:
+        if e.event_type.value.startswith("agent."):
+            agent_types.append(e.event_type.value)
+    return agent_types
+
+
+def find_agent_event(events, event_type_value):
+    """Find an agent event by its type value (e.g., 'agent.started')."""
+    for e in events:
+        if e.event_type.value == event_type_value:
+            return e
+    return None
+
+
+def get_agent_event_data(event):
+    """Get the payload data from an agent event.
+
+    Agent events have their payload in the output_data field.
+    This is now proper JSON (not base64) thanks to the platform fix.
+    """
+    return event.data.get("output_data", {})
 
 
 # =============================================================================
@@ -134,14 +144,13 @@ def test_stream_events_started_metadata(client, worker_process):
         component_type="function",
     ))
 
-    agent_events = extract_agent_events(events)
-    started = next((e for e in agent_events if e["event_type"] == "agent.started"), None)
+    started = find_agent_event(events, "agent.started")
     assert started is not None, "No agent.started event found"
 
-    # Check metadata fields
-    assert "data" in started, "Missing data in started event"
-    assert "agent_name" in started["data"], "Missing agent_name in started event"
-    assert "model" in started["data"], "Missing model in started event"
+    # Check metadata fields in output_data payload
+    data = get_agent_event_data(started)
+    assert "agent_name" in data, f"Missing agent_name in started event, got: {data.keys()}"
+    assert "model" in data, f"Missing model in started event, got: {data.keys()}"
 
 
 @pytest.mark.integration
@@ -153,13 +162,12 @@ def test_stream_events_completed_output(client, worker_process):
         component_type="function",
     ))
 
-    agent_events = extract_agent_events(events)
-    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    completed = find_agent_event(events, "agent.completed")
     assert completed is not None, "No agent.completed event found"
 
-    assert "data" in completed, "Missing data in completed event"
-    assert "output" in completed["data"], "Missing output in completed event"
-    assert len(completed["data"]["output"]) > 0, "Output should not be empty"
+    data = get_agent_event_data(completed)
+    assert "output" in data, f"Missing output in completed event, got: {data.keys()}"
+    assert len(data["output"]) > 0, "Output should not be empty"
 
 
 # =============================================================================
@@ -181,16 +189,16 @@ def test_stream_events_agent_with_tools(client, worker_process):
     assert EventType.RUN_STARTED in run_event_types
     assert EventType.RUN_COMPLETED in run_event_types
 
-    # Agent events are nested
+    # Agent events are now top-level
     agent_event_types = get_agent_event_types(events)
     assert "agent.started" in agent_event_types
     assert "agent.completed" in agent_event_types
 
     # Check output contains correct answer
-    agent_events = extract_agent_events(events)
-    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+    completed = find_agent_event(events, "agent.completed")
     assert completed is not None
-    assert "56" in completed["data"].get("output", ""), "Expected 56 in output"
+    data = get_agent_event_data(completed)
+    assert "56" in data.get("output", ""), "Expected 56 in output"
 
 
 @pytest.mark.integration
@@ -202,15 +210,20 @@ def test_stream_events_tool_calls_recorded(client, worker_process):
         component_type="function",
     ))
 
-    agent_events = extract_agent_events(events)
-    completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
-    assert completed is not None
+    completed = find_agent_event(events, "agent.completed")
+    assert completed is not None, "No agent.completed event found"
 
-    # Tool calls should be recorded
-    tool_calls = completed["data"].get("tool_calls", [])
-    if tool_calls:
-        tool_names = [tc.get("name") for tc in tool_calls]
-        assert "calculate" in tool_names, "Expected calculate tool to be called"
+    data = get_agent_event_data(completed)
+    # Tool calls MUST be recorded for tool-using agents (P1.3)
+    tool_calls = data.get("tool_calls", [])
+    assert len(tool_calls) >= 1, (
+        "Expected tool_calls in agent.completed event. "
+        f"Agent should have used the calculate tool for math operation. Got data: {data.keys()}"
+    )
+    tool_names = [tc.get("name") for tc in tool_calls]
+    assert "calculate" in tool_names, (
+        f"Expected 'calculate' tool in tool_calls, got: {tool_names}"
+    )
 
 
 # =============================================================================
@@ -418,24 +431,23 @@ def test_stream_events_lm_message_delta(client, worker_process):
         component_type="function",
     ))
 
-    # LM events are nested inside output.delta as well
-    agent_event_types = get_agent_event_types(events)
+    # LM events are now top-level events
+    lm_event_types = [e.event_type.value for e in events if e.event_type.value.startswith("lm.")]
 
     # Should have LM message events (token streaming)
     has_lm_events = (
-        "lm.message.start" in agent_event_types or
-        "lm.message.delta" in agent_event_types or
-        "lm.message.stop" in agent_event_types
+        "lm.message.start" in lm_event_types or
+        "lm.message.delta" in lm_event_types or
+        "lm.message.stop" in lm_event_types
     )
 
     # Note: LM events should be present when agent streams
     if has_lm_events:
         # Verify delta events have content
-        agent_events = extract_agent_events(events)
-        delta_events = [e for e in agent_events if e["event_type"] == "lm.message.delta"]
+        delta_events = [e for e in events if e.event_type.value == "lm.message.delta"]
         for delta in delta_events:
-            assert "data" in delta
-            assert "content" in delta["data"], "LM delta should have content"
+            # Delta events should have data with content
+            assert delta.data is not None, "LM delta should have data"
 
 
 @pytest.mark.integration
@@ -447,12 +459,12 @@ def test_stream_events_lm_stream_lifecycle(client, worker_process):
         component_type="function",
     ))
 
-    # LM stream events are also nested
-    agent_event_types = get_agent_event_types(events)
+    # LM stream events are now top-level
+    lm_event_types = [e.event_type.value for e in events if e.event_type.value.startswith("lm.")]
 
     # Check for LM stream lifecycle events
-    has_stream_started = "lm.stream.started" in agent_event_types
-    has_stream_completed = "lm.stream.completed" in agent_event_types
+    has_stream_started = "lm.stream.started" in lm_event_types
+    has_stream_completed = "lm.stream.completed" in lm_event_types
 
     # If we have stream started, we should also have stream completed
     if has_stream_started:

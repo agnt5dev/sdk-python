@@ -330,3 +330,155 @@ def test_stream_after_error(client, worker_process):
     # Streaming should still work
     chunks = [decode_chunk(c) for c in client.stream("stream_counter", {"count": 3, "delay_ms": 10})]
     assert len(chunks) == 3
+
+
+# =============================================================================
+# LARGE PAYLOAD STREAMING (P1.4)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_large_payload(client, worker_process):
+    """Test streaming with large payload (~100KB).
+
+    Validates:
+    - Large payloads can be streamed
+    - No data loss or corruption during streaming
+    - All chunks are received and can be reconstructed
+    """
+    # Generate large text (~100KB)
+    large_text = "word " * 20_000  # ~100KB of text
+
+    chunks = [decode_chunk(c) for c in client.stream(
+        "stream_text",
+        {"text": large_text, "delay_ms": 1}
+    )]
+
+    # Should receive multiple chunks
+    assert len(chunks) >= 1, "Expected at least one chunk"
+
+    # Reconstruct and verify content
+    full_text = "".join(chunks)
+    assert len(full_text) > 0, "Reconstructed text should not be empty"
+    assert "word" in full_text, "Payload content was lost"
+
+
+@pytest.mark.integration
+def test_stream_many_json_chunks(client, worker_process):
+    """Test streaming many JSON chunks (P1.4).
+
+    Validates:
+    - 50 JSON chunks can be streamed
+    - Each chunk is valid JSON
+    - IDs are sequential
+    """
+    chunks = [decode_chunk(c) for c in client.stream("stream_json_chunks", {"items": 50})]
+
+    assert len(chunks) == 50
+
+    # Verify all chunks are valid and sequential
+    for i, chunk in enumerate(chunks):
+        if isinstance(chunk, str):
+            data = json.loads(chunk.strip())
+        else:
+            data = chunk
+        assert data["id"] == i + 1, f"Expected id {i + 1}, got {data['id']}"
+        assert "value" in data
+        assert "timestamp" in data
+
+
+# =============================================================================
+# STREAMING SEQUENCE VALIDATION (P2.2)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_stream_counter_sequence_order(client, worker_process):
+    """Test counter stream maintains strict sequence order.
+
+    Validates:
+    - Numbers arrive in ascending order
+    - No gaps in sequence
+    - No duplicates
+    """
+    chunks = [decode_chunk(c) for c in client.stream("stream_counter", {"count": 20, "delay_ms": 5})]
+
+    numbers = [int(c) for c in chunks]
+
+    # Should be exactly 1 to 20 in order
+    expected = list(range(1, 21))
+    assert numbers == expected, (
+        f"Sequence order violated. Expected {expected}, got {numbers}"
+    )
+
+    # Verify no duplicates
+    assert len(numbers) == len(set(numbers)), "Sequence contains duplicates"
+
+    # Verify strictly ascending
+    for i in range(1, len(numbers)):
+        assert numbers[i] > numbers[i - 1], (
+            f"Sequence not ascending at position {i}: {numbers[i-1]} -> {numbers[i]}"
+        )
+
+
+@pytest.mark.integration
+def test_stream_text_exact_reconstruction(client, worker_process):
+    """Test streamed text can be exactly reconstructed.
+
+    Validates:
+    - All words from input appear in output
+    - Word order is preserved
+    - No data loss during streaming
+    """
+    input_text = "one two three four five"
+    chunks = [decode_chunk(c) for c in client.stream(
+        "stream_text",
+        {"text": input_text, "delay_ms": 10}
+    )]
+
+    reconstructed = "".join(chunks)
+
+    # All words should be present
+    for word in input_text.split():
+        assert word in reconstructed, (
+            f"Word '{word}' missing from reconstructed text. Got: {reconstructed}"
+        )
+
+    # Order should be preserved (check word positions)
+    words = input_text.split()
+    positions = [reconstructed.find(word) for word in words]
+    assert positions == sorted(positions), (
+        f"Word order not preserved. Positions: {dict(zip(words, positions))}"
+    )
+
+
+@pytest.mark.integration
+def test_stream_partial_consumption_cleanup(client, worker_process):
+    """Test partial stream consumption cleans up properly.
+
+    Validates:
+    - Can stop consuming stream early
+    - Subsequent streams still work
+    - No resource leaks
+    """
+    # Partially consume first stream
+    first_chunks = []
+    for i, chunk in enumerate(client.stream("stream_counter", {"count": 100, "delay_ms": 5})):
+        first_chunks.append(decode_chunk(chunk))
+        if i >= 4:
+            break
+
+    assert len(first_chunks) >= 5, "Should have consumed at least 5 chunks"
+
+    # Second stream should work normally
+    second_chunks = [decode_chunk(c) for c in client.stream(
+        "stream_counter",
+        {"count": 10, "delay_ms": 5}
+    )]
+
+    assert len(second_chunks) == 10, (
+        f"Second stream incomplete after partial consumption. Got {len(second_chunks)} chunks"
+    )
+    assert [int(c) for c in second_chunks] == list(range(1, 11)), (
+        "Second stream data corrupted after partial consumption"
+    )

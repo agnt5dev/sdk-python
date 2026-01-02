@@ -2,15 +2,64 @@
 
 import json
 import os
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, Optional, TYPE_CHECKING
 from urllib.parse import urljoin
 
 import httpx
 
 from .events import Event, EventType
 
+if TYPE_CHECKING:
+    from .client import RunError
+
 # Environment variable for API key
 AGNT5_API_KEY_ENV = "AGNT5_API_KEY"
+
+
+def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = None) -> "RunError":
+    """Parse error response from platform and create RunError with structured fields.
+
+    Args:
+        error_data: Error response dict from platform (contains error, error_code, metadata, etc.)
+        run_id: Optional run ID if not in error_data
+
+    Returns:
+        RunError with structured fields populated from the response
+    """
+    # Import here to avoid circular import
+    from .client import RunError
+
+    message = error_data.get("error", "Unknown error")
+    run_id = error_data.get("runId") or run_id
+    error_code = error_data.get("error_code")
+
+    # Extract retry metadata if present
+    metadata = error_data.get("metadata")
+    attempts = None
+    max_attempts = None
+
+    if metadata:
+        if isinstance(metadata, dict):
+            attempts = metadata.get("attempts")
+            max_attempts = metadata.get("max_attempts")
+        elif isinstance(metadata, str):
+            # Parse JSON string metadata
+            try:
+                parsed = json.loads(metadata)
+                attempts = parsed.get("attempts")
+                max_attempts = parsed.get("max_attempts")
+                metadata = parsed
+            except (json.JSONDecodeError, TypeError):
+                metadata = {"raw": metadata}
+
+    return RunError(
+        message,
+        run_id=run_id,
+        error_code=error_code,
+        attempts=attempts,
+        max_attempts=max_attempts,
+        metadata=metadata if isinstance(metadata, dict) else None,
+    )
 
 
 def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> Event:
@@ -200,10 +249,7 @@ class Client:
         if response.status_code == 500:
             try:
                 error_data = response.json()
-                raise RunError(
-                    error_data.get("error", "Unknown error"),
-                    run_id=error_data.get("runId"),
-                )
+                raise _parse_error_response(error_data)
             except ValueError:
                 # JSON parsing failed, fall through to raise_for_status
                 response.raise_for_status()
@@ -216,10 +262,7 @@ class Client:
 
         # Check execution status
         if data.get("status") == "failed":
-            raise RunError(
-                data.get("error", "Unknown error"),
-                run_id=data.get("runId"),
-            )
+            raise _parse_error_response(data)
 
         # Return output
         return data.get("output", {})
@@ -359,10 +402,7 @@ class Client:
 
         # Check if run failed
         if data.get("status") == "failed":
-            raise RunError(
-                data.get("error", "Unknown error"),
-                run_id=run_id,
-            )
+            raise _parse_error_response(data, run_id=run_id)
 
         # Return output
         return data.get("output", {})
@@ -516,14 +556,13 @@ class Client:
                             if "content" in data:
                                 yield data["content"]
                             elif "output_data" in data:
-                                # output_data is base64 encoded - decode it
-                                import base64
-                                try:
-                                    decoded = base64.b64decode(data["output_data"]).decode("utf-8")
-                                    yield decoded
-                                except Exception:
-                                    # Fallback: yield as-is if base64 decode fails
-                                    yield data["output_data"]
+                                # output_data is proper JSON (string, number, object, etc.)
+                                output = data["output_data"]
+                                if isinstance(output, str):
+                                    yield output
+                                elif output is not None:
+                                    # For non-string types, yield JSON string representation
+                                    yield json.dumps(output)
                         # Also support legacy "chunk" format
                         elif "chunk" in data:
                             yield data["chunk"]
@@ -838,10 +877,7 @@ class EntityProxy:
             if response.status_code == 500:
                 try:
                     error_data = response.json()
-                    raise RunError(
-                        error_data.get("error", "Unknown error"),
-                        run_id=error_data.get("run_id"),
-                    )
+                    raise _parse_error_response(error_data)
                 except ValueError:
                     response.raise_for_status()
             else:
@@ -852,10 +888,7 @@ class EntityProxy:
 
             # Check execution status
             if data.get("status") == "failed":
-                raise RunError(
-                    data.get("error", "Unknown error"),
-                    run_id=data.get("run_id"),
-                )
+                raise _parse_error_response(data)
 
             # Return output
             return data.get("output")
@@ -1272,10 +1305,7 @@ class AsyncClient:
         if response.status_code in (500, 503, 504):
             try:
                 error_data = response.json()
-                raise RunError(
-                    error_data.get("error", "Unknown error"),
-                    run_id=error_data.get("runId"),
-                )
+                raise _parse_error_response(error_data)
             except ValueError:
                 response.raise_for_status()
         else:
@@ -1283,7 +1313,7 @@ class AsyncClient:
 
         data = response.json()
         if data.get("status") == "failed":
-            raise RunError(data.get("error", "Unknown error"), run_id=data.get("runId"))
+            raise _parse_error_response(data)
 
         return data.get("output", {})
 
@@ -1467,7 +1497,7 @@ class AsyncClient:
         data = response.json()
 
         if data.get("status") == "failed":
-            raise RunError(data.get("error", "Unknown error"), run_id=run_id)
+            raise _parse_error_response(data, run_id=run_id)
 
         return data.get("output", {})
 
@@ -1478,14 +1508,49 @@ class RunError(Exception):
     Attributes:
         message: Error message describing what went wrong
         run_id: The unique run ID associated with this execution (if available)
+        error_code: Structured error code (e.g., "EXECUTION_FAILED", "GRPC_ERROR")
+        attempts: Number of execution attempts made (1-indexed)
+        max_attempts: Maximum attempts configured for this component
+        metadata: Full metadata dict from platform response
     """
 
-    def __init__(self, message: str, run_id: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        run_id: Optional[str] = None,
+        error_code: Optional[str] = None,
+        attempts: Optional[int] = None,
+        max_attempts: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
-        self.run_id = run_id
         self.message = message
+        self.run_id = run_id
+        self.error_code = error_code
+        self.attempts = attempts
+        self.max_attempts = max_attempts
+        self.metadata = metadata or {}
+
+    @property
+    def was_retried(self) -> bool:
+        """Returns True if execution was retried at least once."""
+        return self.attempts is not None and self.attempts > 1
+
+    @property
+    def exhausted_retries(self) -> bool:
+        """Returns True if all retry attempts were exhausted."""
+        if self.attempts is None or self.max_attempts is None:
+            return False
+        return self.attempts >= self.max_attempts
 
     def __str__(self):
+        parts = [self.message]
         if self.run_id:
-            return f"{self.message} (run_id: {self.run_id})"
+            parts.append(f"run_id: {self.run_id}")
+        if self.attempts is not None and self.max_attempts is not None:
+            parts.append(f"attempts: {self.attempts}/{self.max_attempts}")
+        if self.error_code:
+            parts.append(f"error_code: {self.error_code}")
+        if len(parts) > 1:
+            return f"{parts[0]} ({', '.join(parts[1:])})"
         return self.message

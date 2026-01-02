@@ -141,3 +141,139 @@ def test_platform_mode_configuration(platform):
     print(f"   Journal: {journal_backend}")
     print(f"   Orchestration: {orchestration_backend}")
     print(f"   Database: {db_type}")
+
+
+# =============================================================================
+# HEALTH ENDPOINT SCHEMA VALIDATION (P1.6)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_health_liveness_schema(platform):
+    """
+    Test /livez endpoint returns correct schema.
+
+    Expected schema:
+    {
+        "status": "alive",
+        "service": "gateway",
+        "version": str,
+        "build_time": str,
+        "git_commit": str
+    }
+    """
+    gateway_url = platform["gateway_url"]
+
+    response = requests.get(f"{gateway_url}/livez", timeout=5)
+
+    assert response.status_code == 200, (
+        f"Expected 200 from /livez, got {response.status_code}"
+    )
+
+    data = response.json()
+
+    # Required fields
+    assert "status" in data, "Missing 'status' field in liveness response"
+    assert data["status"] == "alive", f"Expected status 'alive', got '{data['status']}'"
+    assert "service" in data, "Missing 'service' field in liveness response"
+    assert data["service"] == "gateway", f"Expected service 'gateway', got '{data['service']}'"
+
+    # Version info fields (should be present)
+    assert "version" in data, "Missing 'version' field in liveness response"
+    assert "build_time" in data, "Missing 'build_time' field in liveness response"
+    assert "git_commit" in data, "Missing 'git_commit' field in liveness response"
+
+    print(f"\n✅ Liveness endpoint schema correct")
+    print(f"   Status: {data['status']}")
+    print(f"   Service: {data['service']}")
+    print(f"   Version: {data['version']}")
+
+
+@pytest.mark.integration
+def test_health_readiness_schema(platform):
+    """
+    Test /readyz endpoint returns correct schema.
+
+    Expected schema:
+    {
+        "status": "healthy" | "unhealthy",
+        "service": "gateway",
+        "checks": {
+            "orchestration_db": {
+                "status": "healthy" | "unhealthy",
+                "error": str  // only if unhealthy
+            }
+        }
+    }
+    """
+    gateway_url = platform["gateway_url"]
+
+    response = requests.get(f"{gateway_url}/readyz", timeout=5)
+
+    assert response.status_code == 200, (
+        f"Expected 200 from /readyz, got {response.status_code}"
+    )
+
+    data = response.json()
+
+    # Required fields
+    assert "status" in data, "Missing 'status' field in readiness response"
+    assert data["status"] in ["healthy", "unhealthy"], (
+        f"Expected status 'healthy' or 'unhealthy', got '{data['status']}'"
+    )
+    assert "service" in data, "Missing 'service' field in readiness response"
+    assert data["service"] == "gateway", f"Expected service 'gateway', got '{data['service']}'"
+
+    # Checks field
+    assert "checks" in data, "Missing 'checks' field in readiness response"
+    assert isinstance(data["checks"], dict), (
+        f"Expected 'checks' to be a dict, got {type(data['checks'])}"
+    )
+
+    # orchestration_db check
+    assert "orchestration_db" in data["checks"], (
+        "Missing 'orchestration_db' in checks"
+    )
+    db_check = data["checks"]["orchestration_db"]
+    assert "status" in db_check, "Missing 'status' in orchestration_db check"
+    assert db_check["status"] in ["healthy", "unhealthy"], (
+        f"Expected DB status 'healthy' or 'unhealthy', got '{db_check['status']}'"
+    )
+
+    print(f"\n✅ Readiness endpoint schema correct")
+    print(f"   Status: {data['status']}")
+    print(f"   DB Check: {db_check['status']}")
+
+
+@pytest.mark.integration
+def test_health_db_connectivity(platform):
+    """
+    Test that orchestration database is healthy.
+
+    Verifies:
+    - /readyz returns overall healthy status
+    - checks.orchestration_db.status == "healthy"
+    """
+    gateway_url = platform["gateway_url"]
+
+    response = requests.get(f"{gateway_url}/readyz", timeout=5)
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify overall health
+    assert data["status"] == "healthy", (
+        f"Expected overall status 'healthy', got '{data['status']}'. "
+        f"Full response: {data}"
+    )
+
+    # Verify DB connectivity
+    db_check = data["checks"]["orchestration_db"]
+    assert db_check["status"] == "healthy", (
+        f"Expected orchestration_db status 'healthy', got '{db_check['status']}'. "
+        f"Error: {db_check.get('error', 'N/A')}"
+    )
+
+    print(f"\n✅ Database connectivity verified")
+    print(f"   Overall: {data['status']}")
+    print(f"   DB: {db_check['status']}")

@@ -16,7 +16,7 @@ Prerequisites:
 
 import asyncio
 
-from agnt5 import function, FunctionContext, lm
+from agnt5 import function, FunctionContext, lm, EventType
 
 
 # Default model for Anthropic functions
@@ -90,16 +90,23 @@ async def claude_stream(ctx: FunctionContext, prompt: str, model: str = DEFAULT_
     chunks = []
     chunk_count = 0
 
-    async for chunk in lm.stream(
+    # lm.stream() yields Event objects, extract text from LM_MESSAGE_DELTA events
+    # For delta events, event.data is the raw content string (not a dict)
+    async for event in lm.stream(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     ):
-        chunks.append(chunk)
         chunk_count += 1
-        ctx.logger.info(f"[claude_stream] chunk[{chunk_count}]: '{chunk}'")
+        if event.event_type == EventType.LM_MESSAGE_DELTA:
+            # event.data is the raw content string for delta events
+            content = event.data if isinstance(event.data, str) else ""
+            chunks.append(content)
+            ctx.logger.info(f"[claude_stream] chunk[{chunk_count}]: '{content}'")
+        else:
+            ctx.logger.info(f"[claude_stream] event[{chunk_count}]: {event.event_type.value}")
 
     result = "".join(chunks)
-    ctx.logger.info(f"[claude_stream] Response ({chunk_count} chunks): {result[:100]}...")
+    ctx.logger.info(f"[claude_stream] Response ({chunk_count} events, {len(chunks)} text chunks): {result[:100]}...")
 
     return {
         "prompt": prompt,

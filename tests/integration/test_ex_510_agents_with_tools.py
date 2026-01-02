@@ -40,7 +40,7 @@ def test_calculator_agent_simple(client, worker_process):
     """Test calculator agent with simple math."""
     result = client.run("calculator_agent", {
         "question": "What is 15 times 23?",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "345" in result["response"]
@@ -51,7 +51,7 @@ def test_calculator_agent_addition(client, worker_process):
     """Test calculator agent with addition."""
     result = client.run("calculator_agent", {
         "question": "What is 100 + 200 + 300?",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "600" in result["response"]
@@ -61,7 +61,7 @@ def test_calculator_agent_complex(client, worker_process):
     """Test calculator agent with multi-step calculation."""
     result = client.run("calculator_agent", {
         "question": "Calculate 10 * 5, then add 25",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert "75" in result["response"]
@@ -78,7 +78,7 @@ def test_weather_assistant_single_city(client, worker_process):
     """Test weather assistant for one city."""
     result = client.run("weather_assistant", {
         "query": "What's the weather in Tokyo?",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["tool_calls"] >= 1
@@ -91,7 +91,7 @@ def test_weather_assistant_comparison(client, worker_process):
     """Test weather assistant comparing cities."""
     result = client.run("weather_assistant", {
         "query": "Compare weather in New York and London",
-    })
+    }, component_type="workflow")
 
     assert "response" in result
     assert result["tool_calls"] >= 2  # Should call for both cities
@@ -158,9 +158,7 @@ def test_multi_tool_agent_multiple_tools(client, worker_process):
 # =============================================================================
 
 
-@pytest.mark.skip(
-    reason="Multi-agent research coordinator exceeds default 30s timeout - requires extended timeout configuration"
-)
+@pytest.mark.integration
 def test_research_coordinator_basic(client, worker_process):
     """Test research coordinator with simple topic."""
     result = client.run("research_coordinator", {
@@ -171,9 +169,7 @@ def test_research_coordinator_basic(client, worker_process):
     assert result["tool_calls"] >= 1  # Should invoke specialist agents
 
 
-@pytest.mark.skip(
-    reason="Multi-agent research coordinator exceeds default 30s timeout - requires extended timeout configuration"
-)
+@pytest.mark.integration
 def test_research_coordinator_analysis(client, worker_process):
     """Test research coordinator requiring analysis."""
     result = client.run("research_coordinator", {
@@ -223,8 +219,33 @@ def test_support_router_general(client, worker_process):
 
 
 # =============================================================================
-# TOOL BEHAVIOR
+# TOOL BEHAVIOR (P1.3 - Require tool_calls validation)
 # =============================================================================
+
+
+def test_calculator_agent_validates_tool_calls(client, worker_process):
+    """Test that calculator agent MUST use tools for math (P1.3).
+
+    This test validates that tool-using agents actually record their tool calls.
+    A calculator agent MUST use the calculate tool for math operations.
+    """
+    result = client.run("calculator_agent", {
+        "question": "What is 42 * 17?",  # Clear math question
+    })
+
+    # Response must exist
+    assert "response" in result
+    assert "714" in result["response"], (
+        f"Expected 714 (42*17) in response, got: {result['response']}"
+    )
+
+    # Tool calls MUST be present and non-zero
+    assert "tool_calls" in result, "Calculator agent must record tool_calls"
+    assert isinstance(result["tool_calls"], int), "tool_calls should be an integer count"
+    assert result["tool_calls"] >= 1, (
+        f"Calculator agent MUST use tools for math. "
+        f"Expected at least 1 tool call, got {result['tool_calls']}"
+    )
 
 
 def test_tool_returns_correct_format(client, worker_process):

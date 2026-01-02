@@ -40,6 +40,14 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ._schema_utils import detect_format_type
 from .context import get_current_context
+from .journal import (
+    LMCallStartedEvent,
+    LMCallCompletedEvent,
+    LMCallFailedEvent,
+    write_lm_call_started,
+    write_lm_call_completed,
+    write_lm_call_failed,
+)
 
 try:
     from ._core import LanguageModel as RustLanguageModel
@@ -396,7 +404,35 @@ class _LanguageModel(LanguageModel):
 
         Returns:
             GenerateResponse with text, usage, and optional tool calls
+
+        Note:
+            If memoization is enabled on the current context, this method will
+            check the journal for cached results before executing and cache
+            results after successful execution.
         """
+        # Check for memoization before expensive LLM call
+        current_ctx = get_current_context()
+        step_key = None
+        content_hash = None
+
+        if current_ctx and hasattr(current_ctx, '_memo') and current_ctx._memo:
+            # Generate step_key and content_hash for memoization
+            memo = current_ctx._memo
+            step_key, content_hash = memo.lm_call_key(
+                model=request.model,
+                messages=request.messages,
+                config={
+                    "temperature": request.config.temperature,
+                    "max_tokens": request.config.max_tokens,
+                }
+            )
+
+            # Check cache first - skip expensive LLM call if cached
+            cached = await memo.get_cached_lm_result(step_key, content_hash)
+            if cached:
+                logger.debug(f"LLM call {step_key} served from memoization cache")
+                return cached
+
         # Convert Python request to structured format for Rust
         prompt = self._build_prompt_messages(request)
 
@@ -477,20 +513,47 @@ class _LanguageModel(LanguageModel):
         import time
         workflow_ctx = get_workflow_context()
 
-        # Get trace context for event linkage
+        # Get trace context for event linkage using AGNT5's tracing system
         trace_id = None
         span_id = None
         try:
-            from opentelemetry import trace
-            span = trace.get_current_span()
-            if span.is_recording():
-                span_context = span.get_span_context()
-                trace_id = format(span_context.trace_id, '032x')
-                span_id = format(span_context.span_id, '016x')
-        except Exception:
-            pass  # Tracing not available, continue without
+            from .tracing import get_current_span_info
+            span_info = get_current_span_info()
+            if span_info:
+                trace_id = span_info.trace_id
+                span_id = span_info.span_id
+        except Exception as e:
+            import logging
+            logging.getLogger("agnt5.lm").warning(f"🔍 LM-DEBUG: Failed to get span info: {e}")
 
-        # Emit started event (trace_id is optional - emit even without tracing)
+        # Get run_id for journal events - use runtime_context.run_id (base invocation_id)
+        # NOT current_ctx.run_id which may have :agent:name suffix
+        run_id = None
+        if current_ctx and hasattr(current_ctx, '_runtime_context') and current_ctx._runtime_context:
+            run_id = current_ctx._runtime_context.run_id
+        tenant_id = None  # TODO: Get from context when available
+
+        # Track start time for latency calculation (nanoseconds for precision)
+        start_time_ns = time.time_ns()
+
+        # Write journal event for LLM observability (in addition to checkpoint for streaming)
+        if run_id and trace_id and span_id:
+            started_event = LMCallStartedEvent(
+                model=model,
+                provider=self._provider or "unknown",
+                temperature=request.config.temperature,
+                max_tokens=request.config.max_tokens,
+                tools_count=len(request.config.tools) if request.config.tools else 0,
+                timestamp_ns=start_time_ns,
+            )
+            await write_lm_call_started(
+                run_id=run_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                event=started_event,
+                tenant_id=tenant_id,
+            )
+        # Emit checkpoint for real-time streaming (separate from journal)
         if workflow_ctx:
             event_data = {
                 "model": model,
@@ -510,7 +573,36 @@ class _LanguageModel(LanguageModel):
             # Convert Rust response to Python
             response = self._convert_response(rust_response)
 
-            # Emit completion event with token usage and cost
+            # Calculate latency (in ms for human readability)
+            end_time_ns = time.time_ns()
+            latency_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+            # Write journal event for LLM observability
+            if run_id and trace_id and span_id:
+                input_tokens = response.usage.prompt_tokens if response.usage else 0
+                output_tokens = response.usage.completion_tokens if response.usage else 0
+                total_tokens = response.usage.total_tokens if response.usage else 0
+
+                completed_event = LMCallCompletedEvent(
+                    model=model,
+                    provider=self._provider or "unknown",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    latency_ms=latency_ms,
+                    finish_reason=response.finish_reason,
+                    tool_calls_count=len(response.tool_calls) if response.tool_calls else 0,
+                    timestamp_ns=end_time_ns,
+                )
+                await write_lm_call_completed(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    event=completed_event,
+                    tenant_id=tenant_id,
+                )
+
+            # Emit checkpoint for real-time streaming (separate from journal)
             if workflow_ctx:
                 event_data = {
                     "model": model,
@@ -529,9 +621,35 @@ class _LanguageModel(LanguageModel):
 
                 workflow_ctx._send_checkpoint("lm.call.completed", event_data)
 
+            # Cache result for replay if memoization is enabled
+            if current_ctx and current_ctx._memo and step_key:
+                await current_ctx._memo.cache_lm_result(step_key, content_hash, response)
+
             return response
         except Exception as e:
-            # Emit failed event
+            # Calculate latency for failed call (in ms for human readability)
+            end_time_ns = time.time_ns()
+            latency_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+            # Write journal event for LLM failure
+            if run_id and trace_id and span_id:
+                failed_event = LMCallFailedEvent(
+                    model=model,
+                    provider=self._provider or "unknown",
+                    error_code=type(e).__name__,
+                    error_message=str(e),
+                    latency_ms=latency_ms,
+                    timestamp_ns=end_time_ns,
+                )
+                await write_lm_call_failed(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    event=failed_event,
+                    tenant_id=tenant_id,
+                )
+
+            # Emit checkpoint for real-time streaming (separate from journal)
             if workflow_ctx:
                 event_data = {
                     "model": model,
@@ -575,6 +693,9 @@ class _LanguageModel(LanguageModel):
             ```
         """
         from .events import Event, EventType
+        from .context import get_current_context
+
+        current_ctx = get_current_context()
 
         # Convert Python request to structured format for Rust
         prompt = self._build_prompt_messages(request)
@@ -639,6 +760,46 @@ class _LanguageModel(LanguageModel):
         sequence = 0
         # Track block types by index since content_block_stop doesn't include block_type
         block_types: Dict[int, str] = {}
+
+        # Get trace context for journal events
+        trace_id = None
+        span_id = None
+        try:
+            from .tracing import get_current_span_info
+            span_info = get_current_span_info()
+            if span_info:
+                trace_id = span_info.trace_id
+                span_id = span_info.span_id
+        except Exception:
+            pass
+
+        # Get run_id for journal events - use runtime_context.run_id (base invocation_id)
+        # NOT current_ctx.run_id which may have :agent:name suffix
+        run_id = None
+        if current_ctx and hasattr(current_ctx, '_runtime_context') and current_ctx._runtime_context:
+            run_id = current_ctx._runtime_context.run_id
+        tenant_id = None
+
+        # Track timing (nanoseconds for precision)
+        start_time_ns = time.time_ns()
+
+        # Write lm.call.started journal event
+        if run_id and trace_id and span_id:
+            started_event = LMCallStartedEvent(
+                model=model,
+                provider=self._provider or "unknown",
+                temperature=request.config.temperature,
+                max_tokens=request.config.max_tokens,
+                tools_count=len(request.tools) if request.tools else 0,
+                timestamp_ns=start_time_ns,
+            )
+            await write_lm_call_started(
+                run_id=run_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                event=started_event,
+                tenant_id=tenant_id,
+            )
 
         try:
             # Use stream_iter for true async streaming - yields chunks as they arrive
@@ -718,7 +879,50 @@ class _LanguageModel(LanguageModel):
                     )
                     sequence += 1
 
+                    # Write lm.call.completed journal event
+                    if run_id and trace_id and span_id:
+                        end_time_ns = time.time_ns()
+                        latency_ms = (end_time_ns - start_time_ns) // 1_000_000
+                        completed_event = LMCallCompletedEvent(
+                            model=model,
+                            provider=self._provider or "unknown",
+                            input_tokens=chunk.usage.prompt_tokens if chunk.usage else 0,
+                            output_tokens=chunk.usage.completion_tokens if chunk.usage else 0,
+                            total_tokens=chunk.usage.total_tokens if chunk.usage else 0,
+                            latency_ms=latency_ms,
+                            finish_reason=chunk.finish_reason,
+                            tool_calls_count=0,  # TODO: track tool calls in streaming
+                            timestamp_ns=end_time_ns,
+                        )
+                        await write_lm_call_completed(
+                            run_id=run_id,
+                            trace_id=trace_id,
+                            span_id=span_id,
+                            event=completed_event,
+                            tenant_id=tenant_id,
+                        )
+
         except Exception as e:
+            # Write lm.call.failed journal event
+            if run_id and trace_id and span_id:
+                end_time_ns = time.time_ns()
+                latency_ms = (end_time_ns - start_time_ns) // 1_000_000
+                failed_event = LMCallFailedEvent(
+                    model=model,
+                    provider=self._provider or "unknown",
+                    error_code=type(e).__name__,
+                    error_message=str(e),
+                    latency_ms=latency_ms,
+                    timestamp_ns=end_time_ns,
+                )
+                await write_lm_call_failed(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    event=failed_event,
+                    tenant_id=tenant_id,
+                )
+
             # Emit error as a failed event (caller can handle)
             yield Event(
                 event_type=EventType.LM_STREAM_FAILED,
