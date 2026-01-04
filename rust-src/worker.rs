@@ -4,7 +4,7 @@ use agnt5_sdk_core::pb::{
     runtime_message, ComponentInfo, ComponentType, DispatchComponentResponse, RuntimeMessage,
     ServiceMessage,
 };
-use agnt5_sdk_core::span_export_queue::{LogExportQueue, SpanExportQueue};
+use agnt5_sdk_core::journal_queue::JournalEventQueue;
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
 use pyo3::prelude::*;
@@ -20,29 +20,18 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 // Removed baggage import - using span inheritance instead
 use std::collections::HashMap;
 
-// Global span and log export queues for cross-thread access from PySpan.__exit__
-// These are set when the Worker is initialized and used by FFI code to push export requests
-static SPAN_EXPORT_QUEUE: OnceLock<SpanExportQueue> = OnceLock::new();
-static LOG_EXPORT_QUEUE: OnceLock<LogExportQueue> = OnceLock::new();
+// Global unified journal event queue for cross-thread access
+// This replaces the separate span and log export queues
+static JOURNAL_QUEUE: OnceLock<JournalEventQueue> = OnceLock::new();
 
-/// Set the global span export queue (called from Worker initialization)
-pub fn set_span_export_queue(queue: SpanExportQueue) {
-    let _ = SPAN_EXPORT_QUEUE.set(queue);
+/// Set the global journal event queue (called from Worker initialization)
+pub fn set_journal_queue(queue: JournalEventQueue) {
+    let _ = JOURNAL_QUEUE.set(queue);
 }
 
-/// Set the global log export queue (called from Worker initialization)
-pub fn set_log_export_queue(queue: LogExportQueue) {
-    let _ = LOG_EXPORT_QUEUE.set(queue);
-}
-
-/// Get the global span export queue (called from PySpan.__exit__)
-pub fn get_span_export_queue() -> Option<&'static SpanExportQueue> {
-    SPAN_EXPORT_QUEUE.get()
-}
-
-/// Get the global log export queue (called from log_from_python)
-pub fn get_log_export_queue() -> Option<&'static LogExportQueue> {
-    LOG_EXPORT_QUEUE.get()
+/// Get the global journal event queue (called from emit functions)
+pub fn get_journal_queue() -> Option<&'static JournalEventQueue> {
+    JOURNAL_QUEUE.get()
 }
 
 #[pyclass]
@@ -194,66 +183,13 @@ impl PyWorker {
         Ok(())
     }
 
-    /// Queue a workflow checkpoint for progressive durability
-    ///
-    /// This method is called from Python during workflow execution to send
-    /// checkpoints (state changes, step completions) to the platform in real-time.
-    ///
-    /// # Arguments
-    /// * `invocation_id` - Workflow run ID
-    /// * `checkpoint_type` - Event type ("workflow.state.changed", etc.)
-    /// * `checkpoint_data` - JSON payload as string
-    /// * `sequence_number` - Monotonic sequence for ordering
-    /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
-    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created (for correct logical ordering)
-    fn queue_workflow_checkpoint(
-        &self,
-        invocation_id: String,
-        checkpoint_type: String,
-        checkpoint_data: String,
-        sequence_number: i64,
-        metadata: HashMap<String, String>,
-        source_timestamp_ns: i64,
-    ) -> PyResult<()> {
-        // Convert checkpoint_data string to bytes
-        let data_bytes = checkpoint_data.into_bytes();
-
-        // Access worker and queue checkpoint
-        let worker_guard = self.worker.lock().map_err(|e| {
-            let err_msg = format!("Failed to lock worker: {}", e);
-            log::error!("{}", err_msg);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
-        })?;
-
-        if let Some(ref worker) = *worker_guard {
-            worker.queue_checkpoint(
-                invocation_id,
-                checkpoint_type,
-                data_bytes,
-                sequence_number,
-                metadata,
-                source_timestamp_ns,
-            ).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("Failed to queue checkpoint: {}", e)
-                )
-            })?;
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Worker not initialized"
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Flush all buffered workflow checkpoints by waiting for background task
+    /// Flush all buffered journal events by waiting for background task
     ///
     /// This method waits 200ms for the background flush task (100ms interval)
-    /// to send all queued checkpoints. This ensures checkpoints arrive at the
+    /// to send all queued events. This ensures events arrive at the
     /// platform BEFORE the workflow completion response is sent.
     ///
-    /// Returns the number of checkpoints that were initially queued.
+    /// Returns the number of events that were initially queued.
     fn flush_workflow_checkpoints(&self, py: Python) -> PyResult<usize> {
         let worker_guard = self.worker.lock().map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -266,19 +202,19 @@ impl PyWorker {
         })?;
 
         // Get initial queue size
-        let (initial_queued, _, _, _) = worker.checkpoint_metrics();
+        let (initial_queued, _, _, _) = worker.journal_metrics();
 
         if initial_queued == 0 {
-            return Ok(0); // No checkpoints to flush
+            return Ok(0); // No events to flush
         }
 
-        log::debug!("Waiting 200ms to flush {} queued checkpoints before response", initial_queued);
+        log::debug!("Waiting 200ms to flush {} queued events before response", initial_queued);
 
         // Release the lock while waiting
         drop(worker_guard);
 
-        // Simple approach: Wait 200ms (2x flush interval) to ensure checkpoints are sent
-        // The background flush task runs every 100ms, so 200ms guarantees at least 2 flushes
+        // Simple approach: Wait 200ms (2x flush interval) to ensure events are sent
+        // The background flush task runs every 50ms, so 200ms guarantees at least 4 flushes
         py.detach(|| {
             std::thread::sleep(std::time::Duration::from_millis(200));
         });
@@ -287,9 +223,9 @@ impl PyWorker {
         let worker_guard = self.worker.lock().ok();
         if let Some(worker_guard) = worker_guard {
             if let Some(ref worker) = *worker_guard {
-                let (queued, sent, _, _) = worker.checkpoint_metrics();
+                let (queued, sent, _, _) = worker.journal_metrics();
                 log::debug!(
-                    "Checkpoint flush complete: {} still queued, {} sent total",
+                    "Journal flush complete: {} still queued, {} sent total",
                     queued,
                     sent
                 );
@@ -314,6 +250,9 @@ impl PyWorker {
     /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
     /// * `source_timestamp_ns` - Nanosecond timestamp when event was created
     /// * `is_streaming` - If true, use immediate delivery; otherwise buffered
+    /// * `correlation_id` - Optional ID for pairing started/completed events
+    /// * `parent_event_id` - Optional parent event ID for hierarchy
+    #[pyo3(signature = (invocation_id, event_type, event_data, content_index, sequence, metadata, source_timestamp_ns, is_streaming, correlation_id=None, parent_event_id=None))]
     fn queue_event(
         &self,
         invocation_id: String,
@@ -324,8 +263,12 @@ impl PyWorker {
         metadata: HashMap<String, String>,
         source_timestamp_ns: i64,
         is_streaming: bool,
+        correlation_id: Option<String>,
+        parent_event_id: Option<String>,
     ) -> PyResult<()> {
         let data_bytes = event_data.into_bytes();
+        let correlation_id_str = correlation_id.unwrap_or_default();
+        let parent_event_id_str = parent_event_id.unwrap_or_default();
 
         let worker_guard = self.worker.lock().map_err(|e| {
             let err_msg = format!("Failed to lock worker: {}", e);
@@ -344,6 +287,8 @@ impl PyWorker {
                     sequence,
                     metadata,
                     source_timestamp_ns,
+                    correlation_id_str,
+                    parent_event_id_str,
                 ).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         format!("Failed to queue event (streaming): {}", e)
@@ -358,69 +303,14 @@ impl PyWorker {
                     sequence,
                     metadata,
                     source_timestamp_ns,
+                    correlation_id_str,
+                    parent_event_id_str,
                 ).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         format!("Failed to queue event (buffered): {}", e)
                     )
                 })?;
             }
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Worker not initialized"
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Queue a streaming delta for immediate delivery to the coordinator
-    ///
-    /// This method enables real-time streaming by queuing deltas as soon as they
-    /// are yielded from Python async generators, instead of collecting them into
-    /// a list first. A background flush task sends them via gRPC every 10ms.
-    ///
-    /// # Arguments
-    /// * `invocation_id` - Run ID for this invocation
-    /// * `event_type` - Event type ("output.start", "output.delta", "output.stop", etc.)
-    /// * `output_data` - JSON payload as string
-    /// * `content_index` - Index for parallel content blocks
-    /// * `sequence` - Monotonic sequence number for ordering
-    /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
-    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created at SDK
-    fn queue_delta(
-        &self,
-        invocation_id: String,
-        event_type: String,
-        output_data: String,
-        content_index: i32,
-        sequence: i64,
-        metadata: HashMap<String, String>,
-        source_timestamp_ns: i64,
-    ) -> PyResult<()> {
-        // Convert output_data string to bytes
-        let data_bytes = output_data.into_bytes();
-
-        // Access worker and queue delta
-        let worker_guard = self.worker.lock().map_err(|e| {
-            let err_msg = format!("Failed to lock worker: {}", e);
-            log::error!("{}", err_msg);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err_msg)
-        })?;
-
-        if let Some(ref worker) = *worker_guard {
-            worker.queue_delta(
-                invocation_id,
-                event_type,
-                data_bytes,
-                content_index,
-                sequence,
-                metadata,
-                source_timestamp_ns,
-            ).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("Failed to queue delta: {}", e)
-                )
-            })?;
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Worker not initialized"
@@ -492,11 +382,10 @@ impl PyWorker {
 
         let worker = Worker::new(worker_config, components, metadata);
 
-        // Set global export queues for cross-thread access from PySpan.__exit__ and log_from_python
-        // These are used by FFI code to queue span and log exports for background flushing
-        set_span_export_queue(worker.span_export_queue());
-        set_log_export_queue(worker.log_export_queue());
-        log::info!("Global span and log export queues configured for real-time streaming");
+        // Set global unified journal queue for cross-thread access from emit functions
+        // This replaces separate span and log export queues with a single unified queue
+        set_journal_queue(worker.journal_queue());
+        log::info!("Global unified journal event queue configured for real-time streaming");
 
         let mut worker_guard = self.worker.lock().map_err(|e| {
             let err_msg = format!("Failed to lock worker: {}", e);
@@ -1103,76 +992,16 @@ impl PyWorker {
                     },
                 )?;
 
-                // Export span to journal for real-time SSE streaming (if is_streaming)
-                // This must happen BEFORE the span is dropped
-                if is_streaming_request {
-                    // Get span context for trace_id and span_id
-                    let span = cx.span();
-                    let span_context = span.span_context();
-                    let trace_id = span_context.trace_id().to_string();
-                    let span_id = span_context.span_id().to_string();
+                // Note: Span export to journal has been removed.
+                // Spans are no longer persisted. Trace correlation is done via runs.trace_id lookup.
+                // This simplifies the architecture and removes unnecessary data from journal_events.
 
-                    // Get current time as end time
-                    let end_time_unix_nano = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as i64)
-                        .unwrap_or(0);
-
-                    // Determine status from result
-                    let (status_code, status_description): (&str, Option<String>) = if let Some(ref msg) = result {
-                        if let Some(agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(ref resp)) = msg.message_type {
-                            if resp.success {
-                                ("ok", None)
-                            } else {
-                                // error_message is a String (protobuf optional string becomes String with empty default)
-                                let err_msg = if resp.error_message.is_empty() { None } else { Some(resp.error_message.clone()) };
-                                ("error", err_msg)
-                            }
-                        } else {
-                            ("ok", None)
-                        }
-                    } else {
-                        ("ok", None) // Streaming case handled separately
-                    };
-
-                    // Create journal span data
-                    let span_data = agnt5_sdk_core::create_journal_span_data(
-                        &trace_id,
-                        &span_id,
-                        parent_span_id_for_journal.as_deref(),
-                        &component_name,
-                        "server", // span kind
-                        execution_start_nano,
-                        end_time_unix_nano,
-                        status_code,
-                        status_description.as_deref(),
-                        None, // TODO: attributes
-                    );
-
-                    // Export component execution span to journal for SSE streaming
-                    // Use timeout to prevent blocking indefinitely on network issues
-                    // Best-effort: if export fails or times out, log warning and continue
-                    let export_result = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        agnt5_sdk_core::export_span_to_journal(
-                            &invocation_id,
-                            &span_data,
-                            tenant_id_for_journal.as_deref(),
-                        )
-                    ).await;
-
-                    match export_result {
-                        Ok(Ok(())) => {
-                            tracing::debug!("🔍 STREAM-DEBUG: Exported component span to journal");
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!("🔍 STREAM-DEBUG: Failed to export span to journal: {}", e);
-                        }
-                        Err(_) => {
-                            tracing::warn!("🔍 STREAM-DEBUG: Span export timed out after 100ms");
-                        }
-                    }
-                }
+                // Suppress unused variable warnings for fields that were used for span export
+                let _ = is_streaming_request;
+                let _ = tenant_id_for_journal;
+                let _ = execution_start_nano;
+                let _ = parent_span_id_for_journal;
+                let _ = component_name;
 
                 // Span will be automatically ended when _span_guard is dropped
                 // This ensures proper span lifecycle management

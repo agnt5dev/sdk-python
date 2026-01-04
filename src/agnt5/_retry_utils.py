@@ -139,6 +139,7 @@ async def execute_with_retry(
                 retry_policy=retry_policy,
                 is_streaming=getattr(ctx, '_is_streaming', False),
                 tenant_id=getattr(ctx, '_tenant_id', None),
+                worker=getattr(ctx, '_worker', None),
             )
 
             # Execute handler (pass context only if needed)

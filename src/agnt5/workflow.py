@@ -55,11 +55,11 @@ class WorkflowContext(Context):
         user_id: Optional[str] = None,
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
-        checkpoint_callback: Optional[Callable[[dict], None]] = None,
         checkpoint_client: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
-        delta_callback: Optional[Callable[[str, str, int, int, int], None]] = None,
+        deployment_id: Optional[str] = None,
+        worker: Optional[Any] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -71,12 +71,11 @@ class WorkflowContext(Context):
             user_id: User identifier for user-scoped memory (optional)
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
-            checkpoint_callback: Optional callback for sending real-time checkpoints
             checkpoint_client: Optional CheckpointClient for platform-side memoization
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant identifier for multi-tenant deployments
-            delta_callback: Optional callback for forwarding streaming events from nested components
-                           (event_type, output_data, content_index, sequence, source_timestamp_ns) -> None
+            deployment_id: Deployment identifier for tracking deployments
+            worker: PyWorker instance for event queueing
         """
         super().__init__(
             run_id=run_id,
@@ -84,8 +83,8 @@ class WorkflowContext(Context):
             runtime_context=runtime_context,
             is_streaming=is_streaming,
             tenant_id=tenant_id,
-            checkpoint_callback=checkpoint_callback,
-            delta_callback=delta_callback,
+            deployment_id=deployment_id,
+            worker=worker,
         )
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
@@ -108,7 +107,7 @@ class WorkflowContext(Context):
         Forward a streaming delta event from a nested component.
 
         Used by step executors to forward events from streaming agents/functions
-        to the client via the delta queue.
+        to the client via the unified event queue.
 
         Args:
             event_type: Event type (e.g., "agent.started", "lm.message.delta")
@@ -116,9 +115,21 @@ class WorkflowContext(Context):
             content_index: Content index for parallel events (default: 0)
             source_timestamp_ns: Nanosecond timestamp when event was created (default: 0, will be generated if not provided)
         """
-        if self._delta_callback:
-            self._delta_callback(event_type, output_data, content_index, self._delta_sequence, source_timestamp_ns)
-            self._delta_sequence += 1
+        import json
+        try:
+            # Parse output_data if it's a JSON string
+            data = json.loads(output_data) if isinstance(output_data, str) else output_data
+        except json.JSONDecodeError:
+            data = {"raw": output_data}
+
+        # Use the unified EventEmitter to emit the event
+        self.emit.emit(
+            event_type,
+            data,
+            content_index=content_index,
+            source_timestamp_ns=source_timestamp_ns if source_timestamp_ns > 0 else None,
+        )
+        self._delta_sequence += 1
 
     async def _consume_streaming_result(self, async_gen: Any, step_name: str) -> Any:
         """
@@ -199,32 +210,6 @@ class WorkflowContext(Context):
             # Empty generator
             return None
 
-    def _send_checkpoint(self, checkpoint_type: str, checkpoint_data: dict) -> None:
-        """
-        Send a checkpoint via the unified event emission API.
-
-        This method uses ctx.emit for consistent event routing:
-        - Streaming mode: immediate delivery via delta queue
-        - Non-streaming mode: buffered delivery via checkpoint queue
-
-        Automatically adds parent_event_id from the step event stack if we're
-        currently executing inside a nested step call.
-
-        Args:
-            checkpoint_type: Type of checkpoint (e.g., "workflow.state.changed")
-            checkpoint_data: Checkpoint payload (should include event_id if needed)
-        """
-        # Add parent_event_id if we're in a nested step
-        if self._step_event_stack:
-            checkpoint_data = {
-                **checkpoint_data,
-                "parent_event_id": self._step_event_stack[-1],
-            }
-
-        # Use unified emit API for consistent event routing
-        # The emit property handles streaming vs non-streaming routing
-        self.emit.emit(checkpoint_type, checkpoint_data)
-
     @property
     def state(self):
         """
@@ -239,8 +224,8 @@ class WorkflowContext(Context):
         """
         state = self._workflow_entity.state
         # Pass checkpoint callback to state for real-time streaming
-        if hasattr(state, "_set_checkpoint_callback"):
-            state._set_checkpoint_callback(self._send_checkpoint)
+        if hasattr(state, "_set_emitter"):
+            state._set_emitter(self.emit)
         return state
 
     # === Orchestration ===
@@ -394,8 +379,11 @@ class WorkflowContext(Context):
             self._logger.info(f"🔄 Replaying cached step: {step_name}")
             return result
 
+        # Use step_event_id as correlation_id for pairing started ↔ completed
+        step_correlation_id = f"step-{step_event_id[:12]}"
+
         # Emit workflow.step.started checkpoint
-        self._send_checkpoint(
+        self.emit(
             "workflow.step.started",
             {
                 "step_name": step_name,
@@ -403,6 +391,9 @@ class WorkflowContext(Context):
                 "input": args or kwargs,
                 "event_id": step_event_id,  # Include for hierarchy tracking
             },
+            metadata={"name": step_name},
+            correlation_id=step_correlation_id,
+            parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
         )
 
         # Push this step's event_id onto the stack for nested calls
@@ -437,6 +428,7 @@ class WorkflowContext(Context):
             func_ctx = FunctionContext(
                 run_id=f"{self.run_id}:task:{handler_name}",
                 runtime_context=self._runtime_context,
+                worker=self._worker,
             )
 
             try:
@@ -481,7 +473,7 @@ class WorkflowContext(Context):
                         )
 
                 # Emit workflow.step.completed checkpoint
-                self._send_checkpoint(
+                self.emit(
                     "workflow.step.completed",
                     {
                         "step_name": step_name,
@@ -490,6 +482,9 @@ class WorkflowContext(Context):
                         "result": result,
                         "event_id": step_event_id,  # Include for consistency
                     },
+                    metadata={"name": step_name},
+                    correlation_id=step_correlation_id,
+                    parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
                 )
 
                 return result
@@ -504,7 +499,7 @@ class WorkflowContext(Context):
                         )
 
                 # Emit workflow.step.failed checkpoint
-                self._send_checkpoint(
+                self.emit(
                     "workflow.step.failed",
                     {
                         "step_name": step_name,
@@ -514,6 +509,9 @@ class WorkflowContext(Context):
                         "error_type": type(e).__name__,
                         "event_id": step_event_id,  # Include for consistency
                     },
+                    metadata={"name": step_name},
+                    correlation_id=step_correlation_id,
+                    parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
                 )
 
                 # Record error in span
@@ -636,6 +634,8 @@ class WorkflowContext(Context):
 
         # Generate unique event_id for this step (for hierarchy tracking)
         step_event_id = str(uuid.uuid4())
+        # Use step_event_id as correlation_id for pairing started ↔ completed
+        step_correlation_id = f"step-{step_event_id[:12]}"
 
         # Check platform-side memoization first (Phase 3)
         if self._checkpoint_client:
@@ -663,13 +663,16 @@ class WorkflowContext(Context):
             return result
 
         # Emit workflow.step.started checkpoint for observability
-        self._send_checkpoint(
+        self.emit(
             "workflow.step.started",
             {
                 "step_name": name,
                 "handler_name": "checkpoint",
                 "event_id": step_event_id,  # Include for hierarchy tracking
             },
+            metadata={"name": name},
+            correlation_id=step_correlation_id,
+            parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
         )
 
         # Push this step's event_id onto the stack for nested calls
@@ -725,7 +728,7 @@ class WorkflowContext(Context):
                     )
 
             # Emit workflow.step.completed checkpoint to journal for crash recovery
-            self._send_checkpoint(
+            self.emit(
                 "workflow.step.completed",
                 {
                     "step_name": name,
@@ -733,6 +736,9 @@ class WorkflowContext(Context):
                     "result": result,
                     "event_id": step_event_id,  # Include for consistency
                 },
+                metadata={"name": name},
+                correlation_id=step_correlation_id,
+                parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
             )
 
             self._logger.info(f"✅ Checkpoint completed: {name} ({latency_ms}ms)")
@@ -762,7 +768,7 @@ class WorkflowContext(Context):
                     self._logger.warning(f"Failed to record step failure to platform: {cp_err}")
 
             # Emit workflow.step.failed checkpoint
-            self._send_checkpoint(
+            self.emit(
                 "workflow.step.failed",
                 {
                     "step_name": name,
@@ -771,6 +777,9 @@ class WorkflowContext(Context):
                     "error_type": type(e).__name__,
                     "event_id": step_event_id,  # Include for consistency
                 },
+                metadata={"name": name},
+                correlation_id=step_correlation_id,
+                parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
             )
             raise
 
@@ -834,7 +843,9 @@ class WorkflowContext(Context):
 
         # Emit checkpoint for observability
         step_event_id = str(uuid.uuid4())
-        self._send_checkpoint(
+        # Use step_event_id as correlation_id for pairing started ↔ completed
+        step_correlation_id = f"step-{step_event_id[:12]}"
+        self.emit(
             "workflow.step.started",
             {
                 "step_name": sleep_name,
@@ -842,13 +853,16 @@ class WorkflowContext(Context):
                 "duration_seconds": seconds,
                 "event_id": step_event_id,
             },
+            metadata={"name": sleep_name},
+            correlation_id=step_correlation_id,
+            parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
         )
 
         self._logger.info(f"💤 Starting durable sleep '{sleep_name}': {seconds}s")
         await asyncio.sleep(seconds)
 
         # Emit completion checkpoint
-        self._send_checkpoint(
+        self.emit(
             "workflow.step.completed",
             {
                 "step_name": sleep_name,
@@ -856,6 +870,9 @@ class WorkflowContext(Context):
                 "duration_seconds": seconds,
                 "event_id": step_event_id,
             },
+            metadata={"name": sleep_name},
+            correlation_id=step_correlation_id,
+            parent_event_id=self._step_event_stack[-1] if self._step_event_stack else None,
         )
         self._logger.info(f"⏰ Sleep '{sleep_name}' completed")
 
@@ -1310,16 +1327,16 @@ class WorkflowState(EntityState):
         """
         super().__init__(state_dict)
         self._workflow_entity = workflow_entity
-        self._checkpoint_callback: Optional[Callable[[str, dict], None]] = None
+        self._emitter: Optional[Any] = None  # EventEmitter for state change events
 
-    def _set_checkpoint_callback(self, callback: Callable[[str, dict], None]) -> None:
+    def _set_emitter(self, emitter: Any) -> None:
         """
-        Set the checkpoint callback for real-time state change streaming.
+        Set the event emitter for real-time state change streaming.
 
         Args:
-            callback: Function to call when state changes
+            emitter: EventEmitter instance for emitting state change events
         """
-        self._checkpoint_callback = callback
+        self._emitter = emitter
 
     def set(self, key: str, value: Any) -> None:
         """Set value and track change."""
@@ -1330,9 +1347,9 @@ class WorkflowState(EntityState):
         change_record = {"key": key, "value": value, "timestamp": time.time(), "deleted": False}
         self._workflow_entity._state_changes.append(change_record)
 
-        # Emit checkpoint for real-time state streaming
-        if self._checkpoint_callback:
-            self._checkpoint_callback(
+        # Emit event for real-time state streaming
+        if self._emitter:
+            self._emitter.emit(
                 "workflow.state.changed", {"key": key, "value": value, "operation": "set"}
             )
 
@@ -1345,9 +1362,9 @@ class WorkflowState(EntityState):
         change_record = {"key": key, "value": None, "timestamp": time.time(), "deleted": True}
         self._workflow_entity._state_changes.append(change_record)
 
-        # Emit checkpoint for real-time state streaming
-        if self._checkpoint_callback:
-            self._checkpoint_callback("workflow.state.changed", {"key": key, "operation": "delete"})
+        # Emit event for real-time state streaming
+        if self._emitter:
+            self._emitter.emit("workflow.state.changed", {"key": key, "operation": "delete"})
 
     def clear(self) -> None:
         """Clear all state and track change."""
@@ -1363,9 +1380,9 @@ class WorkflowState(EntityState):
         }
         self._workflow_entity._state_changes.append(change_record)
 
-        # Emit checkpoint for real-time state streaming
-        if self._checkpoint_callback:
-            self._checkpoint_callback("workflow.state.changed", {"operation": "clear"})
+        # Emit event for real-time state streaming
+        if self._emitter:
+            self._emitter.emit("workflow.state.changed", {"operation": "clear"})
 
     def has_changes(self) -> bool:
         """Check if any state changes have been tracked."""

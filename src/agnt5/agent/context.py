@@ -58,6 +58,7 @@ class AgentContext(Context):
         runtime_context: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
+        worker: Optional[Any] = None,
     ):
         """
         Initialize agent context.
@@ -72,12 +73,15 @@ class AgentContext(Context):
             runtime_context: RuntimeContext for trace correlation
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant identifier for multi-tenant deployments
+            worker: PyWorker instance for event queueing
         """
-        # Inherit is_streaming and tenant_id from parent context if not explicitly provided
+        # Inherit is_streaming, tenant_id, and worker from parent context if not explicitly provided
         if parent_context and not is_streaming:
             is_streaming = getattr(parent_context, '_is_streaming', False)
         if parent_context and not tenant_id:
             tenant_id = getattr(parent_context, '_tenant_id', None)
+        if parent_context and not worker:
+            worker = getattr(parent_context, '_worker', None)
 
         # Initialize parent Context with memoization enabled by default for agents
         # This ensures LLM and tool calls are automatically journaled for replay
@@ -89,6 +93,7 @@ class AgentContext(Context):
             tenant_id=tenant_id,
             session_id=session_id,
             enable_memoization=True,  # Agents get memoization by default
+            worker=worker,
         )
 
         self._agent_name = agent_name

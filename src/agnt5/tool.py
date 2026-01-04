@@ -11,6 +11,7 @@ import functools
 import inspect
 import json
 import logging
+import uuid as _uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_args, get_origin
 
 from docstring_parser import parse as parse_docstring
@@ -293,15 +294,17 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
             )
 
-        # Emit checkpoint if called within a workflow context
-        from .context import get_workflow_context
+        # Emit tool event from any context (not just workflow)
+        from .context import get_current_context
 
-        workflow_ctx = get_workflow_context()
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("tool.invoked", {
+        context = get_current_context()
+        # Generate correlation_id for pairing tool.invoked ↔ tool.completed/failed
+        tool_correlation_id = f"tool-{_uuid.uuid4().hex[:12]}"
+        if context:
+            context.emit("tool.invoked", {
                 "tool.name": self.name,
                 "tool.args": list(kwargs.keys()),
-            })
+            }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -332,12 +335,12 @@ class Tool:
 
                     logger.debug(f"Tool '{self.name}' completed successfully")
 
-                    # Emit completion checkpoint
-                    if workflow_ctx:
-                        workflow_ctx._send_checkpoint("tool.completed", {
+                    # Emit completion event
+                    if context:
+                        context.emit("tool.completed", {
                             "tool.name": self.name,
                             "tool.success": True,
-                        })
+                        }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
 
                     # Cache result for replay if memoization is enabled
                     if memo and step_key:
@@ -345,13 +348,13 @@ class Tool:
 
                     return result
             except Exception as e:
-                # Emit error checkpoint for observability
-                if workflow_ctx:
-                    workflow_ctx._send_checkpoint("tool.failed", {
+                # Emit error event for observability
+                if context:
+                    context.emit("tool.failed", {
                         "tool.name": self.name,
                         "error": str(e),
                         "error_type": type(e).__name__,
-                    })
+                    }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
                 raise
         finally:
             # Always reset context to prevent leakage

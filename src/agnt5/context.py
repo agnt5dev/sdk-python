@@ -11,7 +11,6 @@ from .emit import EventEmitter, JournalEvent
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
-    from .emit import CheckpointCallback, DeltaCallback
 
 T = TypeVar("T")
 
@@ -79,8 +78,7 @@ class Context:
         deployment_id: Optional[str] = None,
         session_id: Optional[str] = None,
         enable_memoization: bool = False,
-        checkpoint_callback: Optional["CheckpointCallback"] = None,
-        delta_callback: Optional["DeltaCallback"] = None,
+        worker: Optional[Any] = None,
     ) -> None:
         """
         Initialize base context.
@@ -94,8 +92,7 @@ class Context:
             deployment_id: Deployment ID for tracking deployments
             session_id: Session ID for multi-turn conversations (optional)
             enable_memoization: Whether to enable LLM/tool call memoization
-            checkpoint_callback: Callback for buffered event delivery
-            delta_callback: Callback for streaming event delivery
+            worker: PyWorker instance for event queueing
         """
         self._run_id = run_id
         self._attempt = attempt
@@ -104,8 +101,7 @@ class Context:
         self._tenant_id = tenant_id
         self._deployment_id = deployment_id
         self._session_id = session_id
-        self._checkpoint_callback = checkpoint_callback
-        self._delta_callback = delta_callback
+        self._worker = worker
 
         # Lazily initialized event emitter
         self._emitter: Optional[EventEmitter] = None
@@ -169,13 +165,7 @@ class Context:
 
         Provides a consistent way to emit events throughout the SDK.
         Events are automatically timestamped with nanosecond precision
-        and routed to the appropriate delivery mechanism.
-
-        Streaming mode (is_streaming=True):
-            Events are delivered immediately via the delta queue.
-
-        Non-streaming mode (is_streaming=False):
-            Events are buffered and delivered via the checkpoint queue.
+        and routed through the unified JournalEventQueue.
 
         Example:
             # Emit workflow events
@@ -191,12 +181,37 @@ class Context:
             EventEmitter instance for emitting events
         """
         if self._emitter is None:
+            # Build metadata from tenant/deployment IDs
+            # Only include values that are actually set (not None, not empty, not placeholder UUIDs)
+            # In standalone mode, these will be None and won't be included
+            metadata: Dict[str, str] = {}
+            if self._tenant_id and not self._is_placeholder_id(self._tenant_id):
+                metadata["tenant_id"] = self._tenant_id
+            if self._deployment_id and not self._is_placeholder_id(self._deployment_id):
+                metadata["deployment_id"] = self._deployment_id
+
             self._emitter = EventEmitter(
-                checkpoint_callback=self._checkpoint_callback,
-                delta_callback=self._delta_callback,
+                run_id=self._run_id,
                 is_streaming=self._is_streaming,
+                metadata=metadata if metadata else None,
             )
+            # Set the worker for event queueing
+            if self._worker is not None:
+                self._emitter.set_worker(self._worker)
         return self._emitter
+
+    def _is_placeholder_id(self, value: str) -> bool:
+        """Check if value is a placeholder/default UUID (not a real ID).
+
+        In standalone mode, the platform may send placeholder UUIDs like
+        00000000-0000-0000-0000-000000000001. These aren't meaningful and
+        should not be included in event metadata.
+        """
+        if not value:
+            return True
+        # Check for all-zeros pattern (placeholder UUIDs)
+        # e.g., 00000000-0000-0000-0000-000000000001
+        return value.startswith("00000000-0000-0000-0000-")
 
 
 def get_current_context() -> Optional[Context]:
@@ -257,8 +272,11 @@ def get_workflow_context() -> Optional["WorkflowContext"]:
     Get the WorkflowContext from the current context or its parent chain.
 
     This function traverses the context hierarchy to find a WorkflowContext,
-    which is needed for emitting workflow checkpoints from nested contexts
-    like AgentContext or FunctionContext.
+    which provides access to workflow-specific features like state and step tracking.
+
+    Note: For event emission, prefer using `get_current_context().emit()` which
+    works from any context type. This function is primarily useful for accessing
+    workflow-specific features like `wait_for_user()` or step stack information.
 
     Returns:
         WorkflowContext if found in the context chain, None otherwise
@@ -267,7 +285,7 @@ def get_workflow_context() -> Optional["WorkflowContext"]:
         >>> # Inside an agent called from a workflow
         >>> workflow_ctx = get_workflow_context()
         >>> if workflow_ctx:
-        ...     workflow_ctx._send_checkpoint("workflow.lm.started", {...})
+        ...     await workflow_ctx.wait_for_user("Need approval")
     """
     from .workflow import WorkflowContext
 

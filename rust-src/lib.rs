@@ -9,16 +9,8 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Check if span export is enabled (cached for performance)
-/// Default: false (spans not exported to journal by default)
-fn is_span_export_enabled() -> bool {
-    static SPAN_EXPORT_ENABLED: OnceLock<bool> = OnceLock::new();
-    *SPAN_EXPORT_ENABLED.get_or_init(|| {
-        std::env::var("AGNT5_SPAN_EXPORT_ENABLED")
-            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(false) // Default: disabled
-    })
-}
+// Note: Span export has been removed. Spans are no longer sent to the journal.
+// Trace correlation is done via runs.trace_id lookup if needed.
 
 mod adk;
 mod checkpoint_client;
@@ -142,58 +134,9 @@ impl PySpan {
             // Span will be ended when dropped
         }
 
-        // Queue span export for background flush if streaming AND span export are enabled
-        // Uses the global SpanExportQueue which is flushed by a background task in the Worker's Tokio runtime
-        // Note: Span export is disabled by default (AGNT5_SPAN_EXPORT_ENABLED=false)
-        let span_export_enabled = is_span_export_enabled();
-        tracing::debug!(
-            "🔍 CHILD-SPAN-DEBUG: PySpan.__exit__ called, is_streaming={}, span_export_enabled={}, run_id={:?}, name={}",
-            self.is_streaming,
-            span_export_enabled,
-            self.run_id,
-            self.name
-        );
-        if self.is_streaming && span_export_enabled {
-            if let Some(ref run_id) = self.run_id {
-                // Get the global span export queue (set by Worker on initialization)
-                if let Some(queue) = crate::worker::get_span_export_queue() {
-                    use agnt5_sdk_core::span_export_queue::SpanExportRequest;
-
-                    let request = SpanExportRequest {
-                        run_id: run_id.clone(),
-                        tenant_id: self.tenant_id.clone(),
-                        trace_id: trace_id_str.clone(),
-                        span_id: span_id_str.clone(),
-                        parent_span_id: self.parent_span_id.clone(),
-                        name: self.name.clone(),
-                        kind: self.component_type.clone(),
-                        start_time_ns: self.start_time_ns,
-                        end_time_ns,
-                        status_code: status_code.to_string(),
-                        status_description: None,
-                        attributes: None, // TODO: capture span attributes
-                        queued_at: std::time::Instant::now(),
-                    };
-
-                    if let Err(e) = queue.push(request) {
-                        tracing::warn!(
-                            "Failed to queue child span for journal export: {}",
-                            e
-                        );
-                    } else {
-                        tracing::debug!(
-                            "🔍 CHILD-SPAN-DEBUG: Queued span '{}' for journal export (queue_size={})",
-                            self.name,
-                            queue.len()
-                        );
-                    }
-                } else {
-                    tracing::debug!(
-                        "🔍 CHILD-SPAN-DEBUG: Span export queue not initialized, skipping child span export"
-                    );
-                }
-            }
-        }
+        // Note: Span export has been removed from the journal.
+        // Spans are no longer persisted. Trace correlation is done via runs.trace_id lookup.
+        // This simplifies the architecture and removes unnecessary data from journal_events.
 
         Ok(false) // Don't suppress exceptions
     }
@@ -789,13 +732,14 @@ fn log_from_python(
         ),
     }
 
-    // Queue log export for background flush if streaming is enabled
-    // Uses the global LogExportQueue which is flushed by a background task in the Worker's Tokio runtime
+    // Queue log for SSE streaming if streaming is enabled
+    // Logs are SSE-only events (not persisted to journal_events table)
+    // Uses the global unified JournalEventQueue
     if is_streaming.unwrap_or(false) {
         if let Some(ref rid) = run_id {
-            // Get the global log export queue (set by Worker on initialization)
-            if let Some(queue) = crate::worker::get_log_export_queue() {
-                use agnt5_sdk_core::span_export_queue::LogExportRequest;
+            // Get the global journal queue (set by Worker on initialization)
+            if let Some(queue) = crate::worker::get_journal_queue() {
+                use agnt5_sdk_core::journal_queue::JournalEventMessage;
 
                 // Get current timestamp
                 let timestamp_ns = std::time::SystemTime::now()
@@ -803,36 +747,43 @@ fn log_from_python(
                     .map(|d| d.as_nanos() as i64)
                     .unwrap_or(0);
 
-                let request = LogExportRequest {
+                // Create log data payload
+                let log_data = serde_json::json!({
+                    "severity": level,
+                    "body": message,
+                    "tenant_id": effective_tenant_id,
+                    "deployment_id": effective_deployment_id,
+                    "attributes": attributes,
+                });
+
+                let event = JournalEventMessage {
                     run_id: rid.clone(),
-                    tenant_id: effective_tenant_id.clone(),
-                    deployment_id: effective_deployment_id.clone(),
-                    trace_id: trace_id.clone().unwrap_or_default(),
-                    span_id: span_id.clone().unwrap_or_default(),
-                    timestamp_ns,
-                    severity: level.to_string(),
-                    body: message.clone(),
-                    attributes: attributes.clone(),
+                    event_type: "log".to_string(),
+                    data: serde_json::to_vec(&log_data).unwrap_or_default(),
+                    source_timestamp_ns: timestamp_ns,
+                    is_sse_only: true, // Logs are SSE-only (not persisted)
+                    is_streaming: true,
                     queued_at: std::time::Instant::now(),
+                    ..Default::default()
                 };
 
-                if let Err(e) = queue.push(request) {
+                if let Err(e) = queue.push(event) {
                     tracing::warn!(
-                        "Failed to queue log for journal export: {}",
+                        "Failed to queue log for SSE streaming: {}",
                         e
                     );
                 } else {
                     tracing::debug!(
-                        "Queued log for journal export (queue_size={})",
+                        "Queued log for SSE streaming (queue_size={})",
                         queue.len()
                     );
                 }
             } else {
-                // Log export queue not initialized - this can happen during testing or
+                // Journal queue not initialized - this can happen during testing or
                 // when Python calls this function before worker initialization.
                 // Log a debug message but don't fail - tracing output above still works.
                 tracing::debug!(
-                    "Log export queue not initialized, skipping journal export for run_id={}",
+                    "Journal queue not initialized, skipping SSE streaming for run_id={}",
                     rid
                 );
             }
@@ -882,55 +833,5 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
-    m.add_function(wrap_pyfunction!(write_journal_event, m)?)?;
     Ok(())
-}
-
-/// Write a journal event for LLM observability (lm.call.*, output.*, etc.)
-///
-/// This writes events directly to the AGNT5 journal for real-time streaming
-/// and observability. Use this for LLM call tracking, not for memoization.
-///
-/// # Arguments
-/// * `run_id` - The run ID to associate the event with
-/// * `event_type` - Event type (e.g., "lm.call.started", "lm.call.completed")
-/// * `data` - JSON-serialized event data as bytes
-/// * `trace_id` - Trace ID for correlation
-/// * `span_id` - Span ID for correlation
-/// * `tenant_id` - Optional tenant ID
-/// * `source_timestamp_ns` - Source timestamp in nanoseconds since Unix epoch
-#[pyfunction]
-#[pyo3(signature = (run_id, event_type, data, trace_id, span_id, tenant_id=None, source_timestamp_ns=None))]
-fn write_journal_event<'py>(
-    py: Python<'py>,
-    run_id: String,
-    event_type: String,
-    data: Vec<u8>,
-    trace_id: String,
-    span_id: String,
-    tenant_id: Option<String>,
-    source_timestamp_ns: Option<i64>,
-) -> PyResult<Bound<'py, PyAny>> {
-    use pyo3_async_runtimes::tokio::future_into_py;
-
-    let timestamp = source_timestamp_ns.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
-    });
-
-    future_into_py(py, async move {
-        agnt5_sdk_core::journal_exporter::write_event(
-            &run_id,
-            &event_type,
-            &data,
-            &trace_id,
-            &span_id,
-            tenant_id.as_deref(),
-            timestamp,
-        )
-        .await
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Journal write failed: {}", e)))
-    })
 }

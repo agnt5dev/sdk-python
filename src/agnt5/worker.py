@@ -854,6 +854,7 @@ class Worker:
                 retry_policy=config.retries,
                 is_streaming=is_streaming,
                 tenant_id=tenant_id,
+                worker=self._rust_worker,
             )
 
             # Set context in contextvar so get_current_context() and error handlers can access it
@@ -920,40 +921,34 @@ class Worker:
                 has_typed_events = False  # Track if user yields Event objects
                 first_chunk = True
 
-                # Extract metadata for delta queue (must be Dict[str, str] for Rust FFI)
-                metadata = _normalize_metadata(self._extract_critical_metadata(request))
-
                 async for chunk in result:
                     # Check if chunk is a typed Event
                     if isinstance(chunk, Event):
                         has_typed_events = True
                         # Use the event's fields directly
-                        event_data = chunk.to_response_fields()
-                        output_data = event_data.get("output_data", b"")
-                        # Convert bytes to string for queue_delta
-                        output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
-                        self._rust_worker.queue_delta(
-                            invocation_id=request.invocation_id,
-                            event_type=event_data.get("event_type", ""),
-                            output_data=output_str,
-                            content_index=event_data.get("content_index", 0),
-                            sequence=sequence,
-                            metadata=metadata,
-                            source_timestamp_ns=chunk.source_timestamp_ns,
+                        event_fields = chunk.to_response_fields()
+                        output_data = event_fields.get("output_data", b"")
+                        # Convert bytes to dict for emit
+                        if isinstance(output_data, bytes):
+                            try:
+                                import json as _json
+                                event_data = _json.loads(output_data.decode("utf-8"))
+                            except (ValueError, UnicodeDecodeError):
+                                event_data = {"content": output_data.decode("utf-8", errors="replace")}
+                        elif isinstance(output_data, dict):
+                            event_data = output_data
+                        else:
+                            event_data = {"content": str(output_data or "")}
+                        ctx.emit(
+                            event_fields.get("event_type", "output.delta"),
+                            event_data,
+                            content_index=event_fields.get("content_index", 0),
                         )
                     else:
                         # Regular chunk - wrap with output events
                         if first_chunk:
                             # Emit output.start event before first chunk
-                            self._rust_worker.queue_delta(
-                                invocation_id=request.invocation_id,
-                                event_type="output.start",
-                                output_data="{}",
-                                content_index=0,
-                                sequence=sequence,
-                                metadata=metadata,
-                                source_timestamp_ns=time.time_ns(),
-                            )
+                            ctx.emit("output.start", {}, content_index=0)
                             sequence += 1
                             first_chunk = False
 
@@ -962,52 +957,34 @@ class Worker:
                         # (functions may yield pre-formatted JSON strings)
                         # Other types (dicts, Pydantic models, etc.) are JSON-serialized
                         if isinstance(chunk, str):
-                            chunk_str = chunk
+                            chunk_content = chunk
                         elif isinstance(chunk, bytes):
-                            chunk_str = chunk.decode("utf-8")
+                            chunk_content = chunk.decode("utf-8")
+                        elif isinstance(chunk, dict):
+                            chunk_content = chunk  # Keep dict as-is
                         else:
                             # Use _serialize_result for complex types (dicts, Pydantic models, etc.)
                             chunk_data = _serialize_result(chunk)
-                            chunk_str = chunk_data.decode("utf-8") if isinstance(chunk_data, bytes) else str(chunk_data)
+                            chunk_content = chunk_data.decode("utf-8") if isinstance(chunk_data, bytes) else str(chunk_data)
 
                         # Emit output.delta event
-                        self._rust_worker.queue_delta(
-                            invocation_id=request.invocation_id,
-                            event_type="output.delta",
-                            output_data=chunk_str,
-                            content_index=0,
-                            sequence=sequence,
-                            metadata=metadata,
-                            source_timestamp_ns=time.time_ns(),
-                        )
+                        # Wrap string content in a dict; dicts pass through directly
+                        if isinstance(chunk_content, dict):
+                            ctx.emit("output.delta", chunk_content, content_index=0)
+                        else:
+                            ctx.emit("output.delta", {"content": chunk_content}, content_index=0)
                     sequence += 1
 
                 # Emit closing events if we had regular chunks
                 if not has_typed_events and not first_chunk:
                     # Emit output.stop event
-                    self._rust_worker.queue_delta(
-                        invocation_id=request.invocation_id,
-                        event_type="output.stop",
-                        output_data="{}",
-                        content_index=0,
-                        sequence=sequence,
-                        metadata=metadata,
-                        source_timestamp_ns=time.time_ns(),
-                    )
+                    ctx.emit("output.stop", {}, content_index=0)
                     sequence += 1
 
                 # Always emit run.completed event
-                self._rust_worker.queue_delta(
-                    invocation_id=request.invocation_id,
-                    event_type="run.completed",
-                    output_data="{}",
-                    content_index=0,
-                    sequence=sequence,
-                    metadata=metadata,
-                    source_timestamp_ns=time.time_ns(),
-                )
+                ctx.emit("run.completed", {}, content_index=0)
 
-                logger.debug(f"Streaming function queued {sequence + 1} deltas for real-time delivery")
+                logger.debug(f"Streaming function queued {sequence + 1} events for real-time delivery")
                 # Return None to signal that streaming was handled via delta queue
                 return None
             else:
@@ -1240,78 +1217,24 @@ class Worker:
                 workflow_entity._state = WorkflowState(initial_state.copy(), workflow_entity)
                 logger.info(f"🔄 Initialized workflow entity state with {len(initial_state)} keys from session")
 
-            # Create checkpoint callback for real-time streaming
-            def checkpoint_callback(checkpoint: dict) -> None:
-                """Send checkpoint to Rust worker queue."""
-                try:
-                    # Extract critical metadata for checkpoint routing
-                    metadata = self._extract_critical_metadata(request)
+            # Extract tenant/deployment IDs - only meaningful in managed mode
+            # In standalone mode, these may be None or placeholder values
+            deployment_id = None
+            if hasattr(request, 'metadata') and request.metadata:
+                deployment_id = request.metadata.get('deployment_id') or None
 
-                    # DEBUG: Log metadata types for troubleshooting PyO3 conversion errors
-                    logger.debug(f"Checkpoint metadata types: {[(k, type(v).__name__) for k, v in metadata.items()]}")
-
-                    # Get source timestamp (use from checkpoint if provided, otherwise generate now)
-                    source_timestamp_ns = checkpoint.get("source_timestamp_ns", time.time_ns())
-
-                    # Queue checkpoint via Rust FFI
-                    self._rust_worker.queue_workflow_checkpoint(
-                        invocation_id=request.invocation_id,
-                        checkpoint_type=checkpoint["checkpoint_type"],
-                        checkpoint_data=_json.dumps(checkpoint["checkpoint_data"], cls=_ResultEncoder),
-                        sequence_number=checkpoint["sequence_number"],
-                        metadata=metadata,
-                        source_timestamp_ns=source_timestamp_ns,
-                    )
-                    logger.debug(
-                        f"Queued checkpoint: type={checkpoint['checkpoint_type']} "
-                        f"seq={checkpoint['sequence_number']}"
-                    )
-                except Exception as e:
-                    # Checkpoints are critical for durability - failing to persist them
-                    # means we cannot guarantee replay/recovery. Re-raise to fail the workflow.
-                    logger.error(f"Failed to queue checkpoint: {e}", exc_info=True)
-                    logger.error(f"Checkpoint metadata: {metadata}")
-                    logger.error(f"Checkpoint type: {checkpoint.get('checkpoint_type')}")
-                    raise RuntimeError(
-                        f"Failed to queue checkpoint '{checkpoint.get('checkpoint_type')}': {e}. "
-                        f"Workflow cannot continue without durable checkpoints."
-                    ) from e
-
-            # Create delta callback for forwarding streaming events from nested agents/functions
-            # This is used by WorkflowContext._consume_streaming_result to forward events
-            delta_metadata = _normalize_metadata(self._extract_critical_metadata(request))
-
-            def delta_callback(event_type: str, output_data: str, content_index: int, sequence: int, source_timestamp_ns: int = 0) -> None:
-                """Forward streaming delta event from nested component."""
-                try:
-                    # Use provided timestamp or generate one if not provided
-                    ts = source_timestamp_ns if source_timestamp_ns > 0 else time.time_ns()
-                    self._rust_worker.queue_delta(
-                        invocation_id=request.invocation_id,
-                        event_type=event_type,
-                        output_data=output_data,
-                        content_index=content_index,
-                        sequence=sequence,
-                        metadata=delta_metadata,
-                        source_timestamp_ns=ts,
-                    )
-                    logger.debug(f"Forwarded delta: type={event_type} seq={sequence}")
-                except Exception as e:
-                    # Delta forwarding is best-effort - log but don't fail the workflow
-                    logger.warning(f"Failed to forward delta event: {e}")
-
-            # Create WorkflowContext with entity, runtime_context, checkpoint callback, and checkpoint client
+            # Create WorkflowContext with entity, runtime_context, and worker for event queueing
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
                 run_id=request.invocation_id,  # Use unique invocation_id for this execution
                 session_id=session_id,  # Session for multi-turn conversations
                 user_id=user_id,  # User for long-term memory
                 runtime_context=request.runtime_context,
-                checkpoint_callback=checkpoint_callback,
                 checkpoint_client=self._checkpoint_client,  # Phase 3: platform-side memoization
                 is_streaming=is_streaming,  # For real-time SSE log delivery
-                tenant_id=tenant_id,  # For multi-tenant deployments
-                delta_callback=delta_callback,  # For forwarding streaming events from nested components
+                tenant_id=tenant_id,  # For multi-tenant deployments (may be None in standalone)
+                deployment_id=deployment_id,  # For deployment tracking (may be None in standalone)
+                worker=self._rust_worker,  # For unified event queueing
             )
 
             # NEW: Populate agent resume info if this is an agent HITL resume
@@ -1350,24 +1273,31 @@ class Worker:
                     span_token = _current_span.set(span_info)
 
             workflow_start_time = _time.time()
+            # Generate correlation_id for workflow.started ↔ workflow.completed/failed pairing
+            import uuid as _uuid
+            workflow_correlation_id = f"wf-{_uuid.uuid4().hex[:12]}"
+
             try:
                 # Emit workflow.started checkpoint
-                ctx._send_checkpoint("workflow.started", {
+                ctx.emit("workflow.started", {
                     "workflow.name": config.name,
                     "run_id": request.invocation_id,
                     "session_id": session_id,
                     "is_replay": bool(completed_steps),
-                })
+                }, metadata={"name": config.name}, correlation_id=workflow_correlation_id)
 
                 # CRITICAL: Flush immediately to ensure workflow.started arrives at platform
                 # BEFORE handler runs. Without this, nested events (agent.started, lm.call.started)
                 # which use direct journal writes would arrive before workflow.started which is queued.
                 self._rust_worker.flush_workflow_checkpoints()
 
-                if input_dict:
-                    result = await config.handler(ctx, **input_dict)
-                else:
-                    result = await config.handler(ctx)
+                # Set workflow as parent for all child events (agent.iteration, lm.call, etc.)
+                from .emit import parent_scope
+                with parent_scope(workflow_correlation_id):
+                    if input_dict:
+                        result = await config.handler(ctx, **input_dict)
+                    else:
+                        result = await config.handler(ctx)
 
                 # Serialize result BEFORE emitting workflow.completed
                 # This ensures serialization errors trigger workflow.failed, not run.failed
@@ -1375,25 +1305,25 @@ class Worker:
 
                 # Emit workflow.completed checkpoint
                 workflow_duration_ms = int((_time.time() - workflow_start_time) * 1000)
-                ctx._send_checkpoint("workflow.completed", {
+                ctx.emit("workflow.completed", {
                     "workflow.name": config.name,
                     "run_id": request.invocation_id,
                     "duration_ms": workflow_duration_ms,
                     "steps_count": len(ctx._workflow_entity._step_events),
-                })
+                }, metadata={"name": config.name}, correlation_id=workflow_correlation_id)
 
                 # Note: Workflow entity persistence is handled by the @workflow decorator wrapper
                 # which persists before returning. No need to persist here.
             except Exception as workflow_error:
                 # Emit workflow.failed checkpoint
                 workflow_duration_ms = int((_time.time() - workflow_start_time) * 1000)
-                ctx._send_checkpoint("workflow.failed", {
+                ctx.emit("workflow.failed", {
                     "workflow.name": config.name,
                     "run_id": request.invocation_id,
                     "duration_ms": workflow_duration_ms,
                     "error": str(workflow_error),
                     "error_type": type(workflow_error).__name__,
-                })
+                }, metadata={"name": config.name}, correlation_id=workflow_correlation_id)
                 raise
             finally:
                 # Always reset context to prevent leakage
@@ -1846,6 +1776,7 @@ class Worker:
                 runtime_context=request.runtime_context,
                 is_streaming=is_streaming,
                 tenant_id=tenant_id,
+                worker=self._rust_worker,
             )
 
             # Set context in contextvar so get_current_context() and error handlers can access it
@@ -1866,25 +1797,26 @@ class Worker:
                 final_tool_calls = []
                 handoff_to = None
 
-                # Extract metadata for delta queue (must be Dict[str, str] for Rust FFI)
-                metadata = _normalize_metadata(self._extract_critical_metadata(request))
-                metadata["session_id"] = session_id  # Include session for UI
-
                 async for event in result:
                     if isinstance(event, Event):
-                        # Queue the event via delta queue
-                        event_data = event.to_response_fields()
-                        output_data = event_data.get("output_data", b"")
-                        output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
+                        # Emit event through unified event emitter
+                        event_fields = event.to_response_fields()
+                        output_data = event_fields.get("output_data", b"")
+                        # Convert bytes to dict for emit
+                        if isinstance(output_data, bytes):
+                            try:
+                                event_data = json.loads(output_data.decode("utf-8"))
+                            except (ValueError, UnicodeDecodeError):
+                                event_data = {"content": output_data.decode("utf-8", errors="replace")}
+                        elif isinstance(output_data, dict):
+                            event_data = output_data
+                        else:
+                            event_data = {"content": str(output_data or "")}
 
-                        self._rust_worker.queue_delta(
-                            invocation_id=request.invocation_id,
-                            event_type=event_data.get("event_type", ""),
-                            output_data=output_str,
-                            content_index=event_data.get("content_index", 0),
-                            sequence=sequence,
-                            metadata=metadata,
-                            source_timestamp_ns=event.source_timestamp_ns,
+                        ctx.emit(
+                            event_fields.get("event_type", ""),
+                            event_data,
+                            content_index=event_fields.get("content_index", 0),
                         )
                         sequence += 1
 
@@ -1902,17 +1834,9 @@ class Worker:
                 if handoff_to:
                     final_result["handoff_to"] = handoff_to
 
-                self._rust_worker.queue_delta(
-                    invocation_id=request.invocation_id,
-                    event_type="run.completed",
-                    output_data=json.dumps(final_result),
-                    content_index=0,
-                    sequence=sequence,
-                    metadata=metadata,
-                    source_timestamp_ns=time.time_ns(),
-                )
+                ctx.emit("run.completed", final_result, content_index=0)
 
-                logger.debug(f"Agent streaming queued {sequence + 1} deltas for real-time delivery")
+                logger.debug(f"Agent streaming queued {sequence + 1} events for real-time delivery")
                 # Return None to signal that streaming was handled via delta queue
                 return None
             else:

@@ -46,6 +46,7 @@ class FunctionContext(Context):
         retry_policy: Optional[Any] = None,
         is_streaming: bool = False,
         tenant_id: Optional[str] = None,
+        worker: Optional[Any] = None,
     ) -> None:
         """
         Initialize function context.
@@ -57,8 +58,9 @@ class FunctionContext(Context):
             retry_policy: RetryPolicy for should_retry() checks
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             tenant_id: Tenant ID for multi-tenant deployments
+            worker: PyWorker instance for event queueing
         """
-        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id)
+        super().__init__(run_id, attempt, runtime_context, is_streaming, tenant_id, worker=worker)
         self._retry_policy = retry_policy
 
     # === Quick Logging ===

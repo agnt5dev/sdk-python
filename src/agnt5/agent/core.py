@@ -2,6 +2,7 @@
 
 import json
 import logging
+import uuid as _uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
@@ -211,12 +212,12 @@ class Agent:
         """
         return self._cumulative_cost_usd
 
-    def _track_llm_cost(self, response: GenerateResponse, workflow_ctx: Optional[Any] = None) -> None:
+    def _track_llm_cost(self, response: GenerateResponse, context: Optional[Context] = None) -> None:
         """Track LLM call cost.
 
         Args:
             response: LLM response containing usage/cost info
-            workflow_ctx: Optional workflow context for emitting cost events
+            context: Optional context for emitting cost events
         """
         cost_usd = getattr(response, 'cost_usd', None)
         if cost_usd:
@@ -227,15 +228,15 @@ class Agent:
             )
 
             # Emit cost event for observability
-            if workflow_ctx:
+            if context:
                 usage = getattr(response, 'usage', None)
-                workflow_ctx._send_checkpoint("agent.llm_cost", {
+                context.emit("agent.llm_cost", {
                     "agent.name": self.name,
                     "call_cost_usd": cost_usd,
                     "cumulative_cost_usd": self._cumulative_cost_usd,
                     "input_tokens": usage.get("input_tokens") if usage else None,
                     "output_tokens": usage.get("output_tokens") if usage else None,
-                })
+                }, metadata={"name": self.name})
 
     def to_tool(self) -> Tool:
         """Convert this agent to a tool that can be used by other agents.
@@ -419,9 +420,13 @@ class Agent:
         from ..workflow import WorkflowContext
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
+        # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
+        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+
         if context is None:
             import uuid
-            run_id = f"agent-{self.name}-{uuid.uuid4().hex[:8]}"
+            # Standalone agent - generate a proper UUID for run_id
+            run_id = str(uuid.uuid4())
             context = AgentContext(
                 run_id=run_id,
                 agent_name=self.name,
@@ -430,28 +435,36 @@ class Agent:
             pass
         elif hasattr(context, '_workflow_entity'):
             entity_key, scope = self._detect_memory_scope(context)
-            import uuid
-            run_id = f"{context.run_id}:agent:{self.name}"
             detected_session_id = entity_key.split(":", 1)[1] if ":" in entity_key else context.run_id
+            # Use parent's run_id (valid UUID) for events, session_id for conversation history
             context = AgentContext(
-                run_id=run_id,
+                run_id=context.run_id,  # Use parent's UUID, not compound ID
                 agent_name=self.name,
                 session_id=detected_session_id,
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),
             )
         else:
-            import uuid
-            run_id = f"{context.run_id}:agent:{self.name}"
+            # Use parent's run_id (valid UUID) for events
             context = AgentContext(
-                run_id=run_id,
+                run_id=context.run_id,  # Use parent's UUID, not compound ID
                 agent_name=self.name,
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),
             )
 
-        # NOTE: agent.started checkpoint is NOT sent here - it's sent by run() which yields Event.agent_started
-        # This avoids duplicate agent.started events in the journal
+        # Emit agent.started checkpoint for journal persistence
+        if context:
+            context.emit("agent.started", {
+                "agent.name": self.name,
+                "agent.model": self.model_name,
+                "agent.max_iterations": self.max_iterations,
+                "agent.tools": list(self.tools.keys()),
+            }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
+
+        # Set agent as parent for iteration events
+        from ..emit import set_parent_correlation_id, _parent_correlation_id
+        agent_parent_token = set_parent_correlation_id(agent_correlation_id)
 
         # Check for HITL resume
         if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
@@ -527,13 +540,19 @@ class Agent:
                 # Reasoning loop
                 for iteration in range(self.max_iterations):
                     iteration_start_time = _time.time()
+                    # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
+                    iteration_correlation_id = f"iter-{_uuid.uuid4().hex[:12]}"
 
-                    if workflow_ctx:
-                        workflow_ctx._send_checkpoint("agent.iteration.started", {
+                    if context:
+                        context.emit("agent.iteration.started", {
                             "agent.name": self.name,
                             "iteration": iteration + 1,
                             "max_iterations": self.max_iterations,
-                        })
+                        }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
+
+                    # Set iteration as parent for lm.call and tool events
+                    from ..emit import set_parent_correlation_id
+                    iteration_parent_token = set_parent_correlation_id(iteration_correlation_id)
 
                     # Build tool definitions
                     tool_defs = [
@@ -720,34 +739,51 @@ class Agent:
                             f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."
                         ))
 
+                        # Reset parent before emitting iteration.completed
+                        from ..emit import _parent_correlation_id
+                        _parent_correlation_id.reset(iteration_parent_token)
+
                         iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
-                        if workflow_ctx:
-                            workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                        if context:
+                            context.emit("agent.iteration.completed", {
                                 "agent.name": self.name,
                                 "iteration": iteration + 1,
                                 "duration_ms": iteration_duration_ms,
                                 "has_tool_calls": True,
                                 "tool_calls_count": len(tool_results),
-                            })
+                            }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
 
                     else:
                         # No tool calls - agent is done
                         self.logger.debug(f"Agent completed after {iteration + 1} iterations")
 
+                        # Reset parent before emitting iteration.completed
+                        from ..emit import _parent_correlation_id
+                        _parent_correlation_id.reset(iteration_parent_token)
+
                         iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
-                        if workflow_ctx:
-                            workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                        if context:
+                            context.emit("agent.iteration.completed", {
                                 "agent.name": self.name,
                                 "iteration": iteration + 1,
                                 "duration_ms": iteration_duration_ms,
                                 "has_tool_calls": False,
-                            })
+                            }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
 
                         if isinstance(context, AgentContext):
                             await context.save_conversation_history(messages)
 
-                        # NOTE: agent.completed is NOT sent here - it's sent by run() which yields Event.agent_completed()
-                        # This avoids duplicate agent.completed events in the journal
+                        # Reset parent to workflow before emitting agent.completed
+                        _parent_correlation_id.reset(agent_parent_token)
+
+                        # Emit agent.completed checkpoint for journal persistence
+                        if context:
+                            context.emit("agent.completed", {
+                                "agent.name": self.name,
+                                "agent.iterations": iteration + 1,
+                                "agent.tool_calls_count": len(all_tool_calls),
+                                "output_length": len(response_text),
+                            }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                         # Add output data to span for trace visibility
                         span.set_attribute("output.data", _serialize_tool_result(response_text))
@@ -763,18 +799,28 @@ class Agent:
                 self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
                 final_output = messages[-1].content if messages else "No output generated"
 
-                if workflow_ctx:
-                    workflow_ctx._send_checkpoint("agent.max_iterations.reached", {
+                if context:
+                    context.emit("agent.max_iterations.reached", {
                         "agent.name": self.name,
                         "max_iterations": self.max_iterations,
                         "tool_calls_count": len(all_tool_calls),
-                    })
+                    }, metadata={"name": self.name})
 
                 if isinstance(context, AgentContext):
                     await context.save_conversation_history(messages)
 
-                # NOTE: agent.completed is NOT sent here - it's sent by run() which yields Event.agent_completed()
-                # This avoids duplicate agent.completed events in the journal
+                # Reset parent to workflow before emitting agent.completed
+                _parent_correlation_id.reset(agent_parent_token)
+
+                # Emit agent.completed checkpoint for journal persistence (with max_iterations flag)
+                if context:
+                    context.emit("agent.completed", {
+                        "agent.name": self.name,
+                        "agent.iterations": self.max_iterations,
+                        "agent.tool_calls_count": len(all_tool_calls),
+                        "agent.max_iterations_reached": True,
+                        "output_length": len(final_output),
+                    }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                 # Add output data to span for trace visibility
                 span.set_attribute("output.data", _serialize_tool_result(final_output))
@@ -786,12 +832,15 @@ class Agent:
                 )
 
         except Exception as e:
-            if workflow_ctx:
-                workflow_ctx._send_checkpoint("agent.failed", {
+            # Reset parent to workflow before emitting agent.failed
+            _parent_correlation_id.reset(agent_parent_token)
+
+            if context:
+                context.emit("agent.failed", {
                     "agent.name": self.name,
                     "error": str(e),
                     "error_type": type(e).__name__,
-                })
+                }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
             raise
         finally:
             from ..context import _current_context
@@ -1063,10 +1112,13 @@ class Agent:
         from ..workflow import WorkflowContext
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
+        # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
+        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+
         if context is None:
-            # Standalone execution - create AgentContext
+            # Standalone execution - create AgentContext with valid UUID
             import uuid
-            run_id = f"agent-{self.name}-{uuid.uuid4().hex[:8]}"
+            run_id = str(uuid.uuid4())
             context = AgentContext(
                 run_id=run_id,
                 agent_name=self.name,
@@ -1079,13 +1131,12 @@ class Agent:
             # Auto-detect memory scope based on user_id/session_id/run_id priority
             entity_key, scope = self._detect_memory_scope(context)
 
-            import uuid
-            run_id = f"{context.run_id}:agent:{self.name}"
             # Extract the ID from entity_key (e.g., "session:abc-123" → "abc-123")
             detected_session_id = entity_key.split(":", 1)[1] if ":" in entity_key else context.run_id
 
+            # Use parent's run_id (valid UUID) for events, session_id for conversation history
             context = AgentContext(
-                run_id=run_id,
+                run_id=context.run_id,  # Use parent's UUID, not compound ID
                 agent_name=self.name,
                 session_id=detected_session_id,  # Use auto-detected scope
                 parent_context=context,
@@ -1093,18 +1144,26 @@ class Agent:
             )
         else:
             # FunctionContext or other - create new AgentContext
-            import uuid
-            run_id = f"{context.run_id}:agent:{self.name}"
+            # Use parent's run_id (valid UUID) for events
             context = AgentContext(
-                run_id=run_id,
+                run_id=context.run_id,  # Use parent's UUID, not compound ID
                 agent_name=self.name,
                 parent_context=context,  # Inherit streaming context
                 runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
             )
 
-        # NOTE: agent.started checkpoint is NOT sent here
-        # run_sync() calls run() which yields Event.agent_started
-        # The worker processes this and sends the checkpoint
+        # Emit agent.started checkpoint for journal persistence
+        if context:
+            context.emit("agent.started", {
+                "agent.name": self.name,
+                "agent.model": self.model_name,
+                "agent.max_iterations": self.max_iterations,
+                "agent.tools": list(self.tools.keys()),
+            }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
+
+        # Set agent as parent for iteration events
+        from ..emit import set_parent_correlation_id, _parent_correlation_id
+        agent_parent_token = set_parent_correlation_id(agent_correlation_id)
 
         # NEW: Check if this is a resume from HITL
         if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
@@ -1176,14 +1235,20 @@ class Agent:
                     # Reasoning loop
                     for iteration in range(self.max_iterations):
                         iteration_start_time = _time.time()
+                        # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
+                        iteration_correlation_id = f"iter-{_uuid.uuid4().hex[:12]}"
 
                         # Emit iteration started checkpoint
-                        if workflow_ctx:
-                            workflow_ctx._send_checkpoint("agent.iteration.started", {
+                        if context:
+                            context.emit("agent.iteration.started", {
                                 "agent.name": self.name,
                                 "iteration": iteration + 1,
                                 "max_iterations": self.max_iterations,
-                            })
+                            }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
+
+                        # Set iteration as parent for lm.call and tool events
+                        from ..emit import set_parent_correlation_id
+                        iteration_parent_token = set_parent_correlation_id(iteration_correlation_id)
 
                         # Build tool definitions for LLM
                         tool_defs = [
@@ -1221,7 +1286,7 @@ class Agent:
                             response = await self._language_model.generate(request)
 
                             # Track cost for this LLM call
-                            self._track_llm_cost(response, workflow_ctx)
+                            self._track_llm_cost(response, context)
                         else:
                             # New API: model is a string, create internal LM instance
                             request = GenerateRequest(
@@ -1244,7 +1309,7 @@ class Agent:
                             response = await internal_lm.generate(request)
 
                             # Track cost for this LLM call
-                            self._track_llm_cost(response, workflow_ctx)
+                            self._track_llm_cost(response, context)
 
                         # Add assistant response to messages
                         messages.append(Message.assistant(response.text))
@@ -1367,16 +1432,20 @@ class Agent:
                             )
                             messages.append(Message.user(f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."))
 
+                            # Reset parent before emitting iteration.completed
+                            from ..emit import _parent_correlation_id
+                            _parent_correlation_id.reset(iteration_parent_token)
+
                             # Emit iteration completed checkpoint (with tool calls)
                             iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
-                            if workflow_ctx:
-                                workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                            if context:
+                                context.emit("agent.iteration.completed", {
                                     "agent.name": self.name,
                                     "iteration": iteration + 1,
                                     "duration_ms": iteration_duration_ms,
                                     "has_tool_calls": True,
                                     "tool_calls_count": len(tool_results),
-                                })
+                                }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
 
                             # Continue loop for agent to process results
 
@@ -1384,28 +1453,35 @@ class Agent:
                             # No tool calls - agent is done
                             self.logger.debug(f"Agent completed after {iteration + 1} iterations")
 
+                            # Reset parent before emitting iteration.completed
+                            from ..emit import _parent_correlation_id
+                            _parent_correlation_id.reset(iteration_parent_token)
+
                             # Emit iteration completed checkpoint
                             iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
-                            if workflow_ctx:
-                                workflow_ctx._send_checkpoint("agent.iteration.completed", {
+                            if context:
+                                context.emit("agent.iteration.completed", {
                                     "agent.name": self.name,
                                     "iteration": iteration + 1,
                                     "duration_ms": iteration_duration_ms,
                                     "has_tool_calls": False,
-                                })
+                                }, metadata={"name": self.name}, correlation_id=iteration_correlation_id)
 
                             # Save conversation before returning
                             if isinstance(context, AgentContext):
                                 await context.save_conversation_history(messages)
 
+                            # Reset parent to workflow before emitting agent.completed
+                            _parent_correlation_id.reset(agent_parent_token)
+
                             # Emit completion checkpoint
-                            if workflow_ctx:
-                                workflow_ctx._send_checkpoint("agent.completed", {
+                            if context:
+                                context.emit("agent.completed", {
                                     "agent.name": self.name,
                                     "agent.iterations": iteration + 1,
                                     "agent.tool_calls_count": len(all_tool_calls),
                                     "output_length": len(response.text),
-                                })
+                                }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                             # Add output data to span for trace visibility
                             span.set_attribute("output.data", _serialize_tool_result(response.text))
@@ -1421,26 +1497,29 @@ class Agent:
                     final_output = messages[-1].content if messages else "No output generated"
 
                     # Emit max iterations reached checkpoint (separate event for metrics)
-                    if workflow_ctx:
-                        workflow_ctx._send_checkpoint("agent.max_iterations.reached", {
+                    if context:
+                        context.emit("agent.max_iterations.reached", {
                             "agent.name": self.name,
                             "max_iterations": self.max_iterations,
                             "tool_calls_count": len(all_tool_calls),
-                        })
+                        }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                     # Save conversation before returning
                     if isinstance(context, AgentContext):
                         await context.save_conversation_history(messages)
 
+                    # Reset parent to workflow before emitting agent.completed
+                    _parent_correlation_id.reset(agent_parent_token)
+
                     # Emit completion checkpoint with max iterations flag
-                    if workflow_ctx:
-                        workflow_ctx._send_checkpoint("agent.completed", {
+                    if context:
+                        context.emit("agent.completed", {
                             "agent.name": self.name,
                             "agent.iterations": self.max_iterations,
                             "agent.tool_calls_count": len(all_tool_calls),
                             "agent.max_iterations_reached": True,
                             "output_length": len(final_output),
-                        })
+                        }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                     # Add output data to span for trace visibility
                     span.set_attribute("output.data", _serialize_tool_result(final_output))
@@ -1451,13 +1530,16 @@ class Agent:
                         context=context,
                     )
             except Exception as e:
+                # Reset parent to workflow before emitting agent.failed
+                _parent_correlation_id.reset(agent_parent_token)
+
                 # Emit error checkpoint for observability
-                if workflow_ctx:
-                    workflow_ctx._send_checkpoint("agent.failed", {
+                if context:
+                    context.emit("agent.failed", {
                         "agent.name": self.name,
                         "error": str(e),
                         "error_type": type(e).__name__,
-                    })
+                    }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
                 raise
         finally:
             # Always reset context to prevent leakage between agent executions
@@ -1560,6 +1642,13 @@ class Agent:
         elif hasattr(context, "_agent_data") and "_workflow_ctx" in context._agent_data:
             workflow_ctx = context._agent_data["_workflow_ctx"]
 
+        # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
+        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+
+        # Set agent as parent for iteration events (no agent.started emit since this is a continuation)
+        from ..emit import set_parent_correlation_id, _parent_correlation_id
+        agent_parent_token = set_parent_correlation_id(agent_correlation_id)
+
         # Prepare tool definitions
         tool_defs = [
             ToolDefinition(
@@ -1590,7 +1679,7 @@ class Agent:
                 response = await self._language_model.generate(request)
 
                 # Track cost for this LLM call
-                self._track_llm_cost(response, workflow_ctx)
+                self._track_llm_cost(response, context)
             else:
                 # New API: model is a string, create internal LM instance
                 request = GenerateRequest(
@@ -1612,7 +1701,7 @@ class Agent:
                 response = await internal_lm.generate(request)
 
                 # Track cost for this LLM call
-                self._track_llm_cost(response, workflow_ctx)
+                self._track_llm_cost(response, context)
 
             # Add assistant response to messages
             messages.append(Message.assistant(response.text))
@@ -1741,14 +1830,17 @@ class Agent:
                 if isinstance(context, AgentContext):
                     await context.save_conversation_history(messages)
 
+                # Reset parent to workflow before emitting agent.completed
+                _parent_correlation_id.reset(agent_parent_token)
+
                 # Emit completion checkpoint
-                if workflow_ctx:
-                    workflow_ctx._send_checkpoint("agent.completed", {
+                if context:
+                    context.emit("agent.completed", {
                         "agent.name": self.name,
                         "agent.iterations": iteration + 1,
                         "agent.tool_calls_count": len(all_tool_calls),
                         "output_length": len(response.text),
-                    })
+                    }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
                 return AgentResult(
                     output=response.text,
@@ -1765,15 +1857,18 @@ class Agent:
         if isinstance(context, AgentContext):
             await context.save_conversation_history(messages)
 
+        # Reset parent to workflow before emitting agent.completed
+        _parent_correlation_id.reset(agent_parent_token)
+
         # Emit completion checkpoint with max iterations flag
-        if workflow_ctx:
-            workflow_ctx._send_checkpoint("agent.completed", {
+        if context:
+            context.emit("agent.completed", {
                 "agent.name": self.name,
                 "agent.iterations": self.max_iterations,
                 "agent.tool_calls_count": len(all_tool_calls),
                 "agent.max_iterations_reached": True,
                 "output_length": len(final_output),
-            })
+            }, metadata={"name": self.name}, correlation_id=agent_correlation_id)
 
         return AgentResult(
             output=final_output,
