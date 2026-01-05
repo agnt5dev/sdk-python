@@ -7,9 +7,9 @@ use opentelemetry::Context as OtelContext;
 use agnt5_sdk_core::lm::{
     AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, DeepSeekProvider,
     GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider, GroqProvider,
-    JsonSchemaFormat, Message, MessageRole, MistralProvider, OllamaProvider, OpenAiProvider,
-    OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest, TokenUsage,
-    ToolCall, ToolChoice, ToolDefinition, XaiProvider,
+    HuggingFaceProvider, JsonSchemaFormat, LanguageModel, Message, MessageRole, MistralProvider,
+    OllamaProvider, OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle,
+    StreamRequest, TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
 use pyo3::exceptions::{PyStopAsyncIteration, PyValueError};
@@ -83,6 +83,7 @@ enum ProviderKind {
     Ollama(OllamaProvider),
     OpenRouter(OpenRouterProvider),
     Xai(XaiProvider),
+    HuggingFace(HuggingFaceProvider),
 }
 
 impl ProviderKind {
@@ -99,6 +100,7 @@ impl ProviderKind {
             ProviderKind::Ollama(provider) => provider.generate(request).await,
             ProviderKind::OpenRouter(provider) => provider.generate(request).await,
             ProviderKind::Xai(provider) => provider.generate(request).await,
+            ProviderKind::HuggingFace(provider) => provider.generate(request).await,
         }
     }
 
@@ -115,6 +117,7 @@ impl ProviderKind {
             ProviderKind::Ollama(provider) => provider.stream(request).await,
             ProviderKind::OpenRouter(provider) => provider.stream(request).await,
             ProviderKind::Xai(provider) => provider.stream(request).await,
+            ProviderKind::HuggingFace(provider) => provider.stream(request).await,
         }
     }
 }
@@ -557,6 +560,9 @@ impl PyLanguageModel {
         if env::var("XAI_API_KEY").is_ok() {
             providers.push("xai".to_string());
         }
+        if env::var("HUGGINGFACE_API_KEY").is_ok() || env::var("HF_TOKEN").is_ok() {
+            providers.push("huggingface".to_string());
+        }
 
         providers
     }
@@ -596,7 +602,14 @@ impl PyLanguageModel {
 
         if !is_gateway {
             if let Some((prefix, _)) = model.split_once('/') {
-                if provider.to_lowercase() != prefix.to_lowercase() {
+                let provider_lower = provider.to_lowercase();
+                let prefix_lower = prefix.to_lowercase();
+
+                // HuggingFace can use both "hf" and "huggingface" as provider names
+                let is_hf_match = (provider_lower == "huggingface" || provider_lower == "hf")
+                    && (prefix_lower == "huggingface" || prefix_lower == "hf");
+
+                if provider_lower != prefix_lower && !is_hf_match {
                     return Err(PyValueError::new_err(format!(
                         "Provider `{provider}` does not match model prefix `{prefix}`"
                     )));
@@ -641,6 +654,7 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
         "ollama" => Ok(ProviderKind::Ollama(OllamaProvider::from_env()?)),
         "openrouter" => Ok(ProviderKind::OpenRouter(OpenRouterProvider::from_env()?)),
         "xai" => Ok(ProviderKind::Xai(XaiProvider::from_env()?)),
+        "huggingface" | "hf" => Ok(ProviderKind::HuggingFace(HuggingFaceProvider::from_env()?)),
         other => Err(SdkError::Configuration {
             message: format!("Unsupported provider `{other}`"),
             field: Some("provider".to_string()),

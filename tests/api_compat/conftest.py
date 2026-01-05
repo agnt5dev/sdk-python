@@ -23,6 +23,7 @@ Environment Variables:
     DEEPSEEK_API_KEY    - DeepSeek API key
     XAI_API_KEY         - xAI (Grok) API key
     MISTRAL_API_KEY     - Mistral API key
+    HUGGINGFACE_API_KEY - HuggingFace API key (or HF_TOKEN)
     OLLAMA_BASE_URL     - Ollama base URL (defaults to localhost:11434)
 """
 
@@ -58,6 +59,9 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "mistral: marks tests that require Mistral API key"
+    )
+    config.addinivalue_line(
+        "markers", "huggingface: marks tests that require HuggingFace API key"
     )
     config.addinivalue_line(
         "markers", "ollama: marks tests that require Ollama running locally"
@@ -103,6 +107,11 @@ def has_xai_key() -> bool:
 def has_mistral_key() -> bool:
     """Check if Mistral API key is available."""
     return bool(os.getenv("MISTRAL_API_KEY"))
+
+
+def has_huggingface_key() -> bool:
+    """Check if HuggingFace API key is available."""
+    return bool(os.getenv("HUGGINGFACE_API_KEY") or os.getenv("HF_TOKEN"))
 
 
 def has_ollama() -> bool:
@@ -163,6 +172,11 @@ skip_without_xai = pytest.mark.skipif(
 skip_without_mistral = pytest.mark.skipif(
     not has_mistral_key(),
     reason="MISTRAL_API_KEY not set"
+)
+
+skip_without_huggingface = pytest.mark.skipif(
+    not has_huggingface_key(),
+    reason="HUGGINGFACE_API_KEY or HF_TOKEN not set"
 )
 
 skip_without_ollama = pytest.mark.skipif(
