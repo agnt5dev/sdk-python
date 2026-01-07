@@ -679,6 +679,7 @@ class ExecutorMixin:
             else:
                 logger.info(f"Using existing agent session: {session_id}")
 
+            correlation_id = f"agent-{uuid.uuid4().hex[:12]}"
             return AgentContext(
                 run_id=req.invocation_id,
                 agent_name=agent.name,
@@ -686,6 +687,8 @@ class ExecutorMixin:
                 runtime_context=req.runtime_context,
                 is_streaming=getattr(req, "is_streaming", False),
                 worker=self._rust_worker,
+                correlation_id=correlation_id,
+                parent_correlation_id=f"run-{req.invocation_id}",
             )
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
