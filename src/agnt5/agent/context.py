@@ -58,6 +58,8 @@ class AgentContext(Context):
         runtime_context: Optional[Any] = None,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
+        correlation_id: Optional[str] = None,
+        parent_correlation_id: Optional[str] = None,
     ):
         """
         Initialize agent context.
@@ -72,6 +74,8 @@ class AgentContext(Context):
             runtime_context: RuntimeContext for trace correlation
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             worker: PyWorker instance for event queueing
+            correlation_id: Unique identifier for this agent execution (auto-generated if not provided)
+            parent_correlation_id: Parent's correlation ID for event hierarchy
         """
         # Inherit is_streaming and worker from parent context if not explicitly provided
         if parent_context and not is_streaming:
@@ -79,10 +83,12 @@ class AgentContext(Context):
         if parent_context and not worker:
             worker = getattr(parent_context, '_worker', None)
 
-        # Generate correlation IDs for agent execution
+        # Generate correlation IDs for agent execution if not provided
         import uuid
-        correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
-        parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
+        if not correlation_id:
+            correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
+        if not parent_correlation_id:
+            parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
 
         # Initialize parent Context with memoization enabled by default for agents
         # This ensures LLM and tool calls are automatically journaled for replay

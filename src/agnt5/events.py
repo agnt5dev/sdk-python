@@ -67,6 +67,7 @@ class ComponentType(str, Enum):
     FUNCTION = "function"
     STEP = "step"
     ENTITY = "entity"
+    TOOL = "tool"
     LM = "lm"
 
 
