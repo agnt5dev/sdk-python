@@ -1,7 +1,6 @@
 """Executor mixin for component execution.
 
-Supports functions, entities, and workflows. Other component types (tool, agent)
-are commented out for incremental development.
+Supports functions, entities, workflows, agents, and tools.
 """
 
 from __future__ import annotations, print_function
@@ -347,40 +346,149 @@ class ExecutorMixin:
         return None
 
     # -------------------------------------------------------------------------
-    # Tool Execution (COMMENTED OUT - functions only for now)
+    # Tool Execution
     # -------------------------------------------------------------------------
 
-    # async def _execute_tool(
-    #     self, tool: Any, input_data: bytes, request: Any
-    # ) -> "PyExecuteComponentResponse":
-    #     """Execute a tool handler."""
-    #     from ..context import Context
-    #
-    #     def create_context(input_dict: dict, req: Any) -> Context:
-    #         return Context(
-    #             run_id=f"{self.service_name}:{tool.name}",
-    #             runtime_context=req.runtime_context,
-    #         )
-    #
-    #     async def execute(ctx: Context, input_dict: dict, req: Any):
-    #         from .._core import PyExecuteComponentResponse
-    #
-    #         result = await tool.invoke(ctx, **input_dict)
-    #
-    #         return PyExecuteComponentResponse(
-    #             invocation_id=req.invocation_id,
-    #             success=True,
-    #             output_data=serialize(result),
-    #             state_update=None,
-    #             error_message=None,
-    #             metadata=None,
-    #             event_type="run.completed",
-    #             content_index=0,
-    #             sequence=0,
-    #             attempt=getattr(req, "attempt", 0),
-    #         )
-    #
-    #     return await self._execute_with_context(request, create_context, execute, "Tool")
+    async def _execute_tool(
+        self, tool: Any, input_data: bytes, request: Any
+    ) -> "PyExecuteComponentResponse | None":
+        """Execute a tool handler."""
+        from ..context import Context
+        from ..events import Completed, ComponentType, Failed, Started
+
+        logger.debug(
+            f"[_execute_tool] Starting execution for tool={tool.name}, "
+            f"invocation_id={getattr(request, 'invocation_id', 'unknown')}"
+        )
+
+        def create_context(input_dict: dict, req: Any) -> Context:
+            correlation_id = f"tool-{uuid.uuid4().hex[:12]}"
+            return Context(
+                run_id=req.invocation_id,
+                correlation_id=correlation_id,
+                parent_correlation_id=f"run-{req.invocation_id}",
+                attempt=getattr(req, "attempt", 0),
+                runtime_context=req.runtime_context,
+                worker=self._rust_worker,
+            )
+
+        async def execute(ctx: Context, input_dict: dict, req: Any):
+            # Create short run correlation id (matches pattern of other events)
+            run_correlation_id = f"run-{ctx.run_id[:8]}"
+
+            # Emit run.started before executing handler
+            run_started_event = Started(
+                name=tool.name,
+                correlation_id=run_correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                component_type=ComponentType.RUN,
+                input_data=input_dict,
+                attempt=ctx.attempt,
+            )
+            logger.info(
+                f"[_execute_tool] Emitting run.started event: "
+                f"tool={tool.name}, correlation_id={run_correlation_id}"
+            )
+            ctx.emit(run_started_event)
+
+            # Emit tool.started (child of run)
+            start_time_ns = time.time_ns()
+            tool_correlation_id = f"tool-{uuid.uuid4().hex[:8]}"
+            tool_started_event = Started(
+                name=tool.name,
+                correlation_id=tool_correlation_id,
+                parent_correlation_id=run_correlation_id,
+                component_type=ComponentType.TOOL,
+                input_data=input_dict,
+                attempt=ctx.attempt,
+            )
+            logger.info(
+                f"[_execute_tool] Emitting tool.started event: "
+                f"tool={tool.name}, correlation_id={tool_correlation_id}"
+            )
+            ctx.emit(tool_started_event)
+
+            # Execute tool with error handling for proper event emission
+            try:
+                result = await tool.invoke(ctx, **input_dict)
+
+            except Exception as e:
+                # Calculate tool duration even on failure
+                end_time_ns = time.time_ns()
+                duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+                error_msg = f"{type(e).__name__}: {str(e)}"
+
+                # Emit tool.failed (child of run)
+                tool_failed_event = Failed(
+                    name=tool.name,
+                    correlation_id=tool_correlation_id,
+                    parent_correlation_id=run_correlation_id,
+                    component_type=ComponentType.TOOL,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                    duration_ms=duration_ms,
+                )
+                logger.info(
+                    f"[_execute_tool] Emitting tool.failed event: "
+                    f"tool={tool.name}, error={error_msg}"
+                )
+                ctx.emit(tool_failed_event)
+
+                # Emit run.failed (parent event)
+                run_failed_event = Failed(
+                    name=tool.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    component_type=ComponentType.RUN,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                )
+                logger.info(
+                    f"[_execute_tool] Emitting run.failed event: "
+                    f"tool={tool.name}, correlation_id={run_correlation_id}"
+                )
+                ctx.emit(run_failed_event)
+
+                # Return None - the event queue handles delivery
+                return None
+
+            # Calculate tool duration
+            end_time_ns = time.time_ns()
+            duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+            # Emit tool.completed (child of run)
+            tool_completed_event = Completed(
+                name=tool.name,
+                correlation_id=tool_correlation_id,
+                parent_correlation_id=run_correlation_id,
+                component_type=ComponentType.TOOL,
+                output_data=result,
+                duration_ms=duration_ms,
+            )
+            logger.info(
+                f"[_execute_tool] Emitting tool.completed event: "
+                f"tool={tool.name}, duration_ms={duration_ms}"
+            )
+            ctx.emit(tool_completed_event)
+
+            # Emit run.completed via event queue (not synchronous return)
+            run_completed_event = Completed(
+                name=tool.name,
+                correlation_id=run_correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                component_type=ComponentType.RUN,
+                output_data=result,
+            )
+            logger.info(
+                f"[_execute_tool] Emitting run.completed event: "
+                f"tool={tool.name}, correlation_id={run_correlation_id}"
+            )
+            ctx.emit(run_completed_event)
+
+            # Return None - the event queue handles delivery
+            return None
+
+        return await self._execute_with_context(request, create_context, execute, "Tool")
 
     # -------------------------------------------------------------------------
     # Entity Execution
@@ -545,106 +653,220 @@ class ExecutorMixin:
         return await self._execute_with_context(request, create_context, execute, "Entity")
 
     # -------------------------------------------------------------------------
-    # Agent Execution (COMMENTED OUT - functions only for now)
+    # Agent Execution
     # -------------------------------------------------------------------------
 
-    # async def _execute_agent(
-    #     self, agent: Any, input_data: bytes, request: Any
-    # ) -> "PyExecuteComponentResponse | None":
-    #     """Execute an agent with session support."""
-    #     from ..agent import AgentContext
-    #     from ..entity import _entity_state_adapter_ctx
-    #     from ..events import Event, EventType
-    #
-    #     _entity_state_adapter_ctx.set(self._entity_state_adapter)
-    #
-    #     def create_context(input_dict: dict, req: Any) -> AgentContext:
-    #         session_id = input_dict.get("session_id") or str(uuid.uuid4())
-    #
-    #         if not input_dict.get("session_id"):
-    #             logger.info(f"Created new agent session: {session_id}")
-    #         else:
-    #             logger.info(f"Using existing agent session: {session_id}")
-    #
-    #         return AgentContext(
-    #             run_id=req.invocation_id,
-    #             agent_name=agent.name,
-    #             session_id=session_id,
-    #             runtime_context=req.runtime_context,
-    #             is_streaming=getattr(req, "is_streaming", False),
-    #             worker=self._rust_worker,
-    #         )
-    #
-    #     async def execute(ctx: AgentContext, input_dict: dict, req: Any):
-    #         from .._core import PyExecuteComponentResponse
-    #
-    #         user_message = input_dict.get("message", "")
-    #         if not user_message:
-    #             raise ValueError("Agent invocation requires 'message' parameter")
-    #
-    #         result = agent.run(user_message, context=ctx)
-    #
-    #         if inspect.isasyncgen(result):
-    #             sequence = 0
-    #             final_output = None
-    #             final_tool_calls = []
-    #             handoff_to = None
-    #
-    #             async for event in result:
-    #                 if isinstance(event, Event):
-    #                     event_fields = event.to_response_fields()
-    #                     output_data = event_fields.get("output_data", b"")
-    #
-    #                     if isinstance(output_data, bytes):
-    #                         try:
-    #                             event_data = deserialize(output_data)
-    #                         except Exception:
-    #                             event_data = {"content": output_data.decode("utf-8", errors="replace")}
-    #                     elif isinstance(output_data, dict):
-    #                         event_data = output_data
-    #                     else:
-    #                         event_data = {"content": str(output_data or "")}
-    #
-    #                     ctx.emit(
-    #                         event_fields.get("event_type", ""),
-    #                         event_data,
-    #                         content_index=event_fields.get("content_index", 0),
-    #                     )
-    #                     sequence += 1
-    #
-    #                     if event.event_type == EventType.AGENT_COMPLETED:
-    #                         final_output = event.data.get("output", "")
-    #                         final_tool_calls = event.data.get("tool_calls", [])
-    #                         handoff_to = event.data.get("handoff_to")
-    #
-    #             final_result = {"output": final_output, "tool_calls": final_tool_calls}
-    #             if handoff_to:
-    #                 final_result["handoff_to"] = handoff_to
-    #
-    #             ctx.emit("run.completed", final_result, content_index=0)
-    #             logger.debug(f"Agent streaming queued {sequence + 1} events")
-    #             return None
-    #
-    #         # Non-streaming fallback
-    #         if inspect.iscoroutine(result):
-    #             agent_result = await result
-    #         else:
-    #             agent_result = result
-    #
-    #         return PyExecuteComponentResponse(
-    #             invocation_id=req.invocation_id,
-    #             success=True,
-    #             output_data=serialize({"output": agent_result.output, "tool_calls": agent_result.tool_calls}),
-    #             state_update=None,
-    #             error_message=None,
-    #             metadata={"session_id": ctx.session_id},
-    #             event_type="run.completed",
-    #             content_index=0,
-    #             sequence=0,
-    #             attempt=getattr(req, "attempt", 0),
-    #         )
-    #
-    #     return await self._execute_with_context(request, create_context, execute, "Agent")
+    async def _execute_agent(
+        self, agent: Any, input_data: bytes, request: Any
+    ) -> "PyExecuteComponentResponse | None":
+        """Execute an agent with session support."""
+        from ..agent import AgentContext
+        from ..entity import _entity_state_adapter_ctx
+        from ..events import Completed, ComponentType, Event, Failed, Started
+
+        _entity_state_adapter_ctx.set(self._entity_state_adapter)
+
+        logger.debug(
+            f"[_execute_agent] Starting execution for agent={agent.name}, "
+            f"invocation_id={getattr(request, 'invocation_id', 'unknown')}"
+        )
+
+        def create_context(input_dict: dict, req: Any) -> AgentContext:
+            session_id = input_dict.get("session_id") or str(uuid.uuid4())
+
+            if not input_dict.get("session_id"):
+                logger.info(f"Created new agent session: {session_id}")
+            else:
+                logger.info(f"Using existing agent session: {session_id}")
+
+            return AgentContext(
+                run_id=req.invocation_id,
+                agent_name=agent.name,
+                session_id=session_id,
+                correlation_id=f"agent-{uuid.uuid4().hex[:12]}",
+                parent_correlation_id=f"run-{req.invocation_id}",
+                runtime_context=req.runtime_context,
+                is_streaming=getattr(req, "is_streaming", False),
+                worker=self._rust_worker,
+            )
+
+        async def execute(ctx: AgentContext, input_dict: dict, req: Any):
+            from .._core import PyExecuteComponentResponse
+
+            user_message = input_dict.get("message", "")
+            if not user_message:
+                raise ValueError("Agent invocation requires 'message' parameter")
+
+            # Create short run correlation id (matches pattern of other events)
+            run_correlation_id = f"run-{ctx.run_id[:8]}"
+
+            # Emit run.started before executing agent
+            run_started_event = Started(
+                name=agent.name,
+                correlation_id=run_correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                component_type=ComponentType.RUN,
+                input_data=input_dict,
+                attempt=getattr(req, "attempt", 0),
+            )
+            logger.info(
+                f"[_execute_agent] Emitting run.started event: "
+                f"agent={agent.name}, correlation_id={run_correlation_id}"
+            )
+            ctx.emit(run_started_event)
+
+            # Emit agent.started (child of run)
+            start_time_ns = time.time_ns()
+            agent_correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
+            agent_started_event = Started(
+                name=agent.name,
+                correlation_id=agent_correlation_id,
+                parent_correlation_id=run_correlation_id,
+                component_type=ComponentType.AGENT,
+                input_data={"message": user_message},
+            )
+            logger.info(
+                f"[_execute_agent] Emitting agent.started event: "
+                f"agent={agent.name}, correlation_id={agent_correlation_id}"
+            )
+            ctx.emit(agent_started_event)
+
+            try:
+                result = agent.run(user_message, context=ctx)
+
+                if inspect.isasyncgen(result):
+                    sequence = 0
+                    final_output = None
+                    final_tool_calls = []
+                    handoff_to = None
+
+                    async for event in result:
+                        if isinstance(event, Event):
+                            # Forward the event to the context
+                            ctx.emit(event)
+                            sequence += 1
+
+                            # Check for completion event to extract final results
+                            if hasattr(event, 'output_data') and isinstance(event.output_data, dict):
+                                if event.output_data.get("output"):
+                                    final_output = event.output_data.get("output", "")
+                                    final_tool_calls = event.output_data.get("tool_calls", [])
+                                    handoff_to = event.output_data.get("handoff_to")
+
+                    # Calculate agent duration
+                    end_time_ns = time.time_ns()
+                    duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+                    # Emit agent.completed
+                    agent_completed_event = Completed(
+                        name=agent.name,
+                        correlation_id=agent_correlation_id,
+                        parent_correlation_id=run_correlation_id,
+                        component_type=ComponentType.AGENT,
+                        output_data={"output": final_output, "tool_calls": final_tool_calls},
+                        duration_ms=duration_ms,
+                    )
+                    ctx.emit(agent_completed_event)
+
+                    # Emit run.completed
+                    final_result = {"output": final_output, "tool_calls": final_tool_calls}
+                    if handoff_to:
+                        final_result["handoff_to"] = handoff_to
+
+                    run_completed_event = Completed(
+                        name=agent.name,
+                        correlation_id=run_correlation_id,
+                        parent_correlation_id=ctx.parent_correlation_id,
+                        component_type=ComponentType.RUN,
+                        output_data=final_result,
+                    )
+                    ctx.emit(run_completed_event)
+
+                    logger.debug(f"Agent streaming queued {sequence + 1} events")
+                    return None
+
+                # Non-streaming fallback
+                if inspect.iscoroutine(result):
+                    agent_result = await result
+                else:
+                    agent_result = result
+
+                # Calculate agent duration
+                end_time_ns = time.time_ns()
+                duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+                # Emit agent.completed
+                agent_completed_event = Completed(
+                    name=agent.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=run_correlation_id,
+                    component_type=ComponentType.AGENT,
+                    output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
+                    duration_ms=duration_ms,
+                )
+                logger.info(
+                    f"[_execute_agent] Emitting agent.completed event: "
+                    f"agent={agent.name}, duration_ms={duration_ms}"
+                )
+                ctx.emit(agent_completed_event)
+
+                # Emit run.completed
+                run_completed_event = Completed(
+                    name=agent.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    component_type=ComponentType.RUN,
+                    output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
+                )
+                logger.info(
+                    f"[_execute_agent] Emitting run.completed event: "
+                    f"agent={agent.name}, correlation_id={run_correlation_id}"
+                )
+                ctx.emit(run_completed_event)
+
+                return None
+
+            except Exception as e:
+                # Calculate agent duration even on failure
+                end_time_ns = time.time_ns()
+                duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+                error_msg = f"{type(e).__name__}: {str(e)}"
+
+                # Emit agent.failed (child of run)
+                agent_failed_event = Failed(
+                    name=agent.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=run_correlation_id,
+                    component_type=ComponentType.AGENT,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                    duration_ms=duration_ms,
+                )
+                logger.info(
+                    f"[_execute_agent] Emitting agent.failed event: "
+                    f"agent={agent.name}, error={error_msg}"
+                )
+                ctx.emit(agent_failed_event)
+
+                # Emit run.failed (parent event)
+                run_failed_event = Failed(
+                    name=agent.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    component_type=ComponentType.RUN,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                )
+                logger.info(
+                    f"[_execute_agent] Emitting run.failed event: "
+                    f"agent={agent.name}, correlation_id={run_correlation_id}"
+                )
+                ctx.emit(run_failed_event)
+
+                # Return None - the event queue handles delivery
+                return None
+
+        return await self._execute_with_context(request, create_context, execute, "Agent")
 
     # -------------------------------------------------------------------------
     # Workflow Execution

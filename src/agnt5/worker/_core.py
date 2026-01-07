@@ -1,7 +1,6 @@
 """Worker implementation for AGNT5 SDK.
 
-Supports functions, entities, and workflows. Other component types (agent, tool)
-are commented out for incremental development.
+Supports functions, entities, workflows, agents, and tools.
 """
 
 from __future__ import annotations
@@ -374,27 +373,30 @@ class Worker(ExecutorMixin):
 
         logger.info(f"Auto-imported {total_modules} modules")
 
-        # Collect components from registries (functions, entities, and workflows)
-        # from ..agent import AgentRegistry
+        # Collect components from registries
+        from ..agent import AgentRegistry
         from ..entity import EntityRegistry
-        # from ..tool import ToolRegistry
+        from ..tool import ToolRegistry
         from ..workflow import WorkflowRegistry
 
         functions = [cfg.handler for cfg in FunctionRegistry.all().values()]
         workflows = [cfg.handler for cfg in WorkflowRegistry.all().values()]
         entities = [et.entity_class for et in EntityRegistry.all().values()]
-        # agents = list(AgentRegistry.all().values())
-        # tools = list(ToolRegistry.all().values())
+        agents = list(AgentRegistry.all().values())
+        tools = list(ToolRegistry.all().values())
 
         self._explicit_components = {
             "functions": functions,
             "workflows": workflows,
             "entities": entities,
-            "agents": [],     # COMMENTED OUT - functions, entities, and workflows only
-            "tools": [],      # COMMENTED OUT - functions, entities, and workflows only
+            "agents": agents,
+            "tools": tools,
         }
 
-        logger.info(f"Auto-discovered components: {len(functions)} functions, {len(entities)} entities, {len(workflows)} workflows")
+        logger.info(
+            f"Auto-discovered components: {len(functions)} functions, {len(entities)} entities, "
+            f"{len(workflows)} workflows, {len(agents)} agents, {len(tools)} tools"
+        )
 
     def _serialize_schema(self, schema: Any) -> str | None:
         """Serialize a schema to JSON string, returning None if empty."""
@@ -422,7 +424,7 @@ class Worker(ExecutorMixin):
         )
 
     def _discover_components(self) -> list:
-        """Discover explicit components (functions only for now).
+        """Discover explicit components (functions, entities, workflows, agents, tools).
 
         Returns:
             List of PyComponentInfo instances for all components
@@ -494,10 +496,52 @@ class Worker(ExecutorMixin):
                 output_schema=config.output_schema,
             ))
 
-        # COMMENTED OUT - functions, entities, and workflows only for now
-        # Process agents, tools - see git history
+        # Process agents
+        from ..agent import AgentRegistry
+        for agent in self._explicit_components["agents"]:
+            # Build agent definition with tool schemas
+            tool_schemas = []
+            for tool_name, tool in agent.tools.items():
+                tool_schemas.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                })
 
-        logger.info(f"Discovered {len(components)} components (functions + entities + workflows)")
+            definition = {
+                "instructions": agent.instructions,
+                "model": agent.model,
+                "max_iterations": agent.max_iterations,
+                "tools": tool_schemas,
+                "handoffs": [h.agent.name for h in agent.handoffs] if agent.handoffs else [],
+            }
+
+            components.append(self._create_component_info(
+                name=agent.name,
+                component_type="agent",
+                metadata={},
+                config={
+                    "model": agent.model,
+                    "max_iterations": str(agent.max_iterations),
+                },
+                definition=definition,
+            ))
+
+        # Process tools
+        from ..tool import ToolRegistry
+        for tool in self._explicit_components["tools"]:
+            components.append(self._create_component_info(
+                name=tool.name,
+                component_type="tool",
+                metadata={},
+                config={
+                    "confirmation": str(tool.confirmation),
+                },
+                input_schema=tool.input_schema,
+                output_schema=tool.output_schema,
+            ))
+
+        logger.info(f"Discovered {len(components)} components (functions + entities + workflows + agents + tools)")
         return components
 
     def _create_message_handler(self) -> Any:
@@ -536,9 +580,19 @@ class Worker(ExecutorMixin):
                 if workflow_config:
                     return self._execute_workflow(workflow_config, input_data, request)
 
-            # COMMENTED OUT - functions, entities, and workflows only for now
-            # elif component_type == "tool": ...
-            # elif component_type == "agent": ...
+            # Tools
+            elif component_type == "tool":
+                from ..tool import ToolRegistry
+                tool = ToolRegistry.get(component_name)
+                if tool:
+                    return self._execute_tool(tool, input_data, request)
+
+            # Agents
+            elif component_type == "agent":
+                from ..agent import AgentRegistry
+                agent = AgentRegistry.get(component_name)
+                if agent:
+                    return self._execute_agent(agent, input_data, request)
 
             # Not found or unsupported
             error_msg = f"Component '{component_name}' of type '{component_type}' not found"
