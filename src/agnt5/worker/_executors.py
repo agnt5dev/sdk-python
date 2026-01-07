@@ -683,8 +683,6 @@ class ExecutorMixin:
                 run_id=req.invocation_id,
                 agent_name=agent.name,
                 session_id=session_id,
-                correlation_id=f"agent-{uuid.uuid4().hex[:12]}",
-                parent_correlation_id=f"run-{req.invocation_id}",
                 runtime_context=req.runtime_context,
                 is_streaming=getattr(req, "is_streaming", False),
                 worker=self._rust_worker,
