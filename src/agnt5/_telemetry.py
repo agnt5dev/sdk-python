@@ -112,16 +112,12 @@ class OpenTelemetryHandler(logging.Handler):
             # Also emit as event for SSE streaming (if we have an active context)
             try:
                 from .context import get_current_context
-                from .events import Event
+                from .events import EventEnvelope
                 import time
-                import sys
 
                 ctx = get_current_context()
-                print(f"[TELEMETRY DEBUG] get_current_context() = {ctx}", file=sys.stderr, flush=True)
 
                 if ctx is not None and hasattr(ctx, 'emit'):
-                    print(f"[TELEMETRY DEBUG] Context has emit, creating log event for: {record.levelname} - {message[:50]}", file=sys.stderr, flush=True)
-
                     # Create log event with proper correlation IDs from context
                     log_event_data = {
                         "event_type": f"log.{record.levelname.lower()}",
@@ -143,10 +139,9 @@ class OpenTelemetryHandler(logging.Handler):
                         log_event_data["attributes"] = attributes
 
                     # Queue the log event for SSE streaming
-                    # Use raw event emission since we're constructing the dict directly
-                    if hasattr(ctx, '_event_emitter') and ctx._event_emitter:
-                        print(f"[TELEMETRY DEBUG] Queueing log event: event_type={log_event_data['event_type']}, correlation_id={log_event_data['correlation_id']}", file=sys.stderr, flush=True)
-                        from .events import EventEnvelope
+                    # Note: Context uses _emitter attribute accessed via _get_emitter()
+                    emitter = ctx._get_emitter() if hasattr(ctx, '_get_emitter') else None
+                    if emitter:
                         envelope = EventEnvelope(
                             event_type=log_event_data["event_type"],
                             data=log_event_data,
@@ -154,21 +149,14 @@ class OpenTelemetryHandler(logging.Handler):
                             content_index=0,
                             metadata=log_event_data.get("metadata"),
                         )
-                        ctx._event_emitter._queue_event(
+                        emitter._queue_event(
                             envelope,
                             log_event_data["correlation_id"],
                             log_event_data["parent_correlation_id"],
                         )
-                        print(f"[TELEMETRY DEBUG] Log event queued successfully", file=sys.stderr, flush=True)
-                    else:
-                        print(f"[TELEMETRY DEBUG] No event emitter found on context", file=sys.stderr, flush=True)
-                else:
-                    print(f"[TELEMETRY DEBUG] No active context or context has no emit method", file=sys.stderr, flush=True)
-            except Exception as e:
+            except Exception:
                 # Silently fail log event emission - don't break logging
-                print(f"[TELEMETRY DEBUG] Exception during log event emission: {e}", file=sys.stderr, flush=True)
-                import traceback
-                traceback.print_exc(file=sys.stderr)
+                pass
 
         except Exception:
             self.handleError(record)

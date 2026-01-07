@@ -613,15 +613,7 @@ impl PyWorker {
 
                 // Add is_streaming attribute for journal exporter filtering
                 // Only spans with this attribute set to true will be exported to the journal
-                // 🔍 STREAM-DEBUG: Log is_streaming value from request
-                tracing::info!(
-                    "🔍 STREAM-DEBUG: SDK received request with is_streaming={}",
-                    invoke_request.is_streaming
-                );
                 if invoke_request.is_streaming {
-                    tracing::info!(
-                        "🔍 STREAM-DEBUG: Setting agnt5.is_streaming=true attribute on span"
-                    );
                     otel_span.set_attribute(opentelemetry::KeyValue::new(
                         "agnt5.is_streaming",
                         true,

@@ -523,14 +523,6 @@ fn create_span(
         })
     });
 
-    tracing::debug!(
-        "🔍 CHILD-SPAN-DEBUG: create_span called, name={}, parent_span_id={:?}, from_contextvar={}, is_streaming={}",
-        name,
-        parent_span_id_for_journal,
-        from_contextvar,
-        is_streaming
-    );
-
     let span = agnt5_sdk_core::create_component_span(
         &name,
         &component_type,
