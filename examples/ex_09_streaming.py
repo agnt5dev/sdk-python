@@ -205,7 +205,11 @@ async def main() -> None:
 
     # Create a mock context for standalone execution
     from agnt5 import Context
-    ctx = Context(run_id="streaming-demo")
+    ctx = Context(
+        run_id="streaming-demo",
+        correlation_id="streaming-demo",
+        parent_correlation_id="",
+    )
 
     print("\n--- stream_text ---")
     print("Output: ", end="")

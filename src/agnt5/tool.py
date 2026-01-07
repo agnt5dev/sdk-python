@@ -19,6 +19,7 @@ from docstring_parser import parse as parse_docstring
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
 from ._telemetry import setup_module_logger
+from .agent.events import ToolCallFailed
 
 logger = setup_module_logger(__name__)
 
@@ -300,11 +301,9 @@ class Tool:
         context = get_current_context()
         # Generate correlation_id for pairing tool.invoked ↔ tool.completed/failed
         tool_correlation_id = f"tool-{_uuid.uuid4().hex[:12]}"
-        if context:
-            context.emit("tool.invoked", {
-                "tool.name": self.name,
-                "tool.args": list(kwargs.keys()),
-            }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
+        # TODO: Add ToolInvoked typed event (different from ToolCallStarted which is for agent→tool)
+        # if context:
+        #     context.emit(ToolInvoked(...))
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -335,12 +334,9 @@ class Tool:
 
                     logger.debug(f"Tool '{self.name}' completed successfully")
 
-                    # Emit completion event
-                    if context:
-                        context.emit("tool.completed", {
-                            "tool.name": self.name,
-                            "tool.success": True,
-                        }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
+                    # TODO: Add ToolCompleted typed event
+                    # if context:
+                    #     context.emit(ToolCompleted(...))
 
                     # Cache result for replay if memoization is enabled
                     if memo and step_key:
@@ -350,11 +346,16 @@ class Tool:
             except Exception as e:
                 # Emit error event for observability
                 if context:
-                    context.emit("tool.failed", {
-                        "tool.name": self.name,
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                    }, metadata={"name": self.name}, correlation_id=tool_correlation_id)
+                    context.emit(ToolCallFailed(
+                        name=self.name,
+                        correlation_id=tool_correlation_id,
+                        parent_correlation_id=context._correlation_id,
+                        error_code=type(e).__name__,
+                        error_message=str(e),
+                        tool_name=self.name,
+                        tool_call_id=tool_correlation_id,
+                        metadata={"name": self.name},
+                    ))
                 raise
         finally:
             # Always reset context to prevent leakage

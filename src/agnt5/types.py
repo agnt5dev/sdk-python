@@ -1,10 +1,10 @@
-"""Type definitions and protocols for AGNT5 SDK."""
+"""Type definitions for AGNT5 SDK."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, TypeVar, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union
 
 # Type aliases
 JSON = Union[Dict[str, Any], List[Any], str, int, float, bool, None]
@@ -73,39 +73,3 @@ class WorkflowConfig:
     input_schema: Optional[Dict[str, Any]] = None
     output_schema: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, str]] = None
-
-
-class ContextProtocol(Protocol):
-    """Protocol defining the Context interface."""
-
-    @property
-    def run_id(self) -> str:
-        """Workflow/run identifier."""
-        ...
-
-    @property
-    def step_id(self) -> Optional[str]:
-        """Current step identifier."""
-        ...
-
-    @property
-    def attempt(self) -> int:
-        """Retry attempt number."""
-        ...
-
-    @property
-    def component_type(self) -> str:
-        """Component type: 'function', 'entity', 'workflow'."""
-        ...
-
-    async def get(self, key: str, default: Any = None) -> Any:
-        """Get value from state."""
-        ...
-
-    def set(self, key: str, value: Any) -> None:
-        """Set value in state."""
-        ...
-
-    def delete(self, key: str) -> None:
-        """Delete key from state."""
-        ...

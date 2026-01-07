@@ -663,7 +663,7 @@ async def agent_parallel_tools(ctx: WorkflowContext, query: str) -> dict:
     )
 
     start_time = time.time()
-    result = await data_agent.run(query, context=ctx)
+    result = await data_agent.run_sync(query, context=ctx)
     elapsed = (time.time() - start_time) * 1000
 
     # Analyze tool calls
@@ -754,7 +754,11 @@ async def main() -> None:
     print("AGNT5 Parallel and Sequential Tool Calls")
     print("=" * 60)
 
-    ctx = Context(run_id="tool-calls-demo")
+    ctx = Context(
+        run_id="tool-calls-demo",
+        correlation_id="tool-calls-demo",
+        parent_correlation_id="",
+    )
 
     # Sequential chain
     print("\n--- Sequential Tool Chain ---")

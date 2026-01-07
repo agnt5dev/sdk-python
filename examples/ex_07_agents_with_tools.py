@@ -436,7 +436,11 @@ async def main() -> None:
     print("AGNT5 Agents with Tools Example")
     print("=" * 60)
 
-    ctx = Context(run_id="tools-example")
+    ctx = Context(
+        run_id="tools-example",
+        correlation_id="tools-example",
+        parent_correlation_id="",
+    )
 
     # Calculator agent
     print("\n--- Calculator Agent ---")

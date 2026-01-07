@@ -419,7 +419,11 @@ To test HITL workflows:
 
     # Demonstrate conditional approval auto-approve case
     print("\n--- Conditional Approval (Auto-Approve Case) ---")
-    ctx = Context(run_id="hitl-demo")
+    ctx = Context(
+        run_id="hitl-demo",
+        correlation_id="hitl-demo",
+        parent_correlation_id="",
+    )
 
     # Note: This would normally pause, but we'll show the auto-approve path
     print("For amount < $1000, transaction is auto-approved")

@@ -24,6 +24,7 @@ Prerequisites:
 
 import asyncio
 import os
+from typing import Optional
 
 from agnt5 import Agent, FunctionContext, function
 
@@ -205,7 +206,7 @@ Focus on engaging content that captivates the reader.""",
 async def conversation_agent(
     ctx: FunctionContext,
     message: str,
-    history: list = None,
+    history: Optional[list] = None,
 ) -> dict:
     """
     Agent that maintains conversation history.
@@ -284,7 +285,11 @@ async def main() -> None:
     print("AGNT5 Agents Example")
     print("=" * 60)
 
-    ctx = Context(run_id="agents-example")
+    ctx = Context(
+        run_id="agents-example",
+        correlation_id="agents-example",
+        parent_correlation_id="",
+    )
 
     # Simple agent
     print("\n--- Simple Agent ---")

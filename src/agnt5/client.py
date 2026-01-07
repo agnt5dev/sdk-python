@@ -2,18 +2,39 @@
 
 import json
 import os
-from typing import Any, AsyncIterator, Dict, Iterator, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, Optional
 from urllib.parse import urljoin
 
 import httpx
-
-from .events import Event, EventType
 
 if TYPE_CHECKING:
     from .client import RunError
 
 # Environment variable for API key
 AGNT5_API_KEY_ENV = "AGNT5_API_KEY"
+
+
+@dataclass
+class ReceivedEvent:
+    """Event received from SSE stream.
+
+    This is a simple container for events received via Server-Sent Events
+    from the platform. It provides access to the event type and data payload
+    without requiring the full typed event hierarchy used internally by the SDK.
+    """
+
+    event_type: str
+    """Event type string (e.g., 'agent.started', 'lm.content_block.delta')."""
+
+    data: Dict[str, Any]
+    """Event data payload as a dictionary."""
+
+    content_index: int = 0
+    """Content block index for streaming events."""
+
+    sequence: int = 0
+    """Sequence number for ordering events."""
 
 
 def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = None) -> "RunError":
@@ -62,30 +83,18 @@ def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = No
     )
 
 
-def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> Event:
-    """Convert SSE event type and data to typed Event object.
+def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> ReceivedEvent:
+    """Convert SSE event type and data to ReceivedEvent.
 
     Args:
         event_type_str: The event type string from SSE (e.g., "agent.started")
         data: The parsed JSON data from the SSE data field
 
     Returns:
-        Event object with typed event_type and data payload
+        ReceivedEvent with event_type string and data payload
     """
-    try:
-        event_type = EventType(event_type_str)
-    except ValueError:
-        # Unknown event type - store as-is with a generic type
-        # This allows forward compatibility with new event types
-        return Event(
-            event_type=EventType.PROGRESS_UPDATE,
-            data={"_raw_event_type": event_type_str, **data},
-            content_index=data.get("index", 0),
-            sequence=data.get("sequence", 0),
-        )
-
-    return Event(
-        event_type=event_type,
+    return ReceivedEvent(
+        event_type=event_type_str,
         data=data,
         content_index=data.get("index", 0),
         sequence=data.get("sequence", 0),
@@ -121,22 +130,28 @@ class Client:
 
     def __init__(
         self,
-        gateway_url: str = "http://localhost:34181",
+        gateway_url: str = "https://gw.agnt5.com",
         timeout: float = 30.0,
         api_key: Optional[str] = None,
     ):
         """Initialize the AGNT5 client.
 
         Args:
-            gateway_url: Base URL of the AGNT5 gateway (default: http://localhost:34181)
+            gateway_url: Base URL of the AGNT5 gateway (default: https://gw.agnt5.com)
             timeout: Request timeout in seconds (default: 30.0)
             api_key: Service key for authentication. If not provided, falls back to
                      AGNT5_API_KEY environment variable. Keys start with "agnt5_sk_".
         """
         self.gateway_url = gateway_url.rstrip("/")
         self.timeout = timeout
+
         # Use provided api_key or fallback to environment variable
         self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
+
+        # Validate if the key starts with "agnt5_sk_"
+        if self.api_key and not self.api_key.startswith("agnt5_sk_"):
+            raise ValueError("Invalid API key format. Keys must start with 'agnt5_sk_'")
+
         self._client = httpx.Client(timeout=timeout)
 
     def _build_headers(
@@ -160,6 +175,7 @@ class Client:
             headers["X-Session-ID"] = session_id
         if user_id:
             headers["X-User-ID"] = user_id
+
         return headers
 
     def run(
@@ -169,6 +185,7 @@ class Client:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -217,6 +234,7 @@ class Client:
             url,
             json=input_data,
             headers=self._build_headers(session_id=session_id, user_id=user_id),
+            timeout=timeout,
         )
 
         # Handle errors
@@ -579,11 +597,11 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: float = 300.0,
-    ) -> Iterator[Event]:
-        """Stream typed Event objects from a component execution.
+    ) -> Iterator[ReceivedEvent]:
+        """Stream events from a component execution.
 
-        This method yields Event objects as they arrive from the component,
-        providing full access to the event taxonomy including agent lifecycle,
+        This method yields ReceivedEvent objects as they arrive from the component,
+        providing access to the event taxonomy including agent lifecycle,
         LM streaming, tool calls, and workflow events.
 
         Args:
@@ -595,7 +613,7 @@ class Client:
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
 
         Yields:
-            Event objects as they arrive from the stream
+            ReceivedEvent objects as they arrive from the stream
 
         Raises:
             RunError: If the component execution fails
@@ -603,17 +621,17 @@ class Client:
 
         Example:
             ```python
-            from agnt5 import Client, EventType
+            from agnt5 import Client
 
             client = Client()
 
             # Stream agent events
             for event in client.stream_events("my_agent", {"message": "Hi"}, "agent"):
-                if event.event_type == EventType.AGENT_STARTED:
+                if event.event_type == "agent.started":
                     print(f"Agent started: {event.data['agent_name']}")
-                elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                elif event.event_type == "lm.content_block.delta":
                     print(event.data['content'], end='', flush=True)
-                elif event.event_type == EventType.AGENT_COMPLETED:
+                elif event.event_type == "agent.completed":
                     print(f"\\nDone: {event.data['output']}")
             ```
         """
@@ -1106,10 +1124,10 @@ class WorkflowProxy:
         user_id: Optional[str] = None,
         timeout: float = 300.0,
         **kwargs,
-    ) -> Iterator[Event]:
-        """Stream typed Event objects from workflow execution.
+    ) -> Iterator[ReceivedEvent]:
+        """Stream events from workflow execution.
 
-        This method yields Event objects as they arrive from the workflow,
+        This method yields ReceivedEvent objects as they arrive from the workflow,
         including nested events from agents and functions called within the workflow.
 
         Args:
@@ -1119,19 +1137,19 @@ class WorkflowProxy:
             **kwargs: Input parameters for the workflow
 
         Yields:
-            Event objects as they arrive from the stream
+            ReceivedEvent objects as they arrive from the stream
 
         Example:
             ```python
-            from agnt5 import Client, EventType
+            from agnt5 import Client
 
             # Stream workflow events
             for event in client.workflow("research_workflow").stream_events(query="AI"):
-                if event.event_type == EventType.WORKFLOW_STEP_STARTED:
+                if event.event_type == "workflow.step.started":
                     print(f"Step started: {event.data.get('step_name')}")
-                elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                elif event.event_type == "lm.content_block.delta":
                     print(event.data['content'], end='', flush=True)
-                elif event.event_type == EventType.WORKFLOW_STEP_COMPLETED:
+                elif event.event_type == "workflow.step.completed":
                     print(f"\\nStep done: {event.data.get('step_name')}")
             ```
         """
@@ -1177,13 +1195,13 @@ class AsyncClient:
     Example:
         ```python
         import asyncio
-        from agnt5 import AsyncClient, EventType
+        from agnt5 import AsyncClient
 
         async def main():
             async with AsyncClient() as client:
                 # Stream agent events asynchronously
                 async for event in client.stream_events("my_agent", {"msg": "Hi"}, "agent"):
-                    if event.event_type == EventType.LM_MESSAGE_DELTA:
+                    if event.event_type == "lm.content_block.delta":
                         print(event.data['content'], end='', flush=True)
 
         asyncio.run(main())
@@ -1325,11 +1343,11 @@ class AsyncClient:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: float = 300.0,
-    ) -> AsyncIterator[Event]:
-        """Async stream typed Event objects from a component execution.
+    ) -> AsyncIterator[ReceivedEvent]:
+        """Async stream events from a component execution.
 
-        This method yields Event objects as they arrive from the component,
-        providing full access to the event taxonomy including agent lifecycle,
+        This method yields ReceivedEvent objects as they arrive from the component,
+        providing access to the event taxonomy including agent lifecycle,
         LM streaming, tool calls, and workflow events.
 
         Args:
@@ -1341,7 +1359,7 @@ class AsyncClient:
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
 
         Yields:
-            Event objects as they arrive from the stream
+            ReceivedEvent objects as they arrive from the stream
 
         Raises:
             RunError: If the component execution fails
@@ -1351,9 +1369,9 @@ class AsyncClient:
             ```python
             async with AsyncClient() as client:
                 async for event in client.stream_events("my_agent", {"msg": "Hi"}, "agent"):
-                    if event.event_type == EventType.AGENT_STARTED:
+                    if event.event_type == "agent.started":
                         print(f"Agent started: {event.data['agent_name']}")
-                    elif event.event_type == EventType.LM_MESSAGE_DELTA:
+                    elif event.event_type == "lm.content_block.delta":
                         print(event.data['content'], end='', flush=True)
             ```
         """

@@ -882,7 +882,11 @@ async def main() -> None:
         print("   export OPENAI_API_KEY=sk-...")
         return
 
-    ctx = Context(run_id="multi-agent-demo")
+    ctx = Context(
+        run_id="multi-agent-demo",
+        correlation_id="multi-agent-demo",
+        parent_correlation_id="",
+    )
 
     # Supervisor/Worker
     print("\n--- Supervisor/Worker Pattern ---")

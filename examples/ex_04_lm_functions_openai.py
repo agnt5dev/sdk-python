@@ -17,7 +17,8 @@ Prerequisites:
 
 import asyncio
 
-from agnt5 import function, FunctionContext, lm, EventType
+from agnt5 import function, FunctionContext, lm
+from agnt5.lm import LMContentBlockDelta
 
 
 # =============================================================================
@@ -90,20 +91,19 @@ async def lm_stream(ctx: FunctionContext, prompt: str, model: str = "openai/gpt-
     chunks = []
     chunk_count = 0
 
-    # lm.stream() yields Event objects, extract text from LM_MESSAGE_DELTA events
-    # For delta events, event.data is the raw content string (not a dict)
+    # lm.stream() yields typed Event objects (LMContentBlockDelta, LMCompleted, etc.)
     async for event in lm.stream(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     ):
         chunk_count += 1
-        if event.event_type == EventType.LM_MESSAGE_DELTA:
-            # event.data is the raw content string for delta events
-            content = event.data if isinstance(event.data, str) else ""
+        if isinstance(event, LMContentBlockDelta):
+            # LMContentBlockDelta has .content attribute with the text
+            content = str(event.content) if event.content else ""
             chunks.append(content)
             ctx.logger.info(f"[lm_stream] chunk[{chunk_count}]: '{content}'")
         else:
-            ctx.logger.info(f"[lm_stream] event[{chunk_count}]: {event.event_type.value}")
+            ctx.logger.info(f"[lm_stream] event[{chunk_count}]: {event.event_type}")
 
     result = "".join(chunks)
     ctx.logger.info(f"[lm_stream] Response ({chunk_count} events, {len(chunks)} text chunks): {result[:100]}...")
@@ -216,7 +216,11 @@ async def main() -> None:
     print("AGNT5 Language Model Functions Example")
     print("=" * 60)
 
-    ctx = Context(run_id="lm-example-run")
+    ctx = Context(
+        run_id="lm-example-run",
+        correlation_id="lm-example-run",
+        parent_correlation_id="",
+    )
 
     # Non-streaming generate
     print("\n--- lm.generate() ---")

@@ -16,8 +16,8 @@ Example:
 
     # Streaming execution (recommended)
     async for event in agent.run("Find recent AI papers"):
-        if event.event_type == EventType.LM_MESSAGE_DELTA:
-            print(event.data, end="")  # data is raw content string for deltas
+        if event.event_type == "lm.content_block.delta":
+            print(event.content, end="")
 
     # Non-streaming execution
     result = await agent.run_sync("Find recent AI papers")
@@ -27,17 +27,36 @@ Example:
 
 # Import from split modules
 from .context import AgentContext
-from .result import AgentResult
-from .handoff import Handoff, handoff
-from .registry import AgentRegistry
 from .core import Agent
 from .decorator import agent
+from .events import (
+    AgentCompleted,
+    AgentFailed,
+    AgentIterationCompleted,
+    AgentIterationStarted,
+    AgentStarted,
+    ToolCallCompleted,
+    ToolCallFailed,
+    ToolCallStarted,
+)
+from .handoff import Handoff, handoff
+from .registry import AgentRegistry
+from .result import AgentResult
 
 __all__ = [
     # Core classes
     "Agent",
     "AgentContext",
     "AgentResult",
+    # Events
+    "AgentCompleted",
+    "AgentFailed",
+    "AgentIterationCompleted",
+    "AgentIterationStarted",
+    "AgentStarted",
+    "ToolCallCompleted",
+    "ToolCallFailed",
+    "ToolCallStarted",
     # Handoff support
     "Handoff",
     "handoff",

@@ -1,567 +1,545 @@
-"""Streaming event types for AGNT5 SDK.
+"""Events module for AGNT5 SDK.
 
-These events are sent over SSE connections from gateway to clients
-during component execution (agents, workflows, functions).
+Provides typed event classes with compile-time correlation enforcement.
 
-Event types align with the journal event taxonomy defined in:
-platform/pkg/repository/dto/journal_event.go
+Usage:
+    from agnt5.events import Started, Completed, Delta, ComponentType, OperationType
+
+    # Lifecycle events
+    Started(
+        name="my-workflow",
+        correlation_id="wf-123",
+        parent_correlation_id="root",
+        component_type=ComponentType.WORKFLOW,
+        input_data={"query": "hello"},
+    )
+
+    # Streaming delta events
+    Delta(
+        name="claude-3-sonnet",
+        correlation_id="lm-123",
+        parent_correlation_id="agent-456",
+        component_type=ComponentType.LM,
+        operation=OperationType.THINKING,
+        content="Let me think...",
+    )
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
 import json
+import logging
 import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, ClassVar, Optional, Union
+
+from edwh_uuid7 import uuid7
+
+logger = logging.getLogger(__name__)
 
 
-class EventType(str, Enum):
-    """All streaming event types."""
-
-    # Run lifecycle
-    RUN_STARTED = "run.started"
-    RUN_COMPLETED = "run.completed"
-    RUN_FAILED = "run.failed"
-    RUN_PAUSED = "run.paused"
-    RUN_RESUMED = "run.resumed"
-    RUN_CANCELLED = "run.cancelled"
-    RUN_TIMEOUT = "run.timeout"
-
-    # LM streaming lifecycle
-    LM_STREAM_STARTED = "lm.stream.started"
-    LM_STREAM_COMPLETED = "lm.stream.completed"
-    LM_STREAM_FAILED = "lm.stream.failed"
-
-    # LM thinking content blocks (extended thinking / chain-of-thought)
-    LM_THINKING_START = "lm.thinking.start"
-    LM_THINKING_DELTA = "lm.thinking.delta"
-    LM_THINKING_STOP = "lm.thinking.stop"
-
-    # LM message content blocks (assistant output)
-    LM_MESSAGE_START = "lm.message.start"
-    LM_MESSAGE_DELTA = "lm.message.delta"
-    LM_MESSAGE_STOP = "lm.message.stop"
-
-    # LM tool call content blocks (LLM deciding to call a tool)
-    LM_TOOL_CALL_START = "lm.tool_call.start"
-    LM_TOOL_CALL_DELTA = "lm.tool_call.delta"
-    LM_TOOL_CALL_STOP = "lm.tool_call.stop"
-
-    # User code output streaming
-    OUTPUT_START = "output.start"
-    OUTPUT_DELTA = "output.delta"
-    OUTPUT_STOP = "output.stop"
-
-    # Progress indicators
-    PROGRESS_UPDATE = "progress.update"
-
-    # Tool execution events
-    TOOL_INVOKED = "tool.invoked"
-    TOOL_COMPLETED = "tool.completed"
-    TOOL_FAILED = "tool.failed"
-
-    # Agent events
-    AGENT_STARTED = "agent.started"
-    AGENT_COMPLETED = "agent.completed"
-    AGENT_FAILED = "agent.failed"
-    AGENT_ITERATION_STARTED = "agent.iteration.started"
-    AGENT_ITERATION_COMPLETED = "agent.iteration.completed"
-    AGENT_MAX_ITERATIONS = "agent.max_iterations.reached"
-    AGENT_TOOL_CALL_STARTED = "agent.tool_call.started"
-    AGENT_TOOL_CALL_COMPLETED = "agent.tool_call.completed"
-
-    # HITL: Approval events
-    APPROVAL_REQUESTED = "approval.requested"
-    APPROVAL_APPROVED = "approval.approved"
-    APPROVAL_REJECTED = "approval.rejected"
-    APPROVAL_EXPIRED = "approval.expired"
-
-    # HITL: Input events
-    INPUT_REQUESTED = "input.requested"
-    INPUT_PROVIDED = "input.provided"
-    INPUT_EXPIRED = "input.expired"
-
-    # HITL: Feedback events
-    FEEDBACK_REQUESTED = "feedback.requested"
-    FEEDBACK_PROVIDED = "feedback.provided"
-    FEEDBACK_EXPIRED = "feedback.expired"
-
-    # Workflow step events
-    WORKFLOW_STEP_STARTED = "workflow.step.started"
-    WORKFLOW_STEP_COMPLETED = "workflow.step.completed"
-    WORKFLOW_STEP_FAILED = "workflow.step.failed"
+# =============================================================================
+# Type Aliases
+# =============================================================================
 
 
-# --- Data payloads for streaming events ---
+EventData = Union[
+    None,
+    str,  # Text content
+    bytes,  # Binary content
+    dict[str, Any],  # Structured JSON object
+    list[dict[str, Any]],  # Array of objects (e.g., messages)
+]
 
 
-@dataclass
-class ContentBlockStart:
-    """Start of a content block (thinking, message, tool_call, output)."""
-
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"index": self.index}
+# =============================================================================
+# Enums
+# =============================================================================
 
 
-@dataclass
-class ContentBlockDelta:
-    """Delta (incremental content) for a content block."""
+class ComponentType(str, Enum):
+    """Component types for lifecycle events."""
 
-    content: str
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"content": self.content, "index": self.index}
-
-
-@dataclass
-class ContentBlockStop:
-    """End of a content block."""
-
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"index": self.index}
+    RUN = "run"
+    WORKFLOW = "workflow"
+    AGENT = "agent"
+    FUNCTION = "function"
+    STEP = "step"
+    ENTITY = "entity"
+    LM = "lm"
 
 
-@dataclass
-class ToolCallStart:
-    """Start of a tool call block."""
+class OperationType(str, Enum):
+    """Operation types for sub-component events."""
 
-    id: str
-    name: str
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "name": self.name, "index": self.index}
-
-
-@dataclass
-class ToolCallDelta:
-    """Delta for tool call input arguments."""
-
-    input_delta: str
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"input_delta": self.input_delta, "index": self.index}
+    # Execution operations
+    ITERATION = "iteration"
+    GENERATE = "generate"
+    STREAM = "stream"
+    STEP = "step"
+    # Streaming content blocks
+    THINKING = "thinking"
+    MESSAGE = "message"
+    TOOL_CALL = "tool_call"
+    OUTPUT = "output"
 
 
-@dataclass
-class ToolCallStop:
-    """End of a tool call block with complete input."""
-
-    id: str
-    name: str
-    input: Dict[str, Any]
-    index: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "name": self.name, "input": self.input, "index": self.index}
+# =============================================================================
+# Base Event
+# =============================================================================
 
 
-@dataclass
-class ProgressUpdate:
-    """Progress indicator update."""
-
-    message: Optional[str] = None
-    percent: Optional[float] = None
-    current: Optional[int] = None
-    total: Optional[int] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {}
-        if self.message is not None:
-            d["message"] = self.message
-        if self.percent is not None:
-            d["percent"] = self.percent
-        if self.current is not None:
-            d["current"] = self.current
-        if self.total is not None:
-            d["total"] = self.total
-        return d
-
-
-@dataclass
-class TokenUsage:
-    """Token usage statistics."""
-
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-    thinking_tokens: Optional[int] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-        }
-        if self.thinking_tokens is not None:
-            d["thinking_tokens"] = self.thinking_tokens
-        return d
-
-
-@dataclass
-class ErrorDetail:
-    """Error details."""
-
-    code: str
-    message: str
-    details: Optional[Dict[str, Any]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = {"code": self.code, "message": self.message}
-        if self.details:
-            d["details"] = self.details
-        return d
-
-
-# --- Event class ---
-
-
-@dataclass
+@dataclass(kw_only=True)
 class Event:
-    """A streaming event with typed data payload.
+    """Base class for all typed events.
 
-    This is the primary class for emitting events during streaming execution.
-    Events are serialized and sent via the gRPC response stream to the gateway,
-    which then emits them as SSE events to clients.
-
-    For delta events (message_delta, thinking_delta, etc.), data should be
-    the raw content value. The gateway wraps it with {"content": <data>, "index": ...}.
-    For other events, data is typically a dict with structured information.
+    All fields are required and enforced at type-check time.
+    Missing any required field is a compile-time error.
     """
 
-    event_type: EventType
-    data: Any  # Raw value for deltas, dict for structured events
-    content_index: int = 0
-    sequence: int = 0
-    source_timestamp_ns: int = field(default_factory=time.time_ns)
+    # Source component identifier (e.g., model name, function name)
+    name: str
 
-    def to_response_fields(self) -> Dict[str, Any]:
-        """Convert to fields for ExecuteComponentResponse proto.
+    # Unique ID for this execution span
+    correlation_id: str
 
-        Returns dict with:
-        - event_type: str
-        - content_index: int
-        - sequence: int
-        - output_data: bytes (JSON-encoded data)
-        """
-        return {
-            "event_type": self.event_type.value,
-            "content_index": self.content_index,
-            "sequence": self.sequence,
-            "output_data": json.dumps(self.data).encode("utf-8") if self.data else b"",
+    # Links to parent span for trace hierarchy
+    parent_correlation_id: str
+
+    # Unique event identifier for deduplication
+    event_id: str = field(default_factory=lambda: str(uuid7()))
+
+    # Precise timing for ordering/latency
+    timestamp_ns: int = field(default_factory=time.time_ns)
+
+    # Wire format identifier (set by subclass)
+    event_type: str = field(init=False)
+
+    # Additional key-value context
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert event to dict for transport."""
+        result: dict[str, Any] = {
+            "event_type": self.event_type,
+            "event_id": self.event_id,
+            "name": self.name,
+            "correlation_id": self.correlation_id,
+            "parent_correlation_id": self.parent_correlation_id,
+            "timestamp_ns": self.timestamp_ns,
         }
+        if self.metadata:
+            result["metadata"] = self.metadata
+        # Add all other fields from subclass
+        for key, value in self.__dict__.items():
+            if key.startswith("_") or key in result:
+                continue
+            if value is not None:
+                result[key] = value
+        return result
 
-    @classmethod
-    def thinking_start(cls, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a thinking.start event."""
-        return cls(
-            event_type=EventType.LM_THINKING_START,
-            data=ContentBlockStart(index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
 
-    @classmethod
-    def thinking_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a thinking.delta event.
+# =============================================================================
+# Lifecycle Event Base
+# =============================================================================
 
-        Note: data is just the content string. Gateway wraps it with
-        {"content": <data>, "index": content_index}.
+
+@dataclass(kw_only=True)
+class LifecycleEvent(Event):
+    """Base class for lifecycle events (Started, Completed, Failed, etc.).
+
+    Subclasses must set _lifecycle_stage class variable.
+    """
+
+    # Lifecycle stage - set by subclass (e.g., "started", "completed")
+    _lifecycle_stage: ClassVar[str]
+
+    # Component type - enforced via Enum
+    component_type: ComponentType
+
+    # Operation type - None for component-level events
+    operation: Optional[OperationType] = None
+
+    def __post_init__(self) -> None:
+        if self.operation:
+            et = f"{self.component_type.value}.{self.operation.value}.{self._lifecycle_stage}"
+        else:
+            et = f"{self.component_type.value}.{self._lifecycle_stage}"
+        object.__setattr__(self, "event_type", et)
+
+
+# =============================================================================
+# Lifecycle Events
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class Started(LifecycleEvent):
+    """Component or operation started execution."""
+
+    _lifecycle_stage: ClassVar[str] = "started"
+
+    # Input provided to the component
+    input_data: EventData = None
+
+    # Input format hint (json, text, binary)
+    input_type: str = "json"
+
+    # Content block index (for streaming)
+    index: int = 0
+
+    # attempt number
+    attempt: int = 1
+
+
+@dataclass(kw_only=True)
+class Completed(LifecycleEvent):
+    """Component or operation completed successfully."""
+
+    _lifecycle_stage: ClassVar[str] = "completed"
+
+    # Output produced by the component
+    output_data: EventData = None
+
+    # Output format hint
+    output_type: str = "json"
+
+    # Total execution time in milliseconds
+    duration_ms: int = 0
+
+    # Content block index (for streaming)
+    index: int = 0
+
+
+@dataclass(kw_only=True)
+class Failed(LifecycleEvent):
+    """Component or operation failed with error."""
+
+    _lifecycle_stage: ClassVar[str] = "failed"
+
+    # Error classification code
+    error_code: str
+
+    # Human-readable error description
+    error_message: str
+
+    # Optional stack trace for debugging
+    error_traceback: Optional[str] = None
+
+    # Time spent before failure
+    duration_ms: int = 0
+
+
+@dataclass(kw_only=True)
+class Cancelled(LifecycleEvent):
+    """Component or operation explicitly stopped."""
+
+    _lifecycle_stage: ClassVar[str] = "cancelled"
+
+    # Reason for cancellation
+    reason: str = ""
+
+    # Time spent before cancellation
+    duration_ms: int = 0
+
+
+@dataclass(kw_only=True)
+class Timeout(LifecycleEvent):
+    """Component or operation exceeded time limit."""
+
+    _lifecycle_stage: ClassVar[str] = "timeout"
+
+    # Configured timeout value that was exceeded
+    timeout_ms: int
+
+    # Actual time spent before timeout
+    duration_ms: int = 0
+
+
+@dataclass(kw_only=True)
+class Paused(LifecycleEvent):
+    """Component or operation awaiting input/approval."""
+
+    _lifecycle_stage: ClassVar[str] = "paused"
+
+    # Why paused (approval_needed, input_required, rate_limited)
+    reason: str
+
+    # Context data for resumption
+    pause_data: EventData = None
+
+    # Time spent before pausing
+    duration_ms: int = 0
+
+
+@dataclass(kw_only=True)
+class Resumed(LifecycleEvent):
+    """Component or operation continuing after pause."""
+
+    _lifecycle_stage: ClassVar[str] = "resumed"
+
+    # Input/approval that triggered resume
+    resume_data: EventData = None
+
+    # How long the component was paused
+    paused_duration_ms: int = 0
+
+
+@dataclass(kw_only=True)
+class StateChanged(Event):
+    """State mutation event for workflows.
+
+    Used to track state changes within workflow execution.
+    Event type is fixed as: workflow.state.changed
+    """
+
+    # State key that was modified
+    key: Optional[str] = None
+
+    # New value (None for delete/clear operations)
+    value: Any = None
+
+    # Type of operation: "set", "delete", "clear"
+    operation: str = "set"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "event_type", "workflow.state.changed")
+
+
+# =============================================================================
+# Streaming Events
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class Delta(Event):
+    """Streaming delta event for incremental content.
+
+    Used for streaming content blocks (thinking, message, tool_call, output).
+    Event type is computed as: {component_type}.{operation}.delta
+    """
+
+    # Component type - enforced via Enum
+    component_type: ComponentType
+
+    # Operation type - which content block
+    operation: OperationType
+
+    # The delta content
+    content: Any
+
+    # Content block index
+    index: int = 0
+
+    def __post_init__(self) -> None:
+        et = f"{self.component_type.value}.{self.operation.value}.delta"
+        object.__setattr__(self, "event_type", et)
+
+
+# =============================================================================
+# Output Streaming Events
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class OutputStart(Event):
+    """Marks the beginning of user code output streaming."""
+
+    # Content block index
+    index: int = 0
+
+    event_type: str = field(default="output.start", init=False)
+
+
+@dataclass(kw_only=True)
+class OutputDelta(Event):
+    """Incremental output content from user code."""
+
+    # The delta content
+    content: Any
+
+    # Content block index
+    index: int = 0
+
+    event_type: str = field(default="output.delta", init=False)
+
+
+@dataclass(kw_only=True)
+class OutputStop(Event):
+    """Marks the end of user code output streaming."""
+
+    # Content block index
+    index: int = 0
+
+    event_type: str = field(default="output.stop", init=False)
+
+
+# =============================================================================
+# Progress Events
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class ProgressUpdate(Event):
+    """Progress indicator event.
+
+    Standalone event for reporting progress - not a lifecycle event.
+    """
+
+    # Progress message
+    message: Optional[str] = None
+
+    # Completion percentage (0-100)
+    percent: Optional[float] = None
+
+    # Current item number
+    current: Optional[int] = None
+
+    # Total items
+    total: Optional[int] = None
+
+    event_type: str = field(default="progress.update", init=False)
+
+
+# =============================================================================
+# Transport
+# =============================================================================
+
+
+@dataclass
+class EventEnvelope:
+    """Transport envelope for events."""
+
+    event_type: str
+    data: dict[str, Any]
+    source_timestamp_ns: int = field(default_factory=time.time_ns)
+    content_index: int = 0
+    metadata: Optional[dict[str, str]] = None
+
+
+class EventEmitter:
+    """Queues events to the platform."""
+
+    def __init__(
+        self,
+        run_id: Optional[str] = None,
+        base_metadata: Optional[dict[str, str]] = None,
+    ) -> None:
+        self._run_id = run_id or ""
+        self._base_metadata = base_metadata or {}
+        self._sequence = 0
+        self._worker: Any = None
+
+    def set_worker(self, worker: Any) -> None:
+        """Set the worker for queueing events."""
+        self._worker = worker
+
+    def emit(self, event: Event) -> EventEnvelope:
+        """Emit a typed event to the platform.
+
+        All event metadata (correlation_id, parent_correlation_id, timestamp, etc.)
+        is extracted from the Event object.
         """
-        return cls(
-            event_type=EventType.LM_THINKING_DELTA,
-            data=content,  # Raw content, gateway adds wrapper
-            content_index=index,
-            sequence=sequence,
-        )
+        event_data = event.to_dict()
 
-    @classmethod
-    def thinking_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a thinking.stop event."""
-        return cls(
-            event_type=EventType.LM_THINKING_STOP,
-            data=ContentBlockStop(index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
+        # Extract content_index from event if available (e.g., Delta.index)
+        content_index = getattr(event, "index", 0)
 
-    @classmethod
-    def message_start(cls, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a message.start event."""
-        return cls(
-            event_type=EventType.LM_MESSAGE_START,
-            data=ContentBlockStart(index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def message_delta(cls, content: str, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a message.delta event.
-
-        Note: data is just the content string. Gateway wraps it with
-        {"content": <data>, "index": content_index}.
-        """
-        return cls(
-            event_type=EventType.LM_MESSAGE_DELTA,
-            data=content,  # Raw content, gateway adds wrapper
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def message_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a message.stop event."""
-        return cls(
-            event_type=EventType.LM_MESSAGE_STOP,
-            data=ContentBlockStop(index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def tool_call_start(
-        cls, id: str, name: str, index: int = 0, sequence: int = 0
-    ) -> "Event":
-        """Create a tool_call.start event."""
-        return cls(
-            event_type=EventType.LM_TOOL_CALL_START,
-            data=ToolCallStart(id=id, name=name, index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def tool_call_delta(cls, input_delta: str, index: int = 0, sequence: int = 0) -> "Event":
-        """Create a tool_call.delta event.
-
-        Note: data is just the input_delta string. Gateway wraps it with
-        {"content": <data>, "index": content_index}.
-        """
-        return cls(
-            event_type=EventType.LM_TOOL_CALL_DELTA,
-            data=input_delta,  # Raw input delta, gateway adds wrapper
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def tool_call_stop(
-        cls, id: str, name: str, input: Dict[str, Any], index: int = 0, sequence: int = 0
-    ) -> "Event":
-        """Create a tool_call.stop event."""
-        return cls(
-            event_type=EventType.LM_TOOL_CALL_STOP,
-            data=ToolCallStop(id=id, name=name, input=input, index=index).to_dict(),
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def output_start(cls, index: int = 0, sequence: int = 0, content_type: str = "text/plain") -> "Event":
-        """Create an output.start event for user code streaming."""
-        return cls(
-            event_type=EventType.OUTPUT_START,
-            data={"index": index, "content_type": content_type},
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def output_delta(cls, content: Any, index: int = 0, sequence: int = 0) -> "Event":
-        """Create an output.delta event for user code streaming.
-
-        Note: data is just the content value. Gateway wraps it with
-        {"content": <data>, "index": content_index}.
-        """
-        return cls(
-            event_type=EventType.OUTPUT_DELTA,
-            data=content,  # Raw content, gateway adds wrapper
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def output_stop(cls, index: int = 0, sequence: int = 0) -> "Event":
-        """Create an output.stop event for user code streaming."""
-        return cls(
-            event_type=EventType.OUTPUT_STOP,
-            data={"index": index},
-            content_index=index,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def progress(
-        cls,
-        message: Optional[str] = None,
-        percent: Optional[float] = None,
-        current: Optional[int] = None,
-        total: Optional[int] = None,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create a progress.update event."""
-        return cls(
-            event_type=EventType.PROGRESS_UPDATE,
-            data=ProgressUpdate(
-                message=message, percent=percent, current=current, total=total
-            ).to_dict(),
-            content_index=0,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def run_completed(cls, output: Any, usage: Optional[TokenUsage] = None, sequence: int = 0) -> "Event":
-        """Create a run.completed event."""
-        data: Dict[str, Any] = {"output": output}
-        if usage:
-            data["usage"] = usage.to_dict()
-        return cls(
-            event_type=EventType.RUN_COMPLETED,
-            data=data,
-            content_index=0,
-            sequence=sequence,
-        )
-
-    @classmethod
-    def run_failed(cls, error: ErrorDetail, sequence: int = 0) -> "Event":
-        """Create a run.failed event."""
-        return cls(
-            event_type=EventType.RUN_FAILED,
-            data={"error": error.to_dict()},
-            content_index=0,
-            sequence=sequence,
-        )
-
-    # --- Agent events ---
-
-    @classmethod
-    def agent_started(
-        cls,
-        agent_name: str,
-        model: str,
-        tools: Optional[List[str]] = None,
-        max_iterations: int = 10,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create an agent.started event."""
-        return cls(
-            event_type=EventType.AGENT_STARTED,
-            data={
-                "agent_name": agent_name,
-                "model": model,
-                "tools": tools or [],
-                "max_iterations": max_iterations,
-            },
-            sequence=sequence,
-        )
-
-    @classmethod
-    def agent_completed(
-        cls,
-        output: str,
-        iterations: int = 1,
-        tool_calls: Optional[List[Dict[str, Any]]] = None,
-        handoff_to: Optional[str] = None,
-        max_iterations_reached: bool = False,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create an agent.completed event."""
-        return cls(
-            event_type=EventType.AGENT_COMPLETED,
-            data={
-                "output": output,
-                "iterations": iterations,
-                "tool_calls": tool_calls or [],
-                "handoff_to": handoff_to,
-                "max_iterations_reached": max_iterations_reached,
-            },
-            sequence=sequence,
-        )
-
-    @classmethod
-    def agent_failed(
-        cls,
-        error: str,
-        error_type: str,
-        agent_name: Optional[str] = None,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create an agent.failed event."""
-        return cls(
-            event_type=EventType.AGENT_FAILED,
-            data={
-                "error": error,
-                "error_type": error_type,
-                "agent_name": agent_name,
-            },
-            sequence=sequence,
-        )
-
-    @classmethod
-    def agent_tool_call_started(
-        cls,
-        tool_name: str,
-        arguments: str,
-        tool_call_id: Optional[str] = None,
-        content_index: int = 0,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create an agent.tool_call.started event.
-
-        Args:
-            tool_name: Name of the tool being called
-            arguments: JSON-encoded arguments string
-            tool_call_id: Optional unique ID for this tool call (from LLM)
-            content_index: Index for parallel tool calls (0-based)
-            sequence: Event sequence number
-        """
-        return cls(
-            event_type=EventType.AGENT_TOOL_CALL_STARTED,
-            data={
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "tool_call_id": tool_call_id,
-            },
+        envelope = EventEnvelope(
+            event_type=event.event_type,
+            data=event_data,
+            source_timestamp_ns=event.timestamp_ns,
             content_index=content_index,
-            sequence=sequence,
+            metadata=dict(event.metadata) if event.metadata else None,
         )
 
-    @classmethod
-    def agent_tool_call_completed(
-        cls,
-        tool_name: str,
-        result: Any,
-        error: Optional[str] = None,
-        tool_call_id: Optional[str] = None,
-        content_index: int = 0,
-        sequence: int = 0,
-    ) -> "Event":
-        """Create an agent.tool_call.completed event.
+        self._queue_event(envelope, event.correlation_id, event.parent_correlation_id)
+        return envelope
 
-        Args:
-            tool_name: Name of the tool that was called
-            result: The tool's return value (JSON-serializable)
-            error: Error message if tool failed
-            tool_call_id: Optional unique ID for this tool call (from LLM)
-            content_index: Index for parallel tool calls (must match started event)
-            sequence: Event sequence number
-        """
-        return cls(
-            event_type=EventType.AGENT_TOOL_CALL_COMPLETED,
-            data={
-                "tool_name": tool_name,
-                "result": result,
-                "error": error,
-                "tool_call_id": tool_call_id,
-            },
-            content_index=content_index,
-            sequence=sequence,
-        )
+    def __call__(self, event: Event) -> EventEnvelope:
+        """Callable interface - delegates to emit()."""
+        return self.emit(event)
+
+    def _queue_event(
+        self,
+        envelope: EventEnvelope,
+        correlation_id: str,
+        parent_correlation_id: str,
+    ) -> None:
+        """Queue event to the platform via Rust worker."""
+        if self._worker is None:
+            logger.warning(
+                f"[EventEmitter._queue_event] No worker set, dropping event: "
+                f"type={envelope.event_type}, run_id={self._run_id}"
+            )
+            return
+
+        try:
+            merged_metadata = dict(self._base_metadata)
+            if envelope.metadata:
+                merged_metadata.update(envelope.metadata)
+
+            self._sequence += 1
+
+            logger.info(
+                f"[EventEmitter._queue_event] Queueing event to Rust worker: "
+                f"type={envelope.event_type}, run_id={self._run_id}, "
+                f"sequence={self._sequence}, correlation_id={correlation_id}"
+            )
+
+            self._worker.queue_event(
+                invocation_id=self._run_id,
+                event_type=envelope.event_type,
+                event_data=json.dumps(envelope.data),
+                content_index=envelope.content_index,
+                sequence=self._sequence,
+                metadata=merged_metadata,
+                source_timestamp_ns=envelope.source_timestamp_ns,
+                is_streaming=True,
+                correlation_id=correlation_id,
+                parent_event_id=parent_correlation_id,
+            )
+            logger.debug(
+                f"[EventEmitter._queue_event] Event queued successfully: type={envelope.event_type}"
+            )
+        except Exception as e:
+            logger.error(f"[EventEmitter._queue_event] Failed to queue event: {e}")
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+
+__all__ = [
+    # Base
+    "Event",
+    "LifecycleEvent",
+    # Enums
+    "ComponentType",
+    "OperationType",
+    # Types
+    "EventData",
+    # Lifecycle events
+    "Started",
+    "Completed",
+    "Failed",
+    "Cancelled",
+    "Timeout",
+    "Paused",
+    "Resumed",
+    # State events
+    "StateChanged",
+    # Streaming events
+    "Delta",
+    # Progress events
+    "ProgressUpdate",
+    # Transport
+    "EventEmitter",
+    "EventEnvelope",
+]

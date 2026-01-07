@@ -246,7 +246,11 @@ async def main():
         print("   Set it with: export OPENAI_API_KEY=sk-...")
         return
 
-    ctx = Context(run_id="workflow-streaming-demo")
+    ctx = Context(
+        run_id="workflow-streaming-demo",
+        correlation_id="workflow-streaming-demo",
+        parent_correlation_id="",
+    )
 
     # Example 1: Simple agent workflow
     print("\n--- Example 1: Simple Agent Workflow ---\n")

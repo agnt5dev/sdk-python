@@ -8,6 +8,8 @@ import functools
 import hashlib
 import inspect
 import json
+from dataclasses import asdict, is_dataclass
+from dataclasses import fields as dataclass_fields
 from typing import (
     Any,
     Dict,
@@ -16,13 +18,10 @@ from typing import (
     Tuple,
     Type,
     TypeVar,
-    Union,
     get_args,
     get_origin,
     get_type_hints,
 )
-
-from dataclasses import is_dataclass, asdict, fields as dataclass_fields
 
 try:
     from pydantic import BaseModel as PydanticBaseModel
@@ -147,8 +146,8 @@ def _compute_state_hash(state: Any, state_type: Optional[Type]) -> str:
     return hashlib.md5(json_str.encode()).hexdigest()
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
-from .exceptions import ExecutionError
 from ._telemetry import setup_module_logger
+from .exceptions import ExecutionError
 
 logger = setup_module_logger(__name__)
 

@@ -20,8 +20,7 @@ Each workflow can be:
 
 import asyncio
 
-from agnt5 import workflow, WorkflowContext
-
+from agnt5 import FunctionContext, WorkflowContext, function, workflow
 
 # =============================================================================
 # BASIC WORKFLOW
@@ -52,10 +51,13 @@ async def data_pipeline(ctx: WorkflowContext, source: str) -> dict:
     ctx.logger.info(f"Fetched {len(data['records'])} records from {source}")
 
     # Step 2: Transform data (checkpointed)
-    transformed = await ctx.step("transform", lambda: {
-        "source": data["source"],
-        "records": [r * 2 for r in data["records"]],
-    })
+    transformed = await ctx.step(
+        "transform",
+        lambda: {
+            "source": data["source"],
+            "records": [r * 2 for r in data["records"]],
+        },
+    )
     ctx.logger.info(f"Transformed records: {transformed['records']}")
 
     # Step 3: Validate (checkpointed)
@@ -101,35 +103,47 @@ async def order_fulfillment(ctx: WorkflowContext, order_id: str, items: list) ->
     ctx.logger.info(f"Starting fulfillment for order {order_id}")
 
     # Step 1: Validate order
-    validation = await ctx.step("validate", lambda: {
-        "valid": True,
-        "item_count": len(items),
-        "total_qty": sum(item.get("qty", 1) for item in items),
-    })
+    validation = await ctx.step(
+        "validate",
+        lambda: {
+            "valid": True,
+            "item_count": len(items),
+            "total_qty": sum(item.get("qty", 1) for item in items),
+        },
+    )
 
     if not validation["valid"]:
         return {"order_id": order_id, "status": "rejected", "reason": "validation_failed"}
 
     # Step 2: Reserve inventory
-    inventory = await ctx.step("reserve_inventory", lambda: {
-        "reserved": True,
-        "items": items,
-    })
+    inventory = await ctx.step(
+        "reserve_inventory",
+        lambda: {
+            "reserved": True,
+            "items": items,
+        },
+    )
     ctx.logger.info(f"Inventory reserved: {inventory['reserved']}")
 
     # Step 3: Process payment (simulated)
-    payment = await ctx.step("process_payment", lambda: {
-        "status": "completed",
-        "transaction_id": f"TXN-{order_id}",
-    })
+    payment = await ctx.step(
+        "process_payment",
+        lambda: {
+            "status": "completed",
+            "transaction_id": f"TXN-{order_id}",
+        },
+    )
     ctx.logger.info(f"Payment: {payment['status']}")
 
     # Step 4: Create shipment
-    shipment = await ctx.step("create_shipment", lambda: {
-        "tracking": f"TRACK-{order_id}",
-        "carrier": "FastShip",
-        "estimated_days": 3,
-    })
+    shipment = await ctx.step(
+        "create_shipment",
+        lambda: {
+            "tracking": f"TRACK-{order_id}",
+            "carrier": "FastShip",
+            "estimated_days": 3,
+        },
+    )
     ctx.logger.info(f"Shipment created: {shipment['tracking']}")
 
     return {
@@ -144,6 +158,57 @@ async def order_fulfillment(ctx: WorkflowContext, order_id: str, items: list) ->
 # =============================================================================
 # ETL WORKFLOW
 # =============================================================================
+
+
+@function
+async def extract_data(ctx: FunctionContext, dataset: str) -> dict:
+    """
+    Extract data from source dataset.
+    Simulates database query with realistic delay.
+    """
+    ctx.logger.info(f"Extracting data from {dataset}...")
+    # Simulate database query time
+    await asyncio.sleep(2)
+
+    return {
+        "dataset": dataset,
+        "rows": 1000,
+        "columns": ["id", "name", "email", "created_at"],
+    }
+
+
+@function
+async def transform_data(ctx: FunctionContext, extracted: dict) -> dict:
+    """
+    Transform extracted data with business logic.
+    Simulates data processing and transformation time.
+    """
+    ctx.logger.info(f"Transforming {extracted['rows']} rows...")
+    # Simulate transformation processing time
+    await asyncio.sleep(3)
+
+    return {
+        "rows": extracted["rows"],
+        "transformations": ["normalize_email", "parse_dates", "add_metadata"],
+        "errors": 0,
+    }
+
+
+@function
+async def load_data(ctx: FunctionContext, transformed: dict, destination: str) -> dict:
+    """
+    Load transformed data to destination.
+    Simulates write operation with realistic delay.
+    """
+    ctx.logger.info(f"Loading {transformed['rows']} rows to {destination}...")
+    # Simulate data load time
+    await asyncio.sleep(2.5)
+
+    return {
+        "destination": destination,
+        "rows_loaded": transformed["rows"],
+        "duration_ms": 2500,  # Matches actual sleep time
+    }
 
 
 @workflow
@@ -168,31 +233,24 @@ async def etl_workflow(ctx: WorkflowContext, dataset: str, destination: str) -> 
             "dataset": "users",
             "destination": "warehouse"
         }, component_type="workflow")
+
+        # Internally uses clean step syntax:
+        # extracted = await ctx.step(extract_data, dataset)
+        # transformed = await ctx.step(transform_data, extracted)
+        # loaded = await ctx.step(load_data, transformed, destination)
     """
     ctx.logger.info(f"Starting ETL: {dataset} -> {destination}")
 
     # Extract
-    extracted = await ctx.step("extract", lambda: {
-        "dataset": dataset,
-        "rows": 1000,
-        "columns": ["id", "name", "email", "created_at"],
-    })
+    extracted = await ctx.step(extract_data, dataset)
     ctx.logger.info(f"Extracted {extracted['rows']} rows from {dataset}")
 
     # Transform
-    transformed = await ctx.step("transform", lambda: {
-        "rows": extracted["rows"],
-        "transformations": ["normalize_email", "parse_dates", "add_metadata"],
-        "errors": 0,
-    })
+    transformed = await ctx.step(transform_data, extracted)
     ctx.logger.info(f"Applied {len(transformed['transformations'])} transformations")
 
     # Load
-    loaded = await ctx.step("load", lambda: {
-        "destination": destination,
-        "rows_loaded": transformed["rows"],
-        "duration_ms": 250,
-    })
+    loaded = await ctx.step(load_data, transformed, destination)
     ctx.logger.info(f"Loaded {loaded['rows_loaded']} rows to {destination}")
 
     return {
@@ -232,28 +290,37 @@ async def approval_workflow(ctx: WorkflowContext, request_id: str, requester: st
     ctx.logger.info(f"Processing approval request {request_id} from {requester}")
 
     # Step 1: Validate request
-    validation = await ctx.step("validate_request", lambda: {
-        "valid": True,
-        "request_id": request_id,
-        "requester": requester,
-    })
+    validation = await ctx.step(
+        "validate_request",
+        lambda: {
+            "valid": True,
+            "request_id": request_id,
+            "requester": requester,
+        },
+    )
 
     if not validation["valid"]:
         return {"request_id": request_id, "status": "invalid"}
 
     # Step 2: Auto-approve (in production, would wait for signal)
-    approval = await ctx.step("get_approval", lambda: {
-        "approved": True,
-        "approver": "system",
-        "reason": "auto-approved",
-    })
+    approval = await ctx.step(
+        "get_approval",
+        lambda: {
+            "approved": True,
+            "approver": "system",
+            "reason": "auto-approved",
+        },
+    )
 
     # Step 3: Execute action based on approval
     if approval["approved"]:
-        result = await ctx.step("execute", lambda: {
-            "executed": True,
-            "action": "request_processed",
-        })
+        result = await ctx.step(
+            "execute",
+            lambda: {
+                "executed": True,
+                "action": "request_processed",
+            },
+        )
         return {
             "request_id": request_id,
             "status": "approved",
@@ -275,8 +342,9 @@ async def approval_workflow(ctx: WorkflowContext, request_id: str, requester: st
 
 async def main() -> None:
     """Run examples standalone (without platform)."""
-    from agnt5 import Context
     import logging
+
+    from agnt5 import Context
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -284,7 +352,11 @@ async def main() -> None:
     print("AGNT5 Workflows Example")
     print("=" * 60)
 
-    ctx = Context(run_id="workflow-demo")
+    ctx = Context(
+        run_id="workflow-demo",
+        correlation_id="workflow-demo",
+        parent_correlation_id="",
+    )
 
     # Data pipeline
     print("\n--- Data Pipeline Workflow ---")
@@ -293,10 +365,14 @@ async def main() -> None:
 
     # Order fulfillment
     print("\n--- Order Fulfillment Workflow ---")
-    result = await order_fulfillment(ctx, order_id="ORD-123", items=[
-        {"sku": "WIDGET", "qty": 2},
-        {"sku": "GADGET", "qty": 1},
-    ])
+    result = await order_fulfillment(
+        ctx,
+        order_id="ORD-123",
+        items=[
+            {"sku": "WIDGET", "qty": 2},
+            {"sku": "GADGET", "qty": 1},
+        ],
+    )
     print(f"Result: {result}")
 
     # ETL

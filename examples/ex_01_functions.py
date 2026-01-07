@@ -270,7 +270,11 @@ async def main() -> None:
     print("=" * 60)
 
     # Create a context for standalone execution
-    ctx = Context(run_id="example-run")
+    ctx = Context(
+        run_id="example-run",
+        correlation_id="example-run",
+        parent_correlation_id="",
+    )
 
     # Basic functions
     print("\n--- Basic Functions ---")

@@ -25,6 +25,8 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.0",
     "sentry-sdk>=2.0.0",
+    "edwh-uuid7>=0.2.3",
+    "orjson>=3.11.5",
 ]
 
 [project.urls]
@@ -56,6 +58,8 @@ target-version = ['py39']
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 

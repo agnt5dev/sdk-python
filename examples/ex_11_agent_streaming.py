@@ -186,7 +186,11 @@ async def main():
 
     # Example 1: Simple chat streaming
     print("\n--- Example 1: Simple Chat Streaming ---\n")
-    ctx = Context(run_id="streaming-example-1")
+    ctx = Context(
+        run_id="streaming-example-1",
+        correlation_id="streaming-example-1",
+        parent_correlation_id="",
+    )
 
     event_count = 0
     async for event in stream_agent_chat(ctx, "What is Python?"):
@@ -202,7 +206,11 @@ async def main():
 
     # Example 2: Agent with tools
     print("\n--- Example 2: Agent with Tools Streaming ---\n")
-    ctx = Context(run_id="streaming-example-2")
+    ctx = Context(
+        run_id="streaming-example-2",
+        correlation_id="streaming-example-2",
+        parent_correlation_id="",
+    )
 
     event_count = 0
     async for event in stream_agent_with_tools(ctx, "Calculate 15 * 23 + 100"):

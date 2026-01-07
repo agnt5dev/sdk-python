@@ -27,6 +27,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from agnt5 import Agent, Context, FunctionContext, WorkflowContext, function, handoff, tool, workflow
+from agnt5.lm import Message
 
 
 # =============================================================================
@@ -514,9 +515,18 @@ async def handoff_with_full_history(ctx: FunctionContext, messages: List[Dict[st
     context_summary = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
     last_message = messages[-1]["content"] if messages else "No messages"
 
+    # Convert dict messages to Message objects for history
+    history_messages: List[Message] = []
+    if len(messages) > 1:
+        for m in messages[:-1]:
+            if m["role"] == "user":
+                history_messages.append(Message.user(m["content"]))
+            elif m["role"] == "assistant":
+                history_messages.append(Message.assistant(m["content"]))
+
     result = await initial_agent.run_sync(
         f"Previous conversation:\n{context_summary}\n\nContinue from the last message.",
-        history=messages[:-1] if len(messages) > 1 else [],
+        history=history_messages if history_messages else None,
     )
 
     return {
@@ -529,7 +539,7 @@ async def handoff_with_full_history(ctx: FunctionContext, messages: List[Dict[st
 
 
 @function
-async def handoff_state_transfer(ctx: FunctionContext, task: str, initial_state: Dict[str, Any] = None) -> dict:
+async def handoff_state_transfer(ctx: FunctionContext, task: str, initial_state: Optional[Dict[str, Any]] = None) -> dict:
     """
     Explicit state transfer during handoff.
 
@@ -792,7 +802,11 @@ async def main() -> None:
         print("   export OPENAI_API_KEY=sk-...")
         return
 
-    ctx = Context(run_id="handoffs-demo")
+    ctx = Context(
+        run_id="handoffs-demo",
+        correlation_id="handoffs-demo",
+        parent_correlation_id="",
+    )
 
     # Chain handoff
     print("\n--- Chain Handoff ---")

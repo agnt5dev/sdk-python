@@ -69,6 +69,7 @@ Provide:
 
     # Access via .structured_output (recommended)
     review = response.structured_output
+    assert review is not None, "Expected structured output but got None"
     print("\nStructured Output (dict):")
     print(f"  Issues: {review['issues']}")
     print(f"  Suggestions: {review['suggestions']}")
@@ -123,6 +124,7 @@ Identify:
     )
 
     analysis = response.structured_output
+    assert analysis is not None, "Expected structured output but got None"
     print(f"\nSecurity Analysis:")
     print(f"  Severity: {analysis['severity']}")
     print(f"  Safe to Deploy: {analysis['safe_to_deploy']}")
@@ -192,6 +194,7 @@ Extract:
     )
 
     analysis = response.structured_output
+    assert analysis is not None, "Expected structured output but got None"
     print(f"\nCodebase Analysis:")
     print(f"  Complexity Score: {analysis['complexity_score']}/10")
     print(f"  Maintainability: {analysis['maintainability']}")
@@ -257,6 +260,7 @@ Provide exact counts for:
     )
 
     metrics = response.structured_output
+    assert metrics is not None, "Expected structured output but got None"
     print(f"\nCode Metrics:")
     print(f"  Lines of Code: {metrics['lines_of_code']}")
     print(f"  Cyclomatic Complexity: {metrics['cyclomatic_complexity']}")

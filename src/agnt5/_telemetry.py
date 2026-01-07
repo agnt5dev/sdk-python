@@ -1,14 +1,8 @@
-"""
-OpenTelemetry integration for Python logging.
-
-This module bridges Python's standard logging to Rust's tracing/OpenTelemetry system,
-ensuring all logs from ctx.logger are sent to both the console and OTLP exporters.
-"""
+"""OpenTelemetry integration for Python logging."""
 
 import json
 import logging
 from typing import Any, Dict, MutableMapping, Optional
-
 
 # Standard logging kwargs that should NOT be treated as custom attributes
 _STANDARD_LOGGING_KWARGS = frozenset({
@@ -17,49 +11,18 @@ _STANDARD_LOGGING_KWARGS = frozenset({
 
 
 class ContextLogger(logging.LoggerAdapter):
-    """
-    Logger adapter that allows passing arbitrary keyword arguments as log attributes.
+    """Logger adapter that allows keyword arguments as log attributes.
 
-    This enables the convenient API:
-        ctx.logger.info("message", attr1="value1", attr2="value2")
-
-    Instead of the verbose standard logging approach:
-        ctx.logger.info("message", extra={"attr1": "value1", "attr2": "value2"})
-
-    The custom attributes are passed through to the Rust OpenTelemetry system
-    for structured logging and will appear as log record attributes in OTLP exports.
-
-    Example:
-        >>> ctx.logger.info("Processing request", request_id="abc123", user_id="user456")
-        >>> ctx.logger.error("Failed to connect", host="example.com", port=8080, retries=3)
+    Usage: ctx.logger.info("message", attr1="value1", attr2="value2")
     """
 
     def __init__(self, logger: logging.Logger, extra: Optional[Dict[str, Any]] = None):
-        """Initialize the ContextLogger.
-
-        Args:
-            logger: The underlying logger to wrap
-            extra: Optional default extra attributes to include in all log records
-        """
         super().__init__(logger, extra or {})
 
     def process(
         self, msg: str, kwargs: MutableMapping[str, Any]
     ) -> tuple[str, MutableMapping[str, Any]]:
-        """Process the logging call to extract custom attributes.
-
-        This method intercepts logging calls and extracts any keyword arguments
-        that are not standard logging parameters, storing them in the 'extra'
-        dict under the key 'agnt5_attrs'.
-
-        Args:
-            msg: The log message
-            kwargs: Keyword arguments passed to the logging method
-
-        Returns:
-            Tuple of (message, updated_kwargs)
-        """
-        # Extract custom attributes (any kwargs that aren't standard logging params)
+        """Extract custom attributes from kwargs into extra['agnt5_attrs']."""
         custom_attrs = {}
         standard_kwargs = {}
 
@@ -93,96 +56,46 @@ class ContextLogger(logging.LoggerAdapter):
 
 
 class OpenTelemetryHandler(logging.Handler):
-    """
-    Custom logging handler that forwards Python logs to Rust OpenTelemetry system.
+    """Forwards Python logs to Rust OpenTelemetry system and emits log events for SSE streaming."""
 
-    This handler routes all Python log records through the Rust `log_from_python()`
-    function, which integrates with the tracing ecosystem. This ensures:
-
-    1. Logs are sent to OpenTelemetry OTLP exporter
-    2. Logs appear in console output (via Rust's fmt layer)
-    3. Logs inherit span context (invocation.id, trace_id, etc.)
-    4. Structured logging with proper attributes
-
-    The Rust side handles both console output and OTLP export, so we only
-    need one handler on the Python side.
-    """
-
-    def __init__(self, level=logging.NOTSET):
-        """Initialize the OpenTelemetry handler.
-
-        Args:
-            level: Minimum log level to process (default: NOTSET processes all)
-        """
+    def __init__(self, level: int = logging.NOTSET):
         super().__init__(level)
-
-        # Import Rust bridge function
         try:
             from ._core import log_from_python
             self._log_from_python = log_from_python
         except ImportError as e:
-            # Fallback if Rust core not available (development/testing)
             import warnings
-            warnings.warn(
-                f"Failed to import Rust telemetry bridge: {e}. "
-                "Logs will not be sent to OpenTelemetry.",
-                RuntimeWarning
-            )
+            warnings.warn(f"Rust telemetry bridge unavailable: {e}", RuntimeWarning)
             self._log_from_python = None
 
-    def emit(self, record: logging.LogRecord):
-        """
-        Process a log record and forward to Rust telemetry.
-
-        Args:
-            record: Python logging record to process
-        """
+    def emit(self, record: logging.LogRecord) -> None:
+        """Forward log record to Rust and emit log event for SSE streaming."""
         if self._log_from_python is None:
-            # No Rust bridge available, silently skip
             return
 
-        # Filter out gRPC internal logs to avoid noise
-        # These are low-level HTTP/2 protocol logs that aren't useful for application debugging
+        # Filter gRPC internal logs
         if record.name.startswith(('grpc.', 'h2.', '_grpc_', 'h2-')):
             return
 
         try:
-            # Format the message (applies any formatters)
             message = self.format(record)
 
-            # Include exception traceback if present (from logger.exception() or exc_info=True)
+            # Include exception traceback if present
             if record.exc_info:
-                # Use formatter to format the exception, or fall back to basic formatting
                 if self.formatter:
                     exc_text = self.formatter.formatException(record.exc_info)
                 else:
-                    # Fallback: use basic traceback formatting
                     import traceback
                     exc_text = ''.join(traceback.format_exception(*record.exc_info))
                 message = f"{message}\n{exc_text}"
 
-            # Extract correlation IDs from LogRecord attributes (added by _CorrelationFilter)
-            # These ensure logs can be correlated with distributed traces in observability backends
+            # Extract correlation IDs (added by _CorrelationFilter)
             trace_id = getattr(record, 'trace_id', None)
             span_id = getattr(record, 'span_id', None)
             run_id = getattr(record, 'run_id', None)
-
-            # Extract streaming context for real-time SSE delivery
-            is_streaming = getattr(record, 'is_streaming', None)
-            tenant_id = getattr(record, 'tenant_id', None)
-            deployment_id = getattr(record, 'deployment_id', None)
-
-            # Extract custom attributes from ContextLogger
-            # These are stored in the 'agnt5_attrs' key of the extra dict
             attributes = getattr(record, 'agnt5_attrs', None)
 
-            # Forward to Rust tracing system
-            # Rust side will:
-            # - Add to current span context (inherits invocation.id)
-            # - Attach correlation IDs as span attributes for OTLP export
-            # - Send to OTLP exporter with trace context
-            # - Print to console via fmt layer
-            # - Export to journal for SSE streaming if is_streaming=True
+            # Forward to OTLP for observability storage
             self._log_from_python(
                 level=record.levelname,
                 message=message,
@@ -193,87 +106,96 @@ class OpenTelemetryHandler(logging.Handler):
                 trace_id=trace_id,
                 span_id=span_id,
                 run_id=run_id,
-                is_streaming=is_streaming,
-                tenant_id=tenant_id,
-                deployment_id=deployment_id,
                 attributes=attributes,
             )
+
+            # Also emit as event for SSE streaming (if we have an active context)
+            try:
+                from .context import get_current_context
+                from .events import Event
+                import time
+                import sys
+
+                ctx = get_current_context()
+                print(f"[TELEMETRY DEBUG] get_current_context() = {ctx}", file=sys.stderr, flush=True)
+
+                if ctx is not None and hasattr(ctx, 'emit'):
+                    print(f"[TELEMETRY DEBUG] Context has emit, creating log event for: {record.levelname} - {message[:50]}", file=sys.stderr, flush=True)
+
+                    # Create log event with proper correlation IDs from context
+                    log_event_data = {
+                        "event_type": f"log.{record.levelname.lower()}",
+                        "name": record.name,
+                        "correlation_id": ctx._correlation_id if hasattr(ctx, '_correlation_id') else "",
+                        "parent_correlation_id": ctx._parent_correlation_id if hasattr(ctx, '_parent_correlation_id') else "",
+                        "timestamp_ns": time.time_ns(),
+                        "level": record.levelname,
+                        "message": message,
+                        "target": record.name,
+                        "module_path": record.module,
+                        "filename": record.pathname,
+                        "line": record.lineno,
+                        "metadata": {},
+                    }
+
+                    # Add custom attributes if present
+                    if attributes:
+                        log_event_data["attributes"] = attributes
+
+                    # Queue the log event for SSE streaming
+                    # Use raw event emission since we're constructing the dict directly
+                    if hasattr(ctx, '_event_emitter') and ctx._event_emitter:
+                        print(f"[TELEMETRY DEBUG] Queueing log event: event_type={log_event_data['event_type']}, correlation_id={log_event_data['correlation_id']}", file=sys.stderr, flush=True)
+                        from .events import EventEnvelope
+                        envelope = EventEnvelope(
+                            event_type=log_event_data["event_type"],
+                            data=log_event_data,
+                            source_timestamp_ns=log_event_data["timestamp_ns"],
+                            content_index=0,
+                            metadata=log_event_data.get("metadata"),
+                        )
+                        ctx._event_emitter._queue_event(
+                            envelope,
+                            log_event_data["correlation_id"],
+                            log_event_data["parent_correlation_id"],
+                        )
+                        print(f"[TELEMETRY DEBUG] Log event queued successfully", file=sys.stderr, flush=True)
+                    else:
+                        print(f"[TELEMETRY DEBUG] No event emitter found on context", file=sys.stderr, flush=True)
+                else:
+                    print(f"[TELEMETRY DEBUG] No active context or context has no emit method", file=sys.stderr, flush=True)
+            except Exception as e:
+                # Silently fail log event emission - don't break logging
+                print(f"[TELEMETRY DEBUG] Exception during log event emission: {e}", file=sys.stderr, flush=True)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+
         except Exception:
-            # Don't let logging errors crash the application
-            # Use handleError to report the issue via logging system
             self.handleError(record)
 
 
 def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None) -> None:
-    """
-    Configure a Context logger with OpenTelemetry integration.
-
-    This function:
-    1. Removes any existing handlers (avoid duplicates)
-    2. Adds OpenTelemetry handler for OTLP + console output (when Worker is running)
-    3. Adds console handler for local testing (fallback)
-    4. Sets appropriate log level
-    5. Disables propagation to avoid duplicate logs
-
-    Args:
-        logger: Logger instance to configure
-        log_level: Optional log level (default: DEBUG)
-    """
-    # Remove existing handlers to avoid duplicate logs
+    """Configure a Context logger with OpenTelemetry and console handlers."""
     logger.handlers.clear()
 
-    # Add OpenTelemetry handler (for Worker/platform execution)
+    # OpenTelemetry handler (forwards to Rust)
     otel_handler = OpenTelemetryHandler()
     otel_handler.setLevel(logging.DEBUG)
-
-    # Use simple formatter - Rust side handles structured logging
-    formatter = logging.Formatter('%(message)s')
-    otel_handler.setFormatter(formatter)
-
+    otel_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(otel_handler)
 
-    # Add console handler for local testing (fallback when Rust bridge not available)
-    # This ensures logs appear when testing functions locally without Worker
+    # Console handler (fallback for local testing)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
-
-    # Console format includes level, message, and exception info if present
-    # exc_info=True in the format string means "include traceback if present"
-    console_formatter = logging.Formatter(
-        '[%(levelname)s] %(message)s',
-        # Python automatically appends exception traceback when exc_info is set
-    )
-    console_handler.setFormatter(console_formatter)
-
+    console_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
     logger.addHandler(console_handler)
 
-    # Set log level (default to DEBUG to let handlers filter)
-    if log_level is None:
-        log_level = logging.DEBUG
-    logger.setLevel(log_level)
-
-    # Don't propagate to root logger (we handle everything ourselves)
+    logger.setLevel(log_level or logging.DEBUG)
     logger.propagate = False
 
 
 def setup_module_logger(module_name: str, log_level: Optional[int] = None) -> logging.Logger:
-    """
-    Create and configure a logger for a module with OpenTelemetry integration.
-
-    Convenience function for setting up loggers in SDK modules.
-
-    Args:
-        module_name: Name of the module (e.g., "agnt5.worker")
-        log_level: Optional log level (default: INFO for modules)
-
-    Returns:
-        Configured logger instance
-    """
+    """Create and configure a logger for a module."""
     logger = logging.getLogger(module_name)
-
-    # For module loggers, default to INFO level
-    if log_level is None:
-        log_level = logging.INFO
-
-    setup_context_logger(logger, log_level)
+    setup_context_logger(logger, log_level or logging.INFO)
     return logger

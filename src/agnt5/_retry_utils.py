@@ -135,10 +135,10 @@ async def execute_with_retry(
             # Propagate streaming context from parent for real-time SSE log delivery
             attempt_ctx = FunctionContext(
                 run_id=ctx.run_id,
+                correlation_id=getattr(ctx, 'correlation_id', f"retry-{attempt}"),
+                parent_correlation_id=getattr(ctx, 'parent_correlation_id', ctx.run_id),
                 attempt=attempt,
                 retry_policy=retry_policy,
-                is_streaming=getattr(ctx, '_is_streaming', False),
-                tenant_id=getattr(ctx, '_tenant_id', None),
                 worker=getattr(ctx, '_worker', None),
             )
 

@@ -57,7 +57,6 @@ class AgentContext(Context):
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         is_streaming: bool = False,
-        tenant_id: Optional[str] = None,
         worker: Optional[Any] = None,
     ):
         """
@@ -72,25 +71,28 @@ class AgentContext(Context):
             attempt: Retry attempt number
             runtime_context: RuntimeContext for trace correlation
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
-            tenant_id: Tenant identifier for multi-tenant deployments
             worker: PyWorker instance for event queueing
         """
-        # Inherit is_streaming, tenant_id, and worker from parent context if not explicitly provided
+        # Inherit is_streaming and worker from parent context if not explicitly provided
         if parent_context and not is_streaming:
             is_streaming = getattr(parent_context, '_is_streaming', False)
-        if parent_context and not tenant_id:
-            tenant_id = getattr(parent_context, '_tenant_id', None)
         if parent_context and not worker:
             worker = getattr(parent_context, '_worker', None)
+
+        # Generate correlation IDs for agent execution
+        import uuid
+        correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
+        parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
 
         # Initialize parent Context with memoization enabled by default for agents
         # This ensures LLM and tool calls are automatically journaled for replay
         super().__init__(
             run_id=run_id,
+            correlation_id=correlation_id,
+            parent_correlation_id=parent_correlation_id,
             attempt=attempt,
             runtime_context=runtime_context,
             is_streaming=is_streaming,
-            tenant_id=tenant_id,
             session_id=session_id,
             enable_memoization=True,  # Agents get memoization by default
             worker=worker,
@@ -234,16 +236,12 @@ class AgentContext(Context):
         import httpx
 
         gateway_url = os.environ.get("AGNT5_GATEWAY_URL", DEFAULT_GATEWAY_URL)
-        tenant_id = self._tenant_id
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 url = f"{gateway_url}/v1/sessions/{self._session_id}/history"
-                headers = {}
-                if tenant_id:
-                    headers["X-TENANT-ID"] = tenant_id
 
-                response = await client.get(url, headers=headers)
+                response = await client.get(url)
 
                 if response.status_code == 404:
                     # Session not found - this might be a new session or legacy session

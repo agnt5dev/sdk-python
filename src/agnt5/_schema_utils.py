@@ -168,19 +168,19 @@ def _type_to_schema(python_type: Any) -> Dict[str, Any]:
         }
 
     # Handle basic types
-    if python_type == str:
+    if python_type is str:
         return {"type": "string"}
-    elif python_type == int:
+    elif python_type is int:
         return {"type": "integer"}
-    elif python_type == float:
+    elif python_type is float:
         return {"type": "number"}
-    elif python_type == bool:
+    elif python_type is bool:
         return {"type": "boolean"}
-    elif python_type == dict:
+    elif python_type is dict:
         return {"type": "object"}
-    elif python_type == list:
+    elif python_type is list:
         return {"type": "array"}
-    elif python_type == Any:
+    elif python_type is Any:
         return {}  # Any type - no restrictions
 
     # Fallback for unknown types

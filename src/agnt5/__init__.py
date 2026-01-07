@@ -1,17 +1,30 @@
 """
 AGNT5 Python SDK - Build durable, resilient agent-first applications.
 
-This SDK provides high-level components for building agents, tools, and workflows
-with built-in durability guarantees and state management.
+Supports functions, entities, workflows, agents, and LLM integration.
 """
 
-from ._compat import _import_error, _rust_available
-from .agent import Agent, AgentContext, AgentRegistry, AgentResult, Handoff, agent, handoff
-from .checkpoint import CheckpointClient
-from .client import AsyncClient, Client, RunError
+from . import events
+from . import lm
+from .agent import (
+    Agent,
+    AgentCompleted,
+    AgentContext,
+    AgentFailed,
+    AgentIterationCompleted,
+    AgentIterationStarted,
+    AgentRegistry,
+    AgentResult,
+    AgentStarted,
+    Handoff,
+    ToolCallCompleted,
+    ToolCallFailed,
+    ToolCallStarted,
+    agent,
+    handoff,
+)
+from .client import AsyncClient, Client, ReceivedEvent, RunError
 from .context import Context
-from .function import FunctionContext
-from .workflow import WorkflowContext
 from .entity import (
     Entity,
     EntityRegistry,
@@ -22,98 +35,147 @@ from .entity import (
     query,
     with_entity_context,
 )
+from .events import (
+    Cancelled,
+    Completed,
+    ComponentType,
+    Delta,
+    Event,
+    EventEmitter,
+    EventEnvelope,
+    Failed,
+    LifecycleEvent,
+    OperationType,
+    OutputDelta,
+    OutputStart,
+    OutputStop,
+    Paused,
+    ProgressUpdate,
+    Resumed,
+    Started,
+    StateChanged,
+    Timeout,
+)
 from .exceptions import (
     AGNT5Error,
-    CheckpointError,
     ConfigurationError,
     ExecutionError,
     RetryError,
-    StateError,
     WaitingForUserInputException,
 )
-from .function import FunctionRegistry, function
-from .memory import ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory
-from .tool import AskUserTool, RequestApprovalTool, Tool, ToolRegistry, tool
-from .types import BackoffPolicy, BackoffType, FunctionConfig, RetryPolicy, WorkflowConfig
+from .function import FunctionContext, FunctionRegistry, function
+from .lm import (
+    LMCompleted,
+    LMContentBlockCompleted,
+    LMContentBlockDelta,
+    LMContentBlockStarted,
+    LMFailed,
+    LMStarted,
+)
+from .types import BackoffPolicy, BackoffType, RetryPolicy, WorkflowConfig
 from .version import _get_version
 from .worker import Worker
-from .workflow import WorkflowRegistry, workflow
+from .workflow import WorkflowContext, WorkflowRegistry, workflow
 
-# Expose simplified language model API (recommended)
-from . import lm
+from .tool import Tool, ToolRegistry, tool
 
-# Expose streaming events module for typed event streaming
-from . import events
-from .events import Event, EventType
-
-# Expose Sentry utilities for custom error tracking (optional)
-from . import _sentry as sentry
+# Not yet enabled:
+# from .checkpoint import CheckpointClient
+# from .exceptions import CheckpointError, StateError
+# from .memory import ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory
+# from .tool import AskUserTool, RequestApprovalTool
+# from .types import FunctionConfig
+# from . import _sentry as sentry
 
 __version__ = _get_version()
 
 __all__ = [
     # Version
     "__version__",
+    # Modules
+    "events",
+    "lm",
     # Core components
     "Context",
     "FunctionContext",
-    "WorkflowContext",
-    "AgentContext",
-    "CheckpointClient",
-    "Client",
-    "AsyncClient",
     "Worker",
     "function",
     "FunctionRegistry",
+    # Entity components
     "Entity",
-    "EntityType",
     "EntityRegistry",
     "EntityStateAdapter",
+    "EntityType",
     "StateType",
+    "create_entity_context",
     "query",
     "with_entity_context",
-    "create_entity_context",
-    "workflow",
+    # Workflow components
+    "WorkflowContext",
     "WorkflowRegistry",
-    "tool",
-    "Tool",
-    "ToolRegistry",
-    "AskUserTool",
-    "RequestApprovalTool",
-    "agent",
+    "workflow",
+    "WorkflowConfig",
+    # Agent components
     "Agent",
+    "AgentContext",
     "AgentRegistry",
     "AgentResult",
     "Handoff",
+    "agent",
     "handoff",
-    # Memory
-    "ConversationMemory",
-    "MemoryMessage",
-    "MemoryMetadata",
-    "MemoryResult",
-    "MemoryScope",
-    "SemanticMemory",
+    # Tool components
+    "Tool",
+    "ToolRegistry",
+    "tool",
+    # Agent events
+    "AgentCompleted",
+    "AgentFailed",
+    "AgentIterationCompleted",
+    "AgentIterationStarted",
+    "AgentStarted",
+    "ToolCallCompleted",
+    "ToolCallFailed",
+    "ToolCallStarted",
+    # LM events
+    "LMCompleted",
+    "LMContentBlockCompleted",
+    "LMContentBlockDelta",
+    "LMContentBlockStarted",
+    "LMFailed",
+    "LMStarted",
+    # Base events
+    "Cancelled",
+    "Completed",
+    "ComponentType",
+    "Delta",
+    "Event",
+    "EventEmitter",
+    "EventEnvelope",
+    "Failed",
+    "LifecycleEvent",
+    "OperationType",
+    "OutputDelta",
+    "OutputStart",
+    "OutputStop",
+    "Paused",
+    "ProgressUpdate",
+    "Resumed",
+    "Started",
+    "StateChanged",
+    "Timeout",
+    # Client
+    "AsyncClient",
+    "Client",
+    "ReceivedEvent",
+    "RunError",
     # Types
-    "RetryPolicy",
     "BackoffPolicy",
     "BackoffType",
-    "FunctionConfig",
-    "WorkflowConfig",
+    "RetryPolicy",
     # Exceptions
     "AGNT5Error",
     "ConfigurationError",
     "ExecutionError",
     "RetryError",
-    "StateError",
-    "CheckpointError",
     "WaitingForUserInputException",
-    "RunError",
-    # Language Model (Simplified API)
-    "lm",
-    # Streaming Events (for typed SSE events)
-    "events",
-    "Event",
-    "EventType",
-    # Sentry integration (Optional)
-    "sentry",
 ]
