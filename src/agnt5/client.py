@@ -364,8 +364,9 @@ class Client:
         response.raise_for_status()
 
         # Parse response and extract run ID
+        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
         data = response.json()
-        return data.get("runId", "")
+        return data.get("run_id", "")
 
     def get_status(self, run_id: str) -> Dict[str, Any]:
         """Get the current status of a run.
@@ -1518,8 +1519,9 @@ class AsyncClient:
         )
         response.raise_for_status()
 
+        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
         data = response.json()
-        return data.get("runId", "")
+        return data.get("run_id", "")
 
     async def get_status(self, run_id: str) -> Dict[str, Any]:
         """Get the current status of a run.
