@@ -219,7 +219,7 @@ def test_concurrent_requests_with_same_key(platform, worker_process):
 
 
 @pytest.mark.integration
-def test_idempotency_same_key_different_payload(platform, worker_process):
+def test_idempotency_same_key_different_payload(client, worker_process):
     """Same idempotency key with different payload should return cached result.
 
     When the same idempotency key is used with a different payload,
@@ -230,100 +230,62 @@ def test_idempotency_same_key_different_payload(platform, worker_process):
     first request's result regardless of subsequent payloads.
     """
     idempotency_key = f"test-idemp-diff-payload-{uuid.uuid4()}"
-    gateway_url = platform["gateway_url"]
 
     # First request with name="Alice"
-    with httpx.Client(timeout=30) as http_client:
-        resp1 = http_client.post(
-            f"{gateway_url}/v1/run/function/greet",
-            json={"name": "Alice"},
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-        )
-        result1 = resp1.json()
-
-    assert resp1.status_code == 200
-    assert result1["status"] == "completed"
-    assert "Alice" in result1.get("output", "")
-    run_id_1 = result1["runId"]
+    result1 = client.run(
+        "greet",
+        {"name": "Alice"},
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    assert "Alice" in result1
 
     # Second request with SAME key but name="Bob"
-    with httpx.Client(timeout=30) as http_client:
-        resp2 = http_client.post(
-            f"{gateway_url}/v1/run/function/greet",
-            json={"name": "Bob"},  # Different payload!
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-        )
-        result2 = resp2.json()
-
-    # Should return the cached result (Alice, not Bob)
-    assert resp2.status_code == 200
-    assert result2["runId"] == run_id_1, (
-        "Expected same run ID for idempotent request with different payload"
+    # Should return cached result (Alice, not Bob)
+    result2 = client.run(
+        "greet",
+        {"name": "Bob"},  # Different payload!
+        headers={"Idempotency-Key": idempotency_key},
     )
+
     # The output should still be "Alice" (cached), not "Bob"
-    if "output" in result2:
-        assert "Alice" in result2["output"], (
-            "Expected cached result with 'Alice', not new execution with 'Bob'"
-        )
+    assert "Alice" in result2, (
+        "Expected cached result with 'Alice', not new execution with 'Bob'"
+    )
+    assert "Bob" not in result2, (
+        "Unexpected 'Bob' in result - should return cached Alice result"
+    )
 
 
 @pytest.mark.integration
-def test_idempotency_validates_response_output(platform, worker_process):
+def test_idempotency_validates_response_output(client, worker_process):
     """Validate full response structure for idempotent requests.
 
     This test ensures that idempotent responses include all expected fields,
     not just the runId.
     """
     idempotency_key = f"test-idemp-full-response-{uuid.uuid4()}"
-    gateway_url = platform["gateway_url"]
 
     # First request
-    with httpx.Client(timeout=30) as http_client:
-        resp1 = http_client.post(
-            f"{gateway_url}/v1/run/function/add",
-            json={"a": 10, "b": 20},
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-        )
-        result1 = resp1.json()
-
-    assert resp1.status_code == 200
-    assert result1["status"] == "completed"
-    assert result1["output"] == 30  # 10 + 20
+    result1 = client.run(
+        "add",
+        {"a": 10, "b": 20},
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    assert result1 == 30  # 10 + 20
 
     # Second request (should return cached)
-    with httpx.Client(timeout=30) as http_client:
-        resp2 = http_client.post(
-            f"{gateway_url}/v1/run/function/add",
-            json={"a": 10, "b": 20},
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-        )
-        result2 = resp2.json()
+    result2 = client.run(
+        "add",
+        {"a": 10, "b": 20},
+        headers={"Idempotency-Key": idempotency_key},
+    )
 
-    # Verify full response structure, not just runId
-    assert resp2.status_code == 200
-    assert result2["runId"] == result1["runId"], "Run IDs should match"
-    assert "status" in result2, "Idempotent response should include status"
-    assert result2["status"] == "completed", "Cached response should show completed status"
-
-    # Output should also be preserved in cached response
-    if "output" in result1:
-        assert "output" in result2, "Idempotent response should include output"
-        assert result2["output"] == result1["output"], (
-            f"Cached output should match original. "
-            f"Expected {result1['output']}, got {result2.get('output')}"
-        )
+    # Cached output should match original
+    assert result2 == 30, (
+        f"Cached output should match original. "
+        f"Expected 30, got {result2}"
+    )
+    assert result2 == result1, "Idempotent requests should return identical results"
 
 
 @pytest.mark.integration

@@ -50,9 +50,18 @@ def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = No
     # Import here to avoid circular import
     from .client import RunError
 
-    message = error_data.get("error", "Unknown error")
-    run_id = error_data.get("runId") or run_id
-    error_code = error_data.get("error_code")
+    # Extract error message - handle both old format (string) and new format (dict)
+    error = error_data.get("error", "Unknown error")
+    if isinstance(error, dict):
+        # New format: {"code": "...", "message": "..."}
+        message = error.get("message", "Unknown error")
+        error_code = error.get("code") or error_data.get("error_code")
+    else:
+        # Old format: error is a string
+        message = error
+        error_code = error_data.get("error_code")
+
+    run_id = error_data.get("runId") or error_data.get("run_id") or run_id
 
     # Extract retry metadata if present
     metadata = error_data.get("metadata")
@@ -186,6 +195,7 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -197,6 +207,8 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            timeout: Request timeout in seconds (optional, defaults to client timeout)
+            headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
 
         Returns:
             Dictionary containing the component's output
@@ -226,14 +238,19 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
+
+        # Build headers and merge with custom headers
+        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+        if headers:
+            request_headers.update(headers)
 
         # Make request with auth and session headers
         response = self._client.post(
             url,
             json=input_data,
-            headers=self._build_headers(session_id=session_id, user_id=user_id),
+            headers=request_headers,
             timeout=timeout,
         )
 
@@ -282,7 +299,15 @@ class Client:
         if data.get("status") == "failed":
             raise _parse_error_response(data)
 
-        # Return output
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     def submit(
@@ -325,8 +350,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
         # Make request with auth headers
         response = self._client.post(
@@ -339,8 +364,9 @@ class Client:
         response.raise_for_status()
 
         # Parse response and extract run ID
+        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
         data = response.json()
-        return data.get("runId", "")
+        return data.get("run_id", "")
 
     def get_status(self, run_id: str) -> Dict[str, Any]:
         """Get the current status of a run.
@@ -422,7 +448,15 @@ class Client:
         if data.get("status") == "failed":
             raise _parse_error_response(data, run_id=run_id)
 
-        # Return output
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     def wait_for_result(
@@ -516,8 +550,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth headers
         with self._client.stream(
@@ -563,10 +597,8 @@ class Client:
 
                         # Check for error
                         if "error" in data:
-                            raise RunError(
-                                data.get("error"),
-                                run_id=data.get("runId"),
-                            )
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield chunk from output.delta events
                         if current_event == "output.delta":
@@ -641,8 +673,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type (using streaming endpoint)
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        # Build URL with component type (using streaming endpoint, plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth and session headers
         with self._client.stream(
@@ -692,8 +724,8 @@ class Client:
 
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
-                            error_msg = data.get("error", "Unknown streaming error")
-                            raise RunError(error_msg, run_id=data.get("runId"))
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield typed Event object
                         if current_event_type:
@@ -908,7 +940,15 @@ class EntityProxy:
             if data.get("status") == "failed":
                 raise _parse_error_response(data)
 
-            # Return output
+            # Return output - extract from nested event structure
+            # New format: data["result"]["output"]["output_data"]
+            result = data.get("result", {})
+            if result and isinstance(result, dict):
+                output = result.get("output", {})
+                if isinstance(output, dict) and "output_data" in output:
+                    return output["output_data"]
+                return output
+            # Fallback to old format
             return data.get("output")
 
         return method_caller
@@ -1302,7 +1342,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
         response = await client.post(
             url,
@@ -1333,6 +1373,15 @@ class AsyncClient:
         if data.get("status") == "failed":
             raise _parse_error_response(data)
 
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     async def stream_events(
@@ -1382,7 +1431,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         async with client.stream(
             "POST",
@@ -1429,8 +1478,8 @@ class AsyncClient:
 
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
-                            error_msg = data.get("error", "Unknown streaming error")
-                            raise RunError(error_msg, run_id=data.get("runId"))
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield typed Event object
                         if current_event_type:
@@ -1459,7 +1508,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
         response = await client.post(
             url,
@@ -1468,8 +1517,9 @@ class AsyncClient:
         )
         response.raise_for_status()
 
+        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
         data = response.json()
-        return data.get("runId", "")
+        return data.get("run_id", "")
 
     async def get_status(self, run_id: str) -> Dict[str, Any]:
         """Get the current status of a run.
@@ -1517,6 +1567,15 @@ class AsyncClient:
         if data.get("status") == "failed":
             raise _parse_error_response(data, run_id=run_id)
 
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
 
