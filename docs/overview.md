@@ -240,7 +240,7 @@ async def order_fulfillment(ctx: Context, order_id: str) -> dict:
 ```python
 from agnt5 import tool
 
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def delete_database(database_name: str) -> dict:
     """Delete a database permanently.
 

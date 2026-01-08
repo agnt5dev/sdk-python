@@ -144,7 +144,7 @@ Functions callable by LLMs with automatic schema generation.
 ```python
 from agnt5 import tool
 
-@tool(auto_schema=True)
+@tool
 async def search_knowledge_base(ctx: Context, query: str, limit: int = 10) -> list:
     """Search the knowledge base using semantic search.
 

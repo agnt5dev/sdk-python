@@ -35,7 +35,7 @@ from agnt5.lm import Message
 # =============================================================================
 
 
-@tool(auto_schema=True)
+@tool
 async def analyze_request(ctx: Context, request: str) -> dict:
     """
     Analyze a request to determine its category.
@@ -72,7 +72,7 @@ async def analyze_request(ctx: Context, request: str) -> dict:
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def log_handoff(ctx: Context, from_agent: str, to_agent: str, reason: str) -> dict:
     """
     Log a handoff event for tracking.

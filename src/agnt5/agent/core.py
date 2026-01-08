@@ -176,21 +176,18 @@ class Agent:
         if tools:
             for item in tools:
                 if isinstance(item, Tool):
+                    # Tool instance (including @tool decorated functions)
                     self.tools[item.name] = item
                 elif isinstance(item, Agent):
                     # Agent as tool - wrap it
                     agent_tool = item.to_tool()
                     self.tools[agent_tool.name] = agent_tool
                     self.logger.debug(f"Wrapped agent '{item.name}' as tool")
-                elif callable(item):
-                    # Function decorated with @tool
-                    tool_instance = ToolRegistry.get(item.__name__)
-                    if tool_instance:
-                        self.tools[tool_instance.name] = tool_instance
-                    else:
-                        self.logger.warning(f"Tool '{item.__name__}' not found in registry")
                 else:
-                    self.logger.warning(f"Skipping unknown tool type: {type(item)}")
+                    self.logger.warning(
+                        f"Skipping unknown tool type: {type(item)}. "
+                        f"Expected Tool (from @tool decorator) or Agent."
+                    )
 
         # Store handoffs for introspection
         self.handoffs: List[Handoff] = []
@@ -465,7 +462,8 @@ class Agent:
             )
 
         # Emit agent.started checkpoint for journal persistence
-        if context:
+        # Skip if executor already emitted (to avoid duplicate events)
+        if context and not getattr(context, '_executor_managed_lifecycle', False):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
@@ -803,7 +801,8 @@ class Agent:
                         context.restore_parent(original_agent_parent)
 
                         # Emit agent.completed checkpoint for journal persistence
-                        if context:
+                        # Skip if executor already manages lifecycle (to avoid duplicate events)
+                        if context and not getattr(context, '_executor_managed_lifecycle', False):
                             context.emit(AgentCompleted(
                                 name=self.name,
                                 correlation_id=agent_correlation_id,
@@ -838,7 +837,8 @@ class Agent:
                 context.restore_parent(original_agent_parent)
 
                 # Emit agent.completed checkpoint for journal persistence (with max_iterations flag)
-                if context:
+                # Skip if executor already manages lifecycle (to avoid duplicate events)
+                if context and not getattr(context, '_executor_managed_lifecycle', False):
                     context.emit(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
@@ -861,7 +861,8 @@ class Agent:
             # Reset parent to workflow before emitting agent.failed
             context.restore_parent(original_agent_parent)
 
-            if context:
+            # Skip if executor already manages lifecycle (to avoid duplicate events)
+            if context and not getattr(context, '_executor_managed_lifecycle', False):
                 context.emit(AgentFailed(
                     name=self.name,
                     correlation_id=agent_correlation_id,
@@ -1215,7 +1216,8 @@ class Agent:
             )
 
         # Emit agent.started checkpoint for journal persistence
-        if context:
+        # Skip if executor already emitted (to avoid duplicate events)
+        if context and not getattr(context, '_executor_managed_lifecycle', False):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
@@ -1546,7 +1548,8 @@ class Agent:
                             context.restore_parent(original_agent_parent)
 
                             # Emit completion checkpoint
-                            if context:
+                            # Skip if executor already manages lifecycle (to avoid duplicate events)
+                            if context and not getattr(context, '_executor_managed_lifecycle', False):
                                 context.emit(AgentCompleted(
                                     name=self.name,
                                     correlation_id=agent_correlation_id,
@@ -1578,7 +1581,8 @@ class Agent:
                     context.restore_parent(original_agent_parent)
 
                     # Emit completion checkpoint (iterations == max_iterations indicates max iterations reached)
-                    if context:
+                    # Skip if executor already manages lifecycle (to avoid duplicate events)
+                    if context and not getattr(context, '_executor_managed_lifecycle', False):
                         context.emit(AgentCompleted(
                             name=self.name,
                             correlation_id=agent_correlation_id,
@@ -1602,7 +1606,8 @@ class Agent:
                 context.restore_parent(original_agent_parent)
 
                 # Emit error checkpoint for observability
-                if context:
+                # Skip if executor already manages lifecycle (to avoid duplicate events)
+                if context and not getattr(context, '_executor_managed_lifecycle', False):
                     context.emit(AgentFailed(
                         name=self.name,
                         correlation_id=agent_correlation_id,
@@ -1905,7 +1910,8 @@ class Agent:
                 context.restore_parent(original_agent_parent)
 
                 # Emit completion checkpoint
-                if context:
+                # Skip if executor already manages lifecycle (to avoid duplicate events)
+                if context and not getattr(context, '_executor_managed_lifecycle', False):
                     context.emit(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
@@ -1935,7 +1941,8 @@ class Agent:
         context.restore_parent(original_agent_parent)
 
         # Emit completion checkpoint (iterations == max_iterations indicates max iterations reached)
-        if context:
+        # Skip if executor already manages lifecycle (to avoid duplicate events)
+        if context and not getattr(context, '_executor_managed_lifecycle', False):
             context.emit(AgentCompleted(
                 name=self.name,
                 correlation_id=agent_correlation_id,

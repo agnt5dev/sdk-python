@@ -20,7 +20,7 @@ Agents alone can only generate text - tools give them real-world abilities:
 ```python
 from agnt5 import Agent, tool
 
-@tool(auto_schema=True)
+@tool
 def search_web(query: str, max_results: int = 10) -> List[Dict[str, str]]:
     """Search the web for information.
 
@@ -50,17 +50,17 @@ Define tools once, use across multiple agents:
 
 ```python
 # Define domain-specific tools
-@tool(auto_schema=True)
+@tool
 def analyze_code(code: str, language: str = "python") -> Dict[str, Any]:
     """Analyze code for quality issues."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def run_tests(test_file: str) -> Dict[str, Any]:
     """Execute test suite and return results."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def format_code(code: str, style: str = "pep8") -> str:
     """Format code according to style guide."""
     pass
@@ -75,7 +75,7 @@ code_fixer = Agent(name="fixer", tools=[analyze_code, format_code])
 Require approval for dangerous operations:
 
 ```python
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def delete_database(database_name: str) -> Dict[str, str]:
     """Delete a database permanently.
 
@@ -106,7 +106,7 @@ The simplest way to create tools is with the `@tool()` decorator:
 ```python
 from agnt5 import tool
 
-@tool(auto_schema=True)
+@tool
 def calculate_area(length: float, width: float) -> float:
     """Calculate the area of a rectangle.
 
@@ -226,17 +226,17 @@ agent = Agent(name="github_bot", tools=github_tools)
 Combine multiple tools for complex capabilities:
 
 ```python
-@tool(auto_schema=True)
+@tool
 def search_papers(query: str, year_from: int = 2020) -> List[Dict]:
     """Search academic papers."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def download_pdf(url: str) -> bytes:
     """Download PDF document."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def extract_text(pdf_data: bytes) -> str:
     """Extract text from PDF."""
     pass
@@ -257,12 +257,12 @@ result = await research_agent.run("Survey recent work on transformer architectur
 Tools with prerequisite checks:
 
 ```python
-@tool(auto_schema=True)
+@tool
 def check_balance(account_id: str) -> Dict[str, float]:
     """Check account balance."""
     return {"account_id": account_id, "balance": 1000.0}
 
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def transfer_funds(from_account: str, to_account: str, amount: float) -> Dict:
     """Transfer funds between accounts.
 
@@ -294,7 +294,7 @@ agent = Agent(
 Tools with robust error handling:
 
 ```python
-@tool(auto_schema=True)
+@tool
 def fetch_stock_price(symbol: str) -> Dict[str, Any]:
     """Fetch current stock price.
 
@@ -357,7 +357,7 @@ Tools can access execution context for advanced operations:
 ```python
 from agnt5 import tool, Context
 
-@tool(auto_schema=True)
+@tool
 async def store_memory(ctx: Context, key: str, value: str) -> Dict[str, str]:
     """Store information in long-term memory.
 
@@ -390,7 +390,7 @@ Good descriptions help agents use tools correctly:
 
 ```python
 # Good - Clear, specific description
-@tool(auto_schema=True)
+@tool
 def search_documentation(query: str, language: str = "python") -> List[Dict]:
     """Search official language documentation for code examples and API references.
 
@@ -412,7 +412,7 @@ def search_documentation(query: str, language: str = "python") -> List[Dict]:
     pass
 
 # Avoid - Vague description
-@tool(auto_schema=True)
+@tool
 def search(q: str) -> List:
     """Search for stuff."""  # Too vague - agent won't know when to use this
     pass
@@ -425,7 +425,7 @@ Enable automatic schema extraction:
 ```python
 from typing import List, Dict, Optional
 
-@tool(auto_schema=True)
+@tool
 def analyze_sentiment(
     text: str,
     language: str = "en",
@@ -452,7 +452,7 @@ Protect users from destructive actions:
 
 ```python
 # Dangerous operations should require confirmation
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def execute_code(code: str, language: str = "python") -> Dict[str, str]:
     """Execute arbitrary code in a sandboxed environment.
 
@@ -461,7 +461,7 @@ def execute_code(code: str, language: str = "python") -> Dict[str, str]:
     """
     pass
 
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def send_email_blast(recipients: List[str], subject: str, body: str) -> Dict:
     """Send email to multiple recipients.
 
