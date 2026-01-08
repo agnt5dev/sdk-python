@@ -195,6 +195,7 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -206,6 +207,8 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            timeout: Request timeout in seconds (optional, defaults to client timeout)
+            headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
 
         Returns:
             Dictionary containing the component's output
@@ -238,11 +241,16 @@ class Client:
         # Build URL with component type (plural form)
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
+        # Build headers and merge with custom headers
+        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+        if headers:
+            request_headers.update(headers)
+
         # Make request with auth and session headers
         response = self._client.post(
             url,
             json=input_data,
-            headers=self._build_headers(session_id=session_id, user_id=user_id),
+            headers=request_headers,
             timeout=timeout,
         )
 
