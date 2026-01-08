@@ -6,6 +6,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import secrets
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
@@ -80,7 +81,7 @@ class WorkflowContext(Context):
         import uuid
         super().__init__(
             run_id=run_id,
-            correlation_id=correlation_id or f"wf-{uuid.uuid4().hex[:12]}",
+            correlation_id=correlation_id or f"wf-{secrets.token_hex(5)}",
             parent_correlation_id=parent_correlation_id or "",
             attempt=attempt,
             runtime_context=runtime_context,
@@ -465,6 +466,8 @@ class WorkflowContext(Context):
             # Create FunctionContext for the function execution
             func_ctx = FunctionContext(
                 run_id=f"{self.run_id}:task:{handler_name}",
+                correlation_id=f"task-{secrets.token_hex(5)}",
+                parent_correlation_id=self._correlation_id,
                 runtime_context=self._runtime_context,
                 worker=self._worker,
             )

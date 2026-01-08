@@ -186,7 +186,7 @@ def function(
                 else:
                     # Local execution without parent context (dev/testing)
                     run_id = f"local-{uuid.uuid4().hex[:8]}"
-                    correlation_id = f"fn-{secrets.token_hex(4)}"
+                    correlation_id = f"fn-{secrets.token_hex(5)}"
                     ctx = FunctionContext(
                         run_id=run_id,
                         correlation_id=correlation_id,

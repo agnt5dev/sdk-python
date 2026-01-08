@@ -7,6 +7,7 @@ from __future__ import annotations, print_function
 
 import asyncio
 import inspect
+import secrets
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
@@ -131,7 +132,7 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> FunctionContext:
-            correlation_id = f"fn-{uuid.uuid4().hex[:12]}"
+            correlation_id = f"fn-{secrets.token_hex(5)}"
             return FunctionContext(
                 run_id=req.invocation_id,  # Use actual invocation_id for event routing
                 correlation_id=correlation_id,
@@ -170,7 +171,7 @@ class ExecutorMixin:
 
             # Emit function.started (child of run)
             start_time_ns = time.time_ns()
-            fn_correlation_id = f"fn-{uuid.uuid4().hex[:8]}"
+            fn_correlation_id = f"fn-{secrets.token_hex(5)}"
             fn_started_event = Started(
                 name=config.name,
                 correlation_id=fn_correlation_id,
@@ -362,7 +363,7 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> Context:
-            correlation_id = f"tool-{uuid.uuid4().hex[:12]}"
+            correlation_id = f"tool-{secrets.token_hex(5)}"
             return Context(
                 run_id=req.invocation_id,
                 correlation_id=correlation_id,
@@ -393,7 +394,7 @@ class ExecutorMixin:
 
             # Emit tool.started (child of run)
             start_time_ns = time.time_ns()
-            tool_correlation_id = f"tool-{uuid.uuid4().hex[:8]}"
+            tool_correlation_id = f"tool-{secrets.token_hex(5)}"
             tool_started_event = Started(
                 name=tool.name,
                 correlation_id=tool_correlation_id,
@@ -511,7 +512,7 @@ class ExecutorMixin:
 
         def create_context(input_dict: dict, req: Any) -> Context:
             entity_key = input_dict.get("key", "unknown")
-            correlation_id = f"ent-{uuid.uuid4().hex[:12]}"
+            correlation_id = f"ent-{secrets.token_hex(5)}"
             return Context(
                 run_id=req.invocation_id,
                 correlation_id=correlation_id,
@@ -550,7 +551,7 @@ class ExecutorMixin:
 
             # Emit entity.started (child of run)
             start_time_ns = time.time_ns()
-            entity_correlation_id = f"ent-{uuid.uuid4().hex[:8]}"
+            entity_correlation_id = f"ent-{secrets.token_hex(5)}"
             entity_started_event = Started(
                 name=entity_type.name,
                 correlation_id=entity_correlation_id,
@@ -680,7 +681,7 @@ class ExecutorMixin:
             else:
                 logger.info(f"Using existing agent session: {session_id}")
 
-            correlation_id = f"agent-{uuid.uuid4().hex[:12]}"
+            correlation_id = f"agent-{secrets.token_hex(5)}"
             return AgentContext(
                 run_id=req.invocation_id,
                 agent_name=agent.name,
@@ -719,7 +720,7 @@ class ExecutorMixin:
 
             # Emit agent.started (child of run)
             start_time_ns = time.time_ns()
-            agent_correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
+            agent_correlation_id = f"agent-{secrets.token_hex(5)}"
             agent_started_event = Started(
                 name=agent.name,
                 correlation_id=agent_correlation_id,
@@ -1034,7 +1035,7 @@ class ExecutorMixin:
             # Set context in contextvar
             token = set_current_context(ctx)
 
-            workflow_correlation_id = f"wf-{_uuid.uuid4().hex[:8]}"
+            workflow_correlation_id = f"wf-{secrets.token_hex(5)}"
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = f"run-{ctx.run_id[:8]}"
