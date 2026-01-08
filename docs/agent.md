@@ -45,12 +45,12 @@ Agents break down complex tasks and execute them autonomously:
 ```python
 from agnt5 import Agent, tool
 
-@tool(auto_schema=True)
+@tool
 def search_papers(query: str) -> List[Dict]:
     """Search academic papers."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def analyze_paper(paper_url: str) -> Dict:
     """Analyze paper content."""
     pass
@@ -154,12 +154,12 @@ print(result.output)
 ```python
 from agnt5 import Agent, tool
 
-@tool(auto_schema=True)
+@tool
 def search_docs(query: str, language: str = "python") -> List[Dict]:
     """Search programming language documentation."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def run_code(code: str, language: str = "python") -> Dict[str, str]:
     """Execute code and return output."""
     pass
@@ -339,12 +339,12 @@ result = await agent.run("Explain custom API configuration")
 ```python
 from agnt5 import Agent, Session, Memory, tool
 
-@tool(auto_schema=True)
+@tool
 def search_academic(query: str, year_from: int = 2020) -> List[Dict]:
     """Search academic papers."""
     pass
 
-@tool(auto_schema=True)
+@tool
 def extract_insights(paper_text: str) -> Dict[str, List[str]]:
     """Extract key insights from paper."""
     pass
@@ -481,7 +481,7 @@ result = await coordinator.run(
 ### Agent with Human-in-the-Loop
 
 ```python
-@tool(auto_schema=True, confirmation=True)
+@tool(confirmation=True)
 def deploy_to_production(version: str) -> Dict[str, str]:
     """Deploy application to production.
 

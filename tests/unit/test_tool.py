@@ -116,7 +116,7 @@ def test_extract_schema_no_docstring():
 
 def test_tool_decorator_auto_schema():
     """Test @tool decorator with auto_schema=True."""
-    @tool(auto_schema=True)
+    @tool
     def search_web(ctx: Context, query: str, max_results: int = 10) -> list:
         """Search the web for information.
 
@@ -141,7 +141,7 @@ def test_tool_decorator_auto_schema():
 
 def test_tool_decorator_custom_name():
     """Test @tool with custom name."""
-    @tool(name="custom_search", auto_schema=True)
+    @tool(name="custom_search")
     def search_func(ctx: Context, query: str):
         """Search function."""
         return []
@@ -152,7 +152,7 @@ def test_tool_decorator_custom_name():
 
 def test_tool_decorator_custom_description():
     """Test @tool with custom description."""
-    @tool(description="Custom description", auto_schema=True)
+    @tool(description="Custom description")
     def my_tool(ctx: Context, param: str):
         return None
 
@@ -162,7 +162,7 @@ def test_tool_decorator_custom_description():
 
 def test_tool_decorator_confirmation():
     """Test @tool with confirmation flag."""
-    @tool(auto_schema=True, confirmation=True)
+    @tool(confirmation=True)
     def dangerous_tool(ctx: Context, action: str):
         """Perform dangerous action."""
         return "done"
@@ -176,7 +176,7 @@ def test_tool_decorator_confirmation():
 
 def test_tool_decorator_sync_function():
     """Test @tool with sync function (auto-converts to async)."""
-    @tool(auto_schema=True)
+    @tool
     def sync_tool(ctx: Context, value: int) -> int:
         """A sync tool."""
         return value * 2
@@ -193,7 +193,7 @@ def test_tool_decorator_without_context_fails():
     """Test that @tool without Context parameter fails."""
     with pytest.raises(ConfigurationError, match="must have at least one parameter"):
 
-        @tool(auto_schema=True)
+        @tool
         def bad_tool():
             pass
 
@@ -202,7 +202,7 @@ def test_tool_decorator_wrong_first_param_fails():
     """Test that @tool with wrong first parameter fails."""
     with pytest.raises(ConfigurationError, match="first parameter must be 'ctx: Context'"):
 
-        @tool(auto_schema=True)
+        @tool
         def bad_tool(wrong_param: str):
             pass
 
@@ -212,7 +212,7 @@ def test_tool_decorator_wrong_first_param_fails():
 @pytest.mark.asyncio
 async def test_tool_invocation():
     """Test invoking a tool."""
-    @tool(auto_schema=True)
+    @tool
     async def add_numbers(ctx: Context, a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
@@ -227,7 +227,7 @@ async def test_tool_invocation():
 @pytest.mark.asyncio
 async def test_tool_invocation_with_context_access():
     """Test tool accessing context properties."""
-    @tool(auto_schema=True)
+    @tool
     async def context_aware_tool(ctx: Context, key: str, value: str) -> dict:
         """Tool that accesses context."""
         # Context provides run_id, component_type, etc.
@@ -250,7 +250,7 @@ async def test_tool_invocation_with_context_access():
 @pytest.mark.asyncio
 async def test_tool_direct_call():
     """Test calling tool function directly."""
-    @tool(auto_schema=True)
+    @tool
     async def direct_call_tool(ctx: Context, message: str) -> str:
         """A tool for direct calling."""
         return f"Echo: {message}"
@@ -266,11 +266,11 @@ async def test_tool_direct_call():
 
 def test_tool_registry_registration():
     """Test tool registration."""
-    @tool(auto_schema=True)
+    @tool
     def tool1(ctx: Context, param: str):
         pass
 
-    @tool(auto_schema=True)
+    @tool
     def tool2(ctx: Context, param: int):
         pass
 
@@ -281,7 +281,7 @@ def test_tool_registry_registration():
 
 def test_tool_registry_get():
     """Test retrieving tools from registry."""
-    @tool(auto_schema=True)
+    @tool
     def my_tool(ctx: Context, param: str):
         """My tool."""
         pass
@@ -296,11 +296,11 @@ def test_tool_registry_get():
 
 def test_tool_registry_all():
     """Test getting all tools."""
-    @tool(auto_schema=True)
+    @tool
     def tool1(ctx: Context, p: str):
         pass
 
-    @tool(auto_schema=True)
+    @tool
     def tool2(ctx: Context, p: int):
         pass
 
@@ -312,7 +312,7 @@ def test_tool_registry_all():
 
 def test_tool_registry_clear():
     """Test clearing registry."""
-    @tool(auto_schema=True)
+    @tool
     def temp_tool(ctx: Context, p: str):
         pass
 
@@ -324,12 +324,12 @@ def test_tool_registry_clear():
 
 def test_tool_registry_overwrite():
     """Test that registering same name overwrites the previous tool."""
-    @tool(name="duplicate", auto_schema=True)
+    @tool(name="duplicate")
     def tool1(ctx: Context, p: str) -> str:
         """First tool."""
         return "tool1"
 
-    @tool(name="duplicate", auto_schema=True)
+    @tool(name="duplicate")
     def tool2(ctx: Context, p: int) -> int:
         """Second tool."""
         return 42
@@ -378,7 +378,7 @@ def test_tool_with_list_type():
     """Test tool with List type annotation."""
     from typing import List
 
-    @tool(auto_schema=True)
+    @tool
     def process_items(ctx: Context, items: List[str]) -> int:
         """Process list of items.
 
@@ -397,7 +397,7 @@ def test_tool_with_dict_type():
     """Test tool with Dict type annotation."""
     from typing import Dict
 
-    @tool(auto_schema=True)
+    @tool
     def process_config(ctx: Context, config: Dict[str, str]) -> bool:
         """Process configuration.
 
@@ -416,7 +416,7 @@ def test_tool_with_optional_type():
     """Test tool with Optional type."""
     from typing import Optional
 
-    @tool(auto_schema=True)
+    @tool
     def optional_param(ctx: Context, required: str, optional: Optional[str] = None) -> str:
         """Tool with optional parameter.
 
@@ -438,7 +438,7 @@ def test_tool_with_optional_type():
 
 def test_get_schema_format():
     """Test that get_schema returns correct format."""
-    @tool(auto_schema=True, confirmation=True)
+    @tool(confirmation=True)
     def test_tool(ctx: Context, param: str) -> None:
         """Test tool for schema."""
         pass
@@ -460,7 +460,7 @@ def test_get_schema_format():
 
 def test_tool_no_parameters_except_context():
     """Test tool with only context parameter."""
-    @tool(auto_schema=True)
+    @tool
     def no_params(ctx: Context) -> str:
         """Tool with no parameters."""
         return "done"
@@ -475,7 +475,7 @@ def test_tool_no_parameters_except_context():
 
 def test_tool_complex_docstring():
     """Test tool with complex docstring."""
-    @tool(auto_schema=True)
+    @tool
     def complex_doc(ctx: Context, param1: str, param2: int) -> dict:
         """
         This is a complex tool with a detailed description.
@@ -515,7 +515,7 @@ async def test_tool_sync_function_execution():
     """Test that sync functions actually execute correctly when converted to async."""
     execution_log = []
 
-    @tool(auto_schema=True)
+    @tool
     def sync_execution_tool(ctx: Context, value: str) -> str:
         """Sync tool that logs execution."""
         execution_log.append(f"executed_{value}")
@@ -534,7 +534,7 @@ def test_tool_with_any_type():
     """Test tool with Any type annotation."""
     from typing import Any
 
-    @tool(auto_schema=True)
+    @tool
     def any_type_tool(ctx: Context, data: Any) -> str:
         """Tool accepting any type.
 
@@ -550,23 +550,24 @@ def test_tool_with_any_type():
     assert schema["input_schema"]["properties"]["data"]["type"] == "string"
 
 
-@pytest.mark.asyncio
-async def test_tool_wrapper_attached_instance():
-    """Test that tool wrapper has _tool attribute."""
-    @tool(auto_schema=True)
+def test_tool_decorator_returns_tool_instance():
+    """Test that @tool decorator returns Tool instance directly."""
+    @tool
     async def inspectable_tool(ctx: Context, param: str) -> str:
         """Inspectable tool."""
         return param
 
-    # Should be able to access tool instance from wrapper
-    assert hasattr(inspectable_tool, "_tool")
-    assert isinstance(inspectable_tool._tool, Tool)
-    assert inspectable_tool._tool.name == "inspectable_tool"
+    # @tool decorator now returns Tool instance directly
+    assert isinstance(inspectable_tool, Tool)
+    assert inspectable_tool.name == "inspectable_tool"
+    # Function metadata is copied to Tool
+    assert inspectable_tool.__name__ == "inspectable_tool"
+    assert inspectable_tool.__doc__ == "Inspectable tool."
 
 
 def test_tool_without_return_type():
     """Test tool without return type annotation."""
-    @tool(auto_schema=True)
+    @tool
     def no_return_type(ctx: Context, param: str):
         """Tool without return type."""
         return "done"

@@ -661,6 +661,7 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Execute an agent with session support."""
         from ..agent import AgentContext
+        from ..agent.events import AgentCompleted, AgentFailed, AgentStarted
         from ..entity import _entity_state_adapter_ctx
         from ..events import Completed, ComponentType, Event, Failed, Started
 
@@ -732,6 +733,10 @@ class ExecutorMixin:
             )
             ctx.emit(agent_started_event)
 
+            # Mark context as executor-managed so Agent._run_core() doesn't emit
+            # duplicate agent.started/completed events
+            ctx._executor_managed_lifecycle = True
+
             try:
                 result = agent.run(user_message, context=ctx)
 
@@ -743,7 +748,18 @@ class ExecutorMixin:
 
                     async for event in result:
                         if isinstance(event, Event):
-                            # Forward the event to the context
+                            # Skip agent lifecycle events - executor already emits these
+                            # to avoid duplicate agent.started/completed/failed events
+                            if isinstance(event, (AgentStarted, AgentCompleted, AgentFailed)):
+                                # Extract final results from AgentCompleted
+                                if isinstance(event, AgentCompleted):
+                                    if hasattr(event, 'output_data') and isinstance(event.output_data, dict):
+                                        final_output = event.output_data.get("output", "")
+                                        final_tool_calls = event.output_data.get("tool_calls", [])
+                                        handoff_to = event.output_data.get("handoff_to")
+                                continue
+
+                            # Forward other events to the context
                             ctx.emit(event)
                             sequence += 1
 

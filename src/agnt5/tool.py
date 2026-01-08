@@ -16,10 +16,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_
 
 from docstring_parser import parse as parse_docstring
 
-from .context import Context, set_current_context
-from .exceptions import ConfigurationError
 from ._telemetry import setup_module_logger
 from .agent.events import ToolCallFailed
+from .context import Context, set_current_context
+from .exceptions import ConfigurationError
 
 logger = setup_module_logger(__name__)
 
@@ -42,11 +42,11 @@ def _serialize_for_span(value: Any) -> str:
         return "null"
 
     # Handle Pydantic models (v2 API)
-    if hasattr(value, 'model_dump'):
+    if hasattr(value, "model_dump"):
         return json.dumps(value.model_dump())
 
     # Handle Pydantic models (v1 API)
-    if hasattr(value, 'dict') and hasattr(value, '__fields__'):
+    if hasattr(value, "dict") and hasattr(value, "__fields__"):
         return json.dumps(value.dict())
 
     # Handle dataclasses
@@ -94,15 +94,12 @@ def _python_type_to_json_schema(py_type: Any) -> Dict[str, Any]:
         if args:
             # List[T] - extract T and create items schema
             item_type = args[0]
-            return {
-                "type": "array",
-                "items": _python_type_to_json_schema(item_type)
-            }
+            return {"type": "array", "items": _python_type_to_json_schema(item_type)}
         else:
             # Bare list without type parameter
             return {
                 "type": "array",
-                "items": {"type": "string"}  # Default to string items
+                "items": {"type": "string"},  # Default to string items
             }
 
     # Handle Dict[K, V] - basic object schema
@@ -172,11 +169,7 @@ def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
             required.append(param_name)
 
     # Build input schema
-    input_schema = {
-        "type": "object",
-        "properties": properties,
-        "required": required
-    }
+    input_schema = {"type": "object", "properties": properties, "required": required}
 
     # Extract return type for output schema (optional for basic tool functionality)
     return_type = sig.return_annotation
@@ -184,10 +177,7 @@ def _extract_schema_from_function(func: Callable) -> Dict[str, Any]:
     if return_type != inspect.Parameter.empty:
         output_schema = _python_type_to_json_schema(return_type)
 
-    return {
-        "input_schema": input_schema,
-        "output_schema": output_schema
-    }
+    return {"input_schema": input_schema, "output_schema": output_schema}
 
 
 class Tool:
@@ -205,7 +195,7 @@ class Tool:
         handler: ToolHandler,
         input_schema: Optional[Dict[str, Any]] = None,
         confirmation: bool = False,
-        auto_schema: bool = False
+        auto_schema: bool = False,
     ):
         """
         Initialize a Tool.
@@ -278,7 +268,7 @@ class Tool:
         content_hash = None
         memo = None
 
-        if hasattr(ctx, '_memo') and ctx._memo:
+        if hasattr(ctx, "_memo") and ctx._memo:
             memo = ctx._memo
             step_key, content_hash = memo.tool_call_key(self.name, kwargs)
 
@@ -346,20 +336,23 @@ class Tool:
             except Exception as e:
                 # Emit error event for observability
                 if context:
-                    context.emit(ToolCallFailed(
-                        name=self.name,
-                        correlation_id=tool_correlation_id,
-                        parent_correlation_id=context._correlation_id,
-                        error_code=type(e).__name__,
-                        error_message=str(e),
-                        tool_name=self.name,
-                        tool_call_id=tool_correlation_id,
-                        metadata={"name": self.name},
-                    ))
+                    context.emit(
+                        ToolCallFailed(
+                            name=self.name,
+                            correlation_id=tool_correlation_id,
+                            parent_correlation_id=context._correlation_id,
+                            error_code=type(e).__name__,
+                            error_message=str(e),
+                            tool_name=self.name,
+                            tool_call_id=tool_correlation_id,
+                            metadata={"name": self.name},
+                        )
+                    )
                 raise
         finally:
             # Always reset context to prevent leakage
             from .context import _current_context
+
             _current_context.reset(token)
 
     def get_schema(self) -> Dict[str, Any]:
@@ -373,8 +366,31 @@ class Tool:
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
-            "requires_confirmation": self.confirmation
+            "requires_confirmation": self.confirmation,
         }
+
+    async def __call__(self, ctx: Context, **kwargs) -> Any:
+        """Make Tool callable - allows using decorated tools as functions.
+
+        This enables the @tool decorator to return a Tool instance while
+        still allowing it to be called like a function.
+
+        Example:
+            @tool
+            async def my_tool(ctx: Context, x: int) -> int:
+                return x * 2
+
+            # my_tool is a Tool instance but callable:
+            result = await my_tool(ctx, x=5)
+
+        Args:
+            ctx: Execution context
+            **kwargs: Tool arguments
+
+        Returns:
+            Tool execution result
+        """
+        return await self.invoke(ctx, **kwargs)
 
 
 class ToolRegistry:
@@ -419,8 +435,8 @@ def tool(
     description: Optional[str] = None,
     auto_schema: bool = True,
     confirmation: bool = False,
-    input_schema: Optional[Dict[str, Any]] = None
-) -> Callable:
+    input_schema: Optional[Dict[str, Any]] = None,
+) -> Callable[..., Any]:
     """
     Decorator to mark a function as a tool with automatic schema extraction.
 
@@ -436,7 +452,7 @@ def tool(
 
     Example:
         ```python
-        @tool(auto_schema=True)
+        @tool
         def search_web(ctx: Context, query: str, max_results: int = 10) -> List[Dict]:
             \"\"\"Search the web for information.
 
@@ -451,7 +467,8 @@ def tool(
             return results
         ```
     """
-    def decorator(func: Callable) -> Callable:
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         # Determine tool name
         tool_name = name or func.__name__
 
@@ -502,28 +519,19 @@ def tool(
             handler=handler_func,
             input_schema=input_schema,
             confirmation=confirmation,
-            auto_schema=auto_schema
+            auto_schema=auto_schema,
         )
 
         # Register tool
         ToolRegistry.register(tool_instance)
 
-        # Return wrapper that invokes tool
-        @functools.wraps(func)
-        async def tool_wrapper(*args, **kwargs) -> Any:
-            """Wrapper that invokes tool with context."""
-            # If called with Context as first arg, use tool.invoke
-            if args and isinstance(args[0], Context):
-                ctx = args[0]
-                return await tool_instance.invoke(ctx, **kwargs)
+        # Copy function metadata to Tool for inspection
+        # This allows isinstance(my_tool, Tool) while preserving function identity
+        tool_instance.__name__ = func.__name__
+        tool_instance.__doc__ = func.__doc__
+        tool_instance.__module__ = func.__module__
 
-            # Otherwise, direct call (for testing)
-            return await handler_func(*args, **kwargs)
-
-        # Attach tool instance to wrapper for inspection
-        tool_wrapper._tool = tool_instance
-
-        return tool_wrapper
+        return tool_instance
 
     if _func is None:
         return decorator
@@ -533,6 +541,7 @@ def tool(
 # ============================================================================
 # Built-in Human-in-the-Loop Tools
 # ============================================================================
+
 
 class AskUserTool(Tool):
     """
@@ -581,7 +590,7 @@ class AskUserTool(Tool):
             name="ask_user",
             description="Ask the user a question and wait for their text response",
             handler=self._handler,
-            auto_schema=True
+            auto_schema=True,
         )
         self.context = context
 
@@ -597,8 +606,8 @@ class AskUserTool(Tool):
             User's text response
         """
         # Import here to avoid circular dependency
-        from .workflow import WorkflowContext
         from .context import get_current_context
+        from .workflow import WorkflowContext
 
         # Use explicit context if provided during __init__
         workflow_ctx = self.context
@@ -608,7 +617,7 @@ class AskUserTool(Tool):
             current = get_current_context()
             if isinstance(current, WorkflowContext):
                 workflow_ctx = current
-            elif hasattr(current, '_workflow_entity'):
+            elif hasattr(current, "_workflow_entity"):
                 # Current context has workflow entity (is WorkflowContext)
                 workflow_ctx = current  # type: ignore
 
@@ -672,7 +681,7 @@ class RequestApprovalTool(Tool):
             name="request_approval",
             description="Request user approval for an action before proceeding",
             handler=self._handler,
-            auto_schema=True
+            auto_schema=True,
         )
         self.context = context
 
@@ -689,8 +698,8 @@ class RequestApprovalTool(Tool):
             "approve" or "reject" based on user's decision
         """
         # Import here to avoid circular dependency
-        from .workflow import WorkflowContext
         from .context import get_current_context
+        from .workflow import WorkflowContext
 
         # Use explicit context if provided during __init__
         workflow_ctx = self.context
@@ -700,7 +709,7 @@ class RequestApprovalTool(Tool):
             current = get_current_context()
             if isinstance(current, WorkflowContext):
                 workflow_ctx = current
-            elif hasattr(current, '_workflow_entity'):
+            elif hasattr(current, "_workflow_entity"):
                 # Current context has workflow entity (is WorkflowContext)
                 workflow_ctx = current  # type: ignore
 
@@ -718,8 +727,5 @@ class RequestApprovalTool(Tool):
         return await workflow_ctx.wait_for_user(
             question,
             input_type="approval",
-            options=[
-                {"id": "approve", "label": "Approve"},
-                {"id": "reject", "label": "Reject"}
-            ]
+            options=[{"id": "approve", "label": "Approve"}, {"id": "reject", "label": "Reject"}],
         )

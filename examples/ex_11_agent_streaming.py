@@ -30,7 +30,7 @@ from agnt5 import function, FunctionContext, Agent, Context, tool
 # =============================================================================
 
 
-@tool(auto_schema=True)
+@tool
 async def calculate(ctx: Context, expression: str) -> str:
     """
     Evaluate a mathematical expression.

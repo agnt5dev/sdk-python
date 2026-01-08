@@ -383,3 +383,101 @@ def test_stream_vs_sync_same_result(client, worker_process):
 
     # The output should contain the answer (8)
     assert "8" in stream_output
+
+
+# =============================================================================
+# TRAJECTORY VALIDATION - Single Lifecycle Events
+# Regression tests for duplicate agent event bug (3 started/completed instead of 1)
+# =============================================================================
+
+
+@pytest.mark.integration
+def test_agent_trajectory_single_lifecycle_events(client, worker_process):
+    """Verify agent execution produces exactly one started/completed event.
+
+    Regression test for duplicate agent event bug where three agent.started
+    and three agent.completed events were emitted instead of one.
+    """
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "Say hello."
+    }, component_type="function"))
+
+    # Use existing helper to extract agent events (with deduplication)
+    agent_events = extract_agent_events(events)
+    agent_event_types = [e["event_type"] for e in agent_events]
+
+    # Count each event type
+    started_count = agent_event_types.count("agent.started")
+    completed_count = agent_event_types.count("agent.completed")
+
+    assert started_count == 1, \
+        f"Expected 1 agent.started, got {started_count}. Events: {agent_event_types}"
+    assert completed_count == 1, \
+        f"Expected 1 agent.completed, got {completed_count}. Events: {agent_event_types}"
+
+
+@pytest.mark.integration
+def test_agent_trajectory_correlation_chain(client, worker_process):
+    """Verify parent_correlation_id chain is unbroken.
+
+    agent.started and agent.completed should share the same correlation_id
+    and reference the run's correlation_id as parent.
+    """
+    events = list(client.stream_events("stream_agent_simple", {
+        "message": "Test correlation."
+    }, component_type="function"))
+
+    # Find run.started for run correlation_id
+    run_started = next((e for e in events if e.event_type.value == "run.started"), None)
+    assert run_started is not None, "Missing run.started event"
+    run_correlation_id = run_started.data.get("correlation_id")
+
+    # Extract agent events
+    agent_events = extract_agent_events(events)
+    agent_started = next((e for e in agent_events if e["event_type"] == "agent.started"), None)
+    agent_completed = next((e for e in agent_events if e["event_type"] == "agent.completed"), None)
+
+    assert agent_started is not None, "Missing agent.started event"
+    assert agent_completed is not None, "Missing agent.completed event"
+
+    # Agent events should reference run as parent
+    assert agent_started["data"].get("parent_correlation_id") == run_correlation_id, \
+        f"agent.started parent mismatch: expected {run_correlation_id}"
+    assert agent_completed["data"].get("parent_correlation_id") == run_correlation_id, \
+        f"agent.completed parent mismatch: expected {run_correlation_id}"
+
+    # Agent started and completed should have same correlation_id
+    agent_corr_id = agent_started["data"].get("correlation_id")
+    assert agent_completed["data"].get("correlation_id") == agent_corr_id, \
+        "agent.started and agent.completed have different correlation_ids"
+
+
+@pytest.mark.integration
+def test_agent_trajectory_with_tools_single_lifecycle(client, worker_process):
+    """Verify agent with tools still produces only one started/completed.
+
+    Even when an agent uses tools (multiple iterations), there should be
+    exactly one agent.started and one agent.completed event.
+    """
+    events = list(client.stream_events("stream_agent_with_tools", {
+        "message": "What is 25 * 4?"
+    }, component_type="function"))
+
+    agent_events = extract_agent_events(events)
+    agent_event_types = [e["event_type"] for e in agent_events]
+
+    # Count lifecycle events
+    started_count = agent_event_types.count("agent.started")
+    completed_count = agent_event_types.count("agent.completed")
+
+    assert started_count == 1, \
+        f"Expected 1 agent.started with tools, got {started_count}"
+    assert completed_count == 1, \
+        f"Expected 1 agent.completed with tools, got {completed_count}"
+
+    # Should have iteration events (agent used tools)
+    iteration_started = agent_event_types.count("agent.iteration.started")
+    iteration_completed = agent_event_types.count("agent.iteration.completed")
+
+    assert iteration_started >= 1, "Expected at least 1 agent.iteration.started"
+    assert iteration_completed >= 1, "Expected at least 1 agent.iteration.completed"

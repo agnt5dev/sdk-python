@@ -106,7 +106,7 @@ def mock_lm():
 def sample_tool():
     """Create sample tool for testing."""
 
-    @tool(auto_schema=True)
+    @tool
     async def test_tool(ctx: Context, value: int) -> int:
         """Test tool that doubles a value."""
         return value * 2
@@ -334,12 +334,12 @@ async def test_agent_with_tool_execution(sample_tool):
 async def test_agent_multiple_tool_calls():
     """Test agent making multiple tool calls."""
 
-    @tool(auto_schema=True)
+    @tool
     async def add(ctx: Context, a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
 
-    @tool(auto_schema=True)
+    @tool
     async def multiply(ctx: Context, a: int, b: int) -> int:
         """Multiply two numbers."""
         return a * b
@@ -375,7 +375,7 @@ async def test_agent_multiple_tool_calls():
 async def test_agent_tool_error_handling():
     """Test agent handling tool execution errors."""
 
-    @tool(auto_schema=True)
+    @tool
     async def failing_tool(ctx: Context) -> str:
         """Tool that always fails."""
         raise ValueError("Tool execution failed")
@@ -414,7 +414,7 @@ async def test_agent_max_iterations():
         tool_calls=[[{"id": f"call_{i}", "name": "test_tool", "arguments": '{"value": 1}'}] for i in range(20)],
     )
 
-    @tool(auto_schema=True)
+    @tool
     async def test_tool(ctx: Context, value: int) -> int:
         return value
 
@@ -732,7 +732,7 @@ async def test_agent_tool_not_found():
     """
     # Create a dummy tool so the agent uses generate() instead of stream()
     # (streaming doesn't support tool calls)
-    @tool(auto_schema=True)
+    @tool
     async def dummy_tool(ctx: Context, x: int) -> int:
         """A dummy tool that's never called."""
         return x

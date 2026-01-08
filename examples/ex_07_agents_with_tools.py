@@ -33,7 +33,7 @@ from agnt5 import function, FunctionContext, Agent, Context, tool, handoff
 # =============================================================================
 
 
-@tool(auto_schema=True)
+@tool
 async def calculate(ctx: Context, expression: str) -> str:
     """
     Evaluate a mathematical expression.
@@ -53,7 +53,7 @@ async def calculate(ctx: Context, expression: str) -> str:
         return f"Error evaluating '{expression}': {str(e)}"
 
 
-@tool(auto_schema=True)
+@tool
 async def get_weather(ctx: Context, city: str) -> str:
     """
     Get current weather for a city (simulated).
@@ -80,7 +80,7 @@ async def get_weather(ctx: Context, city: str) -> str:
     return f"Weather data not available for {city}. Try: New York, London, Tokyo, or Paris."
 
 
-@tool(auto_schema=True)
+@tool
 async def search_database(ctx: Context, query: str, limit: int = 5) -> List[Dict]:
     """
     Search a database for information (simulated).
@@ -102,7 +102,7 @@ async def search_database(ctx: Context, query: str, limit: int = 5) -> List[Dict
     return results[:limit]
 
 
-@tool(auto_schema=True)
+@tool
 async def send_email(ctx: Context, to: str, subject: str, body: str) -> dict:
     """
     Send an email (simulated).

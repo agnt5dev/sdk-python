@@ -35,7 +35,7 @@ from agnt5 import Agent, Context, FunctionContext, WorkflowContext, function, to
 # =============================================================================
 
 
-@tool(auto_schema=True)
+@tool
 async def register_contribution(ctx: Context, agent_name: str, contribution: str) -> dict:
     """
     Register an agent's contribution to shared state.
@@ -55,7 +55,7 @@ async def register_contribution(ctx: Context, agent_name: str, contribution: str
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def read_contributions(ctx: Context) -> list:
     """
     Read all registered contributions.
@@ -71,7 +71,7 @@ async def read_contributions(ctx: Context) -> list:
     ]
 
 
-@tool(auto_schema=True)
+@tool
 async def vote(ctx: Context, agent_name: str, choice: str, reasoning: str) -> dict:
     """
     Cast a vote with reasoning.

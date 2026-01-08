@@ -35,7 +35,7 @@ from agnt5 import Agent, Context, FunctionContext, WorkflowContext, function, to
 # =============================================================================
 
 
-@tool(auto_schema=True)
+@tool
 async def fetch_data(ctx: Context, source: str) -> dict:
     """
     Fetch data from a source (simulated).
@@ -55,7 +55,7 @@ async def fetch_data(ctx: Context, source: str) -> dict:
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def transform_data(ctx: Context, data: List[int], operation: str = "double") -> dict:
     """
     Transform data with specified operation.
@@ -86,7 +86,7 @@ async def transform_data(ctx: Context, data: List[int], operation: str = "double
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def aggregate_data(ctx: Context, datasets: List[Dict]) -> dict:
     """
     Aggregate multiple datasets.
@@ -115,7 +115,7 @@ async def aggregate_data(ctx: Context, datasets: List[Dict]) -> dict:
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def validate_result(ctx: Context, data: Dict) -> dict:
     """
     Validate processing result.
@@ -137,7 +137,7 @@ async def validate_result(ctx: Context, data: Dict) -> dict:
     }
 
 
-@tool(auto_schema=True)
+@tool
 async def format_output(ctx: Context, data: Dict, format_type: str = "json") -> str:
     """
     Format data for output.
@@ -162,7 +162,7 @@ async def format_output(ctx: Context, data: Dict, format_type: str = "json") -> 
     return str(data)
 
 
-@tool(auto_schema=True)
+@tool
 async def slow_operation(ctx: Context, name: str, delay_ms: int = 100) -> dict:
     """
     Simulated slow operation for timing tests.
