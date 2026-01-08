@@ -597,10 +597,8 @@ class Client:
 
                         # Check for error
                         if "error" in data:
-                            raise RunError(
-                                data.get("error"),
-                                run_id=data.get("runId"),
-                            )
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield chunk from output.delta events
                         if current_event == "output.delta":
@@ -726,8 +724,8 @@ class Client:
 
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
-                            error_msg = data.get("error", "Unknown streaming error")
-                            raise RunError(error_msg, run_id=data.get("runId"))
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield typed Event object
                         if current_event_type:
@@ -1480,8 +1478,8 @@ class AsyncClient:
 
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
-                            error_msg = data.get("error", "Unknown streaming error")
-                            raise RunError(error_msg, run_id=data.get("runId"))
+                            # Use helper to properly parse error structure
+                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
 
                         # Yield typed Event object
                         if current_event_type:
