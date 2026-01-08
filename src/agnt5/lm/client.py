@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -103,7 +104,7 @@ class LMClient(LanguageModel):
             kwargs["runtime_context"] = current_ctx._runtime_context
 
         start_time_ns = time.time_ns()
-        correlation_id = f"lm-{uuid.uuid4().hex[:12]}"
+        correlation_id = f"lm-{secrets.token_hex(5)}"
 
         if current_ctx:
             self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
@@ -141,7 +142,7 @@ class LMClient(LanguageModel):
 
         block_types: Dict[int, str] = {}
         start_time_ns = time.time_ns()
-        correlation_id = f"lm-{uuid.uuid4().hex[:12]}"
+        correlation_id = f"lm-{secrets.token_hex(5)}"
         parent_correlation_id = current_ctx.correlation_id if current_ctx else ""
 
         if current_ctx:

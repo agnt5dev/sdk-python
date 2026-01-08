@@ -2,6 +2,7 @@
 
 import json
 import logging
+import secrets
 import uuid as _uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
@@ -429,7 +430,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
 
         if context is None:
             import uuid
@@ -552,7 +553,7 @@ class Agent:
                 for iteration in range(self.max_iterations):
                     iteration_start_time = _time.time()
                     # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
-                    iteration_correlation_id = f"iter-{_uuid.uuid4().hex[:12]}"
+                    iteration_correlation_id = f"iter-{secrets.token_hex(5)}"
 
                     if context:
                         context.emit(AgentIterationStarted(
@@ -629,7 +630,7 @@ class Agent:
                             })
 
                             # Yield tool call started event with unique content_index
-                            tool_correlation_id = f"tool-{_uuid.uuid4().hex[:12]}"
+                            tool_correlation_id = f"tool-{secrets.token_hex(5)}"
                             yield ToolCallStarted(
                                 name=tool_name,
                                 correlation_id=tool_correlation_id,
@@ -922,7 +923,7 @@ class Agent:
                 response = await internal_lm.generate(request)
 
             # Emit synthetic LM events for compatibility
-            lm_correlation_id = f"lm-{_uuid.uuid4().hex[:12]}"
+            lm_correlation_id = f"lm-{secrets.token_hex(5)}"
             yield (LMContentBlockStarted(
                 name=self.model,
                 correlation_id=lm_correlation_id,
@@ -1050,7 +1051,7 @@ class Agent:
         sequence = 0
 
         # Generate correlation ID for the agent run
-        run_correlation_id = f"agent-run-{_uuid.uuid4().hex[:12]}"
+        run_correlation_id = f"agent-run-{secrets.token_hex(5)}"
 
         # Yield agent.started event
         yield AgentStarted(
@@ -1176,7 +1177,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
 
         if context is None:
             # Standalone execution - create AgentContext with valid UUID
@@ -1302,7 +1303,7 @@ class Agent:
                     for iteration in range(self.max_iterations):
                         iteration_start_time = _time.time()
                         # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
-                        iteration_correlation_id = f"iter-{_uuid.uuid4().hex[:12]}"
+                        iteration_correlation_id = f"iter-{secrets.token_hex(5)}"
 
                         # Emit iteration started checkpoint
                         if context:
@@ -1720,7 +1721,7 @@ class Agent:
             workflow_ctx = context._agent_data["_workflow_ctx"]
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{_uuid.uuid4().hex[:12]}"
+        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
 
         # Set agent as parent for iteration events (no agent.started emit since this is a continuation)
         original_agent_parent = context.set_as_parent(agent_correlation_id)

@@ -11,6 +11,7 @@ import functools
 import inspect
 import json
 import logging
+import secrets
 import uuid as _uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_args, get_origin
 
@@ -290,7 +291,7 @@ class Tool:
 
         context = get_current_context()
         # Generate correlation_id for pairing tool.invoked ↔ tool.completed/failed
-        tool_correlation_id = f"tool-{_uuid.uuid4().hex[:12]}"
+        tool_correlation_id = f"tool-{secrets.token_hex(5)}"
         # TODO: Add ToolInvoked typed event (different from ToolCallStarted which is for agent→tool)
         # if context:
         #     context.emit(ToolInvoked(...))

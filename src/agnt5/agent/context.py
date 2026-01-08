@@ -2,6 +2,7 @@
 
 import logging
 import os
+import secrets
 import time
 import warnings
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -84,9 +85,8 @@ class AgentContext(Context):
             worker = getattr(parent_context, '_worker', None)
 
         # Generate correlation IDs for agent execution if not provided
-        import uuid
         if not correlation_id:
-            correlation_id = f"agent-{uuid.uuid4().hex[:8]}"
+            correlation_id = f"agent-{secrets.token_hex(5)}"
         if not parent_correlation_id:
             parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
 
