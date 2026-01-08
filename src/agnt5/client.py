@@ -50,9 +50,18 @@ def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = No
     # Import here to avoid circular import
     from .client import RunError
 
-    message = error_data.get("error", "Unknown error")
-    run_id = error_data.get("runId") or run_id
-    error_code = error_data.get("error_code")
+    # Extract error message - handle both old format (string) and new format (dict)
+    error = error_data.get("error", "Unknown error")
+    if isinstance(error, dict):
+        # New format: {"code": "...", "message": "..."}
+        message = error.get("message", "Unknown error")
+        error_code = error.get("code") or error_data.get("error_code")
+    else:
+        # Old format: error is a string
+        message = error
+        error_code = error_data.get("error_code")
+
+    run_id = error_data.get("runId") or error_data.get("run_id") or run_id
 
     # Extract retry metadata if present
     metadata = error_data.get("metadata")
@@ -226,8 +235,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
         # Make request with auth and session headers
         response = self._client.post(
@@ -282,7 +291,15 @@ class Client:
         if data.get("status") == "failed":
             raise _parse_error_response(data)
 
-        # Return output
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     def submit(
@@ -325,8 +342,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
         # Make request with auth headers
         response = self._client.post(
@@ -422,7 +439,15 @@ class Client:
         if data.get("status") == "failed":
             raise _parse_error_response(data, run_id=run_id)
 
-        # Return output
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     def wait_for_result(
@@ -516,8 +541,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        # Build URL with component type (plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth headers
         with self._client.stream(
@@ -641,8 +666,8 @@ class Client:
         if input_data is None:
             input_data = {}
 
-        # Build URL with component type (using streaming endpoint)
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        # Build URL with component type (using streaming endpoint, plural form)
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth and session headers
         with self._client.stream(
@@ -908,7 +933,15 @@ class EntityProxy:
             if data.get("status") == "failed":
                 raise _parse_error_response(data)
 
-            # Return output
+            # Return output - extract from nested event structure
+            # New format: data["result"]["output"]["output_data"]
+            result = data.get("result", {})
+            if result and isinstance(result, dict):
+                output = result.get("output", {})
+                if isinstance(output, dict) and "output_data" in output:
+                    return output["output_data"]
+                return output
+            # Fallback to old format
             return data.get("output")
 
         return method_caller
@@ -1302,7 +1335,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/run/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
         response = await client.post(
             url,
@@ -1333,6 +1366,15 @@ class AsyncClient:
         if data.get("status") == "failed":
             raise _parse_error_response(data)
 
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
     async def stream_events(
@@ -1382,7 +1424,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/stream/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         async with client.stream(
             "POST",
@@ -1459,7 +1501,7 @@ class AsyncClient:
             input_data = {}
 
         client = await self._ensure_client()
-        url = urljoin(self.gateway_url + "/", f"v1/submit/{component_type}/{component}")
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
         response = await client.post(
             url,
@@ -1517,6 +1559,15 @@ class AsyncClient:
         if data.get("status") == "failed":
             raise _parse_error_response(data, run_id=run_id)
 
+        # Return output - extract from nested event structure
+        # New format: data["result"]["output"]["output_data"]
+        result = data.get("result", {})
+        if result and isinstance(result, dict):
+            output = result.get("output", {})
+            if isinstance(output, dict) and "output_data" in output:
+                return output["output_data"]
+            return output
+        # Fallback to old format
         return data.get("output", {})
 
 
