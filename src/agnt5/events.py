@@ -27,7 +27,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -35,6 +34,8 @@ from enum import Enum
 from typing import Any, ClassVar, Optional, Union
 
 from edwh_uuid7 import uuid7
+
+from agnt5._serialization import serialize_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +493,7 @@ class EventEmitter:
             self._worker.queue_event(
                 invocation_id=self._run_id,
                 event_type=envelope.event_type,
-                event_data=json.dumps(envelope.data),
+                event_data=serialize_to_str(envelope.data),
                 content_index=envelope.content_index,
                 sequence=self._sequence,
                 metadata=merged_metadata,

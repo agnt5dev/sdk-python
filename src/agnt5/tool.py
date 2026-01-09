@@ -9,7 +9,6 @@ import asyncio
 import dataclasses as dc
 import functools
 import inspect
-import json
 import logging
 import secrets
 import uuid as _uuid
@@ -17,6 +16,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_
 
 from docstring_parser import parse as parse_docstring
 
+from ._serialization import serialize_to_str
 from ._telemetry import setup_module_logger
 from .agent.events import ToolCallFailed
 from .context import Context, set_current_context
@@ -42,21 +42,9 @@ def _serialize_for_span(value: Any) -> str:
     if value is None:
         return "null"
 
-    # Handle Pydantic models (v2 API)
-    if hasattr(value, "model_dump"):
-        return json.dumps(value.model_dump())
-
-    # Handle Pydantic models (v1 API)
-    if hasattr(value, "dict") and hasattr(value, "__fields__"):
-        return json.dumps(value.dict())
-
-    # Handle dataclasses
-    if dc.is_dataclass(value) and not isinstance(value, type):
-        return json.dumps(dc.asdict(value))
-
-    # Default JSON serialization
+    # Use centralized serialization that handles Pydantic models, dataclasses, etc.
     try:
-        return json.dumps(value)
+        return serialize_to_str(value)
     except (TypeError, ValueError):
         return repr(value)
 
