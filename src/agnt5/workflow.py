@@ -12,6 +12,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
+from ._serialization import serialize_to_str
 from .context import Context, set_current_context
 from .entity import Entity, EntityState, _get_state_adapter
 from .function import FunctionContext
@@ -218,7 +219,7 @@ class WorkflowContext(Context):
                 # Raw value (non-Event) - streaming function output
                 # Forward as output.delta and collect for final result
                 try:
-                    chunk_json = json.dumps(item)
+                    chunk_json = serialize_to_str(item)
                 except (TypeError, ValueError):
                     chunk_json = str(item)
 
@@ -446,10 +447,9 @@ class WorkflowContext(Context):
 
         # Import span creation utility (uses contextvar for async-safe parent-child linking)
         from .tracing import create_span
-        import json
 
         # Serialize input data for span attributes
-        input_repr = json.dumps({"args": args, "kwargs": kwargs}) if args or kwargs else "{}"
+        input_repr = serialize_to_str({"args": args, "kwargs": kwargs}) if args or kwargs else "{}"
 
         # Create span for task execution (contextvar handles parent-child linking)
         with create_span(
@@ -494,7 +494,7 @@ class WorkflowContext(Context):
 
                 # Add output data to span
                 try:
-                    output_repr = json.dumps(result)
+                    output_repr = serialize_to_str(result)
                     span.set_attribute("output.data", output_repr)
                 except (TypeError, ValueError):
                     # If result is not JSON serializable, use repr
@@ -795,7 +795,7 @@ class WorkflowContext(Context):
             # Record to platform for persistent memoization (Phase 3)
             if self._checkpoint_client:
                 try:
-                    output_bytes = json.dumps(result).encode("utf-8")
+                    output_bytes = serialize_to_str(result).encode("utf-8")
                     await self._checkpoint_client.step_completed(
                         self.run_id,
                         step_key,

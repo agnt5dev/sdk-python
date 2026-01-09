@@ -1,12 +1,12 @@
 """Agent class - core LLM-driven agent with tool orchestration."""
 
-import json
 import logging
 import secrets
 import uuid as _uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
+from .._serialization import serialize_to_str
 from ..context import Context, get_current_context, set_current_context
 from .. import lm
 from ..lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
@@ -51,21 +51,8 @@ def _serialize_tool_result(result: Any) -> str:
     if result is None:
         return "null"
 
-    # Handle Pydantic models (v2 API)
-    if hasattr(result, 'model_dump'):
-        return json.dumps(result.model_dump())
-
-    # Handle Pydantic models (v1 API)
-    if hasattr(result, 'dict') and hasattr(result, '__fields__'):
-        return json.dumps(result.dict())
-
-    # Handle dataclasses
-    import dataclasses as dc
-    if dc.is_dataclass(result) and not isinstance(result, type):
-        return json.dumps(dc.asdict(result))
-
-    # Default JSON serialization
-    return json.dumps(result)
+    # Use centralized serialization that handles Pydantic models, dataclasses, etc.
+    return serialize_to_str(result)
 
 
 @dataclass
@@ -1662,7 +1649,7 @@ class Agent:
         pending_tool = agent_context["pending_tool_call"]
         tool_results.append({
             "tool": pending_tool["name"],
-            "result": json.dumps(user_response),
+            "result": serialize_to_str(user_response),
             "error": None,
         })
 
