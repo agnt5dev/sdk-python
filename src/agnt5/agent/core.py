@@ -1,5 +1,6 @@
 """Agent class - core LLM-driven agent with tool orchestration."""
 
+import json
 import logging
 import secrets
 import uuid as _uuid
