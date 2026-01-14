@@ -4,8 +4,9 @@
 
 use agnt5_sdk_core::graph::{
     GraphDatabase, GraphNode, GraphRelationship, GraphTraversalResult,
-    MemoryGraphDatabase, RelationshipQuery, TraversalFilters,
+    RelationshipQuery, TraversalFilters,
 };
+use agnt5_sdk_core::MemoryGraphDatabase;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;

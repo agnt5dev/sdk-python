@@ -5,9 +5,6 @@ This module provides reusable function backends for testing various scenarios:
 - Happy path: Basic operations that should succeed
 - Error scenarios: Functions that test failure modes
 - Edge cases: Boundary conditions and corner cases
-
-These fixtures are separate from pedagogical examples, allowing tests to cover
-complex scenarios without cluttering the user-facing examples.
 """
 
 import asyncio
@@ -15,8 +12,7 @@ import random
 import time
 from typing import Any, Optional
 
-from agnt5 import function, FunctionContext
-
+from agnt5 import FunctionContext, function
 
 # =============================================================================
 # HAPPY PATH FIXTURES
@@ -39,23 +35,7 @@ async def add_numbers(ctx: FunctionContext, a: int, b: int) -> int:
     return a + b
 
 
-@function
-async def multiply_numbers(ctx: FunctionContext, a: int, b: int) -> int:
-    """
-    Simple multiplication for basic tests.
-
-    Args:
-        a: First number
-        b: Second number
-
-    Returns:
-        Product of a and b
-    """
-    ctx.logger.info(f"Multiplying {a} * {b}")
-    return a * b
-
-
-@function(timeout_ms=30000)  # 30 second timeout
+@function(timeout_ms=10000)  # 10 second timeout
 async def slow_function(ctx: FunctionContext, duration: float = 5.0) -> dict:
     """
     Function that takes time (for timeout tests).
@@ -233,7 +213,7 @@ async def sometimes_fails(ctx: FunctionContext, fail_probability: float = 0.5) -
     Raises:
         RuntimeError: Random failure based on probability
     """
-    ctx.logger.info(f"Running with {fail_probability*100}% failure rate")
+    ctx.logger.info(f"Running with {fail_probability * 100}% failure rate")
 
     if random.random() < fail_probability:
         raise RuntimeError(f"Random failure occurred (probability: {fail_probability})")
@@ -400,7 +380,9 @@ async def wrong_parameter_count_function(ctx: FunctionContext) -> dict:
 
 
 @function
-async def missing_required_param(ctx: FunctionContext, required: str, optional: str = "default") -> dict:
+async def missing_required_param(
+    ctx: FunctionContext, required: str, optional: str = "default"
+) -> dict:
     """
     Function with required parameters (for missing param tests).
 
@@ -575,7 +557,7 @@ async def float_precision_function(ctx: FunctionContext, value: float) -> dict:
     return {
         "original": value,
         "squared": value * value,
-        "sqrt": value ** 0.5 if value >= 0 else None,
+        "sqrt": value**0.5 if value >= 0 else None,
         "rounded": round(value, 2),
     }
 

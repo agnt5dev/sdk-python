@@ -818,7 +818,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     memory::register_memory(m)?;
 
     // Graph database
-    graph::register(Python::with_gil(|py| py), m)?;
+    graph::register(m.py(), m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;
