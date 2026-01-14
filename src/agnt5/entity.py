@@ -1,5 +1,9 @@
 """
 Entity component for stateful operations with single-writer consistency.
+
+DEPRECATED: The Entity API is deprecated as of AGNT5 v1.0.
+Use the State API (ctx.state) for coordination and the Memory API (ctx.memory) for domain data.
+See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
 """
 
 import asyncio
@@ -8,6 +12,7 @@ import functools
 import hashlib
 import inspect
 import json
+import warnings
 from dataclasses import asdict, is_dataclass
 from dataclasses import fields as dataclass_fields
 from typing import (
@@ -1019,6 +1024,11 @@ class Entity(Generic[StateType]):
     """
     Base class for stateful entities with single-writer consistency.
 
+    .. deprecated:: 1.0
+        Entity API is deprecated. Use **State API** (ctx.state) for coordination
+        and **Memory API** (ctx.memory) for domain data instead.
+        See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
+
     Entities provide a class-based API where:
     - State is accessed via self.state (clean, synchronous API)
     - Methods are regular async methods on the class
@@ -1148,6 +1158,9 @@ class Entity(Generic[StateType]):
         """
         Auto-register Entity subclasses and wrap methods.
 
+        DEPRECATED: Entity API is deprecated. Use State API (ctx.state) for coordination
+        and Memory API (ctx.memory) for domain data instead.
+
         This is called automatically when a class inherits from Entity.
         It performs four tasks:
         1. Extracts state type from generic parameter (Entity[StateType])
@@ -1164,6 +1177,15 @@ class Entity(Generic[StateType]):
         # Don't register SDK's built-in base classes (these are meant to be extended by users)
         if cls.__name__ in ('SessionEntity', 'MemoryEntity'):
             return
+
+        # Issue deprecation warning for user-defined entity classes
+        warnings.warn(
+            f"Entity API is deprecated: {cls.__name__} inherits from Entity. "
+            "Use State API (ctx.state) for coordination and Memory API (ctx.memory) for domain data. "
+            "See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
         # Extract state type from generic parameter (Entity[CartState])
         state_type = None

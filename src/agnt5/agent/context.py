@@ -53,6 +53,7 @@ class AgentContext(Context):
         run_id: str,
         agent_name: str,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         state_manager: Optional[Any] = None,
         parent_context: Optional[Context] = None,
         attempt: int = 0,
@@ -69,6 +70,7 @@ class AgentContext(Context):
             run_id: Unique execution identifier
             agent_name: Name of the agent
             session_id: Session identifier for conversation history (default: run_id)
+            user_id: User identifier for user-scoped state (optional)
             state_manager: Optional state manager (for context inheritance)
             parent_context: Parent context to inherit state from
             attempt: Retry attempt number
@@ -106,6 +108,7 @@ class AgentContext(Context):
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id
+        self._user_id = user_id  # Optional user identifier for user-scoped state
         self.parent_context = parent_context  # Store for context chain traversal
 
         # Determine state adapter based on parent context
@@ -162,25 +165,140 @@ class AgentContext(Context):
     @property
     def state(self):
         """
-        Get state interface for agent state management.
+        Get run-scoped state manager for coordination and control flow.
 
-        Note: This is a simplified in-memory state interface for agent-specific data.
-        Conversation history is managed separately via get_conversation_history() and
-        save_conversation_history() which use the Rust-backed persistence layer.
+        Run-scoped state is ephemeral and cleared when the run completes.
+        Use this for coordination within a single workflow execution:
+        - Phase tracking
+        - Agent completion flags
+        - Iteration counters
+        - Temporary configuration
 
         Returns:
-            Dict-like object for state operations
+            StateManager for run-scoped key-value operations
 
         Example:
-            # Store agent-specific data (in-memory only)
-            ctx.state["research_results"] = data
-            ctx.state["iteration_count"] = 5
+            # Run-scoped state (cleared after workflow completes)
+            await ctx.state.set("phase", "research")
+            phase = await ctx.state.get("phase")
+            await ctx.state.set("agents_completed", ["researcher", "writer"])
         """
-        # Simple dict-based state for agent-specific data
-        # This is in-memory only and not persisted to platform
-        if not hasattr(self, '_agent_state'):
-            self._agent_state = {}
-        return self._agent_state
+        from ..state import StateManager
+
+        if not hasattr(self, '_run_state_manager'):
+            self._run_state_manager = StateManager(
+                state_adapter=self._state_adapter,
+                scope="run",
+                scope_id=self._run_id,
+            )
+        return self._run_state_manager
+
+    @property
+    def session(self):
+        """
+        Get session context with state property.
+
+        Session-scoped state persists across multiple turns in a conversation.
+        Use this for multi-turn conversation state:
+        - Conversation context
+        - User preferences (session-specific)
+        - Ongoing task state
+
+        Returns:
+            SessionContext with state property
+
+        Example:
+            # Session-scoped state (multi-turn conversation)
+            await ctx.session.state.set("context", {"topic": "travel"})
+            context = await ctx.session.state.get("context")
+        """
+        from ..state import SessionContext
+
+        if not hasattr(self, '_session_context'):
+            self._session_context = SessionContext(
+                state_adapter=self._state_adapter,
+                session_id=self._session_id,
+            )
+        return self._session_context
+
+    @property
+    def user(self):
+        """
+        Get user context with state property.
+
+        User-scoped state persists across all sessions for a specific user.
+        Use this for long-term user preferences:
+        - UI theme
+        - Language preference
+        - User settings
+
+        Returns:
+            UserContext with state property, or None if no user_id provided
+
+        Example:
+            # User-scoped state (long-term preferences)
+            if ctx.user:
+                await ctx.user.state.set("theme", "dark")
+                theme = await ctx.user.state.get("theme", "light")
+        """
+        if not self._user_id:
+            return None
+
+        from ..state import UserContext
+
+        if not hasattr(self, '_user_context'):
+            self._user_context = UserContext(
+                state_adapter=self._state_adapter,
+                user_id=self._user_id,
+            )
+        return self._user_context
+
+    @property
+    def memory(self):
+        """
+        Get semantic memory for storing and searching facts.
+
+        Memory is automatically scoped:
+        - If user_id is available: User-scoped (long-term, cross-session)
+        - Otherwise: Session-scoped (temporary, single conversation)
+
+        Semantic memory uses vector embeddings for similarity search,
+        enabling natural language queries over stored facts.
+
+        Requires:
+        - OPENAI_API_KEY for embeddings
+        - Vector database: QDRANT_URL, PINECONE_API_KEY+PINECONE_HOST, or POSTGRES_URL
+
+        Returns:
+            SemanticMemory instance for storing and searching facts
+
+        Example:
+            # Store facts
+            await ctx.memory.store("User prefers dark mode")
+            await ctx.memory.store("User's favorite color is blue")
+
+            # Search for relevant facts
+            results = await ctx.memory.search("color preferences", limit=5)
+            for result in results:
+                print(f"{result.content} (score: {result.score:.2f})")
+
+            # Delete a fact
+            await ctx.memory.forget(results[0].id)
+        """
+        from ..memory import SemanticMemory, MemoryScope
+
+        if not hasattr(self, '_memory'):
+            # Use user scope if available, otherwise session scope
+            if self._user_id:
+                scope = MemoryScope.USER
+                scope_id = self._user_id
+            else:
+                scope = MemoryScope.SESSION
+                scope_id = self._session_id
+
+            self._memory = SemanticMemory(scope, scope_id)
+
+        return self._memory
 
     @property
     def session_id(self) -> str:

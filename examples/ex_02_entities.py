@@ -1,6 +1,13 @@
 """
 Example: AGNT5 Entities
 
+⚠️  DEPRECATED: Entity API is deprecated as of AGNT5 v1.0.
+    Use State API (ctx.state) for coordination and Memory API (ctx.memory) for domain data.
+    See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
+
+    This example is kept for backward compatibility but should not be used for new code.
+    See simple_state_example.py and memory_api_example.py for modern alternatives.
+
 This example demonstrates stateful entity features:
 - Creating entities with typed state (Pydantic models)
 - Direct state attribute access (self.state.count vs self.state.get/set)

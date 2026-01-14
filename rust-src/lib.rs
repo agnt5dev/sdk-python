@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod adk;
 mod checkpoint_client;
 mod entity_state;
+mod graph;
 mod language_model;
 mod memory;
 mod types;
@@ -815,6 +816,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Semantic memory
     memory::register_memory(m)?;
+
+    // Graph database
+    graph::register(Python::with_gil(|py| py), m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;

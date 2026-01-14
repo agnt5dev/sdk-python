@@ -519,3 +519,309 @@ class SemanticMemory:
             score=result.score,
             metadata=dict(result.metadata.extra) if result.metadata else {},
         )
+
+
+@dataclass
+class GraphNode:
+    """Node in a knowledge graph.
+
+    Attributes:
+        id: Unique node identifier (e.g., "User:alice", "Topic:python")
+        node_type: Type of node (e.g., "User", "Topic")
+        properties: Optional node properties
+    """
+    id: str
+    node_type: str
+    properties: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class GraphRelationship:
+    """Relationship between graph nodes.
+
+    Attributes:
+        id: Unique relationship identifier
+        from_node: Source node ID
+        to_node: Target node ID
+        relationship_type: Type of relationship (e.g., "likes", "knows")
+        properties: Optional relationship properties
+        created_at: Creation timestamp
+    """
+    id: str
+    from_node: str
+    to_node: str
+    relationship_type: str
+    properties: Dict[str, str] = field(default_factory=dict)
+    created_at: int = 0
+
+
+@dataclass
+class GraphTraversalResult:
+    """Result of graph traversal.
+
+    Attributes:
+        start_node: Starting node ID
+        nodes: All nodes found in traversal
+        relationships: All relationships found
+        depth: Traversal depth reached
+    """
+    start_node: str
+    nodes: List[GraphNode]
+    relationships: List[GraphRelationship]
+    depth: int
+
+
+class GraphMemory:
+    """In-memory graph database for knowledge relationships.
+
+    Provides graph operations for managing relationships between entities:
+    - Create nodes and relationships
+    - Query relationships
+    - Traverse graph with filters
+    - Scoped isolation per user/session
+
+    Example:
+        ```python
+        from agnt5 import GraphMemory
+
+        # Create graph scoped to a user
+        graph = GraphMemory(scope="user:123")
+
+        # Create nodes
+        await graph.upsert_node("User:alice", "User")
+        await graph.upsert_node("Language:python", "Language")
+
+        # Create relationship
+        rel_id = await graph.relate("User:alice", "Language:python", "likes")
+
+        # Query relationships
+        rels = await graph.query_relationships(from_node="User:alice")
+
+        # Traverse graph
+        result = await graph.traverse("User:alice", depth=2)
+        for node in result.nodes:
+            print(f"Found: {node.id}")
+        ```
+    """
+
+    def __init__(self, scope: str) -> None:
+        """Initialize graph memory for a scope.
+
+        Args:
+            scope: Scope identifier for isolation (e.g., "user:123", "session:abc")
+        """
+        self.scope = scope
+        self._inner = None  # Lazy initialization
+
+    async def _get_inner(self):
+        """Get or create the underlying Rust MemoryGraph instance."""
+        if self._inner is None:
+            try:
+                from ._core import MemoryGraph as PyMemoryGraph
+            except ImportError as e:
+                raise ImportError(
+                    "GraphMemory requires the agnt5 Rust extension. "
+                    f"Import error: {e}"
+                ) from e
+
+            self._inner = PyMemoryGraph(self.scope)
+        return self._inner
+
+    async def upsert_node(
+        self,
+        node_id: str,
+        node_type: str,
+        properties: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Create or update a node in the graph.
+
+        Args:
+            node_id: Unique node identifier
+            node_type: Type of node (e.g., "User", "Topic")
+            properties: Optional node properties
+
+        Returns:
+            The node ID
+
+        Example:
+            await graph.upsert_node("User:alice", "User", {"name": "Alice"})
+        """
+        inner = await self._get_inner()
+        return await inner.upsert_node(node_id, node_type, properties)
+
+    async def relate(
+        self,
+        from_node: str,
+        to_node: str,
+        relationship_type: str,
+        properties: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Create a relationship between two nodes.
+
+        Args:
+            from_node: Source node ID
+            to_node: Target node ID
+            relationship_type: Type of relationship
+            properties: Optional relationship properties
+
+        Returns:
+            Unique relationship ID
+
+        Example:
+            rel_id = await graph.relate(
+                "User:alice",
+                "Topic:python",
+                "interested_in",
+                {"since": "2024"}
+            )
+        """
+        inner = await self._get_inner()
+        return await inner.create_relationship(
+            from_node, to_node, relationship_type, properties
+        )
+
+    async def query_relationships(
+        self,
+        from_node: Optional[str] = None,
+        to_node: Optional[str] = None,
+        relationship_type: Optional[str] = None,
+        limit: int = 100
+    ) -> List[GraphRelationship]:
+        """Query relationships matching criteria.
+
+        Args:
+            from_node: Filter by source node
+            to_node: Filter by target node
+            relationship_type: Filter by relationship type
+            limit: Maximum results
+
+        Returns:
+            List of matching relationships
+
+        Example:
+            # Get all relationships from a user
+            rels = await graph.query_relationships(from_node="User:alice")
+
+            # Get specific relationship type
+            rels = await graph.query_relationships(
+                from_node="User:alice",
+                relationship_type="likes"
+            )
+        """
+        inner = await self._get_inner()
+        results = await inner.query_relationships(
+            from_node, to_node, relationship_type, limit
+        )
+
+        return [
+            GraphRelationship(
+                id=r.id,
+                from_node=r.from_node,
+                to_node=r.to_node,
+                relationship_type=r.relationship_type,
+                properties=r.properties,
+                created_at=r.created_at
+            )
+            for r in results
+        ]
+
+    async def traverse(
+        self,
+        start_node: str,
+        depth: int = 2,
+        relationship_types: Optional[List[str]] = None,
+        node_types: Optional[List[str]] = None
+    ) -> GraphTraversalResult:
+        """Traverse graph from a starting node.
+
+        Args:
+            start_node: Starting node ID
+            depth: Maximum depth to traverse
+            relationship_types: Filter by relationship types
+            node_types: Filter by node types
+
+        Returns:
+            Graph traversal result with nodes and relationships
+
+        Example:
+            # Traverse 2 levels deep
+            result = await graph.traverse("User:alice", depth=2)
+
+            # Traverse only specific relationship types
+            result = await graph.traverse(
+                "User:alice",
+                depth=3,
+                relationship_types=["likes", "knows"]
+            )
+        """
+        inner = await self._get_inner()
+        result = await inner.traverse(
+            start_node, depth, relationship_types, node_types
+        )
+
+        return GraphTraversalResult(
+            start_node=result.start_node,
+            nodes=[
+                GraphNode(
+                    id=n.id,
+                    node_type=n.node_type,
+                    properties=n.properties
+                )
+                for n in result.nodes
+            ],
+            relationships=[
+                GraphRelationship(
+                    id=r.id,
+                    from_node=r.from_node,
+                    to_node=r.to_node,
+                    relationship_type=r.relationship_type,
+                    properties=r.properties,
+                    created_at=r.created_at
+                )
+                for r in result.relationships
+            ],
+            depth=result.depth
+        )
+
+    async def get_node(self, node_id: str) -> Optional[GraphNode]:
+        """Get a node by its ID.
+
+        Args:
+            node_id: Node identifier
+
+        Returns:
+            Node if found, None otherwise
+        """
+        inner = await self._get_inner()
+        result = await inner.get_node(node_id)
+        if result is None:
+            return None
+        return GraphNode(
+            id=result.id,
+            node_type=result.node_type,
+            properties=result.properties
+        )
+
+    async def delete_relationship(self, relationship_id: str) -> bool:
+        """Delete a relationship by its ID.
+
+        Args:
+            relationship_id: Relationship identifier
+
+        Returns:
+            True if deleted, False if not found
+        """
+        inner = await self._get_inner()
+        return await inner.delete_relationship(relationship_id)
+
+    async def delete_node(self, node_id: str) -> bool:
+        """Delete a node and all its relationships.
+
+        Args:
+            node_id: Node identifier
+
+        Returns:
+            True if deleted, False if not found
+        """
+        inner = await self._get_inner()
+        return await inner.delete_node(node_id)

@@ -25,15 +25,17 @@ from .agent import (
 )
 from .client import AsyncClient, Client, ReceivedEvent, RunError
 from .context import Context
+# Entity components (DEPRECATED - use State API and Memory API instead)
+# See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
 from .entity import (
-    Entity,
-    EntityRegistry,
-    EntityStateAdapter,
-    EntityType,
-    StateType,
-    create_entity_context,
-    query,
-    with_entity_context,
+    Entity,  # DEPRECATED: use ctx.state or ctx.memory
+    EntityRegistry,  # DEPRECATED
+    EntityStateAdapter,  # Internal use only
+    EntityType,  # DEPRECATED
+    StateType,  # DEPRECATED
+    create_entity_context,  # DEPRECATED
+    query,  # DEPRECATED
+    with_entity_context,  # DEPRECATED
 )
 from .events import (
     Cancelled,
@@ -76,13 +78,19 @@ from .types import BackoffPolicy, BackoffType, RetryPolicy, WorkflowConfig
 from .version import _get_version
 from .worker import Worker
 from .workflow import WorkflowContext, WorkflowRegistry, workflow
+from .state import StateManager, SessionContext, UserContext
 
 from .tool import Tool, ToolRegistry, tool
+
+# Memory components
+from .memory import (
+    ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory,
+    GraphMemory, GraphNode, GraphRelationship, GraphTraversalResult
+)
 
 # Not yet enabled:
 # from .checkpoint import CheckpointClient
 # from .exceptions import CheckpointError, StateError
-# from .memory import ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory
 # from .tool import AskUserTool, RequestApprovalTool
 # from .types import FunctionConfig
 # from . import _sentry as sentry
@@ -101,20 +109,35 @@ __all__ = [
     "Worker",
     "function",
     "FunctionRegistry",
-    # Entity components
-    "Entity",
-    "EntityRegistry",
-    "EntityStateAdapter",
-    "EntityType",
-    "StateType",
-    "create_entity_context",
-    "query",
-    "with_entity_context",
+    # Entity components (DEPRECATED - use State/Memory APIs)
+    "Entity",  # DEPRECATED: use ctx.state or ctx.memory
+    "EntityRegistry",  # DEPRECATED
+    "EntityStateAdapter",  # Internal use only
+    "EntityType",  # DEPRECATED
+    "StateType",  # DEPRECATED
+    "create_entity_context",  # DEPRECATED
+    "query",  # DEPRECATED
+    "with_entity_context",  # DEPRECATED
     # Workflow components
     "WorkflowContext",
     "WorkflowRegistry",
     "workflow",
     "WorkflowConfig",
+    # State components
+    "StateManager",
+    "SessionContext",
+    "UserContext",
+    # Memory components
+    "ConversationMemory",
+    "MemoryMessage",
+    "MemoryMetadata",
+    "MemoryResult",
+    "MemoryScope",
+    "SemanticMemory",
+    "GraphMemory",
+    "GraphNode",
+    "GraphRelationship",
+    "GraphTraversalResult",
     # Agent components
     "Agent",
     "AgentContext",
