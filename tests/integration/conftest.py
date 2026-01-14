@@ -835,12 +835,10 @@ def worker_process(platform) -> Generator[subprocess.Popen | None, None, None]:
 
     # Determine service path and script based on mode
     if platform["mode"] == "subprocess":
-        # Subprocess mode: use examples directory
-        service_path = platform.get("examples_dir") or os.path.join(
-            os.path.dirname(__file__), "../../examples"
-        )
-        worker_script = "app.py"
-        service_name = "agnt5-examples"
+        # Subprocess mode: use test worker app (imports fixtures)
+        service_path = os.path.join(os.path.dirname(__file__))
+        worker_script = "test_worker_app.py"
+        service_name = "agnt5-test-worker"
     else:
         # Docker modes: use test-bench directory
         service_path = os.path.join(os.path.dirname(__file__), "test-bench")
