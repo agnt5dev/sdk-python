@@ -154,26 +154,14 @@ def setup_embedded_mode(data_dir: str) -> Dict:
     # 1. Find binary
     binary_path = find_standalone_binary()
 
-    # 2. Find examples directory for --project-path
-    # __file__ is .../agnt5/sdk/sdk-python/tests/integration/conftest.py
-    # repo_root is .../agnt5/
-    repo_root = Path(__file__).parent.parent.parent.parent.parent
-    examples_path = repo_root / "sdk" / "sdk-python" / "examples"
-
-    if not examples_path.exists():
-        logger.warning(f"⚠️  Examples path not found: {examples_path}")
-        examples_path = Path(__file__).parent.parent / "examples"
-
     logger.info(f"📁 Data dir: {data_dir}")
-    logger.info(f"📄 Examples: {examples_path}")
 
-    # 3. Start subprocess
+    # 2. Start subprocess (no --project-path since we use --disable-worker
+    # and register components via the test worker instead)
     env = os.environ.copy()
     process = subprocess.Popen(
         [
             binary_path,
-            "--project-path",
-            str(examples_path),
             "--data-dir",
             data_dir,
             "--disable-worker",
@@ -401,6 +389,7 @@ def worker_process(platform):
             raise RuntimeError("Worker process died during startup")
 
         # Check if worker registered via components endpoint
+        # Wait for the 'add' function specifically (from test fixtures)
         try:
             response = requests.get(
                 f"{platform['gateway_url']}/v1/components",
@@ -408,8 +397,9 @@ def worker_process(platform):
             )
             if response.status_code == 200:
                 components = response.json()
-                if len(components) > 0:
-                    logger.info(f"✅ Worker registered ({len(components)} components)")
+                component_names = [c.get("name") for c in components]
+                if "add" in component_names:
+                    logger.info(f"✅ Worker registered ({len(components)} components: {component_names})")
                     break
         except Exception:
             pass
