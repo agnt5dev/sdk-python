@@ -217,7 +217,7 @@ async def test_tool_invocation():
         """Add two numbers."""
         return a + b
 
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
     tool_instance = ToolRegistry.get("add_numbers")
 
     result = await tool_instance.invoke(ctx, a=5, b=3)
@@ -237,7 +237,7 @@ async def test_tool_invocation_with_context_access():
             "stored_value": value
         }
 
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
     tool_instance = ToolRegistry.get("context_aware_tool")
 
     result = await tool_instance.invoke(ctx, key="test_key", value="test_value")
@@ -255,7 +255,7 @@ async def test_tool_direct_call():
         """A tool for direct calling."""
         return f"Echo: {message}"
 
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
 
     # Call through wrapper
     result = await direct_call_tool(ctx, message="Hello")
@@ -521,7 +521,7 @@ async def test_tool_sync_function_execution():
         execution_log.append(f"executed_{value}")
         return f"result_{value}"
 
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
     tool_instance = ToolRegistry.get("sync_execution_tool")
 
     result = await tool_instance.invoke(ctx, value="test")

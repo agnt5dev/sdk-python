@@ -14,8 +14,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from agnt5 import Agent, tool, Context
 from agnt5.agent import AgentResult, AgentContext, AgentRegistry, Handoff, handoff
-from agnt5.events import Event, EventType
+from agnt5.events import Event
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, MessageRole, TokenUsage
+from agnt5.lm.events import LMContentBlockStarted, LMContentBlockDelta, LMContentBlockCompleted, LMCompleted
 from agnt5.tool import ToolRegistry
 
 
@@ -62,26 +63,44 @@ class MockLanguageModel(LanguageModel):
         self.call_count += 1
 
         # Yield content block start
-        yield Event.message_start(index=0, sequence=0)
+        yield LMContentBlockStarted(
+            name="mock-model",
+            correlation_id="mock-corr",
+            parent_correlation_id="mock-parent",
+            block_type="text",
+            index=0,
+        )
 
         # Yield delta with full text
-        yield Event.message_delta(content=response_text, index=0, sequence=1)
+        yield LMContentBlockDelta(
+            name="mock-model",
+            correlation_id="mock-corr",
+            parent_correlation_id="mock-parent",
+            content=response_text,
+            block_type="text",
+            index=0,
+        )
 
         # Yield content block stop
-        yield Event.message_stop(index=0, sequence=2)
+        yield LMContentBlockCompleted(
+            name="mock-model",
+            correlation_id="mock-corr",
+            parent_correlation_id="mock-parent",
+            block_type="text",
+            index=0,
+        )
 
         # Yield completion event
-        yield Event(
-            event_type=EventType.LM_STREAM_COMPLETED,
-            data={
-                "text": response_text,
-                "model": "mock-model",
-                "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 20,
-                },
-            },
-            sequence=3,
+        yield LMCompleted(
+            name="mock-model",
+            correlation_id="mock-corr",
+            parent_correlation_id="mock-parent",
+            model="mock-model",
+            provider="mock",
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            output_data={"text": response_text},
         )
 
 
@@ -222,7 +241,7 @@ async def test_agent_run_simple():
         MockChunk("completed", text="Hello! How can I help you?"),
     ]
 
-    with patch('agnt5.lm.RustLanguageModel') as mock_rust_class:
+    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_response)
         # stream_iter returns an async iterator, not a coroutine
@@ -453,7 +472,7 @@ async def test_agent_as_tool():
     assert "specialist" in specialist_tool.description.lower()
 
     # Use specialist as a tool
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
     result = await specialist_tool.invoke(ctx, message="Test query")  # Parameter is 'message'
 
     assert result == "Specialist response"
@@ -767,7 +786,7 @@ async def test_agent_tool_not_found():
 
 def test_agent_result_creation():
     """Test AgentResult creation."""
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
 
     result = AgentResult(
         output="Test output",
@@ -783,7 +802,7 @@ def test_agent_result_creation():
 
 def test_agent_result_with_handoff():
     """Test AgentResult with handoff metadata."""
-    ctx = Context(run_id="test-123")
+    ctx = Context(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
 
     result = AgentResult(
         output="Handed off",
@@ -840,12 +859,12 @@ async def test_agent_run_streaming_events(mock_lm):
     assert len(events) >= 2
 
     # First event should be agent.started
-    assert events[0].event_type == EventType.AGENT_STARTED
-    assert events[0].data["agent_name"] == "streaming_agent"
+    assert events[0].event_type == "agent.started"
+    assert events[0].name == "streaming_agent"
 
     # Last event should be agent.completed
-    assert events[-1].event_type == EventType.AGENT_COMPLETED
-    assert events[-1].data["output"] == "Hello! How can I help you?"
+    assert events[-1].event_type == "agent.completed"
+    assert events[-1].output_data["output"] == "Hello! How can I help you?"
 
 
 @pytest.mark.asyncio
@@ -879,7 +898,7 @@ async def test_agent_run_streaming_with_error(mock_lm):
 
     # Should have agent.started event
     assert len(events) >= 1
-    assert events[0].event_type == EventType.AGENT_STARTED
+    assert events[0].event_type == "agent.started"
 
 
 @pytest.mark.asyncio
@@ -902,8 +921,9 @@ async def test_agent_run_sync_equivalent_to_streaming(mock_lm):
     # Get result by consuming run() generator
     final_event = None
     async for event in agent.run("Hi there"):
-        if event.event_type == EventType.AGENT_COMPLETED:
+        if event.event_type == "agent.completed":
             final_event = event
 
     # Both should produce same output
-    assert result_sync.output == final_event.data["output"]
+    assert final_event is not None
+    assert result_sync.output == final_event.output_data["output"]

@@ -27,7 +27,11 @@ def clear_registry():
 @pytest.fixture
 def test_context():
     """Reusable test context."""
-    return FunctionContext(run_id="test-123")
+    return FunctionContext(
+        run_id="test-123",
+        correlation_id="corr-123",
+        parent_correlation_id="parent-123",
+    )
 
 
 class TestFunctionDecorator:
@@ -144,7 +148,7 @@ class TestFunctionDecorator:
         assert config is not None
 
         # Should be callable as async
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         result = asyncio.run(sync_func(ctx, 5))
         assert result == 10
 
@@ -158,7 +162,7 @@ class TestFunctionExecution:
         async def add(ctx: FunctionContext, a: int, b: int) -> int:
             return a + b
 
-        ctx = FunctionContext(run_id="test-123")
+        ctx = FunctionContext(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
         result = await add(ctx, 3, 5)
         assert result == 8
 
@@ -197,7 +201,7 @@ class TestFunctionExecution:
             await greet("Alice")  # type: ignore
 
         # Should work with context
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         result = await greet(ctx, "Alice")
         assert result == "Hello, Alice"
 
@@ -207,7 +211,7 @@ class TestFunctionExecution:
         async def get_run_id(ctx: FunctionContext) -> str:
             return ctx.run_id
 
-        ctx = FunctionContext(run_id="test-456")
+        ctx = FunctionContext(run_id="test-456", correlation_id="corr-456", parent_correlation_id="parent-456")
         result = await get_run_id(ctx)
         assert result == "test-456"
 
@@ -225,7 +229,7 @@ class TestRetryLogic:
             call_count += 1
             return "success"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         result = await success_func(ctx)
 
         assert result == "success"
@@ -244,7 +248,7 @@ class TestRetryLogic:
                 raise Exception("Transient error")
             return "success"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         result = await flaky_func(ctx)
 
         assert result == "success"
@@ -260,7 +264,7 @@ class TestRetryLogic:
             call_count += 1
             raise Exception("Permanent error")
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
 
         with pytest.raises(RetryError) as exc_info:
             await always_fails(ctx)
@@ -280,7 +284,7 @@ class TestRetryLogic:
                 raise Exception("Retry")
             return "done"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         await track_attempts(ctx)
 
         assert attempts_seen == [0, 1, 2]
@@ -317,7 +321,7 @@ class TestBackoffCalculation:
                 raise Exception("Retry")
             return "done"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         start = time.time()
         await exponential_func(ctx)
         duration = time.time() - start
@@ -337,7 +341,7 @@ class TestBackoffCalculation:
                 raise Exception("Retry")
             return "done"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         start = time.time()
         await linear_func(ctx)
         duration = time.time() - start
@@ -357,7 +361,7 @@ class TestBackoffCalculation:
                 raise Exception("Retry")
             return "done"
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         start = time.time()
         await constant_func(ctx)
         duration = time.time() - start
@@ -465,7 +469,7 @@ class TestPydanticIntegration:
         assert config.input_schema is not None
         assert "properties" in config.input_schema
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         user = UserInput(name="Alice", age=30)
         result = await process_user(ctx, user)
         assert result == "Alice is 30 years old"
@@ -494,7 +498,7 @@ class TestPydanticIntegration:
         assert config is not None
         assert config.output_schema is not None
 
-        ctx = FunctionContext(run_id="test")
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
         result = await create_greeting(ctx, "Bob")
         assert result.greeting == "Hello, Bob!"
         assert result.user_id == "user_bob"
