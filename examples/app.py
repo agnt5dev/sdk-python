@@ -15,6 +15,11 @@ import logging
 import os
 import sys
 
+from dotenv import load_dotenv
+
+# Load .env file from the examples directory
+load_dotenv()
+
 from agnt5 import Worker
 
 # Configure logging
