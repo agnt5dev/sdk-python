@@ -165,6 +165,7 @@ def setup_embedded_mode(data_dir: str) -> Dict:
             "--data-dir",
             data_dir,
             "--disable-worker",
+            "--verbose",  # Enable verbose logging for debugging CI issues
         ],
         env=env,
         stdout=subprocess.PIPE,
@@ -326,14 +327,26 @@ def platform(request, test_mode, persistent_data_dir):
     if "process" in setup and setup["process"]:
         logger.info("\n🧹 Stopping platform subprocess...")
         process = setup["process"]
-        process.terminate()
+
+        # Check if platform died before we tried to stop it
+        exit_code = process.poll()
+        if exit_code is not None:
+            logger.warning(f"⚠️  Platform already exited with code: {exit_code}")
+        else:
+            process.terminate()
+
         try:
-            process.wait(timeout=5)
-            logger.info("✅ Platform stopped")
+            stdout, _ = process.communicate(timeout=5)
+            logger.info(f"✅ Platform stopped (exit code: {process.returncode})")
+            # Always print platform logs in CI for debugging
+            if stdout and stdout.strip():
+                logger.info(f"📋 Platform logs:\n{stdout}")
         except subprocess.TimeoutExpired:
             logger.warning("⚠️  Platform didn't stop gracefully, killing...")
             process.kill()
-            process.wait()
+            stdout, _ = process.communicate()
+            if stdout and stdout.strip():
+                logger.info(f"📋 Platform logs (after kill):\n{stdout}")
 
 
 @pytest.fixture(scope="session")
@@ -381,12 +394,25 @@ def worker_process(platform):
 
     logger.info(f"⏳ Waiting for worker registration (max {max_wait}s)...")
 
+    # Get platform process to check if it crashes
+    platform_process = platform.get("process")
+
     while time.time() - start < max_wait:
-        # Check if process died
+        # Check if worker process died
         if process.poll() is not None:
             stdout, _ = process.communicate()
             logger.error(f"Worker process died:\n{stdout}")
             raise RuntimeError("Worker process died during startup")
+
+        # Check if platform process died (CI debugging)
+        if platform_process and platform_process.poll() is not None:
+            logger.error(f"❌ Platform process died during worker registration!")
+            try:
+                platform_stdout, _ = platform_process.communicate(timeout=1)
+                logger.error(f"📋 Platform logs:\n{platform_stdout}")
+            except Exception as e:
+                logger.error(f"Could not get platform logs: {e}")
+            raise RuntimeError("Platform process died during worker registration")
 
         # Check if worker registered via components endpoint
         # Wait for the 'add' function specifically (from test fixtures)
@@ -401,12 +427,20 @@ def worker_process(platform):
                 if "add" in component_names:
                     logger.info(f"✅ Worker registered ({len(components)} components: {component_names})")
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            # Log connection errors to help debug platform issues
+            logger.debug(f"Components endpoint not ready: {e}")
 
         time.sleep(0.5)
     else:
-        # Timeout - log warning but continue
+        # Timeout - check platform health before continuing
+        if platform_process and platform_process.poll() is not None:
+            logger.error(f"❌ Platform died during worker registration wait!")
+            try:
+                platform_stdout, _ = platform_process.communicate(timeout=1)
+                logger.error(f"📋 Platform logs:\n{platform_stdout}")
+            except Exception:
+                pass
         logger.warning(f"⚠️  Worker process running but not registered after {max_wait}s")
 
     logger.info(f"✅ Worker started (PID: {process.pid})")
@@ -418,13 +452,16 @@ def worker_process(platform):
     process.terminate()
     try:
         stdout, _ = process.communicate(timeout=5)
-        # Only show logs if there's an error or verbose mode
-        if process.returncode != 0 and process.returncode != -15:  # -15 is SIGTERM
-            logger.info(f"\n📋 Worker logs (all):\n{stdout}")
+        # Always show logs in CI for debugging
+        logger.info(f"✅ Worker stopped (exit code: {process.returncode})")
+        if stdout and stdout.strip():
+            logger.info(f"📋 Worker logs:\n{stdout}")
     except subprocess.TimeoutExpired:
         logger.warning("⚠️  Worker didn't stop gracefully, killing...")
         process.kill()
-        process.wait()
+        stdout, _ = process.communicate()
+        if stdout and stdout.strip():
+            logger.info(f"📋 Worker logs (after kill):\n{stdout}")
 
 
 @pytest.fixture(scope="function")
