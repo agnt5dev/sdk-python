@@ -6,9 +6,6 @@ State API provides scoped key-value storage for:
 - Session-scoped state (multi-turn conversation state)
 - User-scoped state (long-term user preferences)
 
-This is NOT for domain data - use Entity API or Memory API for that.
-State is for coordination: phase tracking, flags, counters, simple config.
-
 Example:
     # Run-scoped state (coordination within single workflow)
     ctx.state.set("phase", "research")
@@ -24,7 +21,7 @@ Example:
 import logging
 from typing import Any, Dict, Optional
 
-from .entity import EntityStateAdapter
+from ._state_adapter import StateAdapter as EntityStateAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +29,6 @@ logger = logging.getLogger(__name__)
 class StateManager:
     """
     Simple key-value state manager for coordination and control flow.
-
-    Uses the state_store table (formerly entities) under the hood with:
-    - entity_type: "state"
-    - entity_key: "kv" (single KV store per scope)
-    - Stores all keys in one JSON object for simplicity
-
-    This is intentionally simple - just get/set/delete operations.
-    For complex state with business logic, use Entity API instead.
     """
 
     def __init__(
@@ -64,10 +53,6 @@ class StateManager:
         self._cache: Optional[Dict[str, Any]] = None
         self._cache_loaded = False
 
-        logger.debug(
-            f"Created StateManager(scope={scope}, scope_id={scope_id[:8]}...)"
-        )
-
     async def _ensure_loaded(self) -> None:
         """Lazy-load state from platform on first access."""
         if self._cache_loaded:
@@ -84,11 +69,6 @@ class StateManager:
 
         self._cache = state if state else {}
         self._cache_loaded = True
-
-        logger.debug(
-            f"Loaded state for {self._scope}:{self._scope_id[:8]}... "
-            f"({len(self._cache)} keys)"
-        )
 
     async def get(self, key: str, default: Any = None) -> Any:
         """
@@ -145,9 +125,7 @@ class StateManager:
         if key in self._cache:  # type: ignore
             del self._cache[key]  # type: ignore
             await self._save()
-            logger.debug(
-                f"Deleted state key '{key}' from {self._scope}:{self._scope_id[:8]}..."
-            )
+            logger.debug(f"Deleted state key '{key}' from {self._scope}:{self._scope_id[:8]}...")
 
     async def clear(self) -> None:
         """
@@ -197,9 +175,7 @@ class StateManager:
                 scope_id=self._scope_id,
             )
         except Exception as e:
-            logger.error(
-                f"Failed to save state for {self._scope}:{self._scope_id[:8]}...: {e}"
-            )
+            logger.error(f"Failed to save state for {self._scope}:{self._scope_id[:8]}...: {e}")
             raise
 
 

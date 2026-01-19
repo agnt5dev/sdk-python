@@ -11,28 +11,29 @@ from test_helpers import print_journal_events, verify_journal_events
 @pytest.mark.integration
 def test_add(client, worker_process, platform):
     """Test basic addition function."""
-    result = client.run("add", {"a": 5, "b": 3})
-    assert result == 8
+    response = client.run("add", {"a": 5, "b": 3})
+    assert response.output == 8
 
     # negative numbers
-    result = client.run("add", {"a": -5, "b": 3})
-    assert result == -2
+    response = client.run("add", {"a": -5, "b": 3})
+    assert response.output == -2
 
     # zero
-    result = client.run("add", {"a": 0, "b": 0})
-    assert result == 0
+    response = client.run("add", {"a": 0, "b": 0})
+    assert response.output == 0
 
 
 @pytest.mark.integration
 def test_add_journal_events(client, worker_process, platform):
     """Test that journal events are recorded for function execution."""
     # Execute the function
-    result = client.run("add", {"a": 10, "b": 20})
-    assert result == 30
+    response = client.run("add", {"a": 10, "b": 20})
+    assert response.output == 30
 
-    # Verify journal events in expected order
+    # Verify journal events in expected order (sorted by timestamp)
     run_id, event_types = verify_journal_events(
-        platform,
+        client,
+        response.run_id,
         expected_events=[
             "run.enqueued",
             "run.assigned",
@@ -55,21 +56,20 @@ def test_add_journal_events(client, worker_process, platform):
 @pytest.mark.integration
 def test_missing_parameters(client, worker_process, platform):
     """Test function called without required parameters."""
-    from agnt5.client import RunError
-
     # Call add without parameters - should fail
-    with pytest.raises(RunError) as exc_info:
-        client.run("add", {})
+    response = client.run("add", {})
 
-    # Validate error
-    error = exc_info.value
-    error_msg = str(error).lower()
+    # Check response indicates error
+    assert response.is_error
+    assert response.error is not None
+    error_msg = str(response.error).lower()
     # Error should mention missing parameters or type error
     assert "error" in error_msg or "missing" in error_msg or "required" in error_msg
 
     # Verify journal events (includes enqueue and assignment)
     verify_journal_events(
-        platform,
+        client,
+        response.run_id,
         expected_events=[
             "run.enqueued",
             "run.assigned",
@@ -84,20 +84,19 @@ def test_missing_parameters(client, worker_process, platform):
 @pytest.mark.integration
 def test_invalid_parameter_type(client, worker_process, platform):
     """Test function with wrong parameter type."""
-    from agnt5.client import RunError
-
     # Call type_strict_function with string instead of int
-    with pytest.raises(RunError) as exc_info:
-        client.run("type_strict_function", {"value": "not_an_int"})
+    response = client.run("type_strict_function", {"value": "not_an_int"})
 
-    # Validate error contains TypeError information
-    error = exc_info.value
-    error_msg = str(error).lower()
+    # Check response indicates error
+    assert response.is_error
+    assert response.error is not None
+    error_msg = str(response.error).lower()
     assert "type" in error_msg or "error" in error_msg
 
     # Verify journal events (includes enqueue and assignment)
     verify_journal_events(
-        platform,
+        client,
+        response.run_id,
         expected_events=[
             "run.enqueued",
             "run.assigned",

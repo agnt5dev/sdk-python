@@ -139,7 +139,7 @@ class Worker(ExecutorMixin):
         # Create entity state adapter
         # TODO: tenant_id should be handled by Rust core, but it still requires it for now
         from .._core import EntityStateManager as RustEntityStateManager
-        from ..entity import EntityStateAdapter
+        from .._state_adapter import StateAdapter as EntityStateAdapter
 
         rust_core = RustEntityStateManager(tenant_id="default")
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
@@ -375,13 +375,12 @@ class Worker(ExecutorMixin):
 
         # Collect components from registries
         from ..agent import AgentRegistry
-        from ..entity import EntityRegistry
         from ..tool import ToolRegistry
         from ..workflow import WorkflowRegistry
 
         functions = [cfg.handler for cfg in FunctionRegistry.all().values()]
         workflows = [cfg.handler for cfg in WorkflowRegistry.all().values()]
-        entities = [et.entity_class for et in EntityRegistry.all().values()]
+        entities: list = []  # Entity API removed in 0.4.0
         agents = list(AgentRegistry.all().values())
         tools = list(ToolRegistry.all().values())
 
@@ -460,24 +459,7 @@ class Worker(ExecutorMixin):
                 output_schema=config.output_schema,
             ))
 
-        # Process entities
-        from ..entity import EntityRegistry
-        for entity_class in self._explicit_components["entities"]:
-            entity_type = EntityRegistry.get(entity_class.__name__)
-            if not entity_type:
-                logger.warning(f"Entity '{entity_class.__name__}' not found in EntityRegistry")
-                continue
-
-            # Build entity definition with method schemas
-            definition = entity_type.build_entity_definition()
-
-            components.append(self._create_component_info(
-                name=entity_type.name,
-                component_type="entity",
-                metadata={},
-                config={},
-                definition=definition,
-            ))
+        # Entity API removed in 0.4.0 - entities list is always empty
 
         # Process workflows
         from ..workflow import WorkflowRegistry
@@ -566,12 +548,10 @@ class Worker(ExecutorMixin):
                 if function_config:
                     return self._execute_function(function_config, input_data, request)
 
-            # Entities
+            # Entities - removed in 0.4.0
             elif component_type == "entity":
-                from ..entity import EntityRegistry
-                entity_type = EntityRegistry.get(component_name)
-                if entity_type:
-                    return self._execute_entity(entity_type, input_data, request)
+                error_msg = f"Entity API was removed in 0.4.0. Entity '{component_name}' not supported."
+                logger.error(error_msg)
 
             # Workflows
             elif component_type == "workflow":

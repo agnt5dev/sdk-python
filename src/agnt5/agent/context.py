@@ -112,7 +112,7 @@ class AgentContext(Context):
         self.parent_context = parent_context  # Store for context chain traversal
 
         # Determine state adapter based on parent context
-        from ..entity import EntityStateAdapter, _get_state_adapter
+        from .._state_adapter import StateAdapter as EntityStateAdapter, _get_state_adapter
 
         if state_manager:
             # Explicit state adapter provided (parameter name kept for backward compat)

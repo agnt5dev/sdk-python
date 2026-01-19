@@ -105,7 +105,7 @@ class ConversationMemory:
     def _get_adapter(self):
         """Get or create state adapter for persistence."""
         if self._state_adapter is None:
-            from .entity import _get_state_adapter, EntityStateAdapter
+            from ._state_adapter import _get_state_adapter, StateAdapter as EntityStateAdapter
             try:
                 self._state_adapter = _get_state_adapter()
             except RuntimeError:

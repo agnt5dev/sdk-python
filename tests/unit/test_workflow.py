@@ -5,7 +5,7 @@ Tests cover:
 - Workflow registration with @workflow decorator
 - Workflow execution with context
 - Sequential and parallel orchestration
-- Task invocation (ctx.task)
+- Step invocation (ctx.step)
 - Signal coordination
 - Workflow registry
 """
@@ -16,7 +16,7 @@ import pytest
 
 from agnt5 import FunctionContext, WorkflowContext, FunctionRegistry, WorkflowRegistry, function, workflow
 from agnt5.workflow import WorkflowEntity
-from agnt5.entity import with_entity_context
+from agnt5._state_adapter import with_state_context as with_entity_context
 
 
 @pytest.fixture(autouse=True)
@@ -167,8 +167,8 @@ async def test_workflow_sequential_tasks():
     @workflow
     async def sequential_workflow(ctx: WorkflowContext) -> int:
         """Sequential workflow."""
-        result1 = await ctx.task(step1)
-        result2 = await ctx.task(step2, input=result1)
+        result1 = await ctx.step(step1)
+        result2 = await ctx.step(step2, input=result1)
         return result2
 
     @with_entity_context
@@ -202,7 +202,7 @@ async def test_workflow_parallel_tasks():
     async def parallel_workflow(ctx: WorkflowContext) -> list:
         """Parallel workflow."""
         results = await ctx.parallel(
-            ctx.task(fast_task), ctx.task(slow_task)
+            ctx.step(fast_task), ctx.step(slow_task)
         )
         return results
 
@@ -241,7 +241,7 @@ async def test_workflow_gather_named():
     async def gather_workflow(ctx: WorkflowContext) -> dict:
         """Workflow with gather."""
         results = await ctx.gather(
-            first=ctx.task(task_a), second=ctx.task(task_b)
+            first=ctx.step(task_a), second=ctx.step(task_b)
         )
         return results
 
@@ -278,12 +278,12 @@ async def test_workflow_conditional_logic():
     @workflow
     async def conditional_workflow(ctx: WorkflowContext, value: int) -> str:
         """Conditional workflow."""
-        is_positive = await ctx.task(check_value, input=value)
+        is_positive = await ctx.step(check_value, input=value)
 
         if is_positive:
-            result = await ctx.task(process_positive)
+            result = await ctx.step(process_positive)
         else:
-            result = await ctx.task(process_negative)
+            result = await ctx.step(process_negative)
 
         return result
 
@@ -309,7 +309,7 @@ async def test_workflow_with_loops():
         """Workflow with loop."""
         value = 0
         for i in range(iterations):
-            value = await ctx.task(increment, input=value)
+            value = await ctx.step(increment, input=value)
         return value
 
     @with_entity_context
@@ -520,7 +520,7 @@ async def test_workflow_type_safe_task_call():
     async def type_safe_workflow(ctx: WorkflowContext) -> list:
         """Workflow using type-safe task calls."""
         # Call with positional and keyword arguments
-        result = await ctx.task(multiply, [1, 2, 3], factor=3)
+        result = await ctx.step(multiply, [1, 2, 3], factor=3)
         return result
 
     @with_entity_context
@@ -544,7 +544,7 @@ async def test_workflow_legacy_string_task_call():
     async def legacy_workflow(ctx: WorkflowContext) -> str:
         """Workflow using legacy string-based calls."""
         # Legacy pattern with input parameter
-        result = await ctx.task("process", input={"value": "test"})
+        result = await ctx.step("process", input={"value": "test"})
         return result
 
     @with_entity_context
@@ -565,7 +565,7 @@ async def test_workflow_task_with_non_decorated_function():
     @workflow
     async def broken_workflow(ctx: WorkflowContext) -> None:
         """Workflow calling non-decorated function."""
-        await ctx.task(not_decorated)
+        await ctx.step(not_decorated)
 
     @with_entity_context
     async def run_test():
@@ -585,7 +585,7 @@ async def test_workflow_function_not_found():
     @workflow
     async def broken_workflow(ctx: WorkflowContext) -> None:
         """Workflow calling missing function."""
-        await ctx.task("missing_function")
+        await ctx.step("missing_function")
 
     @with_entity_context
     async def run_test():
@@ -607,7 +607,7 @@ async def test_workflow_function_error_propagation():
     @workflow
     async def error_workflow(ctx: WorkflowContext) -> None:
         """Workflow calling failing function."""
-        await ctx.task(failing_function)
+        await ctx.step(failing_function)
 
     @with_entity_context
     async def run_test():
@@ -761,7 +761,7 @@ async def test_workflow_type_safe_task_multiple_args():
     @workflow
     async def multi_arg_workflow(ctx: WorkflowContext) -> dict:
         """Workflow with multi-argument task."""
-        result = await ctx.task(
+        result = await ctx.step(
             combine_data,
             [1, 2, 3],
             2,
@@ -797,10 +797,10 @@ async def test_workflow_mixed_task_calling_styles():
     async def mixed_workflow(ctx: WorkflowContext) -> str:
         """Workflow mixing calling styles."""
         # Type-safe call
-        result1 = await ctx.task(func1, 5)
+        result1 = await ctx.step(func1, 5)
 
         # Legacy call
-        result2 = await ctx.task("func2", input={"num": result1})
+        result2 = await ctx.step("func2", input={"num": result1})
 
         return result2
 
@@ -869,9 +869,9 @@ async def test_workflow_step_completion_record():
     @workflow
     async def tracking_workflow(ctx: WorkflowContext) -> int:
         """Workflow that records step completions."""
-        result1 = await ctx.task(step_func, 1)
-        result2 = await ctx.task(step_func, result1)
-        result3 = await ctx.task(step_func, result2)
+        result1 = await ctx.step(step_func, 1)
+        result2 = await ctx.step(step_func, result1)
+        result3 = await ctx.step(step_func, result2)
         return result3
 
     @with_entity_context
@@ -911,8 +911,8 @@ async def test_workflow_partial_completion():
     @workflow
     async def partial_workflow(ctx: WorkflowContext) -> None:
         """Workflow that fails partway through."""
-        await ctx.task(success_step)
-        await ctx.task(failing_step)  # This will fail
+        await ctx.step(success_step)
+        await ctx.step(failing_step)  # This will fail
 
     @with_entity_context
     async def run_test():
@@ -952,12 +952,12 @@ async def test_workflow_fan_out_fan_in():
         # Fan out - process items in parallel
         items = [1, 2, 3, 4, 5]
         results = await ctx.parallel(*[
-            ctx.task(process_item, item)
+            ctx.step(process_item, item)
             for item in items
         ])
 
         # Fan in - aggregate results
-        total = await ctx.task(aggregate_results, results)
+        total = await ctx.step(aggregate_results, results)
         return total
 
     @with_entity_context

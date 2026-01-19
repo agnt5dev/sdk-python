@@ -2,132 +2,72 @@
 Test helper utilities for integration tests.
 
 Provides common functions for:
-- Journal event verification via API
+- Journal event verification via SDK client
 - Event assertions
 """
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
-import requests
+from agnt5 import Client
 
 
 # ============================================================================
-# API-Based Helper Functions (Recommended)
+# SDK Client-Based Helper Functions
 # ============================================================================
 
 
-def get_latest_run_id_via_api(gateway_url: str) -> Optional[str]:
+def fetch_run_events(client: Client, run_id: str, max_retries: int = 3) -> List[str]:
     """
-    Get the most recent run ID via platform API.
-
-    Args:
-        gateway_url: Platform gateway URL (from platform fixture)
-
-    Returns:
-        Run ID of most recent run, or None if no runs found
-
-    Raises:
-        requests.HTTPError: If API request fails
-    """
-    response = requests.get(f"{gateway_url}/v1/runs", params={"limit": 1}, timeout=5)
-    response.raise_for_status()
-    data = response.json()
-    items = data.get("items", [])
-    return items[0]["id"] if items else None
-
-
-def fetch_run_events_via_api(gateway_url: str, run_id: str, max_retries: int = 3) -> List[Dict]:
-    """
-    Fetch journal events for a run via platform API.
+    Fetch journal events for a run using SDK client.
 
     Retries with backoff to allow events to be persisted.
+    Events are sorted by timestamp_ns for correct chronological order.
 
     Args:
-        gateway_url: Platform gateway URL (from platform fixture)
+        client: AGNT5 SDK client
         run_id: Run ID to fetch events for
         max_retries: Maximum number of retry attempts (default: 3)
 
     Returns:
-        List of event dictionaries with fields:
-        - id, sequence_num, event_type, run_id, step_key,
-          input_data, output_data, metadata, source_timestamp_ns, created_at
+        List of event type strings in chronological order
 
     Raises:
-        requests.HTTPError: If API request fails after all retries
+        Exception: If API request fails after all retries
     """
-    last_error = None
-
     for attempt in range(max_retries):
-        try:
-            # Try the main endpoint first
-            response = requests.get(f"{gateway_url}/v1/runs/{run_id}/events", timeout=5)
-            response.raise_for_status()
-            data = response.json()
+        events_response = client.get_events(run_id)
 
-            # Handle both response formats
-            if isinstance(data, dict):
-                # Paginated response: {"count": N, "items": [...]}
-                events = data.get("items", [])
-            elif isinstance(data, list):
-                # Direct list response
-                events = data
-            else:
-                events = []
+        if len(events_response) > 0:
+            # Sort events by timestamp_ns for correct chronological order
+            sorted_events = sorted(
+                events_response.items,
+                key=lambda e: e.timestamp_ns or 0
+            )
+            return [event.event_type for event in sorted_events]
 
-            # If we got events, return them
-            if events:
-                return events
+        # If empty and this isn't the last attempt, retry
+        if attempt < max_retries - 1:
+            time.sleep(0.1 * (attempt + 1))  # Exponential backoff
 
-            # If empty and this isn't the last attempt, retry
-            if attempt < max_retries - 1:
-                time.sleep(0.1 * (attempt + 1))  # Exponential backoff: 0.1s, 0.2s, 0.3s
-                continue
-
-            return events  # Return empty list on last attempt
-
-        except requests.exceptions.HTTPError as e:
-            last_error = e
-            # If 500/501/503 error, try observability endpoint as fallback
-            if e.response.status_code in (500, 501, 503):
-                try:
-                    response = requests.get(f"{gateway_url}/v1/_obs/runs/{run_id}/events", timeout=5)
-                    response.raise_for_status()
-                    data = response.json()
-                    # Observability endpoint might return {"items": [...]} format
-                    if isinstance(data, dict) and "items" in data:
-                        return data["items"]
-                    return data if isinstance(data, list) else []
-                except requests.exceptions.HTTPError:
-                    pass  # Continue to retry
-
-            # If this isn't the last attempt, wait and retry
-            if attempt < max_retries - 1:
-                time.sleep(0.1 * (attempt + 1))
-            else:
-                raise
-
-    # If we get here, raise the last error
-    if last_error:
-        raise last_error
     return []
 
 
-
-
 def verify_journal_events(
-    platform: Dict,
+    client: Client,
+    run_id: str,
     expected_events: List[str],
     match_order: bool = True,
     allow_extra: bool = False,
 ) -> Tuple[str, List[str]]:
     """
-    Verify that journal events were recorded via platform API.
+    Verify that journal events were recorded for a run.
 
-    Uses /v1/runs and /v1/runs/{runId}/events endpoints. Works for both embedded and hosted modes.
+    Uses SDK client's get_events() method.
 
     Args:
-        platform: Platform fixture containing gateway_url
+        client: AGNT5 SDK client
+        run_id: Run ID to verify events for
         expected_events: List of expected event types in order
         match_order: If True, verify events appear in order (default: True)
         allow_extra: If True, allow extra events in actual (default: False)
@@ -137,42 +77,24 @@ def verify_journal_events(
 
     Raises:
         AssertionError: If events are missing or incorrect
-        requests.HTTPError: If API request fails
 
     Example:
-        # Test successful function execution
-        verify_journal_events(platform, [
+        response = client.run("add", {"a": 5, "b": 3})
+        verify_journal_events(client, response.run_id, [
             "run.enqueued",
             "run.started",
             "function.started",
             "function.completed",
             "run.completed",
         ])
-
-        # Test function that fails (allow extra events)
-        verify_journal_events(platform, [
-            "run.started",
-            "function.failed",
-            "run.failed",
-        ], allow_extra=True)
     """
-    gateway_url = platform["gateway_url"]
+    # Fetch events via SDK client
+    event_types = fetch_run_events(client, run_id)
+    assert len(event_types) > 0, f"No events found for run_id {run_id}"
 
-    # 1. Get latest run ID from API
-    run_id = get_latest_run_id_via_api(gateway_url)
-    assert run_id is not None, "No runs found via API"
-
-    # 2. Fetch events via API
-    events = fetch_run_events_via_api(gateway_url, run_id)
-    assert len(events) > 0, f"No events found for run_id {run_id}"
-
-    # 3. Extract event types
-    event_types = [event["event_type"] for event in events]
-
-    # 4. Assert against expected_events
+    # Assert against expected_events
     assert_events_match(event_types, expected_events, match_order, allow_extra)
 
-    # 5. Return run_id and event_types
     return run_id, event_types
 
 

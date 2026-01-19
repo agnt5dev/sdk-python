@@ -500,7 +500,7 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Execute an entity method with lifecycle events."""
         from ..context import Context
-        from ..entity import _entity_state_adapter_ctx
+        from .._state_adapter import _entity_state_adapter_ctx
         from ..events import Completed, ComponentType, Failed, Started
 
         _entity_state_adapter_ctx.set(self._entity_state_adapter)
@@ -663,7 +663,7 @@ class ExecutorMixin:
         """Execute an agent with session support."""
         from ..agent import AgentContext
         from ..agent.events import AgentCompleted, AgentFailed, AgentStarted
-        from ..entity import _entity_state_adapter_ctx
+        from .._state_adapter import _entity_state_adapter_ctx
         from ..events import Completed, ComponentType, Event, Failed, Started
 
         _entity_state_adapter_ctx.set(self._entity_state_adapter)
@@ -907,7 +907,7 @@ class ExecutorMixin:
 
         from .._core import PyExecuteComponentResponse
         from ..context import set_current_context
-        from ..entity import _entity_state_adapter_ctx, _get_state_adapter
+        from .._state_adapter import _entity_state_adapter_ctx, _get_state_adapter
         from ..events import Completed, ComponentType, Failed, Started
         from ..exceptions import WaitingForUserInputException
         from ..tracing import SpanInfo, _current_span

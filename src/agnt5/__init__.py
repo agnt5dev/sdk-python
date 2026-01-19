@@ -1,7 +1,7 @@
 """
 AGNT5 Python SDK - Build durable, resilient agent-first applications.
 
-Supports functions, entities, workflows, agents, and LLM integration.
+Supports functions, workflows, agents, and LLM integration.
 """
 
 from . import events
@@ -24,19 +24,20 @@ from .agent import (
     handoff,
 )
 from .client import AsyncClient, Client, ReceivedEvent, RunError
-from .context import Context
-# Entity components (DEPRECATED - use State API and Memory API instead)
-# See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
-from .entity import (
-    Entity,  # DEPRECATED: use ctx.state or ctx.memory
-    EntityRegistry,  # DEPRECATED
-    EntityStateAdapter,  # Internal use only
-    EntityType,  # DEPRECATED
-    StateType,  # DEPRECATED
-    create_entity_context,  # DEPRECATED
-    query,  # DEPRECATED
-    with_entity_context,  # DEPRECATED
+from .responses import (
+    Event,
+    EventsResponse,
+    RunErrorDetail,
+    RunResponse,
+    RunStatus,
+    StatusResponse,
+    SubmitLinks,
+    SubmitResponse,
 )
+from .context import Context
+# Entity API was removed in v0.4.0
+# Use State API (ctx.state) and Memory API (ctx.memory) instead
+# See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
 from .events import (
     Cancelled,
     Completed,
@@ -109,15 +110,7 @@ __all__ = [
     "Worker",
     "function",
     "FunctionRegistry",
-    # Entity components (DEPRECATED - use State/Memory APIs)
-    "Entity",  # DEPRECATED: use ctx.state or ctx.memory
-    "EntityRegistry",  # DEPRECATED
-    "EntityStateAdapter",  # Internal use only
-    "EntityType",  # DEPRECATED
-    "StateType",  # DEPRECATED
-    "create_entity_context",  # DEPRECATED
-    "query",  # DEPRECATED
-    "with_entity_context",  # DEPRECATED
+    # Entity API was removed in v0.4.0 - use State/Memory APIs
     # Workflow components
     "WorkflowContext",
     "WorkflowRegistry",
@@ -191,6 +184,15 @@ __all__ = [
     "Client",
     "ReceivedEvent",
     "RunError",
+    # Response types
+    "Event",
+    "EventsResponse",
+    "RunErrorDetail",
+    "RunResponse",
+    "RunStatus",
+    "StatusResponse",
+    "SubmitLinks",
+    "SubmitResponse",
     # Types
     "BackoffPolicy",
     "BackoffType",

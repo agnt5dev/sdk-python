@@ -13,8 +13,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Unio
 
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from ._serialization import serialize_to_str
+from ._state_adapter import StateInterface, _get_state_adapter
 from .context import Context, set_current_context
-from .entity import Entity, EntityState, _get_state_adapter
 from .function import FunctionContext
 from .types import HandlerFunc, WorkflowConfig
 from ._telemetry import setup_module_logger
@@ -1094,15 +1094,15 @@ def _sanitize_for_json(obj: Any) -> Any:
 
 
 # ============================================================================
-# WorkflowEntity: Entity specialized for workflow execution state
+# WorkflowEntity: Standalone workflow state management
 # ============================================================================
 
 
-class WorkflowEntity(Entity):
+class WorkflowEntity:
     """
-    Entity specialized for workflow execution state.
+    Workflow execution state management.
 
-    Extends Entity with workflow-specific capabilities:
+    Provides workflow-specific capabilities:
     - Step tracking for replay and crash recovery
     - State change tracking for debugging and audit (AI workflows)
     - Completed step cache for efficient replay
@@ -1155,8 +1155,13 @@ class WorkflowEntity(Entity):
             entity_key = f"run:{run_id}"
             memory_scope = "run"
 
-        # Initialize as entity with scoped key pattern
-        super().__init__(key=entity_key)
+        # Store key and type info (previously inherited from Entity)
+        self._key = entity_key
+        self._entity_type = "WorkflowEntity"
+        self._state_key = (self._entity_type, entity_key)
+
+        # State will be initialized on first access
+        self._state: Optional["WorkflowState"] = None
 
         # Store run_id separately for tracking (even if key is session/user scoped)
         self._run_id = run_id
@@ -1182,6 +1187,11 @@ class WorkflowEntity(Entity):
     def run_id(self) -> str:
         """Get run_id for this workflow execution."""
         return self._run_id
+
+    @property
+    def key(self) -> str:
+        """Get entity key for this workflow."""
+        return self._key
 
     def record_step_completion(
         self, step_name: str, handler_name: str, input_data: Any, result: Any
@@ -1330,8 +1340,6 @@ class WorkflowEntity(Entity):
         logger.info(f"🔍 DEBUG: _persist_state() CALLED for workflow {self.run_id}")
 
         try:
-            from .entity import _get_state_adapter
-
             logger.info(f"🔍 DEBUG: Getting state adapter...")
             # Get the state adapter (must be in Worker context)
             adapter = _get_state_adapter()
@@ -1394,11 +1402,11 @@ class WorkflowEntity(Entity):
         return self._state
 
 
-class WorkflowState(EntityState):
+class WorkflowState(StateInterface):
     """
     State interface for WorkflowEntity with change tracking.
 
-    Extends EntityState to track all state mutations for:
+    Extends StateInterface to track all state mutations for:
     - AI workflow debugging
     - Audit trail
     - Replay capabilities

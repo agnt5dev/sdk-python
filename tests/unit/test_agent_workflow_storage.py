@@ -11,7 +11,7 @@ import pytest
 from agnt5.agent import AgentContext
 from agnt5.workflow import WorkflowEntity, WorkflowContext
 from agnt5.lm import Message
-from agnt5.entity import EntityStateAdapter
+from agnt5._state_adapter import StateAdapter as EntityStateAdapter
 
 
 @pytest.mark.asyncio

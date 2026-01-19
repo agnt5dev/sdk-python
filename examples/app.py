@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 # 01: Basic Functions
 # Components: greet, add, process_data, failing_function
 import ex_01_functions  # noqa: F401
-import ex_02_entities  # noqa: F401
 import ex_03_workflows  # noqa: F401
 import ex_04_lm_functions_openai  # noqa: F401
 import ex_05_lm_functions_anthropic  # noqa: F401

@@ -3,13 +3,22 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, Optional
 from urllib.parse import urljoin
 
 import httpx
 
-if TYPE_CHECKING:
-    from .client import RunError
+from .responses import (
+    EventsResponse,
+    RunResponse,
+    RunStatus,
+    StatusResponse,
+    SubmitResponse,
+    parse_events_response,
+    parse_run_response,
+    parse_status_response,
+    parse_submit_response,
+)
 
 # Environment variable for API key
 AGNT5_API_KEY_ENV = "AGNT5_API_KEY"
@@ -196,10 +205,11 @@ class Client:
         user_id: Optional[str] = None,
         timeout: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+    ) -> RunResponse[Any]:
         """Execute a component synchronously and wait for the result.
 
         This is a blocking call that waits for the component to complete execution.
+        Returns a typed RunResponse with full metadata (trace_id, duration, timestamps).
 
         Args:
             component: Name of the component to execute
@@ -211,28 +221,29 @@ class Client:
             headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
 
         Returns:
-            Dictionary containing the component's output
+            RunResponse containing the output and metadata
 
         Raises:
-            RunError: If the component execution fails
             httpx.HTTPError: If the HTTP request fails
 
         Example:
             ```python
-            # Simple function call (default)
-            result = client.run("greet", {"name": "Alice"})
+            # Simple function call
+            response = client.run("greet", {"name": "Alice"})
+            print(response.output)      # "Hello, Alice!"
+            print(response.elapsed)     # timedelta(milliseconds=16)
+            print(response.trace_id)    # "8ac58da6..."
 
-            # Workflow execution (explicit)
-            result = client.run("order_fulfillment", {"order_id": "123"}, component_type="workflow")
+            # Check for errors
+            if response.is_error:
+                print(f"Error: {response.error}")
+                response.raise_for_status()  # Raises RunError
+
+            # Workflow execution
+            response = client.run("order_fulfillment", {"order_id": "123"}, component_type="workflow")
 
             # Multi-turn conversation with session
-            result = client.run("chat", {"message": "Hello"}, session_id="session-123")
-
-            # User-scoped memory
-            result = client.run("assistant", {"message": "Help me"}, user_id="user-456")
-
-            # No input data
-            result = client.run("get_status")
+            response = client.run("chat", {"message": "Hello"}, session_id="session-123")
             ```
         """
         if input_data is None:
@@ -254,71 +265,79 @@ class Client:
             timeout=timeout,
         )
 
-        # Handle errors
+        # Handle HTTP errors that don't return JSON
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                raise RunError(
-                    error_data.get("error", "Component not found"),
-                    run_id=error_data.get("runId"),
-                )
+                return parse_run_response({
+                    "run_id": error_data.get("runId", ""),
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
+                })
             except ValueError:
-                # JSON parsing failed
-                raise RunError(f"Component '{component}' not found")
+                return parse_run_response({
+                    "run_id": "",
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
+                })
 
         if response.status_code == 503:
-            error_data = response.json()
-            raise RunError(
-                f"Service unavailable: {error_data.get('error', 'Unknown error')}",
-                run_id=error_data.get("runId"),
-            )
-
-        if response.status_code == 504:
-            error_data = response.json()
-            raise RunError(
-                "Execution timeout",
-                run_id=error_data.get("runId"),
-            )
-
-        # Handle 500 errors with our RunResponse format
-        if response.status_code == 500:
             try:
                 error_data = response.json()
-                raise _parse_error_response(error_data)
+                return parse_run_response({
+                    "run_id": error_data.get("runId", ""),
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "SERVICE_UNAVAILABLE", "message": error_data.get("error", "Service unavailable")},
+                })
             except ValueError:
-                # JSON parsing failed, fall through to raise_for_status
+                return parse_run_response({
+                    "run_id": "",
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "SERVICE_UNAVAILABLE", "message": "Service unavailable"},
+                })
+
+        if response.status_code == 504:
+            try:
+                error_data = response.json()
+                return parse_run_response({
+                    "run_id": error_data.get("runId", ""),
+                    "status_code": 500,
+                    "status": "timeout",
+                    "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                })
+            except ValueError:
+                return parse_run_response({
+                    "run_id": "",
+                    "status_code": 500,
+                    "status": "timeout",
+                    "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                })
+
+        # For other non-2xx status codes, try to parse JSON or raise
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+                return parse_run_response(data)
+            except ValueError:
                 response.raise_for_status()
-        else:
-            # For other error codes, use standard HTTP error handling
-            response.raise_for_status()
 
-        # Parse response
+        # Parse successful response
         data = response.json()
-
-        # Check execution status
-        if data.get("status") == "failed":
-            raise _parse_error_response(data)
-
-        # Return output - extract from nested event structure
-        # New format: data["result"]["output"]["output_data"]
-        result = data.get("result", {})
-        if result and isinstance(result, dict):
-            output = result.get("output", {})
-            if isinstance(output, dict) and "output_data" in output:
-                return output["output_data"]
-            return output
-        # Fallback to old format
-        return data.get("output", {})
+        return parse_run_response(data)
 
     def submit(
         self,
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
-    ) -> str:
+    ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
-        This is a non-blocking call that returns a run ID immediately.
+        This is a non-blocking call that returns a SubmitResponse with the run ID.
         Use get_status() to check progress and get_result() to retrieve the output.
 
         Args:
@@ -327,24 +346,22 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
 
         Returns:
-            String containing the run ID
+            SubmitResponse containing run_id and metadata
 
         Raises:
             httpx.HTTPError: If the HTTP request fails
 
         Example:
             ```python
-            # Submit async function (default)
-            run_id = client.submit("process_video", {"url": "https://..."})
-            print(f"Submitted: {run_id}")
-
-            # Submit workflow
-            run_id = client.submit("order_fulfillment", {"order_id": "123"}, component_type="workflow")
+            # Submit async function
+            response = client.submit("process_video", {"url": "https://..."})
+            print(f"Submitted: {response.run_id}")
+            print(f"Status URL: {response.status_url}")
 
             # Check status later
-            status = client.get_status(run_id)
-            if status["status"] == "completed":
-                result = client.get_result(run_id)
+            status = client.get_status(response.run_id)
+            if status.status == RunStatus.COMPLETED:
+                result = client.get_result(response.run_id)
             ```
         """
         if input_data is None:
@@ -363,26 +380,18 @@ class Client:
         # Handle errors
         response.raise_for_status()
 
-        # Parse response and extract run ID
-        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
+        # Parse response
         data = response.json()
-        return data.get("run_id", "")
+        return parse_submit_response(data)
 
-    def get_status(self, run_id: str) -> Dict[str, Any]:
+    def get_status(self, run_id: str) -> StatusResponse:
         """Get the current status of a run.
 
         Args:
             run_id: The run ID returned from submit()
 
         Returns:
-            Dictionary containing status information:
-            {
-                "runId": "...",
-                "status": "pending|running|completed|failed|cancelled",
-                "submittedAt": 1234567890,
-                "startedAt": 1234567891,  // optional
-                "completedAt": 1234567892 // optional
-            }
+            StatusResponse containing status information
 
         Raises:
             httpx.HTTPError: If the HTTP request fails
@@ -390,7 +399,12 @@ class Client:
         Example:
             ```python
             status = client.get_status(run_id)
-            print(f"Status: {status['status']}")
+            print(f"Status: {status.status}")
+
+            if status.is_complete:
+                result = client.get_result(run_id)
+            elif status.is_running:
+                print(f"Started at: {status.started_at}")
             ```
         """
         url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
@@ -398,33 +412,28 @@ class Client:
         response = self._client.get(url, headers=self._build_headers())
         response.raise_for_status()
 
-        return response.json()
+        return parse_status_response(response.json())
 
-    def get_result(self, run_id: str) -> Dict[str, Any]:
+    def get_result(self, run_id: str) -> RunResponse[Any]:
         """Get the result of a completed run.
-
-        This will raise an error if the run is not yet complete.
 
         Args:
             run_id: The run ID returned from submit()
 
         Returns:
-            Dictionary containing the component's output
+            RunResponse containing the output (check is_error for failures)
 
         Raises:
-            RunError: If the run failed or is not yet complete
             httpx.HTTPError: If the HTTP request fails
 
         Example:
             ```python
-            try:
-                result = client.get_result(run_id)
-                print(result)
-            except RunError as e:
-                if "not complete" in str(e):
-                    print("Run is still in progress")
-                else:
-                    print(f"Run failed: {e}")
+            result = client.get_result(run_id)
+            if result.is_success:
+                print(result.output)
+            elif result.is_error:
+                print(f"Run failed: {result.error}")
+                result.raise_for_status()  # Raises RunError
             ```
         """
         url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
@@ -433,38 +442,41 @@ class Client:
 
         # Handle 404 - run not complete or not found
         if response.status_code == 404:
-            error_data = response.json()
-            error_msg = error_data.get("error", "Run not found or not complete")
-            current_status = error_data.get("status", "unknown")
-            raise RunError(f"{error_msg} (status: {current_status})", run_id=run_id)
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("error", "Run not found or not complete")
+                current_status = error_data.get("status", "unknown")
+                return parse_run_response({
+                    "run_id": run_id,
+                    "status_code": 500,
+                    "status": current_status,
+                    "error": {"code": "NOT_READY", "message": error_msg},
+                })
+            except ValueError:
+                return parse_run_response({
+                    "run_id": run_id,
+                    "status_code": 500,
+                    "status": "unknown",
+                    "error": {"code": "NOT_FOUND", "message": "Run not found"},
+                })
 
         # Handle other errors
-        response.raise_for_status()
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+                return parse_run_response(data)
+            except ValueError:
+                response.raise_for_status()
 
-        # Parse response
-        data = response.json()
-
-        # Check if run failed
-        if data.get("status") == "failed":
-            raise _parse_error_response(data, run_id=run_id)
-
-        # Return output - extract from nested event structure
-        # New format: data["result"]["output"]["output_data"]
-        result = data.get("result", {})
-        if result and isinstance(result, dict):
-            output = result.get("output", {})
-            if isinstance(output, dict) and "output_data" in output:
-                return output["output_data"]
-            return output
-        # Fallback to old format
-        return data.get("output", {})
+        # Parse successful response
+        return parse_run_response(response.json())
 
     def wait_for_result(
         self,
         run_id: str,
         timeout: float = 300.0,
         poll_interval: float = 1.0,
-    ) -> Dict[str, Any]:
+    ) -> RunResponse[Any]:
         """Wait for a run to complete and return the result.
 
         This polls the status endpoint until the run completes or times out.
@@ -475,21 +487,22 @@ class Client:
             poll_interval: How often to check status in seconds (default: 1.0)
 
         Returns:
-            Dictionary containing the component's output
+            RunResponse containing the output
 
         Raises:
-            RunError: If the run fails or times out
             httpx.HTTPError: If the HTTP request fails
 
         Example:
             ```python
             # Submit and wait for result
-            run_id = client.submit("long_task", {"data": "..."})
-            try:
-                result = client.wait_for_result(run_id, timeout=600)
-                print(result)
-            except RunError as e:
-                print(f"Failed: {e}")
+            response = client.submit("long_task", {"data": "..."})
+            result = client.wait_for_result(response.run_id, timeout=600)
+
+            if result.is_success:
+                print(result.output)
+            else:
+                print(f"Failed: {result.error}")
+                result.raise_for_status()
             ```
         """
         import time
@@ -500,22 +513,55 @@ class Client:
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed >= timeout:
-                raise RunError(
-                    f"Timeout waiting for run to complete after {timeout}s",
-                    run_id=run_id,
-                )
+                return parse_run_response({
+                    "run_id": run_id,
+                    "status_code": 500,
+                    "status": "timeout",
+                    "error": {"code": "TIMEOUT", "message": f"Timeout waiting for run to complete after {timeout}s"},
+                })
 
             # Get current status
             status = self.get_status(run_id)
-            current_status = status.get("status", "")
 
             # Check if complete
-            if current_status in ("completed", "failed", "cancelled"):
-                # Get result (will raise if failed)
+            if status.is_complete:
                 return self.get_result(run_id)
 
             # Wait before next poll
             time.sleep(poll_interval)
+
+    def get_events(self, run_id: str) -> EventsResponse:
+        """Get all journal events for a run.
+
+        Retrieves the full event stream for a run, including all streaming
+        deltas, tool calls, state changes, and lifecycle events.
+
+        Args:
+            run_id: The run ID returned from submit() or run()
+
+        Returns:
+            EventsResponse containing the list of Event objects
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            # Get events for a completed run
+            events = client.get_events(run_id)
+            for event in events:
+                print(f"{event.event_type}: {event.output_data}")
+
+            # Filter for specific event types
+            deltas = [e for e in events if "delta" in e.event_type]
+            ```
+        """
+        url = urljoin(self.gateway_url + "/", f"v1/runs/{run_id}/events")
+
+        response = self._client.get(url, headers=self._build_headers())
+        response.raise_for_status()
+
+        return parse_events_response(response.json())
 
     def stream(
         self,
@@ -871,10 +917,10 @@ class EntityProxy:
             method_name: The entity method to call
 
         Returns:
-            Callable that executes the entity method
+            Callable that executes the entity method and returns RunResponse
         """
 
-        def method_caller(*args, **kwargs) -> Any:
+        def method_caller(*args, **kwargs) -> RunResponse[Any]:
             """Call an entity method with the given parameters.
 
             Args:
@@ -882,10 +928,9 @@ class EntityProxy:
                 **kwargs: Method parameters as keyword arguments
 
             Returns:
-                The method's return value
+                RunResponse containing the method's return value and metadata
 
             Raises:
-                RunError: If the method execution fails
                 ValueError: If both positional and keyword arguments are provided
             """
             # Convert positional args to kwargs if provided
@@ -918,38 +963,31 @@ class EntityProxy:
 
             # Handle errors
             if response.status_code == 504:
-                error_data = response.json()
-                raise RunError(
-                    "Execution timeout",
-                    run_id=error_data.get("run_id"),
-                )
-
-            if response.status_code == 500:
                 try:
                     error_data = response.json()
-                    raise _parse_error_response(error_data)
+                    return parse_run_response({
+                        "run_id": error_data.get("run_id", ""),
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                    })
+                except ValueError:
+                    return parse_run_response({
+                        "run_id": "",
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                    })
+
+            if response.status_code >= 400:
+                try:
+                    data = response.json()
+                    return parse_run_response(data)
                 except ValueError:
                     response.raise_for_status()
-            else:
-                response.raise_for_status()
 
-            # Parse response
-            data = response.json()
-
-            # Check execution status
-            if data.get("status") == "failed":
-                raise _parse_error_response(data)
-
-            # Return output - extract from nested event structure
-            # New format: data["result"]["output"]["output_data"]
-            result = data.get("result", {})
-            if result and isinstance(result, dict):
-                output = result.get("output", {})
-                if isinstance(output, dict) and "output_data" in output:
-                    return output["output_data"]
-                return output
-            # Fallback to old format
-            return data.get("output")
+            # Parse successful response
+            return parse_run_response(response.json())
 
         return method_caller
 
@@ -992,15 +1030,16 @@ class SessionProxy(EntityProxy):
             print(response)
             ```
         """
-        # Call the chat method via the entity proxy
-        result = self.__getattr__("chat")(message=message, **kwargs)
+        # Call the chat method via the entity proxy (returns RunResponse)
+        response = self.__getattr__("chat")(message=message, **kwargs)
+        output = response.output
 
         # SessionEntity.chat() returns a dict with 'response' key
-        if isinstance(result, dict) and "response" in result:
-            return result["response"]
+        if isinstance(output, dict) and "response" in output:
+            return output["response"]
 
         # If it's already a string, return as-is
-        return str(result)
+        return str(output) if output is not None else ""
 
     def get_history(self) -> list:
         """Get the conversation history for this session.
@@ -1015,9 +1054,10 @@ class SessionProxy(EntityProxy):
                 print(f"{msg['role']}: {msg['content']}")
             ```
         """
-        return self.__getattr__("get_history")()
+        response = self.__getattr__("get_history")()
+        return response.output if isinstance(response.output, list) else []
 
-    def add_message(self, role: str, content: str) -> dict:
+    def add_message(self, role: str, content: str) -> RunResponse[Any]:
         """Add a message to the conversation history.
 
         Args:
@@ -1025,7 +1065,7 @@ class SessionProxy(EntityProxy):
             content: Message content
 
         Returns:
-            Dictionary confirming the message was added
+            RunResponse containing the result
 
         Example:
             ```python
@@ -1035,11 +1075,11 @@ class SessionProxy(EntityProxy):
         """
         return self.__getattr__("add_message")(role=role, content=content)
 
-    def clear_history(self) -> dict:
+    def clear_history(self) -> RunResponse[Any]:
         """Clear the conversation history for this session.
 
         Returns:
-            Dictionary confirming the history was cleared
+            RunResponse containing the result
 
         Example:
             ```python
@@ -1083,7 +1123,7 @@ class WorkflowProxy:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> RunResponse[Any]:
         """Execute the workflow synchronously.
 
         Args:
@@ -1092,14 +1132,16 @@ class WorkflowProxy:
             **kwargs: Input parameters for the workflow
 
         Returns:
-            Dictionary containing the workflow's output
+            RunResponse containing the workflow's output
 
         Example:
             ```python
-            result = client.workflow("order_process").run(
+            response = client.workflow("order_process").run(
                 order_id="123",
                 customer_id="cust-456",
             )
+            print(response.output)
+            print(response.elapsed)
             ```
         """
         return self._client.run(
@@ -1116,7 +1158,7 @@ class WorkflowProxy:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> RunResponse[Any]:
         """Send a message to a chat-enabled workflow.
 
         This is a convenience method for multi-turn conversation workflows.
@@ -1129,19 +1171,19 @@ class WorkflowProxy:
             **kwargs: Additional input parameters for the workflow
 
         Returns:
-            Dictionary containing the workflow's response (typically has 'response' key)
+            RunResponse containing the workflow's response
 
         Example:
             ```python
             # First message
-            result = client.workflow("support_bot").chat(
+            response = client.workflow("support_bot").chat(
                 message="My order hasn't arrived",
                 session_id="session-123",
             )
-            print(result.get("response"))
+            print(response.output.get("response"))
 
             # Continue conversation
-            result = client.workflow("support_bot").chat(
+            response = client.workflow("support_bot").chat(
                 message="Can you track it?",
                 session_id="session-123",
             )
@@ -1202,20 +1244,21 @@ class WorkflowProxy:
             timeout=timeout,
         )
 
-    def submit(self, **kwargs) -> str:
+    def submit(self, **kwargs) -> SubmitResponse:
         """Submit the workflow for async execution.
 
         Args:
             **kwargs: Input parameters for the workflow
 
         Returns:
-            Run ID for tracking the execution
+            SubmitResponse containing run_id and metadata
 
         Example:
             ```python
-            run_id = client.workflow("long_process").submit(data="...")
+            response = client.workflow("long_process").submit(data="...")
+            print(f"Run ID: {response.run_id}")
             # Check status later
-            status = client.get_status(run_id)
+            status = client.get_status(response.run_id)
             ```
         """
         return self._client.submit(
@@ -1321,7 +1364,7 @@ class AsyncClient:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> RunResponse[Any]:
         """Execute a component asynchronously and wait for the result.
 
         Args:
@@ -1332,10 +1375,9 @@ class AsyncClient:
             user_id: User identifier for user-scoped memory
 
         Returns:
-            Dictionary containing the component's output
+            RunResponse containing the output and metadata
 
         Raises:
-            RunError: If the component execution fails
             httpx.HTTPError: If the HTTP request fails
         """
         if input_data is None:
@@ -1350,39 +1392,33 @@ class AsyncClient:
             headers=self._build_headers(session_id=session_id, user_id=user_id),
         )
 
+        # Handle HTTP errors
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                raise RunError(
-                    error_data.get("error", "Component not found"),
-                    run_id=error_data.get("runId"),
-                )
+                return parse_run_response({
+                    "run_id": error_data.get("runId", ""),
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
+                })
             except ValueError:
-                raise RunError(f"Component '{component}' not found")
+                return parse_run_response({
+                    "run_id": "",
+                    "status_code": 500,
+                    "status": "failed",
+                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
+                })
 
-        if response.status_code in (500, 503, 504):
+        if response.status_code >= 400:
             try:
-                error_data = response.json()
-                raise _parse_error_response(error_data)
+                data = response.json()
+                return parse_run_response(data)
             except ValueError:
                 response.raise_for_status()
-        else:
-            response.raise_for_status()
 
-        data = response.json()
-        if data.get("status") == "failed":
-            raise _parse_error_response(data)
-
-        # Return output - extract from nested event structure
-        # New format: data["result"]["output"]["output_data"]
-        result = data.get("result", {})
-        if result and isinstance(result, dict):
-            output = result.get("output", {})
-            if isinstance(output, dict) and "output_data" in output:
-                return output["output_data"]
-            return output
-        # Fallback to old format
-        return data.get("output", {})
+        # Parse successful response
+        return parse_run_response(response.json())
 
     async def stream_events(
         self,
@@ -1493,7 +1529,7 @@ class AsyncClient:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
-    ) -> str:
+    ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
         Args:
@@ -1502,7 +1538,7 @@ class AsyncClient:
             component_type: Type of component
 
         Returns:
-            String containing the run ID
+            SubmitResponse containing run_id and metadata
         """
         if input_data is None:
             input_data = {}
@@ -1517,18 +1553,16 @@ class AsyncClient:
         )
         response.raise_for_status()
 
-        # Submit endpoint uses snake_case "run_id" (not camelCase "runId")
-        data = response.json()
-        return data.get("run_id", "")
+        return parse_submit_response(response.json())
 
-    async def get_status(self, run_id: str) -> Dict[str, Any]:
+    async def get_status(self, run_id: str) -> StatusResponse:
         """Get the current status of a run.
 
         Args:
             run_id: The run ID returned from submit()
 
         Returns:
-            Dictionary containing status information
+            StatusResponse containing status information
         """
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/status/{run_id}")
@@ -1536,19 +1570,19 @@ class AsyncClient:
         response = await client.get(url, headers=self._build_headers())
         response.raise_for_status()
 
-        return response.json()
+        return parse_status_response(response.json())
 
-    async def get_result(self, run_id: str) -> Dict[str, Any]:
+    async def get_result(self, run_id: str) -> RunResponse[Any]:
         """Get the result of a completed run.
 
         Args:
             run_id: The run ID returned from submit()
 
         Returns:
-            Dictionary containing the component's output
+            RunResponse containing the output (check is_error for failures)
 
         Raises:
-            RunError: If the run failed or is not yet complete
+            httpx.HTTPError: If the HTTP request fails
         """
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/result/{run_id}")
@@ -1556,27 +1590,66 @@ class AsyncClient:
         response = await client.get(url, headers=self._build_headers())
 
         if response.status_code == 404:
-            error_data = response.json()
-            error_msg = error_data.get("error", "Run not found or not complete")
-            current_status = error_data.get("status", "unknown")
-            raise RunError(f"{error_msg} (status: {current_status})", run_id=run_id)
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("error", "Run not found or not complete")
+                current_status = error_data.get("status", "unknown")
+                return parse_run_response({
+                    "run_id": run_id,
+                    "status_code": 500,
+                    "status": current_status,
+                    "error": {"code": "NOT_READY", "message": error_msg},
+                })
+            except ValueError:
+                return parse_run_response({
+                    "run_id": run_id,
+                    "status_code": 500,
+                    "status": "unknown",
+                    "error": {"code": "NOT_FOUND", "message": "Run not found"},
+                })
 
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+                return parse_run_response(data)
+            except ValueError:
+                response.raise_for_status()
+
+        return parse_run_response(response.json())
+
+    async def get_events(self, run_id: str) -> EventsResponse:
+        """Get all journal events for a run.
+
+        Retrieves the full event stream for a run, including all streaming
+        deltas, tool calls, state changes, and lifecycle events.
+
+        Args:
+            run_id: The run ID returned from submit() or run()
+
+        Returns:
+            EventsResponse containing the list of Event objects
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            # Get events for a completed run
+            events = await client.get_events(run_id)
+            for event in events:
+                print(f"{event.event_type}: {event.output_data}")
+
+            # Filter for specific event types
+            deltas = [e for e in events if "delta" in e.event_type]
+            ```
+        """
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/runs/{run_id}/events")
+
+        response = await client.get(url, headers=self._build_headers())
         response.raise_for_status()
-        data = response.json()
 
-        if data.get("status") == "failed":
-            raise _parse_error_response(data, run_id=run_id)
-
-        # Return output - extract from nested event structure
-        # New format: data["result"]["output"]["output_data"]
-        result = data.get("result", {})
-        if result and isinstance(result, dict):
-            output = result.get("output", {})
-            if isinstance(output, dict) and "output_data" in output:
-                return output["output_data"]
-            return output
-        # Fallback to old format
-        return data.get("output", {})
+        return parse_events_response(response.json())
 
 
 class RunError(Exception):

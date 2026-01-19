@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+import httpx
 import pytest
-import requests
 
 # Configure logging
 logging.basicConfig(
@@ -119,11 +119,11 @@ def wait_for_health(url: str, timeout: int = 30) -> None:
 
     while time.time() - start < timeout:
         try:
-            response = requests.get(health_url, timeout=2)
+            response = httpx.get(health_url, timeout=2)
             if response.status_code == 200:
                 logger.info(f"✅ Platform is healthy")
                 return
-        except requests.exceptions.RequestException:
+        except httpx.RequestError:
             pass
         time.sleep(0.5)
 
@@ -417,7 +417,7 @@ def worker_process(platform):
         # Check if worker registered via components endpoint
         # Wait for the 'add' function specifically (from test fixtures)
         try:
-            response = requests.get(
+            response = httpx.get(
                 f"{platform['gateway_url']}/v1/components",
                 timeout=1,
             )
@@ -506,7 +506,7 @@ def wait_for_worker_registration(platform: Dict, timeout: int = 10) -> None:
 
     while time.time() - start < timeout:
         try:
-            response = requests.get(f"{gateway_url}/v1/components", timeout=1)
+            response = httpx.get(f"{gateway_url}/v1/components", timeout=1)
             if response.status_code == 200:
                 components = response.json()
                 if len(components) > 0:

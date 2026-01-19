@@ -283,7 +283,7 @@ async def test_agent_run_with_mock_lm(mock_lm):
 @pytest.mark.asyncio
 async def test_agent_run_with_agent_context(mock_lm):
     """Test agent run with AgentContext for conversation history."""
-    from agnt5.entity import create_entity_context
+    from agnt5._state_adapter import create_state_context as create_entity_context
 
     # Create entity context for state management
     manager, token = create_entity_context()
@@ -314,7 +314,7 @@ async def test_agent_run_with_agent_context(mock_lm):
         assert len(history) >= 2  # At least user + assistant from first turn
 
     finally:
-        from agnt5.entity import _entity_state_adapter_ctx
+        from agnt5._state_adapter import _entity_state_adapter_ctx
         _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
@@ -668,7 +668,7 @@ def test_agent_registry_operations():
 
 def test_agent_context_creation():
     """Test AgentContext creation."""
-    from agnt5.entity import create_entity_context
+    from agnt5._state_adapter import create_state_context as create_entity_context
 
     manager, token = create_entity_context()
 
@@ -680,14 +680,14 @@ def test_agent_context_creation():
         assert hasattr(ctx, 'state')
 
     finally:
-        from agnt5.entity import _entity_state_adapter_ctx
+        from agnt5._state_adapter import _entity_state_adapter_ctx
         _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
 def test_agent_context_with_session_id():
     """Test AgentContext with custom session_id."""
-    from agnt5.entity import create_entity_context
+    from agnt5._state_adapter import create_state_context as create_entity_context
 
     manager, token = create_entity_context()
 
@@ -702,14 +702,14 @@ def test_agent_context_with_session_id():
         assert ctx.session_id == "custom-session"
 
     finally:
-        from agnt5.entity import _entity_state_adapter_ctx
+        from agnt5._state_adapter import _entity_state_adapter_ctx
         _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
 
 async def test_agent_context_conversation_history():
     """Test AgentContext conversation history management."""
-    from agnt5.entity import create_entity_context
+    from agnt5._state_adapter import create_state_context as create_entity_context
 
     manager, token = create_entity_context()
 
@@ -734,7 +734,7 @@ async def test_agent_context_conversation_history():
         assert retrieved[1].content == "Hi there!"
 
     finally:
-        from agnt5.entity import _entity_state_adapter_ctx
+        from agnt5._state_adapter import _entity_state_adapter_ctx
         _entity_state_adapter_ctx.reset(token)
         manager.clear_all()
 
