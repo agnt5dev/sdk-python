@@ -22,9 +22,23 @@ class ExecutionError(AGNT5Error):
 
 
 class RetryError(ExecutionError):
-    """Raised when a function exceeds maximum retry attempts."""
+    """Raised when a function exceeds maximum retry attempts.
+
+    .. deprecated::
+        RetryError is deprecated and will be removed in a future version.
+        Retry logic is now handled by the platform (Execution Engine).
+        Functions are executed once by the SDK; the platform orchestrates retries.
+    """
 
     def __init__(self, message: str, attempts: int, last_error: Exception) -> None:
+        import warnings
+
+        warnings.warn(
+            "RetryError is deprecated. Retry logic is now handled by the platform. "
+            "Functions are executed once by the SDK; the platform orchestrates retries.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(message)
         self.attempts = attempts
         self.last_error = last_error
@@ -70,6 +84,8 @@ class WaitingForUserInputException(BaseException):
         options: List of options for approval/choice inputs
         checkpoint_state: Current workflow state for resume
         pause_index: The index of this pause point (for multi-step HITL)
+        step_name: The name of the wait_for_user step (e.g., "wait_for_user_0")
+        step_correlation_id: Correlation ID for the step events
         agent_context: Optional agent execution state for agent-level HITL
             Contains: agent_name, iteration, messages, tool_results, pending_tool_call, etc.
     """
@@ -82,6 +98,8 @@ class WaitingForUserInputException(BaseException):
         checkpoint_state: Dict,
         pause_index: int = 0,
         agent_context: Optional[Dict] = None,
+        step_name: Optional[str] = None,
+        step_correlation_id: Optional[str] = None,
     ) -> None:
         """Initialize WaitingForUserInputException.
 
@@ -100,6 +118,8 @@ class WaitingForUserInputException(BaseException):
                 - pending_tool_call: The HITL tool call awaiting response
                 - all_tool_calls: All tool calls made so far
                 - model_config: Model settings for resume
+            step_name: Name of the wait_for_user step for event correlation
+            step_correlation_id: Correlation ID for the step events
         """
         super().__init__(f"Waiting for user input: {question}")
         self.question = question
@@ -108,3 +128,5 @@ class WaitingForUserInputException(BaseException):
         self.checkpoint_state = checkpoint_state
         self.pause_index = pause_index
         self.agent_context = agent_context
+        self.step_name = step_name
+        self.step_correlation_id = step_correlation_id

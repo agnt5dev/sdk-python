@@ -1,17 +1,14 @@
 """Retry and backoff utilities for durable execution.
 
-This module provides utilities for parsing retry policies, calculating backoff delays,
-and executing functions with retry logic.
+This module provides utilities for parsing retry policies and calculating backoff delays.
+Retry execution is handled by the platform (Execution Engine), not the SDK.
 """
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 from typing import Any, Dict, Optional, Union
 
-from .exceptions import RetryError
-from .types import BackoffPolicy, BackoffType, HandlerFunc, RetryPolicy
+from .types import BackoffPolicy, BackoffType, RetryPolicy
 
 
 def parse_retry_policy(retries: Optional[Union[int, Dict[str, Any], RetryPolicy]]) -> RetryPolicy:
@@ -93,105 +90,3 @@ def calculate_backoff_delay(
     # Cap at max_interval_ms
     delay_ms = min(delay_ms, retry_policy.max_interval_ms)
     return delay_ms / 1000.0  # Convert to seconds
-
-
-async def execute_with_retry(
-    handler: HandlerFunc,
-    ctx: Any,  # FunctionContext, but avoid circular import
-    retry_policy: RetryPolicy,
-    backoff_policy: BackoffPolicy,
-    needs_context: bool,
-    timeout_ms: Optional[int],
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    """Execute handler with retry logic and optional timeout.
-
-    Args:
-        handler: The function handler to execute
-        ctx: Context for logging and attempt tracking (FunctionContext)
-        retry_policy: Retry configuration
-        backoff_policy: Backoff configuration
-        needs_context: Whether handler accepts ctx parameter
-        timeout_ms: Maximum execution time in milliseconds (None for no timeout)
-        *args: Arguments to pass to handler (excluding ctx if needs_context=False)
-        **kwargs: Keyword arguments to pass to handler
-
-    Returns:
-        Result of successful execution
-
-    Raises:
-        RetryError: If all retry attempts fail
-        asyncio.TimeoutError: If function execution exceeds timeout_ms
-    """
-    # Import here to avoid circular dependency
-    from .function import FunctionContext
-
-    last_error: Optional[Exception] = None
-
-    for attempt in range(retry_policy.max_attempts):
-        try:
-            # Create context for this attempt (FunctionContext is immutable)
-            # Propagate streaming context from parent for real-time SSE log delivery
-            attempt_ctx = FunctionContext(
-                run_id=ctx.run_id,
-                correlation_id=getattr(ctx, 'correlation_id', f"retry-{attempt}"),
-                parent_correlation_id=getattr(ctx, 'parent_correlation_id', ctx.run_id),
-                attempt=attempt,
-                retry_policy=retry_policy,
-                worker=getattr(ctx, '_worker', None),
-            )
-
-            # Execute handler (pass context only if needed)
-            if needs_context:
-                result = handler(attempt_ctx, *args, **kwargs)
-            else:
-                result = handler(*args, **kwargs)
-
-            # Check if result is an async generator (streaming function)
-            # Async generators cannot be retried - return immediately for streaming consumption
-            if inspect.isasyncgen(result):
-                return result
-
-            # For coroutines, apply timeout and await
-            if inspect.iscoroutine(result):
-                if timeout_ms is not None:
-                    timeout_seconds = timeout_ms / 1000.0
-                    try:
-                        result = await asyncio.wait_for(result, timeout=timeout_seconds)
-                    except asyncio.TimeoutError:
-                        # Re-raise with more context
-                        raise asyncio.TimeoutError(
-                            f"Function execution timed out after {timeout_ms}ms"
-                        )
-                else:
-                    result = await result
-
-            return result
-
-        except Exception as e:
-            last_error = e
-            ctx.logger.warning(
-                f"Function execution failed (attempt {attempt + 1}/{retry_policy.max_attempts}): {e}"
-            )
-
-            # If this was the last attempt, raise RetryError
-            if attempt == retry_policy.max_attempts - 1:
-                raise RetryError(
-                    f"Function failed after {retry_policy.max_attempts} attempts",
-                    attempts=retry_policy.max_attempts,
-                    last_error=e,
-                )
-
-            # Calculate backoff delay
-            delay = calculate_backoff_delay(attempt, retry_policy, backoff_policy)
-            ctx.logger.info(f"Retrying in {delay:.2f} seconds...")
-            await asyncio.sleep(delay)
-
-    # Should never reach here, but for type safety
-    assert last_error is not None
-    raise RetryError(
-        f"Function failed after {retry_policy.max_attempts} attempts",
-        attempts=retry_policy.max_attempts,
-        last_error=last_error,
-    )

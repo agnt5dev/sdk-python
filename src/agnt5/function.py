@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional, TypeVar, Union, cast
 
-from ._retry_utils import execute_with_retry, parse_backoff_policy, parse_retry_policy
+from ._retry_utils import parse_backoff_policy, parse_retry_policy
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .context import Context, set_current_context
 from .events import Completed, ComponentType, Failed, Started
@@ -214,16 +214,23 @@ def function(
             )
 
             try:
-                result = await execute_with_retry(
-                    handler_func,
-                    ctx,
-                    config.retries or RetryPolicy(),
-                    config.backoff or BackoffPolicy(),
-                    needs_context,
-                    config.timeout_ms,
-                    *func_args,
-                    **kwargs,
-                )
+                # Execute function once - platform handles all retry logic
+                # ctx.attempt is populated from the platform's DispatchComponentRequest
+                if needs_context:
+                    result = handler_func(ctx, *func_args, **kwargs)
+                else:
+                    result = handler_func(*func_args, **kwargs)
+
+                # Handle async generators (streaming) - return immediately
+                if inspect.isasyncgen(result):
+                    return result
+
+                # For coroutines, apply timeout and await
+                if inspect.iscoroutine(result):
+                    if config.timeout_ms is not None:
+                        result = await asyncio.wait_for(result, timeout=config.timeout_ms / 1000)
+                    else:
+                        result = await result
 
                 # Emit function.completed
                 end_time_ns = time.time_ns()

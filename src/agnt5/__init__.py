@@ -4,6 +4,7 @@ AGNT5 Python SDK - Build durable, resilient agent-first applications.
 Supports functions, workflows, agents, and LLM integration.
 """
 
+from . import eval
 from . import events
 from . import lm
 from .agent import (
@@ -25,11 +26,13 @@ from .agent import (
 )
 from .client import AsyncClient, Client, ReceivedEvent, RunError
 from .responses import (
+    EvalResponse,
     Event,
     EventsResponse,
     RunErrorDetail,
     RunResponse,
     RunStatus,
+    ScorerResultSummary,
     StatusResponse,
     SubmitLinks,
     SubmitResponse,
@@ -83,10 +86,41 @@ from .state import StateManager, SessionContext, UserContext
 
 from .tool import Tool, ToolRegistry, tool
 
+# Scorer components
+from .scorer import (
+    ScorerConfig,
+    ScorerContext,
+    ScorerRegistry,
+    get_scorer_config,
+    is_scorer,
+    run_scorer,
+    scorer,
+)
+from .eval.types import ScorerRequest, ScorerResult
+
 # Memory components
 from .memory import (
     ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory,
     GraphMemory, GraphNode, GraphRelationship, GraphTraversalResult
+)
+
+# Sandbox components
+from .sandbox import (
+    Sandbox,
+    SandboxPool,
+    ExecuteCodeResult,
+    RunCommandResult,
+    WriteFileResult,
+    ReadFileResult,
+    FileInfo,
+    ListFilesResult,
+    GitCloneResult,
+    GitStatusFile,
+    GitStatusResult,
+    GitCommitResult,
+    GitPushResult,
+    SandboxHealthResult,
+    StreamEvent,
 )
 
 # Not yet enabled:
@@ -102,6 +136,7 @@ __all__ = [
     # Version
     "__version__",
     # Modules
+    "eval",
     "events",
     "lm",
     # Core components
@@ -143,6 +178,16 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "tool",
+    # Scorer components
+    "scorer",
+    "ScorerConfig",
+    "ScorerContext",
+    "ScorerRegistry",
+    "ScorerRequest",
+    "ScorerResult",
+    "run_scorer",
+    "is_scorer",
+    "get_scorer_config",
     # Agent events
     "AgentCompleted",
     "AgentFailed",
@@ -185,11 +230,13 @@ __all__ = [
     "ReceivedEvent",
     "RunError",
     # Response types
+    "EvalResponse",
     "Event",
     "EventsResponse",
     "RunErrorDetail",
     "RunResponse",
     "RunStatus",
+    "ScorerResultSummary",
     "StatusResponse",
     "SubmitLinks",
     "SubmitResponse",
@@ -203,4 +250,20 @@ __all__ = [
     "ExecutionError",
     "RetryError",
     "WaitingForUserInputException",
+    # Sandbox components
+    "Sandbox",
+    "SandboxPool",
+    "ExecuteCodeResult",
+    "RunCommandResult",
+    "WriteFileResult",
+    "ReadFileResult",
+    "FileInfo",
+    "ListFilesResult",
+    "GitCloneResult",
+    "GitStatusFile",
+    "GitStatusResult",
+    "GitCommitResult",
+    "GitPushResult",
+    "SandboxHealthResult",
+    "StreamEvent",
 ]

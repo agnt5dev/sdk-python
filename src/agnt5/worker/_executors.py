@@ -887,6 +887,187 @@ class ExecutorMixin:
         return await self._execute_with_context(request, create_context, execute, "Agent")
 
     # -------------------------------------------------------------------------
+    # Scorer Execution
+    # -------------------------------------------------------------------------
+
+    async def _execute_scorer(
+        self, config: Any, input_data: bytes, request: Any
+    ) -> "PyExecuteComponentResponse | None":
+        """Execute a scorer handler.
+
+        Scorers receive a ScorerRequest and return a ScorerResult.
+        They are stateless evaluation functions.
+        """
+        from ..events import Completed, ComponentType, Failed, Started
+        from ..scorer import ScorerContext
+        from ..eval.types import ScorerRequest, ScorerResult
+
+        logger.debug(
+            f"[_execute_scorer] Starting execution for scorer={config.name}, "
+            f"invocation_id={getattr(request, 'invocation_id', 'unknown')}"
+        )
+
+        def create_context(input_dict: dict, req: Any) -> ScorerContext:
+            correlation_id = f"scorer-{secrets.token_hex(5)}"
+            return ScorerContext(
+                run_id=req.invocation_id,
+                correlation_id=correlation_id,
+                parent_correlation_id=f"run-{req.invocation_id}",
+                attempt=getattr(req, "attempt", 0),
+                runtime_context=req.runtime_context,
+                worker=self._rust_worker,
+            )
+
+        async def execute(ctx: ScorerContext, input_dict: dict, req: Any):
+            # Create short run correlation id
+            run_correlation_id = f"run-{ctx.run_id[:8]}"
+
+            # Build ScorerRequest from input
+            scorer_request = ScorerRequest(
+                output=input_dict.get("output"),
+                expected=input_dict.get("expected"),
+                input=input_dict.get("input"),
+                trace=input_dict.get("trace"),
+                config=input_dict.get("config"),
+            )
+
+            # Emit run.started
+            run_started_event = Started(
+                name=config.name,
+                correlation_id=run_correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                component_type=ComponentType.RUN,
+                input_data=input_dict,
+                attempt=ctx.attempt,
+            )
+            logger.info(
+                f"[_execute_scorer] Emitting run.started event: "
+                f"scorer={config.name}, correlation_id={run_correlation_id}"
+            )
+            ctx.emit(run_started_event)
+
+            # Emit scorer.started (child of run)
+            start_time_ns = time.time_ns()
+            scorer_correlation_id = f"scorer-{secrets.token_hex(5)}"
+            scorer_started_event = Started(
+                name=config.name,
+                correlation_id=scorer_correlation_id,
+                parent_correlation_id=run_correlation_id,
+                component_type=ComponentType.SCORER,
+                input_data=input_dict,
+                attempt=ctx.attempt,
+            )
+            logger.info(
+                f"[_execute_scorer] Emitting scorer.started event: "
+                f"scorer={config.name}, correlation_id={scorer_correlation_id}"
+            )
+            ctx.emit(scorer_started_event)
+
+            # Execute scorer with error handling
+            try:
+                # Scorer handlers can take (ctx, request) or just (request)
+                sig = inspect.signature(config.handler)
+                params = list(sig.parameters.values())
+                needs_context = bool(params) and params[0].name == "ctx"
+
+                if needs_context:
+                    result = await config.handler(ctx, scorer_request)
+                else:
+                    result = await config.handler(scorer_request)
+
+                # Ensure result is a ScorerResult
+                if not isinstance(result, ScorerResult):
+                    result = ScorerResult(
+                        score=float(result) if isinstance(result, (int, float)) else 0.0,
+                        passed=bool(result) if isinstance(result, bool) else None,
+                    )
+
+            except Exception as e:
+                # Calculate scorer duration even on failure
+                end_time_ns = time.time_ns()
+                duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+                error_msg = f"{type(e).__name__}: {str(e)}"
+
+                # Emit scorer.failed (child of run)
+                scorer_failed_event = Failed(
+                    name=config.name,
+                    correlation_id=scorer_correlation_id,
+                    parent_correlation_id=run_correlation_id,
+                    component_type=ComponentType.SCORER,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                    duration_ms=duration_ms,
+                )
+                logger.info(
+                    f"[_execute_scorer] Emitting scorer.failed event: "
+                    f"scorer={config.name}, error={error_msg}"
+                )
+                ctx.emit(scorer_failed_event)
+
+                # Emit run.failed (parent event)
+                run_failed_event = Failed(
+                    name=config.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    component_type=ComponentType.RUN,
+                    error_code=type(e).__name__,
+                    error_message=error_msg,
+                )
+                logger.info(
+                    f"[_execute_scorer] Emitting run.failed event: "
+                    f"scorer={config.name}, correlation_id={run_correlation_id}"
+                )
+                ctx.emit(run_failed_event)
+
+                return None
+
+            # Calculate scorer duration
+            end_time_ns = time.time_ns()
+            duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+
+            # Convert result to dict for output
+            result_dict = {
+                "score": result.score,
+                "passed": result.passed,
+                "label": result.label,
+                "explanation": result.explanation,
+                "metadata": result.metadata,
+            }
+
+            # Emit scorer.completed (child of run)
+            scorer_completed_event = Completed(
+                name=config.name,
+                correlation_id=scorer_correlation_id,
+                parent_correlation_id=run_correlation_id,
+                component_type=ComponentType.SCORER,
+                output_data=result_dict,
+                duration_ms=duration_ms,
+            )
+            logger.info(
+                f"[_execute_scorer] Emitting scorer.completed event: "
+                f"scorer={config.name}, duration_ms={duration_ms}"
+            )
+            ctx.emit(scorer_completed_event)
+
+            # Emit run.completed
+            run_completed_event = Completed(
+                name=config.name,
+                correlation_id=run_correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                component_type=ComponentType.RUN,
+                output_data=result_dict,
+            )
+            logger.info(
+                f"[_execute_scorer] Emitting run.completed event: "
+                f"scorer={config.name}, correlation_id={run_correlation_id}"
+            )
+            ctx.emit(run_completed_event)
+
+            return None
+
+        return await self._execute_with_context(request, create_context, execute, "Scorer")
+
+    # -------------------------------------------------------------------------
     # Workflow Execution
     # -------------------------------------------------------------------------
 
@@ -940,6 +1121,9 @@ class ExecutorMixin:
             step_events = []
             initial_state = {}
             user_response = None
+            resumed_workflow_correlation_id = None
+            resumed_step_correlation_id = None
+            resumed_step_name = None
 
             if hasattr(request, 'metadata') and request.metadata:
                 # Parse completed steps for replay
@@ -979,6 +1163,20 @@ class ExecutorMixin:
                     user_response = request.metadata["user_response"]
                     logger.info(f"Resuming workflow with user response: {user_response}")
 
+                # Restore workflow correlation ID for resume
+                # This ensures the same correlation ID is used after resume
+                if "workflow_correlation_id" in request.metadata:
+                    resumed_workflow_correlation_id = request.metadata["workflow_correlation_id"]
+                    logger.info(f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}")
+
+                # Restore step correlation info for proper event pairing on resume
+                if "step_correlation_id" in request.metadata:
+                    resumed_step_correlation_id = request.metadata["step_correlation_id"]
+                    logger.info(f"Restoring step correlation ID: {resumed_step_correlation_id}")
+                if "step_name" in request.metadata:
+                    resumed_step_name = request.metadata["step_name"]
+                    logger.info(f"Restoring step name: {resumed_step_name}")
+
             # Extract session_id and user_id for memory scoping
             session_id = request.session_id if hasattr(request, 'session_id') and request.session_id else request.invocation_id
             user_id = request.user_id if hasattr(request, 'user_id') and request.user_id else None
@@ -1014,6 +1212,12 @@ class ExecutorMixin:
                 workflow_entity.inject_user_response(user_response)
                 workflow_entity._pause_index = 0  # Reset for replay
 
+                # Store resumed step info for proper event pairing
+                if resumed_step_correlation_id:
+                    workflow_entity._resumed_step_correlation_id = resumed_step_correlation_id
+                if resumed_step_name:
+                    workflow_entity._resumed_step_name = resumed_step_name
+
             if initial_state:
                 state_adapter = _get_state_adapter()
                 if hasattr(state_adapter, '_standalone_states'):
@@ -1035,7 +1239,12 @@ class ExecutorMixin:
             # Set context in contextvar
             token = set_current_context(ctx)
 
-            workflow_correlation_id = f"wf-{secrets.token_hex(5)}"
+            # Use restored correlation ID for resumed workflows, or generate a new one
+            if resumed_workflow_correlation_id:
+                workflow_correlation_id = resumed_workflow_correlation_id
+                logger.info(f"Using restored workflow correlation ID: {workflow_correlation_id}")
+            else:
+                workflow_correlation_id = f"wf-{secrets.token_hex(5)}"
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = f"run-{ctx.run_id[:8]}"
@@ -1054,35 +1263,44 @@ class ExecutorMixin:
                 if trace_id and span_id:
                     _current_span.set(SpanInfo(trace_id=trace_id, span_id=span_id))
 
-            # Emit run.started event (like function executor does)
-            run_started_event = Started(
-                name=config.name,
-                correlation_id=run_correlation_id,
-                parent_correlation_id=None,  # Run events are top-level
-                component_type=ComponentType.RUN,
-                input_data=input_dict,
-                attempt=getattr(request, 'attempt', 0),
-            )
-            logger.info(
-                f"[_execute_workflow] Emitting run.started event: "
-                f"component={config.name}, correlation_id={run_correlation_id}"
-            )
-            ctx.emit(run_started_event)
+            # Emit run.started and workflow.started events only for fresh executions.
+            # For resumed workflows (HITL), the platform emits run.resumed instead,
+            # and the workflow code will emit workflow.resumed when it detects the resume.
+            if not ctx._is_replay:
+                # Emit run.started event (like function executor does)
+                run_started_event = Started(
+                    name=config.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id=None,  # Run events are top-level
+                    component_type=ComponentType.RUN,
+                    input_data=input_dict,
+                    attempt=getattr(request, 'attempt', 0),
+                )
+                logger.info(
+                    f"[_execute_workflow] Emitting run.started event: "
+                    f"component={config.name}, correlation_id={run_correlation_id}"
+                )
+                ctx.emit(run_started_event)
 
-            # Emit workflow.started event (child of run)
-            workflow_started_event = Started(
-                name=config.name,
-                correlation_id=workflow_correlation_id,
-                parent_correlation_id=run_correlation_id,
-                component_type=ComponentType.WORKFLOW,
-                input_data=input_dict,
-                attempt=getattr(request, 'attempt', 0),
-            )
-            logger.info(
-                f"[_execute_workflow] Emitting workflow.started event: "
-                f"component={config.name}, correlation_id={workflow_correlation_id}"
-            )
-            ctx.emit(workflow_started_event)
+                # Emit workflow.started event (child of run)
+                workflow_started_event = Started(
+                    name=config.name,
+                    correlation_id=workflow_correlation_id,
+                    parent_correlation_id=run_correlation_id,
+                    component_type=ComponentType.WORKFLOW,
+                    input_data=input_dict,
+                    attempt=getattr(request, 'attempt', 0),
+                )
+                logger.info(
+                    f"[_execute_workflow] Emitting workflow.started event: "
+                    f"component={config.name}, correlation_id={workflow_correlation_id}"
+                )
+                ctx.emit(workflow_started_event)
+            else:
+                logger.info(
+                    f"[_execute_workflow] Skipping run.started and workflow.started for resumed workflow: "
+                    f"component={config.name}"
+                )
 
             # Execute workflow
             try:
@@ -1197,6 +1415,12 @@ class ExecutorMixin:
                 "pause_index": str(e.pause_index),
             }
 
+            # Store step correlation info for proper event pairing on resume
+            if e.step_correlation_id:
+                pause_metadata["step_correlation_id"] = e.step_correlation_id
+            if e.step_name:
+                pause_metadata["step_name"] = e.step_name
+
             if e.options:
                 pause_metadata["options"] = json.dumps(e.options)
             if e.checkpoint_state:
@@ -1204,7 +1428,7 @@ class ExecutorMixin:
             if session_id:
                 pause_metadata["session_id"] = session_id
 
-            # Add step events to pause metadata
+            # Add step events and correlation ID to pause metadata
             if ctx is not None:
                 step_events = ctx._workflow_entity._step_events
                 if step_events:
@@ -1215,6 +1439,11 @@ class ExecutorMixin:
                     if ctx._workflow_entity._state.has_changes():
                         state_snapshot = ctx._workflow_entity._state.get_state_snapshot()
                         pause_metadata["workflow_state"] = json.dumps(state_snapshot)
+
+                # Preserve workflow correlation ID for resume
+                # This ensures the same correlation ID is used after resume
+                if ctx._correlation_id:
+                    pause_metadata["workflow_correlation_id"] = ctx._correlation_id
 
             output = {
                 "question": e.question,

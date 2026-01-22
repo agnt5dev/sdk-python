@@ -13,6 +13,7 @@ from .. import _sentry
 from .._serialization import serialize_to_str
 from .._telemetry import setup_module_logger
 from ..function import FunctionRegistry
+from ..scorer import ScorerRegistry
 
 # from ..workflow import WorkflowRegistry  # COMMENTED OUT - functions only for now
 from ._executors import ExecutorMixin
@@ -62,6 +63,7 @@ class Worker(ExecutorMixin):
         entities: list | None = None,
         agents: list | None = None,
         tools: list | None = None,
+        scorers: list | None = None,
         auto_register: bool = False,
         auto_register_paths: list[str] | None = None,
         pyproject_path: str | None = None,
@@ -90,6 +92,7 @@ class Worker(ExecutorMixin):
             entities: List of Entity classes (explicit mode)
             agents: List of Agent instances (explicit mode)
             tools: List of Tool instances (explicit mode)
+            scorers: List of @scorer decorated handlers (explicit mode)
             auto_register: Enable automatic component discovery (default: False)
             auto_register_paths: Explicit source paths to scan (overrides pyproject.toml discovery)
             pyproject_path: Path to pyproject.toml (default: current directory)
@@ -178,9 +181,9 @@ class Worker(ExecutorMixin):
 
         # Component registration
         if auto_register:
-            if any([functions, workflows, entities, agents, tools]):
+            if any([functions, workflows, entities, agents, tools, scorers]):
                 logger.warning(
-                    "auto_register=True ignores explicit functions/workflows/entities/agents/tools parameters. "
+                    "auto_register=True ignores explicit functions/workflows/entities/agents/tools/scorers parameters. "
                     "Remove explicit params or set auto_register=False to use explicit registration."
                 )
 
@@ -199,6 +202,7 @@ class Worker(ExecutorMixin):
                 "entities": list(entities or []),
                 "agents": list(agents or []),
                 "tools": list(tools or []),
+                "scorers": list(scorers or []),
             }
 
             total_explicit = sum(len(v) for v in self._explicit_components.values())
@@ -214,6 +218,7 @@ class Worker(ExecutorMixin):
         entities: list | None = None,
         agents: list | None = None,
         tools: list | None = None,
+        scorers: list | None = None,
     ) -> None:
         """Register additional components after Worker initialization.
 
@@ -226,6 +231,7 @@ class Worker(ExecutorMixin):
             entities: List of entity classes
             agents: List of agent instances
             tools: List of tool instances
+            scorers: List of scorers decorated with @scorer
         """
         if functions:
             self._explicit_components["functions"].extend(functions)
@@ -246,6 +252,10 @@ class Worker(ExecutorMixin):
         if tools:
             self._explicit_components["tools"].extend(tools)
             logger.debug(f"Registered {len(tools)} tools")
+
+        if scorers:
+            self._explicit_components["scorers"].extend(scorers)
+            logger.debug(f"Registered {len(scorers)} scorers")
 
         total = sum(len(v) for v in self._explicit_components.values())
         logger.info(f"Total components now registered: {total}")
@@ -383,6 +393,7 @@ class Worker(ExecutorMixin):
         entities: list = []  # Entity API removed in 0.4.0
         agents = list(AgentRegistry.all().values())
         tools = list(ToolRegistry.all().values())
+        scorers = [cfg.handler for cfg in ScorerRegistry.all().values()]
 
         self._explicit_components = {
             "functions": functions,
@@ -390,11 +401,12 @@ class Worker(ExecutorMixin):
             "entities": entities,
             "agents": agents,
             "tools": tools,
+            "scorers": scorers,
         }
 
         logger.info(
             f"Auto-discovered components: {len(functions)} functions, {len(entities)} entities, "
-            f"{len(workflows)} workflows, {len(agents)} agents, {len(tools)} tools"
+            f"{len(workflows)} workflows, {len(agents)} agents, {len(tools)} tools, {len(scorers)} scorers"
         )
 
     def _serialize_schema(self, schema: Any) -> str | None:
@@ -523,7 +535,24 @@ class Worker(ExecutorMixin):
                 output_schema=tool.output_schema,
             ))
 
-        logger.info(f"Discovered {len(components)} components (functions + entities + workflows + agents + tools)")
+        # Process scorers
+        for scorer_handler in self._explicit_components.get("scorers", []):
+            scorer_name = getattr(scorer_handler, "_scorer_name", scorer_handler.__name__)
+            config = ScorerRegistry.get(scorer_name)
+            if not config:
+                logger.warning(f"Scorer '{scorer_name}' not found in ScorerRegistry")
+                continue
+
+            components.append(self._create_component_info(
+                name=config.name,
+                component_type="scorer",
+                metadata={},
+                config={},
+                input_schema=None,  # Scorers use standardized ScorerRequest
+                output_schema=None,  # Scorers use standardized ScorerResult
+            ))
+
+        logger.info(f"Discovered {len(components)} components (functions + entities + workflows + agents + tools + scorers)")
         return components
 
     def _create_message_handler(self) -> Any:
@@ -573,6 +602,12 @@ class Worker(ExecutorMixin):
                 agent = AgentRegistry.get(component_name)
                 if agent:
                     return self._execute_agent(agent, input_data, request)
+
+            # Scorers
+            elif component_type == "scorer":
+                scorer_config = ScorerRegistry.get(component_name)
+                if scorer_config:
+                    return self._execute_scorer(scorer_config, input_data, request)
 
             # Not found or unsupported
             error_msg = f"Component '{component_name}' of type '{component_type}' not found"

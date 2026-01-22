@@ -1,12 +1,14 @@
-"""Tests for Function decorator and retry logic."""
+"""Tests for Function decorator.
+
+Note: Retry execution is now handled by the platform (Execution Engine).
+The SDK executes functions once and reports results; the platform orchestrates retries.
+"""
 
 import asyncio
-import time
 
 import pytest
 
 from agnt5 import BackoffPolicy, BackoffType, FunctionContext, FunctionRegistry, RetryPolicy, function
-from agnt5.exceptions import RetryError
 
 # Test constants
 MAX_TEST_RETRIES = 3
@@ -216,11 +218,20 @@ class TestFunctionExecution:
         assert result == "test-456"
 
 
-class TestRetryLogic:
-    """Test retry behavior."""
+class TestFunctionExecution_PlatformRetry:
+    """Test function execution with platform-level retry.
+
+    Note: Retry execution is now handled by the platform (Execution Engine).
+    The SDK executes functions once and reports results; the platform orchestrates retries.
+    These tests verify:
+    - Functions execute exactly once per invocation
+    - Exceptions are propagated to caller (platform will decide whether to retry)
+    - ctx.attempt reflects the platform-provided attempt number
+    """
 
     @pytest.mark.asyncio
-    async def test_successful_execution_no_retry(self) -> None:
+    async def test_successful_execution_single_call(self) -> None:
+        """Test that successful function executes exactly once."""
         call_count = 0
 
         @function
@@ -233,142 +244,147 @@ class TestRetryLogic:
         result = await success_func(ctx)
 
         assert result == "success"
+        assert call_count == 1  # Executes exactly once
+
+    @pytest.mark.asyncio
+    async def test_exception_propagated_to_platform(self) -> None:
+        """Test that exceptions are propagated (platform handles retry decisions)."""
+        call_count = 0
+
+        @function(retries=MAX_TEST_RETRIES)  # Config still flows to platform
+        async def failing_func(ctx: FunctionContext) -> str:
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("Simulated failure")
+
+        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
+
+        # Exception is propagated directly - no RetryError wrapping
+        with pytest.raises(ValueError, match="Simulated failure"):
+            await failing_func(ctx)
+
+        # SDK executes only once - platform will call again for retries
         assert call_count == 1
 
     @pytest.mark.asyncio
-    async def test_retry_until_success(self) -> None:
-        call_count = 0
+    async def test_context_attempt_from_platform(self) -> None:
+        """Test that ctx.attempt reflects platform-provided attempt number."""
+        attempt_seen = None
 
-        @function(retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": TEST_INTERVAL_MS})
-        async def flaky_func(ctx: FunctionContext) -> str:
-            nonlocal call_count
-            call_count += 1
+        @function
+        async def check_attempt(ctx: FunctionContext) -> int:
+            nonlocal attempt_seen
+            attempt_seen = ctx.attempt
+            return ctx.attempt
 
-            if call_count < 3:
-                raise Exception("Transient error")
-            return "success"
+        # Simulate platform's retry attempt (attempt=2 means third try)
+        ctx = FunctionContext(
+            run_id="test",
+            correlation_id="corr",
+            parent_correlation_id="parent",
+            attempt=2,  # Platform provides this on retry
+        )
+        result = await check_attempt(ctx)
 
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-        result = await flaky_func(ctx)
-
-        assert result == "success"
-        assert call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_retry_exceeds_max_attempts(self) -> None:
-        call_count = 0
-
-        @function(retries=MAX_TEST_RETRIES)  # Simple form
-        async def always_fails(ctx: FunctionContext) -> str:
-            nonlocal call_count
-            call_count += 1
-            raise Exception("Permanent error")
-
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-
-        with pytest.raises(RetryError) as exc_info:
-            await always_fails(ctx)
-
-        assert call_count == MAX_TEST_RETRIES
-        assert exc_info.value.attempts == MAX_TEST_RETRIES
-        assert "Permanent error" in str(exc_info.value.last_error)
+        assert attempt_seen == 2
+        assert result == 2
 
     @pytest.mark.asyncio
-    async def test_context_attempt_increments(self) -> None:
-        attempts_seen = []
-
-        @function(retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": TEST_INTERVAL_MS})
-        async def track_attempts(ctx: FunctionContext) -> str:
-            attempts_seen.append(ctx.attempt)
-            if ctx.attempt < 2:
-                raise Exception("Retry")
+    async def test_retry_config_flows_to_registry(self) -> None:
+        """Test that retry config is captured and available for platform."""
+        @function(retries={"max_attempts": 5, "initial_interval_ms": 1000})
+        async def configured_func(ctx: FunctionContext) -> str:
             return "done"
 
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-        await track_attempts(ctx)
-
-        assert attempts_seen == [0, 1, 2]
+        config = FunctionRegistry.get("configured_func")
+        assert config is not None
+        assert config.retries is not None
+        assert config.retries.max_attempts == 5
+        assert config.retries.initial_interval_ms == 1000
 
     @pytest.mark.asyncio
-    async def test_retry_with_function_without_context(self) -> None:
-        """Test retry logic works for functions without context."""
+    async def test_function_without_context_executes_once(self) -> None:
+        """Test functions without context also execute exactly once."""
         call_count = 0
 
         @function(retries=MAX_TEST_RETRIES)
-        async def flaky_add(a: int, b: int) -> int:
+        async def simple_add(a: int, b: int) -> int:
             nonlocal call_count
             call_count += 1
-            if call_count < 2:
-                raise Exception("Transient error")
             return a + b
 
-        result = await flaky_add(3, 5)
+        result = await simple_add(3, 5)
         assert result == 8
-        assert call_count == 2
+        assert call_count == 1
 
 
 class TestBackoffCalculation:
-    """Test backoff delay calculation."""
+    """Test backoff delay calculation utility.
 
-    @pytest.mark.asyncio
-    async def test_exponential_backoff(self) -> None:
-        @function(
-            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS, "max_interval_ms": BACKOFF_MAX_INTERVAL_MS},
-            backoff="exponential",  # Simple string form
-        )
-        async def exponential_func(ctx: FunctionContext) -> str:
-            if ctx.attempt < 2:
-                raise Exception("Retry")
-            return "done"
+    Note: The calculate_backoff_delay function is used by the platform for retry scheduling.
+    These tests verify the utility function works correctly.
+    """
 
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-        start = time.time()
-        await exponential_func(ctx)
-        duration = time.time() - start
+    def test_exponential_backoff_calculation(self) -> None:
+        """Test exponential backoff delay calculation."""
+        from agnt5._retry_utils import calculate_backoff_delay
 
-        # Should take roughly: 100ms + 200ms = 300ms (with some tolerance)
-        assert duration >= 0.25  # At least 250ms
-        assert duration < 0.5  # Less than 500ms
+        retry_policy = RetryPolicy(initial_interval_ms=100, max_interval_ms=10000)
+        backoff_policy = BackoffPolicy(type=BackoffType.EXPONENTIAL, multiplier=2.0)
 
-    @pytest.mark.asyncio
-    async def test_linear_backoff(self) -> None:
-        @function(
-            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS},
-            backoff={"type": "linear", "multiplier": 1.0},  # Dict form
-        )
-        async def linear_func(ctx: FunctionContext) -> str:
-            if ctx.attempt < 2:
-                raise Exception("Retry")
-            return "done"
+        # Attempt 0: 100ms * 2^0 = 100ms
+        delay = calculate_backoff_delay(0, retry_policy, backoff_policy)
+        assert delay == 0.1  # 100ms in seconds
 
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-        start = time.time()
-        await linear_func(ctx)
-        duration = time.time() - start
+        # Attempt 1: 100ms * 2^1 = 200ms
+        delay = calculate_backoff_delay(1, retry_policy, backoff_policy)
+        assert delay == 0.2
 
-        # Should take roughly: 100ms + 200ms = 300ms
-        assert duration >= 0.25
-        assert duration < 0.5
+        # Attempt 2: 100ms * 2^2 = 400ms
+        delay = calculate_backoff_delay(2, retry_policy, backoff_policy)
+        assert delay == 0.4
 
-    @pytest.mark.asyncio
-    async def test_constant_backoff(self) -> None:
-        @function(
-            retries={"max_attempts": MAX_TEST_RETRIES, "initial_interval_ms": BACKOFF_INTERVAL_MS},
-            backoff="constant",  # Simple string form
-        )
-        async def constant_func(ctx: FunctionContext) -> str:
-            if ctx.attempt < 2:
-                raise Exception("Retry")
-            return "done"
+    def test_linear_backoff_calculation(self) -> None:
+        """Test linear backoff delay calculation."""
+        from agnt5._retry_utils import calculate_backoff_delay
 
-        ctx = FunctionContext(run_id="test", correlation_id="corr", parent_correlation_id="parent")
-        start = time.time()
-        await constant_func(ctx)
-        duration = time.time() - start
+        retry_policy = RetryPolicy(initial_interval_ms=100, max_interval_ms=10000)
+        backoff_policy = BackoffPolicy(type=BackoffType.LINEAR)
 
-        # Should take roughly: 100ms + 100ms = 200ms
-        assert duration >= 0.15
-        assert duration < 0.4
+        # Attempt 0: 100ms * (0+1) = 100ms
+        delay = calculate_backoff_delay(0, retry_policy, backoff_policy)
+        assert delay == 0.1
+
+        # Attempt 1: 100ms * (1+1) = 200ms
+        delay = calculate_backoff_delay(1, retry_policy, backoff_policy)
+        assert delay == 0.2
+
+        # Attempt 2: 100ms * (2+1) = 300ms
+        delay = calculate_backoff_delay(2, retry_policy, backoff_policy)
+        assert delay == 0.3
+
+    def test_constant_backoff_calculation(self) -> None:
+        """Test constant backoff delay calculation."""
+        from agnt5._retry_utils import calculate_backoff_delay
+
+        retry_policy = RetryPolicy(initial_interval_ms=100, max_interval_ms=10000)
+        backoff_policy = BackoffPolicy(type=BackoffType.CONSTANT)
+
+        # All attempts should have same delay
+        for attempt in range(5):
+            delay = calculate_backoff_delay(attempt, retry_policy, backoff_policy)
+            assert delay == 0.1  # Always 100ms
+
+    def test_backoff_respects_max_interval(self) -> None:
+        """Test that backoff delay is capped at max_interval_ms."""
+        from agnt5._retry_utils import calculate_backoff_delay
+
+        retry_policy = RetryPolicy(initial_interval_ms=100, max_interval_ms=500)
+        backoff_policy = BackoffPolicy(type=BackoffType.EXPONENTIAL, multiplier=2.0)
+
+        # Attempt 10: would be 100ms * 2^10 = 102400ms, but capped at 500ms
+        delay = calculate_backoff_delay(10, retry_policy, backoff_policy)
+        assert delay == 0.5  # Capped at 500ms
 
 
 class TestFunctionRegistry:

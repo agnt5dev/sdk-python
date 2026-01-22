@@ -1013,6 +1013,7 @@ class WorkflowContext(Context):
             )
             ```
         """
+        from .events import Completed, ComponentType, OperationType, Paused, Resumed, Started
         from .exceptions import WaitingForUserInputException
 
         # Generate unique step name for this user input request
@@ -1020,15 +1021,85 @@ class WorkflowContext(Context):
         # This allows multi-step HITL workflows where each pause gets its own response
         pause_index = self._workflow_entity._pause_index
         response_key = f"user_response:{self.run_id}:{pause_index}"
+        step_name = f"wait_for_user_{pause_index}"
+
+        parent_correlation_id = self._step_event_stack[-1] if self._step_event_stack else self._correlation_id
 
         # Increment pause index for next call (whether we replay or pause)
         self._workflow_entity._pause_index += 1
 
-        # Check if we already have the user's response (replay scenario)
+        # IMPORTANT: Check for cached response FIRST (before emitting step.started)
+        # On resume, we need to emit: workflow.resumed -> workflow.step.completed (with original ID)
+        # NOT: workflow.step.started -> workflow.resumed -> workflow.step.completed
         if self._workflow_entity.has_completed_step(response_key):
             response = self._workflow_entity.get_completed_step(response_key)
             self._logger.info(f"🔄 Replaying user response from checkpoint (pause {pause_index})")
+
+            # Use the ORIGINAL step correlation ID from the pause, not a new one
+            # This ensures step.started and step.completed have matching correlation IDs
+            original_step_correlation_id = self._workflow_entity._resumed_step_correlation_id
+            original_step_name = self._workflow_entity._resumed_step_name or step_name
+
+            if original_step_correlation_id:
+                self._logger.info(f"Using restored step correlation ID: {original_step_correlation_id}")
+            else:
+                # Fallback: generate new ID (shouldn't happen in normal resume flow)
+                step_event_id = str(uuid.uuid4())
+                original_step_correlation_id = f"step-{step_event_id[:12]}"
+                self._logger.warning(f"No restored step correlation ID, using new: {original_step_correlation_id}")
+
+            # Emit workflow.resumed FIRST - workflow is continuing after pause
+            workflow_resumed = Resumed(
+                name=self._workflow_name or "workflow",
+                correlation_id=self._correlation_id,
+                parent_correlation_id=f"run-{self.run_id[:8]}",
+                component_type=ComponentType.WORKFLOW,
+                resume_data={"response": response, "pause_index": pause_index},
+            )
+            self.emit(workflow_resumed)
+
+            # Emit workflow.step.completed - complete the SAME step that was paused
+            # Use the ORIGINAL correlation ID so started/completed events pair correctly
+            step_completed = Completed(
+                name=original_step_name,
+                correlation_id=original_step_correlation_id,
+                parent_correlation_id=parent_correlation_id,
+                component_type=ComponentType.WORKFLOW,
+                operation=OperationType.STEP,
+                output_data={
+                    "step_name": original_step_name,
+                    "handler_name": "wait_for_user",
+                    "result": response,
+                },
+                metadata={"name": original_step_name},
+            )
+            self.emit(step_completed)
+
+            # Clear the resumed step info after use
+            self._workflow_entity._resumed_step_correlation_id = None
+            self._workflow_entity._resumed_step_name = None
+
             return response
+
+        # No cached response - this is a fresh execution, emit step.started
+        step_event_id = str(uuid.uuid4())
+        step_correlation_id = f"step-{step_event_id[:12]}"
+
+        # Emit workflow.step.started - this step is entering
+        step_started = Started(
+            name=step_name,
+            correlation_id=step_correlation_id,
+            parent_correlation_id=parent_correlation_id,
+            component_type=ComponentType.WORKFLOW,
+            operation=OperationType.STEP,
+            input_data={
+                "step_name": step_name,
+                "handler_name": "wait_for_user",
+                "input": {"question": question, "input_type": input_type, "options": options},
+            },
+            metadata={"name": step_name, "type": "user_input"},
+        )
+        self.emit(step_started)
 
         # No response yet - pause execution
         # Collect current workflow state for checkpoint
@@ -1038,12 +1109,33 @@ class WorkflowContext(Context):
 
         self._logger.info(f"⏸️  Pausing workflow for user input: {question}")
 
+        # Emit workflow.paused - workflow is pausing for user input
+        # This should arrive BEFORE run.paused in the event stream
+        workflow_paused = Paused(
+            name=self._workflow_name or "workflow",
+            correlation_id=self._correlation_id,
+            parent_correlation_id=f"run-{self.run_id[:8]}",
+            component_type=ComponentType.WORKFLOW,
+            reason="user_input_required",
+            pause_data={
+                "question": question,
+                "input_type": input_type,
+                "options": options,
+                "pause_index": pause_index,
+                "step_name": step_name,
+                "step_correlation_id": step_correlation_id,
+            },
+        )
+        self.emit(workflow_paused)
+
         raise WaitingForUserInputException(
             question=question,
             input_type=input_type,
             options=options,
             checkpoint_state=checkpoint_state,
             pause_index=pause_index,  # Pass the pause index for multi-step HITL
+            step_name=step_name,  # Pass step info for proper event completion on resume
+            step_correlation_id=step_correlation_id,
         )
 
 
@@ -1177,6 +1269,10 @@ class WorkflowEntity:
 
         # HITL pause tracking - each wait_for_user gets unique index
         self._pause_index: int = 0
+
+        # Resumed step info for proper event pairing after HITL resume
+        self._resumed_step_correlation_id: Optional[str] = None
+        self._resumed_step_name: Optional[str] = None
 
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []

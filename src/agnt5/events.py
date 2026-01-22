@@ -70,6 +70,7 @@ class ComponentType(str, Enum):
     ENTITY = "entity"
     TOOL = "tool"
     LM = "lm"
+    SCORER = "scorer"
 
 
 class OperationType(str, Enum):

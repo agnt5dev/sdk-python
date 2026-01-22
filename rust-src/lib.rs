@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod adk;
 mod checkpoint_client;
 mod entity_state;
+mod eval;
 mod graph;
 mod language_model;
 mod memory;
@@ -819,6 +820,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Graph database
     graph::register(m.py(), m)?;
+
+    // Evaluation framework
+    eval::register_eval(m.py(), m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;

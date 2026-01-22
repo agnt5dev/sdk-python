@@ -3,17 +3,19 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 from urllib.parse import urljoin
 
 import httpx
 
 from .responses import (
+    EvalResponse,
     EventsResponse,
     RunResponse,
     RunStatus,
     StatusResponse,
     SubmitResponse,
+    parse_eval_response,
     parse_events_response,
     parse_run_response,
     parse_status_response,
@@ -562,6 +564,128 @@ class Client:
         response.raise_for_status()
 
         return parse_events_response(response.json())
+
+    def eval(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        expected: Optional[Any] = None,
+        scorers: Optional[List[str]] = None,
+        component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> EvalResponse[Any]:
+        """Evaluate a component's output using specified scorers.
+
+        This method executes a component and runs one or more scorers against
+        its output. Scorers can be built-in (exact_match, contains, etc.) or
+        custom scorers registered with the @scorer decorator.
+
+        Args:
+            component: Name of the component to evaluate
+            input_data: Input data for the component (will be sent as JSON body)
+            expected: Expected output for comparison scorers (optional)
+            scorers: List of scorer names to run (default: ["exact_match"] if expected provided)
+            component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
+            session_id: Session identifier for multi-turn conversations (optional)
+            user_id: User identifier for user-scoped memory (optional)
+            timeout: Request timeout in seconds (optional, defaults to client timeout)
+
+        Returns:
+            EvalResponse containing output, scorer results, and overall pass/fail
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            # Simple evaluation with expected output
+            result = client.eval(
+                component="greet",
+                input_data={"name": "Alice"},
+                expected="Hello, Alice!",
+                scorers=["exact_match"]
+            )
+            print(f"Passed: {result.passed}")
+            print(f"Score: {result.scores[0].score}")
+
+            # Evaluate with multiple scorers
+            result = client.eval(
+                component="summarize",
+                component_type="agent",
+                input_data={"text": "Long article..."},
+                scorers=["format_checker", "length_validator", "llm_judge"]
+            )
+            for score in result.scores:
+                print(f"{score.scorer}: {score.score} - {score.explanation}")
+
+            # Check overall result
+            if result.passed:
+                print("All scorers passed!")
+            else:
+                result.raise_for_status()  # Raises if component failed
+            ```
+        """
+        if input_data is None:
+            input_data = {}
+
+        # Default to exact_match if expected is provided but no scorers specified
+        if scorers is None:
+            scorers = ["exact_match"] if expected is not None else []
+
+        # Build request payload
+        payload = {
+            "component": component,
+            "component_type": component_type,
+            "input": input_data,
+            "scorers": scorers,
+        }
+        if expected is not None:
+            payload["expected"] = expected
+
+        # Build URL for eval endpoint
+        url = urljoin(self.gateway_url + "/", "v1/eval")
+
+        # Build headers and make request
+        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+
+        response = self._client.post(
+            url,
+            json=payload,
+            headers=request_headers,
+            timeout=timeout,
+        )
+
+        # Handle HTTP errors
+        if response.status_code == 404:
+            try:
+                error_data = response.json()
+                return parse_eval_response({
+                    "run_id": error_data.get("runId", ""),
+                    "output": None,
+                    "scores": [],
+                    "passed": False,
+                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
+                })
+            except ValueError:
+                return parse_eval_response({
+                    "run_id": "",
+                    "output": None,
+                    "scores": [],
+                    "passed": False,
+                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
+                })
+
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+                return parse_eval_response(data)
+            except ValueError:
+                response.raise_for_status()
+
+        # Parse successful response
+        return parse_eval_response(response.json())
 
     def stream(
         self,
@@ -1650,6 +1774,122 @@ class AsyncClient:
         response.raise_for_status()
 
         return parse_events_response(response.json())
+
+    async def eval(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        expected: Optional[Any] = None,
+        scorers: Optional[List[str]] = None,
+        component_type: str = "function",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> EvalResponse[Any]:
+        """Evaluate a component's output using specified scorers.
+
+        This method executes a component and runs one or more scorers against
+        its output. Scorers can be built-in (exact_match, contains, etc.) or
+        custom scorers registered with the @scorer decorator.
+
+        Args:
+            component: Name of the component to evaluate
+            input_data: Input data for the component (will be sent as JSON body)
+            expected: Expected output for comparison scorers (optional)
+            scorers: List of scorer names to run (default: ["exact_match"] if expected provided)
+            component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
+            session_id: Session identifier for multi-turn conversations (optional)
+            user_id: User identifier for user-scoped memory (optional)
+            timeout: Request timeout in seconds (optional, defaults to client timeout)
+
+        Returns:
+            EvalResponse containing output, scorer results, and overall pass/fail
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+
+        Example:
+            ```python
+            async with AsyncClient() as client:
+                # Simple evaluation
+                result = await client.eval(
+                    component="greet",
+                    input_data={"name": "Alice"},
+                    expected="Hello, Alice!",
+                    scorers=["exact_match"]
+                )
+                print(f"Passed: {result.passed}")
+
+                # Multiple scorers
+                result = await client.eval(
+                    component="summarize",
+                    component_type="agent",
+                    input_data={"text": "Long article..."},
+                    scorers=["format_checker", "llm_judge"]
+                )
+                for score in result.scores:
+                    print(f"{score.scorer}: {score.score}")
+            ```
+        """
+        if input_data is None:
+            input_data = {}
+
+        # Default to exact_match if expected is provided but no scorers specified
+        if scorers is None:
+            scorers = ["exact_match"] if expected is not None else []
+
+        # Build request payload
+        payload = {
+            "component": component,
+            "component_type": component_type,
+            "input": input_data,
+            "scorers": scorers,
+        }
+        if expected is not None:
+            payload["expected"] = expected
+
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", "v1/eval")
+
+        # Build headers and make request
+        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+
+        response = await client.post(
+            url,
+            json=payload,
+            headers=request_headers,
+            timeout=timeout,
+        )
+
+        # Handle HTTP errors
+        if response.status_code == 404:
+            try:
+                error_data = response.json()
+                return parse_eval_response({
+                    "run_id": error_data.get("runId", ""),
+                    "output": None,
+                    "scores": [],
+                    "passed": False,
+                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
+                })
+            except ValueError:
+                return parse_eval_response({
+                    "run_id": "",
+                    "output": None,
+                    "scores": [],
+                    "passed": False,
+                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
+                })
+
+        if response.status_code >= 400:
+            try:
+                data = response.json()
+                return parse_eval_response(data)
+            except ValueError:
+                response.raise_for_status()
+
+        # Parse successful response
+        return parse_eval_response(response.json())
 
 
 class RunError(Exception):

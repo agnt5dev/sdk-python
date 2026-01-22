@@ -311,6 +311,110 @@ class EventsResponse:
         return self.count
 
 
+@dataclass
+class ScorerResultSummary:
+    """Summary of a single scorer result.
+
+    Attributes:
+        scorer: Name of the scorer that was run.
+        score: Score between 0.0 and 1.0.
+        passed: Whether the scorer passed.
+        explanation: Human-readable explanation from the scorer.
+        label: Categorical label (optional).
+        metadata: Additional metadata from the scorer.
+    """
+
+    scorer: str
+    score: float
+    passed: bool
+    explanation: Optional[str] = None
+    label: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class EvalResponse(Generic[T]):
+    """Response from client.eval() containing component output and scorer results.
+
+    Example:
+        ```python
+        result = client.eval(
+            component="my_agent",
+            component_type="agent",
+            input={"task": "summarize this"},
+            expected="A summary of...",
+            scorers=["exact_match", "format_checker"]
+        )
+
+        print(f"Output: {result.output}")
+        print(f"Passed: {result.passed}")
+        for score in result.scores:
+            print(f"  {score.scorer}: {score.score} ({score.explanation})")
+        ```
+
+    Attributes:
+        output: The component's output.
+        scores: List of scorer results.
+        passed: Overall pass/fail (True if all scorers passed).
+        run_id: Unique identifier for this execution run.
+        trace_id: OpenTelemetry trace ID for distributed tracing.
+        duration_ms: Execution duration in milliseconds.
+        error: Error details if the run failed.
+    """
+
+    output: Optional[T]
+    scores: List[ScorerResultSummary]
+    passed: bool
+    run_id: str = ""
+    trace_id: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error: Optional[RunErrorDetail] = None
+    _raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def is_success(self) -> bool:
+        """True if the component ran successfully (may still have failing scores)."""
+        return self.error is None
+
+    @property
+    def is_error(self) -> bool:
+        """True if the component run failed."""
+        return self.error is not None
+
+    @property
+    def elapsed(self) -> Optional[timedelta]:
+        """Execution duration as a timedelta."""
+        if self.duration_ms is not None:
+            return timedelta(milliseconds=self.duration_ms)
+        return None
+
+    def get_score(self, scorer_name: str) -> Optional[ScorerResultSummary]:
+        """Get a specific scorer result by name.
+
+        Args:
+            scorer_name: Name of the scorer to retrieve.
+
+        Returns:
+            ScorerResultSummary or None if not found.
+        """
+        for score in self.scores:
+            if score.scorer == scorer_name:
+                return score
+        return None
+
+    def raise_for_status(self) -> None:
+        """Raise RunError if the component run failed."""
+        if self.is_error and self.error:
+            from .client import RunError
+
+            raise RunError(
+                self.error.message,
+                run_id=self.run_id,
+                error_code=self.error.code,
+                metadata=self.error.details,
+            )
+
+
 # -----------------------------------------------------------------------------
 # Parser Functions
 # -----------------------------------------------------------------------------
@@ -519,5 +623,60 @@ def parse_events_response(data: Dict[str, Any]) -> EventsResponse:
     return EventsResponse(
         items=items,
         count=data.get("count", len(items)),
+        _raw=data,
+    )
+
+
+def parse_eval_response(data: Dict[str, Any]) -> EvalResponse[Any]:
+    """Parse platform JSON response into EvalResponse.
+
+    Args:
+        data: Raw JSON response from the platform containing eval results.
+
+    Returns:
+        Typed EvalResponse with all fields populated.
+    """
+    # Parse error if present
+    error = None
+    if data.get("error"):
+        err_data = data["error"]
+        if isinstance(err_data, dict):
+            error = RunErrorDetail(
+                code=err_data.get("code", "UNKNOWN"),
+                message=err_data.get("message", "Unknown error"),
+                details=err_data.get("details"),
+            )
+        else:
+            error = RunErrorDetail(code="UNKNOWN", message=str(err_data))
+
+    # Parse scorer results
+    scores_data = data.get("scores", [])
+    scores = []
+    for score_data in scores_data:
+        scores.append(
+            ScorerResultSummary(
+                scorer=score_data.get("scorer", ""),
+                score=score_data.get("score", 0.0),
+                passed=score_data.get("passed", False),
+                explanation=score_data.get("explanation"),
+                label=score_data.get("label"),
+                metadata=score_data.get("metadata"),
+            )
+        )
+
+    # Determine overall passed status
+    passed = data.get("passed")
+    if passed is None:
+        # Default: passed if all scorers passed
+        passed = all(s.passed for s in scores) if scores else True
+
+    return EvalResponse(
+        output=data.get("output"),
+        scores=scores,
+        passed=passed,
+        run_id=data.get("run_id", ""),
+        trace_id=data.get("trace_id"),
+        duration_ms=data.get("duration_ms"),
+        error=error,
         _raw=data,
     )
