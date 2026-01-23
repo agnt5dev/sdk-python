@@ -18,7 +18,6 @@ from docstring_parser import parse as parse_docstring
 
 from ._serialization import serialize_to_str
 from ._telemetry import setup_module_logger
-from .agent.events import ToolCallFailed
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
 
@@ -274,15 +273,14 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
             )
 
-        # Emit tool event from any context (not just workflow)
-        from .context import get_current_context
-
-        context = get_current_context()
-        # Generate correlation_id for pairing tool.invoked ↔ tool.completed/failed
-        tool_correlation_id = f"tool-{secrets.token_hex(5)}"
-        # TODO: Add ToolInvoked typed event (different from ToolCallStarted which is for agent→tool)
-        # if context:
-        #     context.emit(ToolInvoked(...))
+        # TODO: Add ToolInvoked/ToolCompleted typed events for standalone tool invocation
+        # (different from ToolCallStarted/Completed which are for agent→tool calls)
+        # When implementing, use:
+        #   from .context import get_current_context
+        #   context = get_current_context()
+        #   tool_correlation_id = f"tool-{secrets.token_hex(5)}"
+        #   if context:
+        #       context.emit(ToolInvoked(...))
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -323,20 +321,11 @@ class Tool:
 
                     return result
             except Exception as e:
-                # Emit error event for observability
-                if context:
-                    context.emit(
-                        ToolCallFailed(
-                            name=self.name,
-                            correlation_id=tool_correlation_id,
-                            parent_correlation_id=context._correlation_id,
-                            error_code=type(e).__name__,
-                            error_message=str(e),
-                            tool_name=self.name,
-                            tool_call_id=tool_correlation_id,
-                            metadata={"name": self.name},
-                        )
-                    )
+                # Don't emit ToolCallFailed here - the agent's _run_core() already
+                # emits it with proper correlation_id tracking. Emitting here would
+                # create an orphaned failed event with a different correlation_id.
+                # TODO: If tool is invoked standalone (not from agent), we should
+                # emit ToolInvoked/ToolFailed events. For now, let the caller handle it.
                 raise
         finally:
             # Always reset context to prevent leakage

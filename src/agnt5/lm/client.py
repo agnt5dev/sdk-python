@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from .._ids import generate_cid
 from ..context import get_current_context
 from ..events import Event
 from .base import LanguageModel
@@ -104,7 +105,7 @@ class LMClient(LanguageModel):
             kwargs["runtime_context"] = current_ctx._runtime_context
 
         start_time_ns = time.time_ns()
-        correlation_id = f"lm-{secrets.token_hex(5)}"
+        correlation_id = generate_cid()
 
         if current_ctx:
             self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
@@ -142,7 +143,7 @@ class LMClient(LanguageModel):
 
         block_types: Dict[int, str] = {}
         start_time_ns = time.time_ns()
-        correlation_id = f"lm-{secrets.token_hex(5)}"
+        correlation_id = generate_cid()
         parent_correlation_id = current_ctx.correlation_id if current_ctx else ""
 
         if current_ctx:

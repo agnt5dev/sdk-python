@@ -7,7 +7,7 @@ use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 // Note: Span export has been removed. Spans are no longer sent to the journal.
 // Trace correlation is done via runs.trace_id lookup if needed.
@@ -33,12 +33,18 @@ use worker::{PyWorker, PyWorkerConfig};
 #[pyclass]
 struct PySpan {
     span: Mutex<Option<BoxedSpan>>,
-    // Fields for journal export on streaming requests
+    // Fields kept for future journal export on streaming requests
+    #[allow(dead_code)]
     run_id: Option<String>,
+    #[allow(dead_code)]
     tenant_id: Option<String>,
+    #[allow(dead_code)]
     is_streaming: bool,
+    #[allow(dead_code)]
     name: String,
+    #[allow(dead_code)]
     component_type: String,
+    #[allow(dead_code)]
     start_time_ns: i64,
     // Parent span ID for maintaining trace hierarchy in journal export
     parent_span_id: Option<String>,
@@ -79,7 +85,7 @@ impl PySpan {
         exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        let end_time_ns = std::time::SystemTime::now()
+        let _end_time_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
@@ -88,15 +94,16 @@ impl PySpan {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Span mutex poisoned: {}", e))
         })?;
 
-        // Get span IDs before processing (needed for journal export)
-        let (trace_id_str, span_id_str) = if let Some(ref span) = *span_guard {
+        // Get span IDs before processing (kept for future journal export)
+        let (_trace_id_str, _span_id_str) = if let Some(ref span) = *span_guard {
             let span_ctx = span.span_context();
             (span_ctx.trace_id().to_string(), span_ctx.span_id().to_string())
         } else {
             (String::new(), String::new())
         };
 
-        let mut status_code = "ok";
+        // Status code kept for future journal export
+        let mut _status_code = "ok";
 
         if let Some(mut span) = span_guard.take() {
             // Check if there was an exception
@@ -124,7 +131,7 @@ impl PySpan {
                     span.set_status(opentelemetry::trace::Status::Ok);
                 } else {
                     // Regular exception - mark as error
-                    status_code = "error";
+                    _status_code = "error";
                     let error_str = format!("{}", exc);
                     span.set_attribute(opentelemetry::KeyValue::new("error", true));
                     span.set_attribute(opentelemetry::KeyValue::new("error.message", error_str.clone()));
@@ -493,7 +500,7 @@ fn create_span(
         None
     };
 
-    let from_contextvar = parent_context_from_ids.is_some();
+    let _from_contextvar = parent_context_from_ids.is_some();
 
     let (parent_context, service_name, run_id) = if let Some(ctx) = parent_context_from_ids {
         // Use the context from Python contextvar - ensures proper async-safe nesting

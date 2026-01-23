@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
 
+from ._ids import generate_cid
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from ._serialization import serialize_to_str
 from ._state_adapter import StateInterface, _get_state_adapter
@@ -82,7 +83,7 @@ class WorkflowContext(Context):
         import uuid
         super().__init__(
             run_id=run_id,
-            correlation_id=correlation_id or f"wf-{secrets.token_hex(5)}",
+            correlation_id=correlation_id or generate_cid(),
             parent_correlation_id=parent_correlation_id or "",
             attempt=attempt,
             runtime_context=runtime_context,
@@ -421,7 +422,7 @@ class WorkflowContext(Context):
             return result
 
         # Use step_event_id as correlation_id for pairing started ↔ completed
-        step_correlation_id = f"step-{step_event_id[:12]}"
+        step_correlation_id = generate_cid()
 
         # Emit workflow.step.started checkpoint
         from .events import ComponentType, OperationType, Started
@@ -464,13 +465,37 @@ class WorkflowContext(Context):
             },
         ) as span:
             # Create FunctionContext for the function execution
+            # Use step_correlation_id as parent so function events are nested under the step
+            # The correlation_id uniquely identifies this function execution
+            func_correlation_id = generate_cid()
             func_ctx = FunctionContext(
-                run_id=f"{self.run_id}:task:{handler_name}",
-                correlation_id=f"task-{secrets.token_hex(5)}",
-                parent_correlation_id=self._correlation_id,
+                run_id=self.run_id,  # Pure run ID - correlation_id handles unique identification
+                correlation_id=func_correlation_id,
+                parent_correlation_id=step_correlation_id,
                 runtime_context=self._runtime_context,
                 worker=self._worker,
             )
+
+            # Emit function.started event
+            # Normalize input for event data
+            if len(args) == 1 and isinstance(args[0], dict):
+                func_input_data = args[0]
+            elif kwargs.get("input") and isinstance(kwargs.get("input"), dict):
+                func_input_data = kwargs["input"]
+            elif kwargs:
+                func_input_data = dict(kwargs)
+            else:
+                func_input_data = {"args": list(args)} if args else {}
+            func_started = Started(
+                name=handler_name,
+                correlation_id=func_correlation_id,
+                parent_correlation_id=step_correlation_id,
+                component_type=ComponentType.FUNCTION,
+                input_data=func_input_data,
+                attempt=0,
+            )
+            self.emit(func_started)
+            func_start_time = time.time_ns()
 
             try:
                 # Execute function with arguments
@@ -505,6 +530,19 @@ class WorkflowContext(Context):
                     step_name, handler_name, args or kwargs, result
                 )
 
+                # Emit function.completed event (before workflow.step.completed)
+                from .events import Completed
+                func_duration_ms = (time.time_ns() - func_start_time) // 1_000_000
+                func_completed = Completed(
+                    name=handler_name,
+                    correlation_id=func_correlation_id,
+                    parent_correlation_id=step_correlation_id,
+                    component_type=ComponentType.FUNCTION,
+                    output_data=result if isinstance(result, dict) else {"result": result},
+                    duration_ms=func_duration_ms,
+                )
+                self.emit(func_completed)
+
                 # Pop this step's event_id from the stack (execution complete)
                 if self._step_event_stack:
                     popped_id = self._step_event_stack.pop()
@@ -514,7 +552,6 @@ class WorkflowContext(Context):
                         )
 
                 # Emit workflow.step.completed checkpoint
-                from .events import Completed
                 step_completed = Completed(
                     name=step_name,
                     correlation_id=step_correlation_id,
@@ -529,6 +566,20 @@ class WorkflowContext(Context):
                 return result
 
             except Exception as e:
+                # Emit function.failed event (before workflow.step.failed)
+                from .events import Failed
+                func_duration_ms = (time.time_ns() - func_start_time) // 1_000_000
+                func_failed = Failed(
+                    name=handler_name,
+                    correlation_id=func_correlation_id,
+                    parent_correlation_id=step_correlation_id,
+                    component_type=ComponentType.FUNCTION,
+                    error_code=type(e).__name__,
+                    error_message=str(e),
+                    duration_ms=func_duration_ms,
+                )
+                self.emit(func_failed)
+
                 # Pop this step's event_id from the stack (execution failed)
                 if self._step_event_stack:
                     popped_id = self._step_event_stack.pop()
@@ -538,7 +589,6 @@ class WorkflowContext(Context):
                         )
 
                 # Emit workflow.step.failed checkpoint
-                from .events import Failed
                 step_failed = Failed(
                     name=step_name,
                     correlation_id=step_correlation_id,
@@ -723,7 +773,7 @@ class WorkflowContext(Context):
         # Generate unique event_id for this step (for hierarchy tracking)
         step_event_id = str(uuid.uuid4())
         # Use step_event_id as correlation_id for pairing started ↔ completed
-        step_correlation_id = f"step-{step_event_id[:12]}"
+        step_correlation_id = generate_cid()
 
         # Check platform-side memoization first (Phase 3)
         if self._checkpoint_client:
@@ -931,7 +981,7 @@ class WorkflowContext(Context):
         # Emit checkpoint for observability
         step_event_id = str(uuid.uuid4())
         # Use step_event_id as correlation_id for pairing started ↔ completed
-        step_correlation_id = f"step-{step_event_id[:12]}"
+        step_correlation_id = generate_cid()
 
         from .events import Completed, ComponentType, OperationType, Started
         step_started = Started(
@@ -1045,14 +1095,14 @@ class WorkflowContext(Context):
             else:
                 # Fallback: generate new ID (shouldn't happen in normal resume flow)
                 step_event_id = str(uuid.uuid4())
-                original_step_correlation_id = f"step-{step_event_id[:12]}"
+                original_step_correlation_id = generate_cid()
                 self._logger.warning(f"No restored step correlation ID, using new: {original_step_correlation_id}")
 
             # Emit workflow.resumed FIRST - workflow is continuing after pause
             workflow_resumed = Resumed(
                 name=self._workflow_name or "workflow",
                 correlation_id=self._correlation_id,
-                parent_correlation_id=f"run-{self.run_id[:8]}",
+                parent_correlation_id=self.run_id[:8],
                 component_type=ComponentType.WORKFLOW,
                 resume_data={"response": response, "pause_index": pause_index},
             )
@@ -1083,7 +1133,7 @@ class WorkflowContext(Context):
 
         # No cached response - this is a fresh execution, emit step.started
         step_event_id = str(uuid.uuid4())
-        step_correlation_id = f"step-{step_event_id[:12]}"
+        step_correlation_id = generate_cid()
 
         # Emit workflow.step.started - this step is entering
         step_started = Started(
@@ -1109,12 +1159,26 @@ class WorkflowContext(Context):
 
         self._logger.info(f"⏸️  Pausing workflow for user input: {question}")
 
+        # Emit approval.requested - explicit HITL event for UI to catch
+        from .events import ApprovalRequested
+
+        approval_requested = ApprovalRequested(
+            name=step_name,
+            correlation_id=step_correlation_id,
+            parent_correlation_id=parent_correlation_id,
+            question=question,
+            input_type=input_type,
+            options=options or [],
+            step_key=step_name,
+        )
+        self.emit(approval_requested)
+
         # Emit workflow.paused - workflow is pausing for user input
-        # This should arrive BEFORE run.paused in the event stream
+        # This should arrive AFTER approval.requested in the event stream
         workflow_paused = Paused(
             name=self._workflow_name or "workflow",
             correlation_id=self._correlation_id,
-            parent_correlation_id=f"run-{self.run_id[:8]}",
+            parent_correlation_id=self.run_id[:8],
             component_type=ComponentType.WORKFLOW,
             reason="user_input_required",
             pause_data={
@@ -1540,10 +1604,11 @@ class WorkflowState(StateInterface):
 
         # Emit event for real-time state streaming
         if self._emitter:
+            from ._ids import generate_cid
             from .events import StateChanged
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
-                correlation_id=self._workflow_entity.run_id,
+                correlation_id=generate_cid(),
                 parent_correlation_id="",
                 key=key,
                 value=value,
@@ -1562,10 +1627,11 @@ class WorkflowState(StateInterface):
 
         # Emit event for real-time state streaming
         if self._emitter:
+            from ._ids import generate_cid
             from .events import StateChanged
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
-                correlation_id=self._workflow_entity.run_id,
+                correlation_id=generate_cid(),
                 parent_correlation_id="",
                 key=key,
                 operation="delete",
@@ -1588,10 +1654,11 @@ class WorkflowState(StateInterface):
 
         # Emit event for real-time state streaming
         if self._emitter:
+            from ._ids import generate_cid
             from .events import StateChanged
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
-                correlation_id=self._workflow_entity.run_id,
+                correlation_id=generate_cid(),
                 parent_correlation_id="",
                 operation="clear",
             )

@@ -790,11 +790,13 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessag
                         None
                     } else {
                         // tool_calls is a list of dicts with id, name, arguments
+                        #[allow(deprecated)]
                         let tc_list = tc_value.downcast::<PyList>().map_err(|_| {
                             PyValueError::new_err("tool_calls must be a list")
                         })?;
                         let mut calls = Vec::with_capacity(tc_list.len());
                         for tc_item in tc_list.iter() {
+                            #[allow(deprecated)]
                             let tc_dict = tc_item.downcast::<PyDict>().map_err(|_| {
                                 PyValueError::new_err("Each tool_call must be a dict")
                             })?;

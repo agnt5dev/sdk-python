@@ -289,6 +289,59 @@ class Resumed(LifecycleEvent):
     paused_duration_ms: int = 0
 
 
+# =============================================================================
+# HITL Events
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class ApprovalRequested(Event):
+    """Request for human approval/decision.
+
+    Emitted when a workflow needs human input before continuing.
+    Event type is fixed as: approval.requested
+    """
+
+    # Question to ask the user
+    question: str
+
+    # Type of input: "approval", "text", "choice"
+    input_type: str = "approval"
+
+    # Options for approval/choice (list of dicts with 'id' and 'label')
+    options: list[dict[str, str]] = field(default_factory=list)
+
+    # Step key for tracking this approval request
+    step_key: str | None = None
+
+    # Previous output to show for context
+    previous_output: Any = None
+
+    def __post_init__(self) -> None:
+        self.event_type = "approval.requested"
+
+
+@dataclass(kw_only=True)
+class ApprovalResolved(Event):
+    """Human responded to an approval request.
+
+    Emitted when the user provides a response (approve, reject, or selection).
+    Event type is fixed as: approval.resolved
+    """
+
+    # The user's decision: "approved", "rejected", or a custom option ID
+    decision: str
+
+    # Optional reason/feedback from user
+    reason: str | None = None
+
+    # Who made the decision
+    decided_by: str | None = None
+
+    def __post_init__(self) -> None:
+        self.event_type = "approval.resolved"
+
+
 @dataclass(kw_only=True)
 class StateChanged(Event):
     """State mutation event for workflows.
@@ -471,6 +524,10 @@ class EventEmitter:
         parent_correlation_id: str,
     ) -> None:
         """Queue event to the platform via Rust worker."""
+        logger.info(
+            f"[EventEmitter._queue_event] ENTRY: type={envelope.event_type}, "
+            f"run_id={self._run_id}, has_worker={self._worker is not None}"
+        )
         if self._worker is None:
             logger.warning(
                 f"[EventEmitter._queue_event] No worker set, dropping event: "
@@ -501,7 +558,7 @@ class EventEmitter:
                 source_timestamp_ns=envelope.source_timestamp_ns,
                 is_streaming=True,
                 correlation_id=correlation_id,
-                parent_event_id=parent_correlation_id,
+                parent_correlation_id=parent_correlation_id,
             )
             logger.debug(
                 f"[EventEmitter._queue_event] Event queued successfully: type={envelope.event_type}"

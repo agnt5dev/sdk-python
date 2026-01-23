@@ -7,6 +7,7 @@ import time
 import warnings
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from .._ids import generate_cid
 from ..context import Context
 from ..lm import Message
 
@@ -88,7 +89,7 @@ class AgentContext(Context):
 
         # Generate correlation IDs for agent execution if not provided
         if not correlation_id:
-            correlation_id = f"agent-{secrets.token_hex(5)}"
+            correlation_id = generate_cid()
         if not parent_correlation_id:
             parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
 

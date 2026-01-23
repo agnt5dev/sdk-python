@@ -95,7 +95,7 @@ class AgentIterationCompleted(Completed):
 
 
 # =============================================================================
-# Tool Call Events (under AGENT)
+# Tool Call Events
 # =============================================================================
 
 
@@ -103,7 +103,7 @@ class AgentIterationCompleted(Completed):
 class ToolCallStarted(Started):
     """Tool call started."""
 
-    _event_type: ClassVar[str] = "agent.tool_call.started"
+    _event_type: ClassVar[str] = "tool_call.started"
     component_type: ComponentType = field(default=ComponentType.AGENT, init=False)
     operation: OperationType = field(default=OperationType.TOOL_CALL, init=False)
     tool_name: str = ""
@@ -117,7 +117,7 @@ class ToolCallStarted(Started):
 class ToolCallCompleted(Completed):
     """Tool call completed."""
 
-    _event_type: ClassVar[str] = "agent.tool_call.completed"
+    _event_type: ClassVar[str] = "tool_call.completed"
     component_type: ComponentType = field(default=ComponentType.AGENT, init=False)
     operation: OperationType = field(default=OperationType.TOOL_CALL, init=False)
     tool_name: str = ""
@@ -131,7 +131,7 @@ class ToolCallCompleted(Completed):
 class ToolCallFailed(Failed):
     """Tool call failed."""
 
-    _event_type: ClassVar[str] = "agent.tool_call.failed"
+    _event_type: ClassVar[str] = "tool_call.failed"
     component_type: ComponentType = field(default=ComponentType.AGENT, init=False)
     operation: OperationType = field(default=OperationType.TOOL_CALL, init=False)
     tool_name: str = ""

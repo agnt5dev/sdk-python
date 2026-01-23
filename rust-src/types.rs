@@ -375,6 +375,7 @@ impl From<DispatchComponentRequest> for PyExecuteComponentRequest {
                 ComponentType::Agent => "agent",
                 ComponentType::Tool => "tool",
                 ComponentType::Mcp => "mcp",
+                ComponentType::Scorer => "scorer",
                 ComponentType::Unspecified => "unspecified",
             }
             .to_string();

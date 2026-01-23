@@ -425,7 +425,7 @@ impl PyMemoryGraph {
 }
 
 /// Register graph classes with Python module
-pub fn register(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
+pub fn register(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphNode>()?;
     m.add_class::<PyGraphRelationship>()?;
     m.add_class::<PyGraphTraversalResult>()?;

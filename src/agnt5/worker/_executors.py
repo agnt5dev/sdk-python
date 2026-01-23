@@ -12,6 +12,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
+from .._ids import generate_cid
 from .._serialization import deserialize, serialize
 from .._telemetry import setup_module_logger
 from ._utils import create_failed_response, format_error_message
@@ -71,9 +72,9 @@ class ExecutorMixin:
             if current_ctx is not None:
                 failed_event = Failed(
                     name=component_type,
-                    correlation_id=getattr(current_ctx, "correlation_id", f"err-{request.invocation_id}"),
+                    correlation_id=getattr(current_ctx, "correlation_id", generate_cid()),
                     parent_correlation_id=getattr(
-                        current_ctx, "parent_correlation_id", f"run-{request.invocation_id}"
+                        current_ctx, "parent_correlation_id", generate_cid()
                     ),
                     component_type=ComponentType.RUN,
                     error_code=type(e).__name__,
@@ -132,11 +133,11 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> FunctionContext:
-            correlation_id = f"fn-{secrets.token_hex(5)}"
+            correlation_id = generate_cid()
             return FunctionContext(
                 run_id=req.invocation_id,  # Use actual invocation_id for event routing
                 correlation_id=correlation_id,
-                parent_correlation_id=f"run-{req.invocation_id}",
+                parent_correlation_id=generate_cid(),
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 retry_policy=config.retries,
@@ -152,7 +153,7 @@ class ExecutorMixin:
                     _current_span.set(SpanInfo(trace_id=trace_id, span_id=span_id))
 
             # Create short run correlation id (matches pattern of other events)
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Emit run.started before executing handler
             run_started_event = Started(
@@ -171,7 +172,7 @@ class ExecutorMixin:
 
             # Emit function.started (child of run)
             start_time_ns = time.time_ns()
-            fn_correlation_id = f"fn-{secrets.token_hex(5)}"
+            fn_correlation_id = generate_cid()
             fn_started_event = Started(
                 name=config.name,
                 correlation_id=fn_correlation_id,
@@ -367,7 +368,7 @@ class ExecutorMixin:
             return Context(
                 run_id=req.invocation_id,
                 correlation_id=correlation_id,
-                parent_correlation_id=f"run-{req.invocation_id}",
+                parent_correlation_id=generate_cid(),
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
@@ -375,7 +376,7 @@ class ExecutorMixin:
 
         async def execute(ctx: Context, input_dict: dict, req: Any):
             # Create short run correlation id (matches pattern of other events)
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Emit run.started before executing handler
             run_started_event = Started(
@@ -516,7 +517,7 @@ class ExecutorMixin:
             return Context(
                 run_id=req.invocation_id,
                 correlation_id=correlation_id,
-                parent_correlation_id=f"run-{req.invocation_id}",
+                parent_correlation_id=generate_cid(),
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
@@ -532,7 +533,7 @@ class ExecutorMixin:
                 raise ValueError("Entity invocation requires 'method' parameter")
 
             # Create short run correlation id (matches pattern of other events)
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Emit run.started before executing entity method
             run_started_event = Started(
@@ -681,7 +682,7 @@ class ExecutorMixin:
             else:
                 logger.info(f"Using existing agent session: {session_id}")
 
-            correlation_id = f"agent-{secrets.token_hex(5)}"
+            correlation_id = generate_cid()
             return AgentContext(
                 run_id=req.invocation_id,
                 agent_name=agent.name,
@@ -690,7 +691,7 @@ class ExecutorMixin:
                 is_streaming=getattr(req, "is_streaming", False),
                 worker=self._rust_worker,
                 correlation_id=correlation_id,
-                parent_correlation_id=f"run-{req.invocation_id}",
+                parent_correlation_id=generate_cid(),
             )
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
@@ -701,7 +702,7 @@ class ExecutorMixin:
                 raise ValueError("Agent invocation requires 'message' parameter")
 
             # Create short run correlation id (matches pattern of other events)
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Emit run.started before executing agent
             run_started_event = Started(
@@ -720,7 +721,7 @@ class ExecutorMixin:
 
             # Emit agent.started (child of run)
             start_time_ns = time.time_ns()
-            agent_correlation_id = f"agent-{secrets.token_hex(5)}"
+            agent_correlation_id = generate_cid()
             agent_started_event = Started(
                 name=agent.name,
                 correlation_id=agent_correlation_id,
@@ -912,7 +913,7 @@ class ExecutorMixin:
             return ScorerContext(
                 run_id=req.invocation_id,
                 correlation_id=correlation_id,
-                parent_correlation_id=f"run-{req.invocation_id}",
+                parent_correlation_id=generate_cid(),
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
@@ -920,7 +921,7 @@ class ExecutorMixin:
 
         async def execute(ctx: ScorerContext, input_dict: dict, req: Any):
             # Create short run correlation id
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Build ScorerRequest from input
             scorer_request = ScorerRequest(
@@ -1244,10 +1245,10 @@ class ExecutorMixin:
                 workflow_correlation_id = resumed_workflow_correlation_id
                 logger.info(f"Using restored workflow correlation ID: {workflow_correlation_id}")
             else:
-                workflow_correlation_id = f"wf-{secrets.token_hex(5)}"
+                workflow_correlation_id = generate_cid()
 
             # Create short run correlation id (matches pattern of other events)
-            run_correlation_id = f"run-{ctx.run_id[:8]}"
+            run_correlation_id = ctx.run_id[:8]
 
             # Setup context fields for all workflow events
             ctx._correlation_id = workflow_correlation_id
@@ -1476,7 +1477,7 @@ class ExecutorMixin:
                 workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
 
                 # Create short run correlation id (matches pattern of other events)
-                outer_run_correlation_id = f"run-{ctx.run_id[:8]}"
+                outer_run_correlation_id = ctx.run_id[:8]
 
                 # Emit run.failed via event queue
                 run_failed_event = Failed(

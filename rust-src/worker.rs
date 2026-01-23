@@ -251,8 +251,8 @@ impl PyWorker {
     /// * `source_timestamp_ns` - Nanosecond timestamp when event was created
     /// * `is_streaming` - If true, use immediate delivery; otherwise buffered
     /// * `correlation_id` - Optional ID for pairing started/completed events
-    /// * `parent_event_id` - Optional parent event ID for hierarchy
-    #[pyo3(signature = (invocation_id, event_type, event_data, content_index, sequence, metadata, source_timestamp_ns, is_streaming, correlation_id=None, parent_event_id=None))]
+    /// * `parent_correlation_id` - Optional parent correlation ID for hierarchy
+    #[pyo3(signature = (invocation_id, event_type, event_data, content_index, sequence, metadata, source_timestamp_ns, is_streaming, correlation_id=None, parent_correlation_id=None))]
     fn queue_event(
         &self,
         invocation_id: String,
@@ -264,11 +264,11 @@ impl PyWorker {
         source_timestamp_ns: i64,
         is_streaming: bool,
         correlation_id: Option<String>,
-        parent_event_id: Option<String>,
+        parent_correlation_id: Option<String>,
     ) -> PyResult<()> {
         let data_bytes = event_data.into_bytes();
         let correlation_id_str = correlation_id.unwrap_or_default();
-        let parent_event_id_str = parent_event_id.unwrap_or_default();
+        let parent_correlation_id_str = parent_correlation_id.unwrap_or_default();
 
         let worker_guard = self.worker.lock().map_err(|e| {
             let err_msg = format!("Failed to lock worker: {}", e);
@@ -288,7 +288,7 @@ impl PyWorker {
                     metadata,
                     source_timestamp_ns,
                     correlation_id_str,
-                    parent_event_id_str,
+                    parent_correlation_id_str,
                 ).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         format!("Failed to queue event (streaming): {}", e)
@@ -304,7 +304,7 @@ impl PyWorker {
                     metadata,
                     source_timestamp_ns,
                     correlation_id_str,
-                    parent_event_id_str,
+                    parent_correlation_id_str,
                 ).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                         format!("Failed to queue event (buffered): {}", e)
@@ -584,6 +584,7 @@ impl PyWorker {
                         ComponentType::Agent => "agent",
                         ComponentType::Tool => "tool",
                         ComponentType::Mcp => "mcp",
+                        ComponentType::Scorer => "scorer",
                         ComponentType::Unspecified => "unspecified",
                     };
 

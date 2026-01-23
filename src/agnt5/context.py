@@ -160,9 +160,14 @@ class Context:
         """
         logging.getLogger(__name__).info(
             f"[Context.emit] Emitting event: type={event.event_type}, "
-            f"run_id={self._run_id}, correlation_id={event.correlation_id}"
+            f"run_id={self._run_id}, correlation_id={event.correlation_id}, "
+            f"has_worker={self._worker is not None}"
         )
-        return self._get_emitter().emit(event)
+        emitter = self._get_emitter()
+        logging.getLogger(__name__).info(
+            f"[Context.emit] Got emitter, has_worker={emitter._worker is not None}"
+        )
+        return emitter.emit(event)
 
     @contextmanager
     def as_parent(self) -> Generator[None, None, None]:

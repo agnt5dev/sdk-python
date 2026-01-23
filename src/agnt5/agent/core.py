@@ -7,6 +7,7 @@ import uuid as _uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
+from .._ids import generate_cid
 from .._serialization import serialize_to_str
 from ..context import Context, get_current_context, set_current_context
 from .. import lm
@@ -407,6 +408,7 @@ class Agent:
             - run(): Wraps with agent.started/completed events
             - run_sync(): Consumes events and extracts final result
         """
+        self.logger.info(f"[DEBUG _run_core] ENTERED _run_core for agent '{self.name}', tools={list(self.tools.keys())}")
         sequence = sequence_start
 
         # Create or adapt context
@@ -418,7 +420,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
+        agent_correlation_id = generate_cid()
 
         if context is None:
             import uuid
@@ -452,11 +454,12 @@ class Agent:
 
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
+        # Use _parent_correlation_id to link agent to parent step in hierarchy
         if context and not getattr(context, '_executor_managed_lifecycle', False):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
-                parent_correlation_id=context._correlation_id,
+                parent_correlation_id=context._parent_correlation_id,
                 agent_model=self.model_name,
                 tool_names=list(self.tools.keys()),
                 max_iterations=self.max_iterations,
@@ -541,7 +544,7 @@ class Agent:
                 for iteration in range(self.max_iterations):
                     iteration_start_time = _time.time()
                     # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
-                    iteration_correlation_id = f"iter-{secrets.token_hex(5)}"
+                    iteration_correlation_id = generate_cid()
 
                     if context:
                         context.emit(AgentIterationStarted(
@@ -596,8 +599,9 @@ class Agent:
                     messages.append(Message.assistant(response_text))
 
                     # Check if LLM wants to use tools
+                    self.logger.info(f"[DEBUG _run_core] response_tool_calls={response_tool_calls}, len={len(response_tool_calls) if response_tool_calls else 0}")
                     if response_tool_calls:
-                        self.logger.debug(f"Agent calling {len(response_tool_calls)} tool(s)")
+                        self.logger.info(f"[DEBUG _run_core] Agent calling {len(response_tool_calls)} tool(s): {[tc.get('name') for tc in response_tool_calls]}")
 
                         if not hasattr(context, '_agent_data'):
                             context._agent_data = {}
@@ -619,7 +623,8 @@ class Agent:
 
                             # Yield tool call started event with unique content_index
                             tool_correlation_id = f"tool-{secrets.token_hex(5)}"
-                            yield ToolCallStarted(
+                            tool_start_time = _time.time()
+                            tool_started_event = ToolCallStarted(
                                 name=tool_name,
                                 correlation_id=tool_correlation_id,
                                 parent_correlation_id=iteration_correlation_id,
@@ -628,6 +633,12 @@ class Agent:
                                 input_data={"arguments": tool_args_str},
                                 index=tool_idx,
                             )
+                            # Emit to platform for persistence
+                            self.logger.info(f"[DEBUG _run_core] Emitting ToolCallStarted: tool={tool_name}, context={context is not None}")
+                            if context:
+                                self.logger.info(f"[DEBUG _run_core] context.emit(ToolCallStarted) for {tool_name}")
+                                context.emit(tool_started_event)
+                            yield tool_started_event
                             sequence += 1
 
                             try:
@@ -645,15 +656,21 @@ class Agent:
                                             await context.save_conversation_history(messages)
 
                                         # Yield tool completed and final result
-                                        yield ToolCallCompleted(
+                                        tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
+                                        tool_completed_event = ToolCallCompleted(
                                             name=tool_name,
                                             correlation_id=tool_correlation_id,
                                             parent_correlation_id=iteration_correlation_id,
                                             tool_name=tool_name,
                                             tool_call_id=tool_call_id or "",
                                             output_data={"result": _serialize_tool_result(result["output"])},
+                                            duration_ms=tool_duration_ms,
                                             index=tool_idx,
                                         )
+                                        # Emit to platform for persistence
+                                        if context:
+                                            context.emit(tool_completed_event)
+                                        yield tool_completed_event
                                         sequence += 1
 
                                         # Add output data to span for trace visibility
@@ -677,15 +694,21 @@ class Agent:
                                 })
 
                                 # Yield tool completed event
-                                yield ToolCallCompleted(
+                                tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
+                                tool_completed_event = ToolCallCompleted(
                                     name=tool_name,
                                     correlation_id=tool_correlation_id,
                                     parent_correlation_id=iteration_correlation_id,
                                     tool_name=tool_name,
                                     tool_call_id=tool_call_id or "",
                                     output_data={"result": result_text},
+                                    duration_ms=tool_duration_ms,
                                     index=tool_idx,
                                 )
+                                # Emit to platform for persistence
+                                if context:
+                                    context.emit(tool_completed_event)
+                                yield tool_completed_event
                                 sequence += 1
 
                             except WaitingForUserInputException as e:
@@ -726,7 +749,7 @@ class Agent:
                                     "result": None,
                                     "error": str(e),
                                 })
-                                yield ToolCallFailed(
+                                tool_failed_event = ToolCallFailed(
                                     name=tool_name,
                                     correlation_id=tool_correlation_id,
                                     parent_correlation_id=iteration_correlation_id,
@@ -735,6 +758,10 @@ class Agent:
                                     error_code=type(e).__name__,
                                     error_message=str(e),
                                 )
+                                # Emit to platform for persistence
+                                if context:
+                                    context.emit(tool_failed_event)
+                                yield tool_failed_event
                                 sequence += 1
 
                         # Add tool results to conversation
@@ -911,7 +938,7 @@ class Agent:
                 response = await internal_lm.generate(request)
 
             # Emit synthetic LM events for compatibility
-            lm_correlation_id = f"lm-{secrets.token_hex(5)}"
+            lm_correlation_id = generate_cid()
             yield (LMContentBlockStarted(
                 name=self.model,
                 correlation_id=lm_correlation_id,
@@ -1039,7 +1066,7 @@ class Agent:
         sequence = 0
 
         # Generate correlation ID for the agent run
-        run_correlation_id = f"agent-run-{secrets.token_hex(5)}"
+        run_correlation_id = generate_cid()
 
         # Yield agent.started event
         yield AgentStarted(
@@ -1154,6 +1181,7 @@ class Agent:
 
         This contains the core agent loop logic. Called by both run() and run_sync().
         """
+        self.logger.info(f"[DEBUG] _run_impl called for agent '{self.name}', tools={list(self.tools.keys())}")
         # Create or adapt context
         if context is None:
             # Try to get context from task-local storage (set by workflow/function decorator)
@@ -1165,7 +1193,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
+        agent_correlation_id = generate_cid()
 
         if context is None:
             # Standalone execution - create AgentContext with valid UUID
@@ -1206,11 +1234,12 @@ class Agent:
 
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
+        # Use _parent_correlation_id to link agent to parent step in hierarchy
         if context and not getattr(context, '_executor_managed_lifecycle', False):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
-                parent_correlation_id=context._correlation_id,
+                parent_correlation_id=context._parent_correlation_id,
                 agent_model=self.model_name,
                 tool_names=list(self.tools.keys()),
                 max_iterations=self.max_iterations,
@@ -1291,7 +1320,7 @@ class Agent:
                     for iteration in range(self.max_iterations):
                         iteration_start_time = _time.time()
                         # Generate correlation_id for pairing agent.iteration.started ↔ agent.iteration.completed
-                        iteration_correlation_id = f"iter-{secrets.token_hex(5)}"
+                        iteration_correlation_id = generate_cid()
 
                         # Emit iteration started checkpoint
                         if context:
@@ -1372,8 +1401,9 @@ class Agent:
                         messages.append(Message.assistant(response.text))
 
                         # Check if LLM wants to use tools
+                        self.logger.info(f"[DEBUG] LLM response has tool_calls={response.tool_calls is not None and len(response.tool_calls) > 0}, count={len(response.tool_calls) if response.tool_calls else 0}")
                         if response.tool_calls:
-                            self.logger.debug(f"Agent calling {len(response.tool_calls)} tool(s)")
+                            self.logger.info(f"[DEBUG] Agent calling {len(response.tool_calls)} tool(s): {[tc.get('name', 'unknown') for tc in response.tool_calls]}")
 
                             # Store current conversation in context for potential handoffs
                             # Use a simple dict attribute since we don't need full state persistence for this
@@ -1383,9 +1413,10 @@ class Agent:
 
                             # Execute tool calls
                             tool_results = []
-                            for tool_call in response.tool_calls:
+                            for tool_idx, tool_call in enumerate(response.tool_calls):
                                 tool_name = tool_call["name"]
                                 tool_args_str = tool_call["arguments"]
+                                tool_call_id = tool_call.get("id", "")
 
                                 # Track tool call
                                 all_tool_calls.append(
@@ -1395,6 +1426,25 @@ class Agent:
                                         "iteration": iteration + 1,
                                     }
                                 )
+
+                                # Generate correlation ID for this tool call
+                                tool_correlation_id = f"tool-{secrets.token_hex(5)}"
+                                tool_start_time = _time.time()
+
+                                # Emit tool call started event
+                                self.logger.info(f"[DEBUG] Tool call started: {tool_name}, context={context is not None}, correlation_id={tool_correlation_id}")
+                                if context:
+                                    event = ToolCallStarted(
+                                        name=tool_name,
+                                        correlation_id=tool_correlation_id,
+                                        parent_correlation_id=iteration_correlation_id,
+                                        tool_name=tool_name,
+                                        tool_call_id=tool_call_id,
+                                        input_data={"arguments": tool_args_str},
+                                        index=tool_idx,
+                                    )
+                                    self.logger.info(f"[DEBUG] Emitting ToolCallStarted event: {event.event_type}")
+                                    context.emit(event)
 
                                 # Execute tool
                                 try:
@@ -1420,6 +1470,19 @@ class Agent:
                                                 await context.save_conversation_history(messages)
                                             # Add output data to span for trace visibility
                                             span.set_attribute("output.data", _serialize_tool_result(result["output"]))
+                                            # Emit tool call completed event for handoff
+                                            if context:
+                                                tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
+                                                context.emit(ToolCallCompleted(
+                                                    name=tool_name,
+                                                    correlation_id=tool_correlation_id,
+                                                    parent_correlation_id=iteration_correlation_id,
+                                                    tool_name=tool_name,
+                                                    tool_call_id=tool_call_id,
+                                                    output_data={"result": _serialize_tool_result(result["output"])},
+                                                    duration_ms=tool_duration_ms,
+                                                    index=tool_idx,
+                                                ))
                                             # Return immediately with handoff result
                                             return AgentResult(
                                                 output=result["output"],
@@ -1434,6 +1497,23 @@ class Agent:
                                     tool_results.append(
                                         {"tool": tool_name, "result": result_text, "error": None}
                                     )
+
+                                    # Emit tool call completed event
+                                    self.logger.info(f"[DEBUG] Tool call completed: {tool_name}, context={context is not None}")
+                                    if context:
+                                        tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
+                                        event = ToolCallCompleted(
+                                            name=tool_name,
+                                            correlation_id=tool_correlation_id,
+                                            parent_correlation_id=iteration_correlation_id,
+                                            tool_name=tool_name,
+                                            tool_call_id=tool_call_id,
+                                            output_data={"result": result_text},
+                                            duration_ms=tool_duration_ms,
+                                            index=tool_idx,
+                                        )
+                                        self.logger.info(f"[DEBUG] Emitting ToolCallCompleted event: {event.event_type}, duration_ms={tool_duration_ms}")
+                                        context.emit(event)
 
                                 except WaitingForUserInputException as e:
                                     # HITL PAUSE: Capture agent state and propagate exception
@@ -1477,6 +1557,21 @@ class Agent:
                                     tool_results.append(
                                         {"tool": tool_name, "result": None, "error": str(e)}
                                     )
+
+                                    # Emit tool call failed event
+                                    self.logger.info(f"[DEBUG] Tool call failed: {tool_name}, error={e}")
+                                    if context:
+                                        event = ToolCallFailed(
+                                            name=tool_name,
+                                            correlation_id=tool_correlation_id,
+                                            parent_correlation_id=iteration_correlation_id,
+                                            tool_name=tool_name,
+                                            tool_call_id=tool_call_id,
+                                            error_code=type(e).__name__,
+                                            error_message=str(e),
+                                        )
+                                        self.logger.info(f"[DEBUG] Emitting ToolCallFailed event: {event.event_type}")
+                                        context.emit(event)
 
                             # Add tool results to conversation
                             results_text = "\n".join(
@@ -1709,7 +1804,7 @@ class Agent:
             workflow_ctx = context._agent_data["_workflow_ctx"]
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = f"agent-{secrets.token_hex(5)}"
+        agent_correlation_id = generate_cid()
 
         # Set agent as parent for iteration events (no agent.started emit since this is a continuation)
         original_agent_parent = context.set_as_parent(agent_correlation_id)

@@ -42,6 +42,8 @@ from .context import Context
 # Use State API (ctx.state) and Memory API (ctx.memory) instead
 # See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
 from .events import (
+    ApprovalRequested,
+    ApprovalResolved,
     Cancelled,
     Completed,
     ComponentType,
@@ -205,6 +207,8 @@ __all__ = [
     "LMFailed",
     "LMStarted",
     # Base events
+    "ApprovalRequested",
+    "ApprovalResolved",
     "Cancelled",
     "Completed",
     "ComponentType",

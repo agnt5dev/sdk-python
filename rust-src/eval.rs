@@ -41,6 +41,7 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // Try list
+    #[allow(deprecated)]
     if let Ok(list) = obj.downcast::<PyList>() {
         let mut arr = Vec::new();
         for item in list.iter() {
@@ -50,6 +51,7 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // Try dict
+    #[allow(deprecated)]
     if let Ok(dict) = obj.downcast::<PyDict>() {
         let mut map = serde_json::Map::new();
         for (key, value) in dict.iter() {
@@ -71,7 +73,7 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 }
 
 /// Convert serde_json::Value to Python object
-fn value_to_py(py: Python<'_>, val: &Value) -> PyResult<PyObject> {
+fn value_to_py(py: Python<'_>, val: &Value) -> PyResult<Py<PyAny>> {
     use pyo3::conversion::IntoPyObject;
 
     match val {
@@ -155,7 +157,7 @@ impl PyScorerResult {
 
     /// Get metadata as a Python dict
     #[getter]
-    fn metadata(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn metadata(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.metadata_value {
             Some(v) => Ok(Some(value_to_py(py, v)?)),
             None => Ok(None),
@@ -209,6 +211,7 @@ impl PyScorerInput {
                 t.iter()
                     .filter_map(|item| {
                         // Try to extract as dict and convert to TraceEvent
+                        #[allow(deprecated)]
                         if let Ok(dict) = item.downcast::<PyDict>() {
                             parse_trace_event(py, dict).ok()
                         } else {
@@ -230,13 +233,13 @@ impl PyScorerInput {
 
     /// Get the output value
     #[getter]
-    fn output(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn output(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_py(py, &self.inner.output)
     }
 
     /// Get the expected value
     #[getter]
-    fn expected(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn expected(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.inner.expected {
             Some(v) => Ok(Some(value_to_py(py, v)?)),
             None => Ok(None),
@@ -245,7 +248,7 @@ impl PyScorerInput {
 
     /// Get the input value
     #[getter]
-    fn input_value(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn input_value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.inner.input {
             Some(v) => Ok(Some(value_to_py(py, v)?)),
             None => Ok(None),

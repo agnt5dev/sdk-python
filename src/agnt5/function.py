@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional, TypeVar, Union, cast
 
+from ._ids import generate_cid
 from ._retry_utils import parse_backoff_policy, parse_retry_policy
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .context import Context, set_current_context
@@ -186,11 +187,11 @@ def function(
                 else:
                     # Local execution without parent context (dev/testing)
                     run_id = f"local-{uuid.uuid4().hex[:8]}"
-                    correlation_id = f"fn-{secrets.token_hex(5)}"
+                    correlation_id = generate_cid()
                     ctx = FunctionContext(
                         run_id=run_id,
                         correlation_id=correlation_id,
-                        parent_correlation_id=f"run-{run_id}",
+                        parent_correlation_id=run_id[:8],
                         retry_policy=retry_policy,
                     )
                     func_args = args
