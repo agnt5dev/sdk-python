@@ -7,6 +7,17 @@ Supports functions, workflows, agents, and LLM integration.
 from . import eval
 from . import events
 from . import lm
+from .batch import (
+    BatchConfig,
+    BatchError,
+    BatchItemError,
+    BatchItemInput,
+    BatchItemResult,
+    BatchResult,
+    BatchStats,
+    BatchStatusResult,
+    CancelBatchResult,
+)
 from .agent import (
     Agent,
     AgentCompleted,
@@ -125,6 +136,22 @@ from .sandbox import (
     StreamEvent,
 )
 
+# MCP (Model Context Protocol) components
+from .mcp import (
+    MCPClient,
+    MCPError,
+    CallToolResult,
+    McpTool,
+    McpToolWithServer,
+    ServerCapabilities,
+    ServerConfig,
+    ServerInfo,
+    SseConfig,
+    StdioConfig,
+    ToolContent,
+    TransportType,
+)
+
 # Not yet enabled:
 # from .checkpoint import CheckpointClient
 # from .exceptions import CheckpointError, StateError
@@ -233,6 +260,16 @@ __all__ = [
     "Client",
     "ReceivedEvent",
     "RunError",
+    # Batch components
+    "BatchConfig",
+    "BatchError",
+    "BatchItemError",
+    "BatchItemInput",
+    "BatchItemResult",
+    "BatchResult",
+    "BatchStats",
+    "BatchStatusResult",
+    "CancelBatchResult",
     # Response types
     "EvalResponse",
     "Event",
@@ -270,4 +307,17 @@ __all__ = [
     "GitPushResult",
     "SandboxHealthResult",
     "StreamEvent",
+    # MCP components
+    "MCPClient",
+    "MCPError",
+    "CallToolResult",
+    "McpTool",
+    "McpToolWithServer",
+    "ServerCapabilities",
+    "ServerConfig",
+    "ServerInfo",
+    "SseConfig",
+    "StdioConfig",
+    "ToolContent",
+    "TransportType",
 ]

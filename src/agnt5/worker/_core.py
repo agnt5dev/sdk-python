@@ -101,7 +101,23 @@ class Worker(ExecutorMixin):
         self.service_version = service_version
         self.coordinator_endpoint = coordinator_endpoint
         self.runtime = runtime
+
+        # Initialize metadata with user-provided values
         self.metadata = metadata or {}
+
+        # Auto-populate tenant_id and deployment_id from environment if not provided
+        # These are required for journal writes in managed mode
+        import os
+
+        if "tenant_id" not in self.metadata:
+            tenant_id = os.getenv("AGNT5_TENANT_ID")
+            if tenant_id:
+                self.metadata["tenant_id"] = tenant_id
+
+        if "deployment_id" not in self.metadata:
+            deployment_id = os.getenv("AGNT5_DEPLOYMENT_ID")
+            if deployment_id:
+                self.metadata["deployment_id"] = deployment_id
 
         # Import Rust worker
         try:

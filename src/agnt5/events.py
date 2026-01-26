@@ -41,6 +41,61 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Event Classification
+# =============================================================================
+
+
+def is_sse_only_event(event_type: str) -> bool:
+    """Check if an event type is SSE-only (not persisted to journal).
+
+    SSE-only events are streaming/progress events that don't affect replay:
+    - output.* (output.start, output.delta, output.stop)
+    - lm.stream.* (deprecated streaming)
+    - lm.message.* (message deltas)
+    - lm.thinking.* (thinking deltas)
+    - progress.* (progress updates)
+    - log (log events)
+
+    Args:
+        event_type: The event type string (e.g., "output.delta", "workflow.started")
+
+    Returns:
+        True if the event is SSE-only, False if it's a checkpoint event
+    """
+    return (
+        event_type.startswith("output.")
+        or event_type.startswith("lm.stream.")
+        or event_type.startswith("lm.message.")
+        or event_type.startswith("lm.thinking.")
+        or event_type.startswith("progress.")
+        or event_type.startswith("log")  # log, log.info, log.warn, log.error, etc.
+    )
+
+
+def is_checkpoint_event(event_type: str) -> bool:
+    """Check if an event type is a checkpoint event requiring sync acknowledgement.
+
+    Checkpoint events block until the platform acknowledges persistence.
+    This ensures correct event ordering for lifecycle events that affect
+    workflow state.
+
+    Checkpoint events include:
+    - *.started, *.completed, *.failed, *.paused, *.resumed
+    - approval.requested, approval.resolved
+    - workflow.state.changed
+
+    This is the inverse of is_sse_only_event().
+
+    Args:
+        event_type: The event type string (e.g., "workflow.started", "output.delta")
+
+    Returns:
+        True if the event is a checkpoint event, False if it's SSE-only
+    """
+    return not is_sse_only_event(event_type)
+
+
+# =============================================================================
 # Type Aliases
 # =============================================================================
 
@@ -517,13 +572,101 @@ class EventEmitter:
         """Callable interface - delegates to emit()."""
         return self.emit(event)
 
+    async def _queue_event_async(
+        self,
+        envelope: EventEnvelope,
+        correlation_id: str,
+        parent_correlation_id: str,
+    ) -> None:
+        """Queue event to the platform via Rust worker (async version).
+
+        For checkpoint events, this method blocks until the platform acknowledges
+        that the event has been persisted. This ensures correct event ordering.
+        """
+        logger.info(
+            f"[EventEmitter._queue_event_async] ENTRY: type={envelope.event_type}, "
+            f"run_id={self._run_id}, has_worker={self._worker is not None}"
+        )
+        if self._worker is None:
+            logger.warning(
+                f"[EventEmitter._queue_event_async] No worker set, dropping event: "
+                f"type={envelope.event_type}, run_id={self._run_id}"
+            )
+            return
+
+        try:
+            merged_metadata = dict(self._base_metadata)
+            if envelope.metadata:
+                merged_metadata.update(envelope.metadata)
+
+            self._sequence += 1
+
+            # Check if this is a checkpoint event that needs sync acknowledgement
+            if is_checkpoint_event(envelope.event_type):
+                # Add correlation IDs to metadata for journal persistence
+                # Platform extracts these as "correlation_id" and "parent_correlation_id"
+                if correlation_id:
+                    merged_metadata["correlation_id"] = correlation_id
+                if parent_correlation_id:
+                    merged_metadata["parent_correlation_id"] = parent_correlation_id
+
+                logger.info(
+                    f"[EventEmitter._queue_event_async] Emitting checkpoint event (sync): "
+                    f"type={envelope.event_type}, run_id={self._run_id}, "
+                    f"sequence={self._sequence}"
+                )
+
+                # Use sync emit that blocks until platform acknowledges
+                await self._worker.emit_event_sync(
+                    run_id=self._run_id,
+                    event_type=envelope.event_type,
+                    event_data=serialize_to_str(envelope.data),
+                    sequence_number=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=envelope.source_timestamp_ns,
+                    timeout_ms=5000,  # 5 second timeout
+                )
+                logger.debug(
+                    f"[EventEmitter._queue_event_async] Checkpoint event acknowledged: "
+                    f"type={envelope.event_type}"
+                )
+            else:
+                logger.info(
+                    f"[EventEmitter._queue_event_async] Queueing observability event (async): "
+                    f"type={envelope.event_type}, run_id={self._run_id}, "
+                    f"sequence={self._sequence}"
+                )
+
+                # Use async queue for observability/streaming events
+                self._worker.queue_event(
+                    invocation_id=self._run_id,
+                    event_type=envelope.event_type,
+                    event_data=serialize_to_str(envelope.data),
+                    content_index=envelope.content_index,
+                    sequence=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=envelope.source_timestamp_ns,
+                    is_streaming=True,
+                    correlation_id=correlation_id,
+                    parent_correlation_id=parent_correlation_id,
+                )
+                logger.debug(
+                    f"[EventEmitter._queue_event_async] Event queued: type={envelope.event_type}"
+                )
+        except Exception as e:
+            logger.error(f"[EventEmitter._queue_event_async] Failed to queue event: {e}")
+
     def _queue_event(
         self,
         envelope: EventEnvelope,
         correlation_id: str,
         parent_correlation_id: str,
     ) -> None:
-        """Queue event to the platform via Rust worker."""
+        """Queue event to the platform via Rust worker (sync version).
+
+        Note: For checkpoint events, emit_event_sync blocks until the platform
+        acknowledges persistence. For observability events, the async queue is used.
+        """
         logger.info(
             f"[EventEmitter._queue_event] ENTRY: type={envelope.event_type}, "
             f"run_id={self._run_id}, has_worker={self._worker is not None}"
@@ -542,27 +685,79 @@ class EventEmitter:
 
             self._sequence += 1
 
-            logger.info(
-                f"[EventEmitter._queue_event] Queueing event to Rust worker: "
-                f"type={envelope.event_type}, run_id={self._run_id}, "
-                f"sequence={self._sequence}, correlation_id={correlation_id}"
-            )
+            # Check if this is a checkpoint event that needs sync acknowledgement
+            if is_checkpoint_event(envelope.event_type):
+                # Add correlation IDs to metadata for journal persistence
+                # Platform extracts these as "correlation_id" and "parent_correlation_id"
+                if correlation_id:
+                    merged_metadata["correlation_id"] = correlation_id
+                if parent_correlation_id:
+                    merged_metadata["parent_correlation_id"] = parent_correlation_id
 
-            self._worker.queue_event(
-                invocation_id=self._run_id,
-                event_type=envelope.event_type,
-                event_data=serialize_to_str(envelope.data),
-                content_index=envelope.content_index,
-                sequence=self._sequence,
-                metadata=merged_metadata,
-                source_timestamp_ns=envelope.source_timestamp_ns,
-                is_streaming=True,
-                correlation_id=correlation_id,
-                parent_correlation_id=parent_correlation_id,
-            )
-            logger.debug(
-                f"[EventEmitter._queue_event] Event queued successfully: type={envelope.event_type}"
-            )
+                logger.info(
+                    f"[EventEmitter._queue_event] Emitting checkpoint event (sync): "
+                    f"type={envelope.event_type}, run_id={self._run_id}, "
+                    f"sequence={self._sequence}"
+                )
+
+                # For checkpoint events, use emit_event_sync which blocks until
+                # the platform acknowledges the event has been persisted.
+                # This is a TRULY SYNCHRONOUS call - no async/await needed.
+                try:
+                    self._worker.emit_event_sync(
+                        run_id=self._run_id,
+                        event_type=envelope.event_type,
+                        event_data=serialize_to_str(envelope.data),
+                        sequence_number=self._sequence,
+                        metadata=merged_metadata,
+                        source_timestamp_ns=envelope.source_timestamp_ns,
+                        timeout_ms=5000,
+                    )
+                    logger.debug(
+                        f"[EventEmitter._queue_event] Checkpoint event acknowledged: "
+                        f"type={envelope.event_type}"
+                    )
+                except Exception as e:
+                    # On failure, fall back to async queue to ensure event isn't lost
+                    logger.warning(
+                        f"[EventEmitter._queue_event] Checkpoint sync emit failed ({e}), "
+                        f"falling back to async: type={envelope.event_type}"
+                    )
+                    self._worker.queue_event(
+                        invocation_id=self._run_id,
+                        event_type=envelope.event_type,
+                        event_data=serialize_to_str(envelope.data),
+                        content_index=envelope.content_index,
+                        sequence=self._sequence,
+                        metadata=merged_metadata,
+                        source_timestamp_ns=envelope.source_timestamp_ns,
+                        is_streaming=True,
+                        correlation_id=correlation_id,
+                        parent_correlation_id=parent_correlation_id,
+                    )
+            else:
+                logger.info(
+                    f"[EventEmitter._queue_event] Queueing observability event (async): "
+                    f"type={envelope.event_type}, run_id={self._run_id}, "
+                    f"sequence={self._sequence}"
+                )
+
+                # Use async queue for observability/streaming events
+                self._worker.queue_event(
+                    invocation_id=self._run_id,
+                    event_type=envelope.event_type,
+                    event_data=serialize_to_str(envelope.data),
+                    content_index=envelope.content_index,
+                    sequence=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=envelope.source_timestamp_ns,
+                    is_streaming=True,
+                    correlation_id=correlation_id,
+                    parent_correlation_id=parent_correlation_id,
+                )
+                logger.debug(
+                    f"[EventEmitter._queue_event] Event queued: type={envelope.event_type}"
+                )
         except Exception as e:
             logger.error(f"[EventEmitter._queue_event] Failed to queue event: {e}")
 
@@ -585,6 +780,9 @@ __all__ = [
     "OperationType",
     # Types
     "EventData",
+    # Event classification
+    "is_checkpoint_event",
+    "is_sse_only_event",
     # Lifecycle events
     "Started",
     "Completed",
@@ -595,8 +793,15 @@ __all__ = [
     "Resumed",
     # State events
     "StateChanged",
+    # HITL events
+    "ApprovalRequested",
+    "ApprovalResolved",
     # Streaming events
     "Delta",
+    # Output streaming events
+    "OutputStart",
+    "OutputDelta",
+    "OutputStop",
     # Progress events
     "ProgressUpdate",
     # Transport

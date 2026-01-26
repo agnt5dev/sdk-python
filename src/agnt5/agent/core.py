@@ -463,6 +463,7 @@ class Agent:
                 agent_model=self.model_name,
                 tool_names=list(self.tools.keys()),
                 max_iterations=self.max_iterations,
+                input_data={"task": user_message},
                 metadata={"name": self.name},
             ))
 
@@ -552,6 +553,7 @@ class Agent:
                             correlation_id=iteration_correlation_id,
                             parent_correlation_id=agent_correlation_id,
                             iteration=iteration + 1,
+                            input_data={"iteration": iteration + 1, "max_iterations": self.max_iterations},
                             metadata={"name": self.name},
                         ))
 
@@ -1076,6 +1078,7 @@ class Agent:
             agent_model=self.model_name,
             tool_names=list(self.tools.keys()),
             max_iterations=self.max_iterations,
+            input_data={"task": user_message},
         )
         sequence += 1
 
@@ -1243,6 +1246,7 @@ class Agent:
                 agent_model=self.model_name,
                 tool_names=list(self.tools.keys()),
                 max_iterations=self.max_iterations,
+                input_data={"task": user_message},
                 metadata={"name": self.name},
             ))
 
@@ -1330,6 +1334,7 @@ class Agent:
                                 parent_correlation_id=agent_correlation_id,
                                 iteration=iteration + 1,
                                 max_iterations=self.max_iterations,
+                                input_data={"iteration": iteration + 1, "max_iterations": self.max_iterations},
                                 metadata={"name": self.name},
                             ))
 

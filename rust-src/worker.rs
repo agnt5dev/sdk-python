@@ -320,6 +320,86 @@ impl PyWorker {
         Ok(())
     }
 
+    /// Emit a checkpoint event synchronously and wait for acknowledgement
+    ///
+    /// This method blocks until the platform acknowledges that the event has been
+    /// persisted to the journal. This ensures correct event ordering for lifecycle
+    /// events that affect workflow state.
+    ///
+    /// # Arguments
+    /// * `run_id` - The run ID this checkpoint belongs to
+    /// * `event_type` - The event type (e.g., "approval.requested", "workflow.step.paused")
+    /// * `event_data` - JSON-encoded event payload
+    /// * `sequence_number` - Sequence number for ordering within execution
+    /// * `metadata` - Dictionary of metadata
+    /// * `source_timestamp_ns` - Nanosecond timestamp when event was created
+    /// * `timeout_ms` - Timeout in milliseconds to wait for acknowledgement (default: 5000)
+    ///
+    /// # Returns
+    /// None if successful, raises exception on error
+    ///
+    /// # Note
+    /// This is a TRULY SYNCHRONOUS function that blocks the calling thread until
+    /// the platform acknowledges the checkpoint. It uses std::sync primitives internally
+    /// and does NOT require a Python event loop.
+    ///
+    /// IMPORTANT: This function releases the Python GIL during the blocking wait
+    /// using `py.allow_threads()`. This allows other Python coroutines to run
+    /// concurrently while waiting for the checkpoint acknowledgement.
+    #[pyo3(signature = (run_id, event_type, event_data, sequence_number, metadata, source_timestamp_ns, timeout_ms=5000))]
+    fn emit_event_sync(
+        &self,
+        py: Python<'_>,
+        run_id: String,
+        event_type: String,
+        event_data: String,
+        sequence_number: i64,
+        metadata: HashMap<String, String>,
+        source_timestamp_ns: i64,
+        timeout_ms: u64,
+    ) -> PyResult<()> {
+        let data_bytes = event_data.into_bytes();
+
+        // Get the worker (using std::sync::Mutex, not tokio)
+        let worker = {
+            let worker_guard = self.worker.lock().map_err(|e| {
+                let err_msg = format!("Failed to lock worker: {}", e);
+                log::error!("{}", err_msg);
+                pyo3::exceptions::PyRuntimeError::new_err(err_msg)
+            })?;
+            worker_guard
+                .as_ref()
+                .ok_or_else(|| {
+                    log::error!("Worker not initialized");
+                    pyo3::exceptions::PyRuntimeError::new_err("Worker not initialized")
+                })?
+                .clone()
+        };
+
+        // Release the GIL during the blocking wait for checkpoint acknowledgement.
+        // This allows other Python coroutines to run concurrently, enabling true
+        // parallel execution of batch items instead of serializing on the GIL.
+        let result = py.allow_threads(|| {
+            worker.emit_checkpoint_sync_blocking(
+                run_id,
+                event_type,
+                data_bytes,
+                sequence_number,
+                metadata,
+                source_timestamp_ns,
+                timeout_ms,
+            )
+        });
+
+        result.map_err(|e| {
+            let err_msg = format!("Failed to emit checkpoint sync: {}", e);
+            log::error!("{}", err_msg);
+            pyo3::exceptions::PyRuntimeError::new_err(err_msg)
+        })?;
+
+        Ok(())
+    }
+
     /// Set the Python event loop for concurrent async execution
     ///
     /// This method stores a reference to the Python event loop via TaskLocals.
@@ -719,6 +799,9 @@ impl PyWorker {
                 //
                 // Use async move block and instrument it with the span to propagate trace context
                 let result = async move {
+                    // TIMING: Track GIL acquisition and Python execution times
+                    let timing_start = std::time::Instant::now();
+
                     // Get TaskLocals with the shared event loop
                     let task_locals: TaskLocals = Python::attach(|_py| -> Result<_, agnt5_sdk_core::error::SdkError> {
                         let guard = event_loop_locals_arc.lock().map_err(|e| {
@@ -733,6 +816,12 @@ impl PyWorker {
                             agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                         })?.clone())
                     })?;
+
+                    // TIMING: Log task_locals acquisition time
+                    let task_locals_ms = timing_start.elapsed().as_millis();
+                    log::info!("⏱️ RUST: Got task_locals (GIL #1): {}ms, invocation_id={}", task_locals_ms, invocation_id);
+
+                    let handler_start = std::time::Instant::now();
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
@@ -828,13 +917,26 @@ impl PyWorker {
                         Ok(future)
                     })?;
 
-                    rust_future
+                    // TIMING: Log handler setup time (GIL #2)
+                    let handler_setup_ms = handler_start.elapsed().as_millis();
+                    log::info!("⏱️ RUST: Handler setup complete (GIL #2): {}ms, invocation_id={}", handler_setup_ms, invocation_id);
+
+                    let await_start = std::time::Instant::now();
+
+                    let await_result = rust_future
                         .await
                         .map_err(|e| {
                             let err_msg = format!("Python async execution failed: {}", e);
                             log::error!("{}", err_msg);
                             agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                        })
+                        });
+
+                    // TIMING: Log Python future await time
+                    let await_ms = await_start.elapsed().as_millis();
+                    let total_ms = timing_start.elapsed().as_millis();
+                    log::info!("⏱️ RUST: Python future awaited: {}ms, total={}ms, invocation_id={}", await_ms, total_ms, invocation_id);
+
+                    await_result
                 }
                 .instrument(execution_span)
                 .await?;
@@ -1038,6 +1140,15 @@ impl PyWorker {
             Some(runtime_message::MessageData::CancelExecution(_)) => {
                 log::debug!(
                     "Ignoring CancelExecution message (type: {})",
+                    runtime_message.message_type as i32
+                );
+                Ok(None)
+            }
+            Some(runtime_message::MessageData::CheckpointAck(_)) => {
+                // CheckpointAck messages are handled in the Rust core dispatch loop
+                // and should not reach here. Log if they do.
+                log::warn!(
+                    "Unexpected CheckpointAck message reached Python handler (type: {})",
                     runtime_message.message_type as i32
                 );
                 Ok(None)

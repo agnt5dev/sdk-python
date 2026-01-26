@@ -652,6 +652,250 @@ class WorkflowContext(Context):
         results = await asyncio.gather(*values)
         return dict(zip(keys, results))
 
+    async def batch(
+        self,
+        func: Callable,
+        items: List[Any],
+        max_concurrency: int = 10,
+        continue_on_failure: bool = True,
+        timeout_per_item: Optional[float] = None,
+    ) -> "BatchResult":
+        """Execute a function across multiple inputs as a platform batch.
+
+        This method sends all items to the AGNT5 platform for parallel
+        execution with controlled concurrency. The platform handles:
+        - Concurrent execution up to max_concurrency
+        - Rate limiting and resource management
+        - Individual item retries and error handling
+        - Progress tracking and observability
+
+        Args:
+            func: The @function decorated callable to execute
+            items: List of input items (each becomes a separate execution)
+            max_concurrency: Maximum parallel executions (default: 10)
+            continue_on_failure: Keep processing if items fail (default: True)
+            timeout_per_item: Per-item timeout in seconds (optional)
+
+        Returns:
+            BatchResult containing all item results and statistics
+
+        Raises:
+            BatchError: If the batch execution fails entirely
+            ValueError: If func is not a registered @function
+
+        Example:
+            ```python
+            @function
+            async def process_document(doc_id: str) -> dict:
+                # Process a single document
+                return {"processed": doc_id}
+
+            @workflow
+            async def batch_processor(ctx: WorkflowContext, doc_ids: list[str]):
+                # Execute across all documents with controlled concurrency
+                result = await ctx.batch(
+                    process_document,
+                    [{"doc_id": d} for d in doc_ids],
+                    max_concurrency=20,
+                )
+
+                return {
+                    "processed": result.stats.completed_items,
+                    "failed": result.stats.failed_items,
+                }
+            ```
+        """
+        from .batch import BatchConfig, BatchResult, BatchError
+        from .function import get_function_config
+
+        # Get function name from registered function
+        func_config = get_function_config(func)
+        if func_config is None:
+            raise ValueError(f"{func} is not a registered @function")
+
+        function_name = func_config.name
+
+        # Build batch items
+        batch_items = []
+        for i, item in enumerate(items):
+            # If item is a dict, use it directly; otherwise wrap it
+            if isinstance(item, dict):
+                batch_items.append({"input": item, "index": i})
+            else:
+                batch_items.append({"input": {"value": item}, "index": i})
+
+        # Build config
+        config = BatchConfig(
+            max_concurrency=max_concurrency,
+            continue_on_failure=continue_on_failure,
+            default_item_timeout_ms=int(timeout_per_item * 1000) if timeout_per_item else 30000,
+        )
+
+        # Get the runtime context to make the batch call
+        runtime_ctx = self._runtime_context
+        if runtime_ctx is None:
+            raise RuntimeError("WorkflowContext not initialized with runtime context")
+
+        # Call the platform's batch API via the runtime
+        # For now, we use local parallel execution as a fallback
+        # In production, this would call the gateway's batch endpoint
+        try:
+            result = await runtime_ctx.execute_batch(
+                function_name=function_name,
+                items=batch_items,
+                config=config,
+            )
+            return result
+        except AttributeError:
+            # Fallback: local parallel execution if runtime doesn't support batch
+            return await self._local_batch_fallback(
+                func, items, max_concurrency, continue_on_failure, timeout_per_item
+            )
+
+    async def _local_batch_fallback(
+        self,
+        func: Callable,
+        items: List[Any],
+        max_concurrency: int,
+        continue_on_failure: bool,
+        timeout_per_item: Optional[float],
+    ) -> "BatchResult":
+        """Fallback implementation using local parallel execution.
+
+        This is used when the runtime doesn't support native batch execution.
+        """
+        import asyncio
+        from .batch import BatchResult, BatchItemResult, BatchStats, BatchError
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+        results: List[BatchItemResult] = []
+        start_time = time.time()
+
+        async def execute_item(index: int, item: Any) -> BatchItemResult:
+            async with semaphore:
+                item_start = time.time()
+                try:
+                    # Execute the function
+                    if isinstance(item, dict):
+                        output = await func(**item)
+                    else:
+                        output = await func(item)
+
+                    duration_ms = int((time.time() - item_start) * 1000)
+                    return BatchItemResult(
+                        index=index,
+                        run_id=f"local-{index}",
+                        status="completed",
+                        output=output,
+                        duration_ms=duration_ms,
+                    )
+                except Exception as e:
+                    duration_ms = int((time.time() - item_start) * 1000)
+                    from .batch import BatchItemError
+                    return BatchItemResult(
+                        index=index,
+                        run_id=f"local-{index}",
+                        status="failed",
+                        error=BatchItemError(code="EXECUTION_ERROR", message=str(e)),
+                        duration_ms=duration_ms,
+                    )
+
+        # Execute all items with timeout
+        tasks = [execute_item(i, item) for i, item in enumerate(items)]
+
+        if timeout_per_item:
+            timeout = timeout_per_item * len(items) / max_concurrency + 60
+        else:
+            timeout = None
+
+        try:
+            if timeout:
+                results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+            else:
+                results = await asyncio.gather(*tasks)
+        except asyncio.TimeoutError:
+            raise BatchError("Batch execution timed out")
+
+        # Calculate stats
+        completed = sum(1 for r in results if r.status == "completed")
+        failed = sum(1 for r in results if r.status == "failed")
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Determine status
+        if failed == 0:
+            status = "completed"
+        elif completed > 0:
+            status = "partial_failure"
+        else:
+            status = "failed"
+
+        return BatchResult(
+            batch_id=f"local-batch-{self.run_id}",
+            status=status,
+            results=list(results),
+            stats=BatchStats(
+                total_items=len(items),
+                completed_items=completed,
+                failed_items=failed,
+                cancelled_items=0,
+                pending_items=0,
+                duration_ms=duration_ms,
+            ),
+        )
+
+    async def map(
+        self,
+        func: Callable,
+        items: List[Any],
+        max_concurrency: int = 10,
+        **kwargs: Any,
+    ) -> List[Any]:
+        """Execute a function across items and return outputs.
+
+        Convenience wrapper around batch() that returns just the outputs.
+        Raises BatchError if any item fails.
+
+        Args:
+            func: The @function decorated callable to execute
+            items: List of input items
+            max_concurrency: Maximum parallel executions (default: 10)
+            **kwargs: Additional arguments passed to batch()
+
+        Returns:
+            List of outputs in the same order as inputs
+
+        Raises:
+            BatchError: If any item fails
+
+        Example:
+            ```python
+            @workflow
+            async def process_all(ctx: WorkflowContext, ids: list[str]):
+                # Process all IDs and get results
+                results = await ctx.map(
+                    process_item,
+                    [{"id": i} for i in ids],
+                    max_concurrency=10,
+                )
+                return {"results": results}
+            ```
+        """
+        from .batch import BatchError
+
+        result = await self.batch(
+            func, items, max_concurrency=max_concurrency, continue_on_failure=False, **kwargs
+        )
+
+        if result.status == "failed":
+            failed = result.failed_items()
+            if failed:
+                msg = f"Batch failed: {failed[0].error.message if failed[0].error else 'Unknown error'}"
+            else:
+                msg = "Batch failed"
+            raise BatchError(msg, result)
+
+        return result.outputs
+
     async def task(
         self,
         handler: Union[str, Callable],
@@ -1173,8 +1417,26 @@ class WorkflowContext(Context):
         )
         self.emit(approval_requested)
 
-        # Emit workflow.paused - workflow is pausing for user input
+        # Emit workflow.step.paused - step is pausing for user input
         # This should arrive AFTER approval.requested in the event stream
+        step_paused = Paused(
+            name=step_name,
+            correlation_id=step_correlation_id,
+            parent_correlation_id=parent_correlation_id,
+            component_type=ComponentType.WORKFLOW,
+            operation=OperationType.STEP,
+            reason="user_input_required",
+            pause_data={
+                "question": question,
+                "input_type": input_type,
+                "options": options,
+                "pause_index": pause_index,
+            },
+        )
+        self.emit(step_paused)
+
+        # Emit workflow.paused - workflow is pausing for user input
+        # This should arrive AFTER workflow.step.paused in the event stream
         workflow_paused = Paused(
             name=self._workflow_name or "workflow",
             correlation_id=self._correlation_id,

@@ -995,6 +995,160 @@ class Client:
         """
         return SessionProxy(self, session_type, key)
 
+    def batch(
+        self,
+        component: str,
+        items: List[Dict[str, Any]],
+        component_type: str = "function",
+        max_concurrency: int = 10,
+        continue_on_failure: bool = True,
+        batch_timeout_ms: Optional[int] = None,
+        item_timeout_ms: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> "BatchResult":
+        """Execute a component in batch with multiple inputs.
+
+        Sends all items to the platform for parallel execution with controlled
+        concurrency. Results are returned in the same order as the input items.
+
+        Args:
+            component: Name of the component to execute
+            items: List of input dictionaries, one per batch item
+            component_type: Type of component - "function" or "workflow" (default: "function")
+            max_concurrency: Maximum items to execute in parallel (default: 10)
+            continue_on_failure: Continue processing if an item fails (default: True)
+            batch_timeout_ms: Overall batch timeout in milliseconds (default: 1 hour)
+            item_timeout_ms: Default timeout per item in milliseconds (default: 30 seconds)
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            BatchResult containing all item results and statistics
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+            ValueError: If component_type is not "function" or "workflow"
+
+        Example:
+            ```python
+            # Batch process multiple items
+            result = client.batch(
+                "process_item",
+                items=[{"id": 1}, {"id": 2}, {"id": 3}],
+                max_concurrency=5,
+            )
+
+            # Check overall status
+            if result.is_success:
+                print(f"All {result.stats.total_items} items completed")
+            else:
+                print(f"Failed: {result.stats.failed_items} items")
+
+            # Access individual outputs
+            for i, output in enumerate(result.outputs):
+                print(f"Item {i}: {output}")
+
+            # Get only successful outputs
+            successful = result.successful_outputs()
+            ```
+        """
+        from .batch import BatchConfig, BatchItemInput, BatchResult
+
+        if component_type not in ("function", "workflow"):
+            raise ValueError(f"Batch only supports 'function' or 'workflow', got: {component_type}")
+
+        # Build URL
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/batch")
+
+        # Build request body
+        config = BatchConfig(
+            max_concurrency=max_concurrency,
+            continue_on_failure=continue_on_failure,
+            batch_timeout_ms=batch_timeout_ms or 3600000,
+            default_item_timeout_ms=item_timeout_ms or 30000,
+        )
+
+        batch_items = [BatchItemInput(input=item, index=i).to_dict() for i, item in enumerate(items)]
+
+        request_body = {
+            "items": batch_items,
+            "config": config.to_dict(),
+        }
+
+        headers = self._build_headers()
+        response = self._client.post(url, json=request_body, headers=headers, timeout=timeout)
+        response.raise_for_status()
+
+        return BatchResult.from_dict(response.json())
+
+    def get_batch_status(
+        self,
+        batch_id: str,
+        include_results: bool = True,
+        timeout: Optional[float] = None,
+    ) -> "BatchStatusResult":
+        """Get the status of a batch execution.
+
+        Args:
+            batch_id: The batch ID to query
+            include_results: Include individual item results (default: True)
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            BatchStatusResult with current status and results
+
+        Example:
+            ```python
+            status = client.get_batch_status("550e8400-e29b-41d4-a716-446655440000")
+            if status.is_completed:
+                print(f"Batch completed with {status.stats.completed_items} items")
+            ```
+        """
+        from .batch import BatchStatusResult
+
+        url = urljoin(self.gateway_url + "/", f"v1/batches/{batch_id}")
+        params = {"include_results": str(include_results).lower()}
+
+        headers = self._build_headers()
+        response = self._client.get(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+
+        return BatchStatusResult.from_dict(response.json())
+
+    def cancel_batch(
+        self,
+        batch_id: str,
+        reason: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> "CancelBatchResult":
+        """Cancel a running batch execution.
+
+        Args:
+            batch_id: The batch ID to cancel
+            reason: Optional reason for cancellation
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            CancelBatchResult with cancellation details
+
+        Example:
+            ```python
+            result = client.cancel_batch("550e8400-e29b-41d4-a716-446655440000", reason="User requested")
+            print(f"Cancelled {result.cancelled_items} items")
+            ```
+        """
+        from .batch import CancelBatchResult
+
+        url = urljoin(self.gateway_url + "/", f"v1/batches/{batch_id}")
+        params = {}
+        if reason:
+            params["reason"] = reason
+
+        headers = self._build_headers()
+        response = self._client.delete(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+
+        return CancelBatchResult.from_dict(response.json())
+
     def close(self):
         """Close the underlying HTTP client."""
         self._client.close()
@@ -1890,6 +2044,157 @@ class AsyncClient:
 
         # Parse successful response
         return parse_eval_response(response.json())
+
+    async def batch(
+        self,
+        component: str,
+        items: List[Dict[str, Any]],
+        component_type: str = "function",
+        max_concurrency: int = 10,
+        continue_on_failure: bool = True,
+        batch_timeout_ms: Optional[int] = None,
+        item_timeout_ms: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> "BatchResult":
+        """Execute a component in batch with multiple inputs asynchronously.
+
+        Sends all items to the platform for parallel execution with controlled
+        concurrency. Results are returned in the same order as the input items.
+
+        Args:
+            component: Name of the component to execute
+            items: List of input dictionaries, one per batch item
+            component_type: Type of component - "function" or "workflow" (default: "function")
+            max_concurrency: Maximum items to execute in parallel (default: 10)
+            continue_on_failure: Continue processing if an item fails (default: True)
+            batch_timeout_ms: Overall batch timeout in milliseconds (default: 1 hour)
+            item_timeout_ms: Default timeout per item in milliseconds (default: 30 seconds)
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            BatchResult containing all item results and statistics
+
+        Raises:
+            httpx.HTTPError: If the HTTP request fails
+            ValueError: If component_type is not "function" or "workflow"
+
+        Example:
+            ```python
+            # Batch process multiple items
+            result = await client.batch(
+                "process_item",
+                items=[{"id": 1}, {"id": 2}, {"id": 3}],
+                max_concurrency=5,
+            )
+
+            # Check overall status
+            if result.is_success:
+                print(f"All {result.stats.total_items} items completed")
+
+            # Get only successful outputs
+            successful = result.successful_outputs()
+            ```
+        """
+        from .batch import BatchConfig, BatchItemInput, BatchResult
+
+        if component_type not in ("function", "workflow"):
+            raise ValueError(f"Batch only supports 'function' or 'workflow', got: {component_type}")
+
+        # Build URL
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/batch")
+
+        # Build request body
+        config = BatchConfig(
+            max_concurrency=max_concurrency,
+            continue_on_failure=continue_on_failure,
+            batch_timeout_ms=batch_timeout_ms or 3600000,
+            default_item_timeout_ms=item_timeout_ms or 30000,
+        )
+
+        batch_items = [BatchItemInput(input=item, index=i).to_dict() for i, item in enumerate(items)]
+
+        request_body = {
+            "items": batch_items,
+            "config": config.to_dict(),
+        }
+
+        client = await self._ensure_client()
+        headers = self._build_headers()
+        response = await client.post(url, json=request_body, headers=headers, timeout=timeout)
+        response.raise_for_status()
+
+        return BatchResult.from_dict(response.json())
+
+    async def get_batch_status(
+        self,
+        batch_id: str,
+        include_results: bool = True,
+        timeout: Optional[float] = None,
+    ) -> "BatchStatusResult":
+        """Get the status of a batch execution asynchronously.
+
+        Args:
+            batch_id: The batch ID to query
+            include_results: Include individual item results (default: True)
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            BatchStatusResult with current status and results
+
+        Example:
+            ```python
+            status = await client.get_batch_status("550e8400-e29b-41d4-a716-446655440000")
+            if status.is_completed:
+                print(f"Batch completed with {status.stats.completed_items} items")
+            ```
+        """
+        from .batch import BatchStatusResult
+
+        url = urljoin(self.gateway_url + "/", f"v1/batches/{batch_id}")
+        params = {"include_results": str(include_results).lower()}
+
+        client = await self._ensure_client()
+        headers = self._build_headers()
+        response = await client.get(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+
+        return BatchStatusResult.from_dict(response.json())
+
+    async def cancel_batch(
+        self,
+        batch_id: str,
+        reason: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> "CancelBatchResult":
+        """Cancel a running batch execution asynchronously.
+
+        Args:
+            batch_id: The batch ID to cancel
+            reason: Optional reason for cancellation
+            timeout: HTTP request timeout in seconds (optional)
+
+        Returns:
+            CancelBatchResult with cancellation details
+
+        Example:
+            ```python
+            result = await client.cancel_batch("550e8400-e29b-41d4-a716-446655440000")
+            print(f"Cancelled {result.cancelled_items} items")
+            ```
+        """
+        from .batch import CancelBatchResult
+
+        url = urljoin(self.gateway_url + "/", f"v1/batches/{batch_id}")
+        params = {}
+        if reason:
+            params["reason"] = reason
+
+        client = await self._ensure_client()
+        headers = self._build_headers()
+        response = await client.delete(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+
+        return CancelBatchResult.from_dict(response.json())
 
 
 class RunError(Exception):
