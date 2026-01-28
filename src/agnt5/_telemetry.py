@@ -162,28 +162,65 @@ class OpenTelemetryHandler(logging.Handler):
             self.handleError(record)
 
 
+def _is_debug_enabled() -> bool:
+    """Check if AGNT5_DEBUG is enabled."""
+    import os
+    debug_val = os.environ.get("AGNT5_DEBUG", "").lower()
+    return debug_val in ("1", "true", "yes")
+
+
 def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None) -> None:
     """Configure a Context logger with OpenTelemetry and console handlers."""
     logger.handlers.clear()
 
+    # Determine effective log level based on AGNT5_DEBUG
+    debug_enabled = _is_debug_enabled()
+    effective_level = log_level or (logging.DEBUG if debug_enabled else logging.WARNING)
+
     # OpenTelemetry handler (forwards to Rust)
     otel_handler = OpenTelemetryHandler()
-    otel_handler.setLevel(logging.DEBUG)
+    otel_handler.setLevel(logging.DEBUG)  # Always forward to OTel
     otel_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(otel_handler)
 
-    # Console handler (fallback for local testing)
+    # Console handler - respects AGNT5_DEBUG
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(effective_level)
     console_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
     logger.addHandler(console_handler)
 
-    logger.setLevel(log_level or logging.DEBUG)
+    logger.setLevel(logging.DEBUG)  # Let handlers filter
     logger.propagate = False
 
 
 def setup_module_logger(module_name: str, log_level: Optional[int] = None) -> logging.Logger:
     """Create and configure a logger for a module."""
     logger = logging.getLogger(module_name)
-    setup_context_logger(logger, log_level or logging.INFO)
+    # Default to INFO for module loggers, but respect AGNT5_DEBUG
+    debug_enabled = _is_debug_enabled()
+    default_level = logging.DEBUG if debug_enabled else logging.INFO
+    setup_context_logger(logger, log_level or default_level)
     return logger
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger with AGNT5-consistent formatting.
+
+    Use this to get a logger that follows AGNT5 conventions:
+    - Respects AGNT5_DEBUG environment variable
+    - Uses consistent [LEVEL] format
+    - Integrates with OpenTelemetry when running in a worker
+
+    Args:
+        name: Logger name (typically __name__ or your service name)
+
+    Returns:
+        Configured logger instance
+
+    Example:
+        from agnt5 import get_logger
+
+        logger = get_logger(__name__)
+        logger.info("Starting worker...")
+    """
+    return setup_module_logger(name)

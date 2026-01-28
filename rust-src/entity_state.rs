@@ -147,7 +147,7 @@ impl EntityStateManager {
     pub async fn set_request_sender(&self, sender: agnt5_sdk_core::flume::Sender<ServiceMessage>) {
         let mut request_sender = self.request_sender.lock().await;
         *request_sender = Some(sender);
-        log::info!("EntityStateManager: Request sender configured");
+        log::debug!("EntityStateManager: Request sender configured");
     }
 
     /// Handle incoming RuntimeServiceResponse from the platform
@@ -262,7 +262,7 @@ impl EntityStateManager {
         scope: String,
         scope_id: String,
     ) -> Result<EntityLoadResult, EntityError> {
-        log::info!(
+        log::debug!(
             "EntityStateManager: Loading from platform {}:{} (scope: {}, scope_id: {})",
             entity_type,
             entity_key,
@@ -284,7 +284,7 @@ impl EntityStateManager {
         // Extract load result
         match response.result {
             Some(runtime_service_response::Result::EntityStateLoad(result)) => {
-                log::info!(
+                log::debug!(
                     "EntityStateManager: Platform load result - found: {}, version: {}",
                     result.found,
                     result.version
@@ -310,7 +310,7 @@ impl EntityStateManager {
         scope: String,
         scope_id: String,
     ) -> Result<EntitySaveResult, EntityError> {
-        log::info!(
+        log::debug!(
             "EntityStateManager: Saving to platform {}:{} (expected version: {}, scope: {}, scope_id: {})",
             entity_type,
             entity_key,
@@ -335,7 +335,7 @@ impl EntityStateManager {
         // Extract save result
         match response.result {
             Some(runtime_service_response::Result::EntityStateSave(result)) => {
-                log::info!(
+                log::debug!(
                     "EntityStateManager: Platform save successful - new version: {}",
                     result.new_version
                 );
@@ -491,7 +491,7 @@ impl EntityStateManager {
                 scope_id.clone(),
             ).await {
                 Ok(new_version) => {
-                    log::info!(
+                    log::debug!(
                         "EntityStateManager: Update successful for {}:{} (version {} -> {}) after {} attempts",
                         entity_type,
                         entity_key,
@@ -517,7 +517,7 @@ impl EntityStateManager {
 
                     // Exponential backoff: base_delay * 2^attempt
                     let delay_ms = self.base_delay_ms * (2_u64.pow(attempt - 1));
-                    log::info!(
+                    log::debug!(
                         "EntityStateManager: Version conflict for {}:{}, retrying in {}ms (attempt {}/{})",
                         entity_type,
                         entity_key,

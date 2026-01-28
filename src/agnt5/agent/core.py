@@ -408,7 +408,7 @@ class Agent:
             - run(): Wraps with agent.started/completed events
             - run_sync(): Consumes events and extracts final result
         """
-        self.logger.info(f"[DEBUG _run_core] ENTERED _run_core for agent '{self.name}', tools={list(self.tools.keys())}")
+        self.logger.debug(f"_run_core entered for agent '{self.name}', tools={list(self.tools.keys())}")
         sequence = sequence_start
 
         # Create or adapt context
@@ -601,9 +601,9 @@ class Agent:
                     messages.append(Message.assistant(response_text))
 
                     # Check if LLM wants to use tools
-                    self.logger.info(f"[DEBUG _run_core] response_tool_calls={response_tool_calls}, len={len(response_tool_calls) if response_tool_calls else 0}")
+                    self.logger.debug(f"response_tool_calls count={len(response_tool_calls) if response_tool_calls else 0}")
                     if response_tool_calls:
-                        self.logger.info(f"[DEBUG _run_core] Agent calling {len(response_tool_calls)} tool(s): {[tc.get('name') for tc in response_tool_calls]}")
+                        self.logger.debug(f"Agent calling {len(response_tool_calls)} tool(s): {[tc.get('name') for tc in response_tool_calls]}")
 
                         if not hasattr(context, '_agent_data'):
                             context._agent_data = {}
@@ -636,9 +636,9 @@ class Agent:
                                 index=tool_idx,
                             )
                             # Emit to platform for persistence
-                            self.logger.info(f"[DEBUG _run_core] Emitting ToolCallStarted: tool={tool_name}, context={context is not None}")
+                            self.logger.debug(f"Emitting ToolCallStarted: tool={tool_name}")
                             if context:
-                                self.logger.info(f"[DEBUG _run_core] context.emit(ToolCallStarted) for {tool_name}")
+                                self.logger.debug(f"context.emit(ToolCallStarted) for {tool_name}")
                                 context.emit(tool_started_event)
                             yield tool_started_event
                             sequence += 1
@@ -1184,7 +1184,7 @@ class Agent:
 
         This contains the core agent loop logic. Called by both run() and run_sync().
         """
-        self.logger.info(f"[DEBUG] _run_impl called for agent '{self.name}', tools={list(self.tools.keys())}")
+        self.logger.debug(f" _run_impl called for agent '{self.name}', tools={list(self.tools.keys())}")
         # Create or adapt context
         if context is None:
             # Try to get context from task-local storage (set by workflow/function decorator)
@@ -1406,9 +1406,9 @@ class Agent:
                         messages.append(Message.assistant(response.text))
 
                         # Check if LLM wants to use tools
-                        self.logger.info(f"[DEBUG] LLM response has tool_calls={response.tool_calls is not None and len(response.tool_calls) > 0}, count={len(response.tool_calls) if response.tool_calls else 0}")
+                        self.logger.debug(f" LLM response has tool_calls={response.tool_calls is not None and len(response.tool_calls) > 0}, count={len(response.tool_calls) if response.tool_calls else 0}")
                         if response.tool_calls:
-                            self.logger.info(f"[DEBUG] Agent calling {len(response.tool_calls)} tool(s): {[tc.get('name', 'unknown') for tc in response.tool_calls]}")
+                            self.logger.debug(f" Agent calling {len(response.tool_calls)} tool(s): {[tc.get('name', 'unknown') for tc in response.tool_calls]}")
 
                             # Store current conversation in context for potential handoffs
                             # Use a simple dict attribute since we don't need full state persistence for this
@@ -1437,7 +1437,7 @@ class Agent:
                                 tool_start_time = _time.time()
 
                                 # Emit tool call started event
-                                self.logger.info(f"[DEBUG] Tool call started: {tool_name}, context={context is not None}, correlation_id={tool_correlation_id}")
+                                self.logger.debug(f" Tool call started: {tool_name}, context={context is not None}, correlation_id={tool_correlation_id}")
                                 if context:
                                     event = ToolCallStarted(
                                         name=tool_name,
@@ -1448,7 +1448,7 @@ class Agent:
                                         input_data={"arguments": tool_args_str},
                                         index=tool_idx,
                                     )
-                                    self.logger.info(f"[DEBUG] Emitting ToolCallStarted event: {event.event_type}")
+                                    self.logger.debug(f" Emitting ToolCallStarted event: {event.event_type}")
                                     context.emit(event)
 
                                 # Execute tool
@@ -1504,7 +1504,7 @@ class Agent:
                                     )
 
                                     # Emit tool call completed event
-                                    self.logger.info(f"[DEBUG] Tool call completed: {tool_name}, context={context is not None}")
+                                    self.logger.debug(f" Tool call completed: {tool_name}, context={context is not None}")
                                     if context:
                                         tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
                                         event = ToolCallCompleted(
@@ -1517,7 +1517,7 @@ class Agent:
                                             duration_ms=tool_duration_ms,
                                             index=tool_idx,
                                         )
-                                        self.logger.info(f"[DEBUG] Emitting ToolCallCompleted event: {event.event_type}, duration_ms={tool_duration_ms}")
+                                        self.logger.debug(f" Emitting ToolCallCompleted event: {event.event_type}, duration_ms={tool_duration_ms}")
                                         context.emit(event)
 
                                 except WaitingForUserInputException as e:
@@ -1564,7 +1564,7 @@ class Agent:
                                     )
 
                                     # Emit tool call failed event
-                                    self.logger.info(f"[DEBUG] Tool call failed: {tool_name}, error={e}")
+                                    self.logger.debug(f" Tool call failed: {tool_name}, error={e}")
                                     if context:
                                         event = ToolCallFailed(
                                             name=tool_name,
@@ -1575,7 +1575,7 @@ class Agent:
                                             error_code=type(e).__name__,
                                             error_message=str(e),
                                         )
-                                        self.logger.info(f"[DEBUG] Emitting ToolCallFailed event: {event.event_type}")
+                                        self.logger.debug(f" Emitting ToolCallFailed event: {event.event_type}")
                                         context.emit(event)
 
                             # Add tool results to conversation

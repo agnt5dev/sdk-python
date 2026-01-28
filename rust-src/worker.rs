@@ -114,7 +114,7 @@ impl PyWorker {
         match self.entity_state_manager.try_lock() {
             Ok(mut manager_guard) => {
                 *manager_guard = Some(rust_manager);
-                log::info!("Entity state manager configured for worker");
+                log::debug!("Entity state manager configured for worker");
                 Ok(())
             }
             Err(_) => {
@@ -127,7 +127,7 @@ impl PyWorker {
 
     /// Set the message handler callback
     fn set_message_handler(&self, handler: Py<PyAny>) -> PyResult<()> {
-        log::info!("Setting message handler for PyWorker");
+        log::debug!("Setting message handler for PyWorker");
 
         let mut handler_guard = self.message_handler.lock().map_err(|e| {
             let err_msg = format!("Failed to lock message handler: {}", e);
@@ -136,13 +136,13 @@ impl PyWorker {
         })?;
         *handler_guard = Some(handler);
 
-        log::info!("Message handler set successfully");
+        log::debug!("Message handler set successfully");
         Ok(())
     }
 
     /// Set components for the worker
     fn set_components(&self, py_components: Vec<PyComponentInfo>) -> PyResult<()> {
-        log::info!("Setting {} components for PyWorker", py_components.len());
+        log::debug!("Setting {} components for PyWorker", py_components.len());
 
         let components: Vec<ComponentInfo> = py_components
             .into_iter()
@@ -162,7 +162,7 @@ impl PyWorker {
             }
         }
 
-        log::info!("Components set successfully");
+        log::debug!("Components set successfully");
         Ok(())
     }
 
@@ -413,7 +413,7 @@ impl PyWorker {
     /// # Arguments
     /// * `event_loop` - The Python asyncio event loop object
     fn set_event_loop(&self, py: Python, event_loop: Py<PyAny>) -> PyResult<()> {
-        log::info!("Setting Python event loop for concurrent async execution");
+        log::debug!("Setting Python event loop for concurrent async execution");
 
         // Create TaskLocals from the event loop
         // TaskLocals stores a reference to the Python event loop that can be
@@ -427,13 +427,13 @@ impl PyWorker {
         })?;
         *guard = Some(task_locals);
 
-        log::info!("Event loop set successfully - concurrent Python async execution enabled");
+        log::debug!("Event loop set successfully");
         Ok(())
     }
 
     /// Initialize the worker with components
     fn initialize(&self) -> PyResult<()> {
-        log::info!(
+        log::debug!(
             "Initializing PyWorker for service: {}",
             self.config.service_name
         );
@@ -465,7 +465,7 @@ impl PyWorker {
         // Set global unified journal queue for cross-thread access from emit functions
         // This replaces separate span and log export queues with a single unified queue
         set_journal_queue(worker.journal_queue());
-        log::info!("Global unified journal event queue configured for real-time streaming");
+        log::debug!("Global unified journal event queue configured");
 
         let mut worker_guard = self.worker.lock().map_err(|e| {
             let err_msg = format!("Failed to lock worker: {}", e);
@@ -474,13 +474,13 @@ impl PyWorker {
         })?;
         *worker_guard = Some(worker);
 
-        log::info!("PyWorker initialized successfully");
+        log::debug!("PyWorker initialized successfully");
         Ok(())
     }
 
     /// Run the worker
     fn run<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        log::info!(
+        log::debug!(
             "Starting PyWorker run for service: {}",
             self.config.service_name
         );
@@ -540,11 +540,11 @@ impl PyWorker {
                 }
             };
 
-            log::info!("Starting worker event loop for service: {}", service_name);
+            log::debug!("Starting worker event loop for service: {}", service_name);
 
             match worker.run(message_handler).await {
                 Ok(()) => {
-                    log::info!(
+                    log::debug!(
                         "Worker event loop ended normally for service: {}",
                         service_name
                     );
@@ -578,7 +578,7 @@ impl PyWorker {
                 if sender_guard.is_none() {
                     drop(sender_guard); // Release lock before calling set_request_sender
                     manager.set_request_sender(tx.clone()).await;
-                    log::info!("Entity state manager connected to worker stream");
+                    log::debug!("Entity state manager connected to worker stream");
                 }
             }
         }
@@ -799,9 +799,6 @@ impl PyWorker {
                 //
                 // Use async move block and instrument it with the span to propagate trace context
                 let result = async move {
-                    // TIMING: Track GIL acquisition and Python execution times
-                    let timing_start = std::time::Instant::now();
-
                     // Get TaskLocals with the shared event loop
                     let task_locals: TaskLocals = Python::attach(|_py| -> Result<_, agnt5_sdk_core::error::SdkError> {
                         let guard = event_loop_locals_arc.lock().map_err(|e| {
@@ -816,12 +813,6 @@ impl PyWorker {
                             agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                         })?.clone())
                     })?;
-
-                    // TIMING: Log task_locals acquisition time
-                    let task_locals_ms = timing_start.elapsed().as_millis();
-                    log::info!("⏱️ RUST: Got task_locals (GIL #1): {}ms, invocation_id={}", task_locals_ms, invocation_id);
-
-                    let handler_start = std::time::Instant::now();
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
@@ -917,26 +908,13 @@ impl PyWorker {
                         Ok(future)
                     })?;
 
-                    // TIMING: Log handler setup time (GIL #2)
-                    let handler_setup_ms = handler_start.elapsed().as_millis();
-                    log::info!("⏱️ RUST: Handler setup complete (GIL #2): {}ms, invocation_id={}", handler_setup_ms, invocation_id);
-
-                    let await_start = std::time::Instant::now();
-
-                    let await_result = rust_future
+                    rust_future
                         .await
                         .map_err(|e| {
                             let err_msg = format!("Python async execution failed: {}", e);
                             log::error!("{}", err_msg);
                             agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                        });
-
-                    // TIMING: Log Python future await time
-                    let await_ms = await_start.elapsed().as_millis();
-                    let total_ms = timing_start.elapsed().as_millis();
-                    log::info!("⏱️ RUST: Python future awaited: {}ms, total={}ms, invocation_id={}", await_ms, total_ms, invocation_id);
-
-                    await_result
+                        })
                 }
                 .instrument(execution_span)
                 .await?;

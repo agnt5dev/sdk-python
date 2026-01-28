@@ -162,14 +162,12 @@ class Worker(ExecutorMixin):
 
         rust_core = RustEntityStateManager(tenant_id="default")
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
-        logger.info("Created EntityStateAdapter with Rust core for state management")
 
         # Create CheckpointClient for step-level memoization
         try:
             from ..checkpoint import CheckpointClient
 
             self._checkpoint_client = CheckpointClient()
-            logger.info("Created CheckpointClient for step-level memoization")
         except Exception as e:
             logger.warning(f"Failed to create CheckpointClient (memoization disabled): {e}")
             self._checkpoint_client = None
@@ -222,9 +220,9 @@ class Worker(ExecutorMixin):
             }
 
             total_explicit = sum(len(v) for v in self._explicit_components.values())
-            logger.info(
+            logger.debug(
                 f"Worker initialized: {service_name} v{service_version} (runtime: {runtime}), "
-                f"{total_explicit} components explicitly registered"
+                f"{total_explicit} components registered"
             )
 
     def register_components(
@@ -568,7 +566,6 @@ class Worker(ExecutorMixin):
                 output_schema=None,  # Scorers use standardized ScorerResult
             ))
 
-        logger.info(f"Discovered {len(components)} components (functions + entities + workflows + agents + tools + scorers)")
         return components
 
     def _create_message_handler(self) -> Any:
@@ -636,6 +633,48 @@ class Worker(ExecutorMixin):
 
         return handle_message
 
+    def _print_startup_banner(self, components: list) -> None:
+        """Print startup banner with component tree and dashboard link."""
+        import os
+
+        # Group components by type
+        by_type: dict[str, list[str]] = {}
+        for comp in components:
+            comp_type = comp.component_type
+            if comp_type not in by_type:
+                by_type[comp_type] = []
+            by_type[comp_type].append(comp.name)
+
+        # Print service info
+        print(f"\n  {self.service_name} v{self.service_version}")
+        print("  " + "─" * 40)
+
+        # Print component tree
+        type_order = ["workflow", "function", "agent", "tool", "scorer"]
+        type_icons = {
+            "workflow": "◆",
+            "function": "ƒ",
+            "agent": "●",
+            "tool": "◇",
+            "scorer": "★",
+        }
+
+        for comp_type in type_order:
+            if comp_type in by_type:
+                icon = type_icons.get(comp_type, "•")
+                names = by_type[comp_type]
+                print(f"  {icon} {comp_type}s ({len(names)})")
+                for i, name in enumerate(sorted(names)):
+                    is_last = i == len(names) - 1
+                    prefix = "└──" if is_last else "├──"
+                    print(f"    {prefix} {name}")
+
+        # Print dashboard link
+        dashboard_url = os.getenv("AGNT5_DASHBOARD_URL", "http://localhost:34181")
+        print("  " + "─" * 40)
+        print(f"  Dashboard: {dashboard_url}")
+        print()
+
     async def run(self) -> None:
         """Run the worker (register and start message loop).
 
@@ -649,32 +688,25 @@ class Worker(ExecutorMixin):
         This is the main entry point for your worker service.
         """
         try:
-            logger.info(f"Starting worker: {self.service_name}")
-
             components = self._discover_components()
+            self._print_startup_banner(components)
             self._rust_worker.set_components(components)
 
             if self.metadata:
                 self._rust_worker.set_service_metadata(self.metadata)
 
             # Configure entity state manager
-            logger.info("Configuring Rust EntityStateManager for database persistence")
             if (
                 hasattr(self._entity_state_adapter, "_rust_core")
                 and self._entity_state_adapter._rust_core
             ):
                 self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
-                logger.info("Successfully configured Rust EntityStateManager")
 
             loop = asyncio.get_running_loop()
-            logger.info("Passing Python event loop to Rust worker for concurrent execution")
-
             self._rust_worker.set_event_loop(loop)
             handler = self._create_message_handler()
             self._rust_worker.set_message_handler(handler)
             self._rust_worker.initialize()
-
-            logger.info("Worker registered successfully, entering message loop...")
 
             await self._rust_worker.run()
 

@@ -80,7 +80,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_with_context] Emitting run.failed event: "
                     f"event_type={failed_event.event_type}, "
                     f"error={error_msg}"
@@ -164,11 +164,12 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_function] Emitting run.started event: "
                 f"component={config.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_started_event)
+            logger.info(f"Executing function {config.name}")
 
             # Emit function.started (child of run)
             start_time_ns = time.time_ns()
@@ -181,7 +182,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_function] Emitting function.started event: "
                 f"component={config.name}, correlation_id={fn_correlation_id}"
             )
@@ -224,7 +225,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_function] Emitting function.failed event: "
                     f"component={config.name}, error={error_msg}"
                 )
@@ -239,10 +240,11 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_function] Emitting run.failed event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
+                logger.info(f"Function {config.name} failed: {error_msg}")
                 ctx.emit(run_failed_event)
 
                 # Return None - the event queue handles delivery
@@ -261,7 +263,7 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=duration_ms,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_function] Emitting function.completed event: "
                 f"component={config.name}, duration_ms={duration_ms}"
             )
@@ -276,10 +278,11 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_function] Emitting run.completed event: "
                 f"component={config.name}, correlation_id={run_correlation_id}"
             )
+            logger.info(f"Function {config.name} completed ({duration_ms}ms)")
             ctx.emit(run_completed_event)
 
             # Return None - the event queue handles delivery
@@ -294,9 +297,6 @@ class ExecutorMixin:
         sequence = 0
         has_typed_events = False
         first_chunk = True
-
-        print("=-----------------")
-        print("Run Started..")
 
         async for chunk in result:
             if isinstance(chunk, Event):
@@ -387,7 +387,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_tool] Emitting run.started event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
@@ -404,7 +404,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_tool] Emitting tool.started event: "
                 f"tool={tool.name}, correlation_id={tool_correlation_id}"
             )
@@ -430,7 +430,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_tool] Emitting tool.failed event: "
                     f"tool={tool.name}, error={error_msg}"
                 )
@@ -445,7 +445,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_tool] Emitting run.failed event: "
                     f"tool={tool.name}, correlation_id={run_correlation_id}"
                 )
@@ -467,7 +467,7 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=duration_ms,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_tool] Emitting tool.completed event: "
                 f"tool={tool.name}, duration_ms={duration_ms}"
             )
@@ -481,7 +481,7 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_tool] Emitting run.completed event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
@@ -544,7 +544,7 @@ class ExecutorMixin:
                 input_data={"key": entity_key, "method": method_name, **input_dict},
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_entity] Emitting run.started event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
@@ -560,7 +560,7 @@ class ExecutorMixin:
                 component_type=ComponentType.ENTITY,
                 input_data={"key": entity_key, "method": method_name, **input_dict},
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_entity] Emitting entity.started event: "
                 f"entity={entity_type.name}, key={entity_key}, method={method_name}"
             )
@@ -592,7 +592,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_entity] Emitting entity.failed event: "
                     f"entity={entity_type.name}, error={error_msg}"
                 )
@@ -607,7 +607,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_entity] Emitting run.failed event: "
                     f"entity={entity_type.name}, correlation_id={run_correlation_id}"
                 )
@@ -629,7 +629,7 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=duration_ms,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_entity] Emitting entity.completed event: "
                 f"entity={entity_type.name}, duration_ms={duration_ms}"
             )
@@ -643,7 +643,7 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_entity] Emitting run.completed event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
@@ -678,9 +678,9 @@ class ExecutorMixin:
             session_id = input_dict.get("session_id") or str(uuid.uuid4())
 
             if not input_dict.get("session_id"):
-                logger.info(f"Created new agent session: {session_id}")
+                logger.debug(f"Created new agent session: {session_id}")
             else:
-                logger.info(f"Using existing agent session: {session_id}")
+                logger.debug(f"Using existing agent session: {session_id}")
 
             correlation_id = generate_cid()
             return AgentContext(
@@ -713,7 +713,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=getattr(req, "attempt", 0),
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_agent] Emitting run.started event: "
                 f"agent={agent.name}, correlation_id={run_correlation_id}"
             )
@@ -729,7 +729,7 @@ class ExecutorMixin:
                 component_type=ComponentType.AGENT,
                 input_data={"message": user_message},
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_agent] Emitting agent.started event: "
                 f"agent={agent.name}, correlation_id={agent_correlation_id}"
             )
@@ -823,7 +823,7 @@ class ExecutorMixin:
                     output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_agent] Emitting agent.completed event: "
                     f"agent={agent.name}, duration_ms={duration_ms}"
                 )
@@ -837,7 +837,7 @@ class ExecutorMixin:
                     component_type=ComponentType.RUN,
                     output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_agent] Emitting run.completed event: "
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
@@ -861,7 +861,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_agent] Emitting agent.failed event: "
                     f"agent={agent.name}, error={error_msg}"
                 )
@@ -876,7 +876,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_agent] Emitting run.failed event: "
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
@@ -941,7 +941,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_scorer] Emitting run.started event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
@@ -958,7 +958,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_scorer] Emitting scorer.started event: "
                 f"scorer={config.name}, correlation_id={scorer_correlation_id}"
             )
@@ -999,7 +999,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_scorer] Emitting scorer.failed event: "
                     f"scorer={config.name}, error={error_msg}"
                 )
@@ -1014,7 +1014,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_scorer] Emitting run.failed event: "
                     f"scorer={config.name}, correlation_id={run_correlation_id}"
                 )
@@ -1044,7 +1044,7 @@ class ExecutorMixin:
                 output_data=result_dict,
                 duration_ms=duration_ms,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_scorer] Emitting scorer.completed event: "
                 f"scorer={config.name}, duration_ms={duration_ms}"
             )
@@ -1058,7 +1058,7 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result_dict,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_scorer] Emitting run.completed event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
@@ -1113,9 +1113,9 @@ class ExecutorMixin:
             session_id = input_dict.get("session_id")
             if not session_id:
                 session_id = str(_uuid.uuid4())
-                logger.info(f"Created new workflow session: {session_id}")
+                logger.debug(f"Created new workflow session: {session_id}")
             else:
-                logger.info(f"Using existing workflow session: {session_id}")
+                logger.debug(f"Using existing workflow session: {session_id}")
 
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
@@ -1133,7 +1133,7 @@ class ExecutorMixin:
                     if completed_steps_json:
                         try:
                             completed_steps = json.loads(completed_steps_json)
-                            logger.info(f"Replaying workflow with {len(completed_steps)} cached steps")
+                            logger.debug(f"Replaying workflow with {len(completed_steps)} cached steps")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse completed_steps from metadata")
                 elif "step_events" in request.metadata:
@@ -1145,7 +1145,7 @@ class ExecutorMixin:
                                 if "step_name" in event and "result" in event:
                                     completed_steps[event["step_name"]] = event["result"]
                             step_events = step_events_list
-                            logger.info(f"Resuming workflow with {len(completed_steps)} completed steps")
+                            logger.debug(f"Resuming workflow with {len(completed_steps)} completed steps")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse step_events from metadata")
 
@@ -1155,28 +1155,28 @@ class ExecutorMixin:
                     if workflow_state_json:
                         try:
                             initial_state = json.loads(workflow_state_json)
-                            logger.info(f"Loaded workflow state: {len(initial_state)} keys")
+                            logger.debug(f"Loaded workflow state: {len(initial_state)} keys")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse workflow_state from metadata")
 
                 # Check for user response (resume after pause)
                 if "user_response" in request.metadata:
                     user_response = request.metadata["user_response"]
-                    logger.info(f"Resuming workflow with user response: {user_response}")
+                    logger.debug(f"Resuming workflow with user response: {user_response}")
 
                 # Restore workflow correlation ID for resume
                 # This ensures the same correlation ID is used after resume
                 if "workflow_correlation_id" in request.metadata:
                     resumed_workflow_correlation_id = request.metadata["workflow_correlation_id"]
-                    logger.info(f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}")
+                    logger.debug(f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}")
 
                 # Restore step correlation info for proper event pairing on resume
                 if "step_correlation_id" in request.metadata:
                     resumed_step_correlation_id = request.metadata["step_correlation_id"]
-                    logger.info(f"Restoring step correlation ID: {resumed_step_correlation_id}")
+                    logger.debug(f"Restoring step correlation ID: {resumed_step_correlation_id}")
                 if "step_name" in request.metadata:
                     resumed_step_name = request.metadata["step_name"]
-                    logger.info(f"Restoring step name: {resumed_step_name}")
+                    logger.debug(f"Restoring step name: {resumed_step_name}")
 
             # Extract session_id and user_id for memory scoping
             session_id = request.session_id if hasattr(request, 'session_id') and request.session_id else request.invocation_id
@@ -1224,7 +1224,7 @@ class ExecutorMixin:
                 if hasattr(state_adapter, '_standalone_states'):
                     state_adapter._standalone_states[workflow_entity._state_key] = initial_state
                 workflow_entity._state = WorkflowState(initial_state.copy(), workflow_entity)
-                logger.info(f"Initialized workflow entity state with {len(initial_state)} keys")
+                logger.debug(f"Initialized workflow entity state with {len(initial_state)} keys")
 
             # Create WorkflowContext
             ctx = WorkflowContext(
@@ -1243,7 +1243,7 @@ class ExecutorMixin:
             # Use restored correlation ID for resumed workflows, or generate a new one
             if resumed_workflow_correlation_id:
                 workflow_correlation_id = resumed_workflow_correlation_id
-                logger.info(f"Using restored workflow correlation ID: {workflow_correlation_id}")
+                logger.debug(f"Using restored workflow correlation ID: {workflow_correlation_id}")
             else:
                 workflow_correlation_id = generate_cid()
 
@@ -1277,11 +1277,12 @@ class ExecutorMixin:
                     input_data=input_dict,
                     attempt=getattr(request, 'attempt', 0),
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_workflow] Emitting run.started event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
                 ctx.emit(run_started_event)
+                logger.info(f"Executing workflow {config.name}")
 
                 # Emit workflow.started event (child of run)
                 workflow_started_event = Started(
@@ -1292,13 +1293,13 @@ class ExecutorMixin:
                     input_data=input_dict,
                     attempt=getattr(request, 'attempt', 0),
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_workflow] Emitting workflow.started event: "
                     f"component={config.name}, correlation_id={workflow_correlation_id}"
                 )
                 ctx.emit(workflow_started_event)
             else:
-                logger.info(
+                logger.debug(
                     f"[_execute_workflow] Skipping run.started and workflow.started for resumed workflow: "
                     f"component={config.name}"
                 )
@@ -1333,7 +1334,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=workflow_duration_ms,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_workflow] Emitting workflow.failed event: "
                     f"component={config.name}, error={error_msg}"
                 )
@@ -1348,7 +1349,7 @@ class ExecutorMixin:
                     error_code=type(workflow_error).__name__,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.debug(
                     f"[_execute_workflow] Emitting run.failed event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
@@ -1361,14 +1362,14 @@ class ExecutorMixin:
             end_time_ns = time.time_ns()
             workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
 
-            logger.info(f"Workflow completed in {workflow_duration_ms}ms")
+            logger.info(f"Workflow {config.name} completed ({workflow_duration_ms}ms)")
 
             # Persist workflow entity state
             if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
                 if ctx._workflow_entity._state.has_changes():
                     try:
                         await ctx._workflow_entity._persist_state()
-                        logger.info(f"Persisted WorkflowEntity state for run {request.invocation_id}")
+                        logger.debug(f"Persisted WorkflowEntity state for run {request.invocation_id}")
                     except Exception as persist_error:
                         logger.error(f"Failed to persist WorkflowEntity state: {persist_error}", exc_info=True)
 
@@ -1381,7 +1382,7 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=workflow_duration_ms,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_workflow] Emitting workflow.completed event: "
                 f"component={config.name}, duration_ms={workflow_duration_ms}"
             )
@@ -1396,7 +1397,7 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            logger.info(
+            logger.debug(
                 f"[_execute_workflow] Emitting run.completed event: "
                 f"component={config.name}, correlation_id={run_correlation_id}"
             )
