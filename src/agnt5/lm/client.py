@@ -372,7 +372,15 @@ class LMClient(LanguageModel):
                 "tool_calls": getattr(response, 'tool_calls', None),
             },
             duration_ms=latency_ms,
-            metadata={"name": model},
+            metadata={
+                "name": model,
+                "model": model,
+                "provider": self._provider or "unknown",
+                "duration_ms": str(latency_ms),
+                "input_tokens": str(usage.prompt_tokens if usage else 0),
+                "output_tokens": str(usage.completion_tokens if usage else 0),
+                "total_tokens": str(usage.total_tokens if usage else 0),
+            },
         )
         ctx.emit(completed_event)
 

@@ -2,7 +2,10 @@
 
 import json
 import logging
-from typing import Any, Dict, MutableMapping, Optional
+from typing import Any, Dict, MutableMapping, Optional, Union
+
+# Module-level default log level (set via set_log_level())
+_default_log_level: Optional[int] = None
 
 # Standard logging kwargs that should NOT be treated as custom attributes
 _STANDARD_LOGGING_KWARGS = frozenset({
@@ -169,13 +172,53 @@ def _is_debug_enabled() -> bool:
     return debug_val in ("1", "true", "yes")
 
 
+def set_log_level(level: Union[int, str]) -> None:
+    """Set the default log level for context loggers.
+
+    Call this in your app.py to control what log levels appear in console output.
+
+    Args:
+        level: Log level as int (e.g., logging.DEBUG) or string (e.g., "DEBUG", "INFO")
+
+    Example:
+        import agnt5
+        import logging
+
+        agnt5.set_log_level(logging.DEBUG)  # Show all logs
+        agnt5.set_log_level("INFO")         # Show INFO and above
+    """
+    global _default_log_level
+
+    if isinstance(level, str):
+        level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "WARN": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }
+        level_upper = level.upper()
+        if level_upper not in level_map:
+            raise ValueError(f"Invalid log level: {level}. Use DEBUG, INFO, WARNING, ERROR, or CRITICAL.")
+        _default_log_level = level_map[level_upper]
+    else:
+        _default_log_level = level
+
+
 def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None) -> None:
     """Configure a Context logger with OpenTelemetry and console handlers."""
     logger.handlers.clear()
 
-    # Determine effective log level based on AGNT5_DEBUG
-    debug_enabled = _is_debug_enabled()
-    effective_level = log_level or (logging.DEBUG if debug_enabled else logging.WARNING)
+    # Priority: explicit log_level > user-configured default > AGNT5_DEBUG > INFO
+    if log_level is not None:
+        effective_level = log_level
+    elif _default_log_level is not None:
+        effective_level = _default_log_level
+    elif _is_debug_enabled():
+        effective_level = logging.DEBUG
+    else:
+        effective_level = logging.INFO
 
     # OpenTelemetry handler (forwards to Rust)
     otel_handler = OpenTelemetryHandler()

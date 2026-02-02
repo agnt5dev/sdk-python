@@ -94,7 +94,7 @@ from .lm import (
 from .types import BackoffPolicy, BackoffType, RetryPolicy, WorkflowConfig
 from .version import _get_version
 from .worker import Worker
-from ._telemetry import get_logger
+from ._telemetry import get_logger, set_log_level
 from .workflow import WorkflowContext, WorkflowRegistry, workflow
 from .state import StateManager, SessionContext, UserContext
 
@@ -176,6 +176,7 @@ __all__ = [
     "function",
     "FunctionRegistry",
     "get_logger",
+    "set_log_level",
     # Entity API was removed in v0.4.0 - use State/Memory APIs
     # Workflow components
     "WorkflowContext",
