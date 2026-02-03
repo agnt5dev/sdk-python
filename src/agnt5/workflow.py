@@ -2131,6 +2131,16 @@ def workflow(
                 # Auto-create workflow entity and context for direct workflow calls
                 run_id = f"workflow-{uuid.uuid4().hex[:8]}"
 
+                # Set up standalone state adapter if not already set
+                # This enables direct workflow execution without Worker
+                from ._state_adapter import _state_adapter_ctx, StateAdapter
+
+                existing_adapter = _state_adapter_ctx.get()
+                state_token = None
+                if existing_adapter is None:
+                    standalone_adapter = StateAdapter()  # In-memory mode
+                    state_token = _state_adapter_ctx.set(standalone_adapter)
+
                 # Create WorkflowEntity to manage state
                 workflow_entity = WorkflowEntity(run_id=run_id)
 
@@ -2143,8 +2153,10 @@ def workflow(
                 # Set context in task-local storage for automatic propagation
                 token = set_current_context(ctx)
                 try:
-                    # Execute workflow
-                    result = await handler_func(ctx, *args, **kwargs)
+                    # Execute workflow - only pass kwargs, not original args
+                    # The original args would contain a non-WorkflowContext that
+                    # would incorrectly map to the first positional parameter
+                    result = await handler_func(ctx, **kwargs)
 
                     # Persist workflow state after successful execution
                     try:
@@ -2159,6 +2171,10 @@ def workflow(
                     from .context import _current_context
 
                     _current_context.reset(token)
+
+                    # Clean up standalone state adapter if we created one
+                    if state_token is not None:
+                        _state_adapter_ctx.reset(state_token)
             else:
                 # WorkflowContext provided - use it and set in contextvar
                 ctx = args[0]
