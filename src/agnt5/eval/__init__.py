@@ -19,10 +19,21 @@ Trace assertions (glassbox):
     - TraceAssertion.event_count(type, min): Event occurred at least min times
 
 LLM-as-judge:
-    Use llm_judge for semantic evaluation with an LLM:
+    For client.eval() - use LLMJudge class:
 
-    >>> from agnt5.eval import llm_judge, LlmJudgeConfig
-    >>> config = LlmJudgeConfig(criteria="Is the response helpful?")
+    >>> from agnt5 import Client
+    >>> from agnt5.eval import LLMJudge
+    >>> client = Client()
+    >>> result = await client.eval(
+    ...     component="my_agent",
+    ...     input_data={"question": "What is 2+2?"},
+    ...     scorers=["exact_match", LLMJudge(criteria="Is the answer correct?")]
+    ... )
+
+    For standalone local evaluation - use llm_judge function:
+
+    >>> from agnt5.eval import llm_judge, LLMJudgeConfig
+    >>> config = LLMJudgeConfig(criteria="Is the response helpful?")
     >>> result = await llm_judge("The answer is 42.", config)
     >>> print(f"Score: {result.score}, Passed: {result.passed}")
 
@@ -81,8 +92,9 @@ from .types import EvalContext, ScorerRequest, ScorerResult as ScorerResultPy, T
 
 # LLM-as-judge
 from .llm_judge import (
-    LlmJudgeConfig,
-    LlmJudgeResult,
+    LLMJudge,
+    LLMJudgeConfig,
+    LLMJudgeResult,
     evaluate_with_criteria,
     llm_judge,
 )
@@ -98,10 +110,11 @@ __all__ = [
     "levenshtein",
     "trace_scorer",
     # LLM-as-judge
+    "LLMJudge",
     "llm_judge",
     "evaluate_with_criteria",
-    "LlmJudgeConfig",
-    "LlmJudgeResult",
+    "LLMJudgeConfig",
+    "LLMJudgeResult",
     # Python types for scorer component
     "ScorerRequest",
     "ScorerResultPy",

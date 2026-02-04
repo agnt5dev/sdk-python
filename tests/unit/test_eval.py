@@ -837,14 +837,14 @@ That's my assessment."""
         assert result.label == "parse_error"
 
 
-class TestLlmJudgeConfig:
-    """Test LlmJudgeConfig and LlmJudgeResult."""
+class TestLLMJudgeConfig:
+    """Test LLMJudgeConfig and LLMJudgeResult."""
 
     def test_config_defaults(self):
-        """Test LlmJudgeConfig default values."""
-        from agnt5.eval.llm_judge import LlmJudgeConfig
+        """Test LLMJudgeConfig default values."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig
 
-        config = LlmJudgeConfig(criteria="Is the answer helpful?")
+        config = LLMJudgeConfig(criteria="Is the answer helpful?")
 
         assert config.criteria == "Is the answer helpful?"
         assert config.model == "openai/gpt-4o-mini"
@@ -853,10 +853,10 @@ class TestLlmJudgeConfig:
         assert config.include_input is False
 
     def test_config_custom_values(self):
-        """Test LlmJudgeConfig with custom values."""
-        from agnt5.eval.llm_judge import LlmJudgeConfig
+        """Test LLMJudgeConfig with custom values."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig
 
-        config = LlmJudgeConfig(
+        config = LLMJudgeConfig(
             criteria="Is the response accurate?",
             model="anthropic/claude-3-haiku",
             temperature=0.1,
@@ -869,10 +869,10 @@ class TestLlmJudgeConfig:
         assert config.include_input is True
 
     def test_result_dataclass(self):
-        """Test LlmJudgeResult dataclass."""
-        from agnt5.eval.llm_judge import LlmJudgeResult
+        """Test LLMJudgeResult dataclass."""
+        from agnt5.eval.llm_judge import LLMJudgeResult
 
-        result = LlmJudgeResult(
+        result = LLMJudgeResult(
             score=0.9,
             passed=True,
             explanation="Excellent answer",
@@ -885,6 +885,89 @@ class TestLlmJudgeConfig:
         assert result.explanation == "Excellent answer"
         assert result.label == "good"
         assert result.metadata == {"raw": "data"}
+
+
+class TestLLMJudge:
+    """Test LLMJudge class for client.eval() usage."""
+
+    def test_llm_judge_defaults(self):
+        """Test LLMJudge default values."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(criteria="Is the answer correct?")
+
+        assert judge.criteria == "Is the answer correct?"
+        assert judge.model == "openai/gpt-4o-mini"
+        assert judge.include_input is False
+        assert judge.temperature == 0.0
+
+    def test_llm_judge_custom_values(self):
+        """Test LLMJudge with custom values."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(
+            criteria="Is the response helpful and accurate?",
+            model="anthropic/claude-3-haiku",
+            include_input=True,
+            temperature=0.1,
+        )
+
+        assert judge.criteria == "Is the response helpful and accurate?"
+        assert judge.model == "anthropic/claude-3-haiku"
+        assert judge.include_input is True
+        assert judge.temperature == 0.1
+
+    def test_to_scorer_spec_with_provider_model(self):
+        """Test to_scorer_spec with provider/model format."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(
+            criteria="Check correctness",
+            model="openai/gpt-4o",
+        )
+
+        spec = judge.to_scorer_spec()
+
+        assert spec["name"] == "llm_judge"
+        assert spec["config"]["provider"] == "openai"
+        assert spec["config"]["model"] == "gpt-4o"
+        assert spec["config"]["criteria"] == "Check correctness"
+        assert spec["config"]["include_input"] is False
+        assert spec["config"]["temperature"] == 0.0
+
+    def test_to_scorer_spec_without_provider(self):
+        """Test to_scorer_spec defaults to openai provider."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(
+            criteria="Check quality",
+            model="gpt-4o-mini",
+        )
+
+        spec = judge.to_scorer_spec()
+
+        assert spec["name"] == "llm_judge"
+        assert spec["config"]["provider"] == "openai"
+        assert spec["config"]["model"] == "gpt-4o-mini"
+
+    def test_to_scorer_spec_anthropic(self):
+        """Test to_scorer_spec with Anthropic model."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(
+            criteria="Evaluate response",
+            model="anthropic/claude-3-5-sonnet-latest",
+            include_input=True,
+            temperature=0.2,
+        )
+
+        spec = judge.to_scorer_spec()
+
+        assert spec["name"] == "llm_judge"
+        assert spec["config"]["provider"] == "anthropic"
+        assert spec["config"]["model"] == "claude-3-5-sonnet-latest"
+        assert spec["config"]["include_input"] is True
+        assert spec["config"]["temperature"] == 0.2
 
 
 class TestScorerComponentType:

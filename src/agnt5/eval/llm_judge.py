@@ -10,11 +10,80 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from ..lm import generate
+
+@dataclass
+class LLMJudge:
+    """LLM-as-judge scorer for use with client.eval().
+
+    This class is used to configure an LLM judge scorer when running evaluations
+    through the platform. For standalone local evaluation, use llm_judge() function
+    or LLMJudgeConfig instead.
+
+    Args:
+        criteria: Evaluation criteria/rubric for the judge
+        model: Model to use in "provider/model" format (default: "openai/gpt-4o-mini")
+        include_input: Include original input in judge prompt (default: False)
+        temperature: LLM temperature, 0.0 for deterministic (default: 0.0)
+
+    Example:
+        >>> from agnt5 import Client
+        >>> from agnt5.eval import LLMJudge
+        >>>
+        >>> client = Client()
+        >>> result = await client.eval(
+        ...     component="my_agent",
+        ...     input_data={"question": "What is 2+2?"},
+        ...     expected="4",
+        ...     scorers=[
+        ...         "exact_match",
+        ...         LLMJudge(
+        ...             criteria="Is the answer mathematically correct?",
+        ...             model="openai/gpt-4o-mini",
+        ...         )
+        ...     ]
+        ... )
+        >>> print(f"Passed: {result.passed}")
+    """
+
+    criteria: str
+    model: str = "openai/gpt-4o-mini"
+    include_input: bool = False
+    temperature: float = 0.0
+
+    def to_scorer_spec(self) -> Dict[str, Any]:
+        """Serialize to platform scorer spec format.
+
+        Returns:
+            Dict with "name" and "config" keys for the platform API.
+        """
+        # Parse model format "provider/model" -> provider, model
+        if "/" in self.model:
+            provider, model_name = self.model.split("/", 1)
+        else:
+            provider = "openai"
+            model_name = self.model
+
+        return {
+            "name": "llm_judge",
+            "config": {
+                "provider": provider,
+                "model": model_name,
+                "criteria": self.criteria,
+                "include_input": self.include_input,
+                "temperature": self.temperature,
+            },
+        }
+
+
+# Import here to avoid circular import at module level
+def _get_generate():
+    from ..lm import generate
+
+    return generate
 
 
 @dataclass
-class LlmJudgeConfig:
+class LLMJudgeConfig:
     """Configuration for LLM-as-judge scorer.
 
     Attributes:
@@ -33,7 +102,7 @@ class LlmJudgeConfig:
 
 
 @dataclass
-class LlmJudgeResult:
+class LLMJudgeResult:
     """Result from LLM judge evaluation.
 
     Attributes:
@@ -63,24 +132,24 @@ Respond ONLY with the JSON object, no other text."""
 
 async def llm_judge(
     output: Any,
-    config: LlmJudgeConfig,
+    config: LLMJudgeConfig,
     *,
     expected: Optional[Any] = None,
     input_data: Optional[Any] = None,
-) -> LlmJudgeResult:
+) -> LLMJudgeResult:
     """Evaluate output using an LLM as judge.
 
     Args:
         output: The output to evaluate
-        config: LlmJudgeConfig with criteria and settings
+        config: LLMJudgeConfig with criteria and settings
         expected: Expected output for comparison (optional)
         input_data: Original input for context (optional)
 
     Returns:
-        LlmJudgeResult with score, passed status, and explanation
+        LLMJudgeResult with score, passed status, and explanation
 
     Example:
-        >>> config = LlmJudgeConfig(
+        >>> config = LLMJudgeConfig(
         ...     criteria="Is the response helpful and accurate?",
         ...     model="openai/gpt-4o-mini"
         ... )
@@ -106,6 +175,7 @@ async def llm_judge(
     user_content += "Please evaluate the output and respond with a JSON object."
 
     try:
+        generate = _get_generate()
         response = await generate(
             model=config.model,
             messages=[
@@ -118,7 +188,7 @@ async def llm_judge(
         return _parse_llm_response(response.text)
 
     except Exception as e:
-        return LlmJudgeResult(
+        return LLMJudgeResult(
             score=0.0,
             passed=False,
             explanation=f"LLM call failed: {str(e)}",
@@ -136,8 +206,8 @@ def _format_value(value: Any) -> str:
         return str(value)
 
 
-def _parse_llm_response(content: str) -> LlmJudgeResult:
-    """Parse the LLM's JSON response into an LlmJudgeResult."""
+def _parse_llm_response(content: str) -> LLMJudgeResult:
+    """Parse the LLM's JSON response into an LLMJudgeResult."""
     json_str = _extract_json(content)
 
     try:
@@ -153,7 +223,7 @@ def _parse_llm_response(content: str) -> LlmJudgeResult:
         explanation = data.get("explanation")
         label = data.get("label")
 
-        return LlmJudgeResult(
+        return LLMJudgeResult(
             score=score,
             passed=passed,
             explanation=explanation,
@@ -162,7 +232,7 @@ def _parse_llm_response(content: str) -> LlmJudgeResult:
         )
 
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        return LlmJudgeResult(
+        return LLMJudgeResult(
             score=0.0,
             passed=False,
             explanation=f"Could not parse LLM response: {content}",
@@ -201,7 +271,7 @@ async def evaluate_with_criteria(
     *,
     model: str = "openai/gpt-4o-mini",
     expected: Optional[Any] = None,
-) -> LlmJudgeResult:
+) -> LLMJudgeResult:
     """Simple interface to evaluate output against criteria.
 
     Args:
@@ -211,7 +281,7 @@ async def evaluate_with_criteria(
         expected: Expected output for comparison (optional)
 
     Returns:
-        LlmJudgeResult with score and explanation
+        LLMJudgeResult with score and explanation
 
     Example:
         >>> result = await evaluate_with_criteria(
@@ -220,5 +290,5 @@ async def evaluate_with_criteria(
         ... )
         >>> print(f"Passed: {result.passed}")
     """
-    config = LlmJudgeConfig(criteria=criteria, model=model)
+    config = LLMJudgeConfig(criteria=criteria, model=model)
     return await llm_judge(output, config, expected=expected)

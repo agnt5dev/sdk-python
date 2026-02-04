@@ -3,7 +3,10 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+
+if TYPE_CHECKING:
+    from .eval import LLMJudge
 from urllib.parse import urljoin
 
 import httpx
@@ -570,7 +573,7 @@ class Client:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         expected: Optional[Any] = None,
-        scorers: Optional[List[str]] = None,
+        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -579,14 +582,15 @@ class Client:
         """Evaluate a component's output using specified scorers.
 
         This method executes a component and runs one or more scorers against
-        its output. Scorers can be built-in (exact_match, contains, etc.) or
-        custom scorers registered with the @scorer decorator.
+        its output. Scorers can be built-in (exact_match, contains, etc.),
+        custom scorers registered with the @scorer decorator, or LLMJudge
+        instances for LLM-based evaluation.
 
         Args:
             component: Name of the component to evaluate
             input_data: Input data for the component (will be sent as JSON body)
             expected: Expected output for comparison scorers (optional)
-            scorers: List of scorer names to run (default: ["exact_match"] if expected provided)
+            scorers: List of scorer names or LLMJudge instances (default: ["exact_match"] if expected provided)
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
@@ -600,6 +604,8 @@ class Client:
 
         Example:
             ```python
+            from agnt5.eval import LLMJudge
+
             # Simple evaluation with expected output
             result = client.eval(
                 component="greet",
@@ -610,12 +616,15 @@ class Client:
             print(f"Passed: {result.passed}")
             print(f"Score: {result.scores[0].score}")
 
-            # Evaluate with multiple scorers
+            # Evaluate with LLM judge
             result = client.eval(
                 component="summarize",
                 component_type="agent",
                 input_data={"text": "Long article..."},
-                scorers=["format_checker", "length_validator", "llm_judge"]
+                scorers=[
+                    "json_valid",
+                    LLMJudge(criteria="Is the summary concise and accurate?")
+                ]
             )
             for score in result.scores:
                 print(f"{score.scorer}: {score.score} - {score.explanation}")
@@ -634,12 +643,24 @@ class Client:
         if scorers is None:
             scorers = ["exact_match"] if expected is not None else []
 
+        # Normalize scorers to spec format
+        scorer_specs = []
+        for s in scorers:
+            if isinstance(s, str):
+                scorer_specs.append({"name": s})
+            elif hasattr(s, "to_scorer_spec"):
+                # LLMJudge or other scorer objects with to_scorer_spec method
+                scorer_specs.append(s.to_scorer_spec())
+            else:
+                # Assume it's already a dict spec
+                scorer_specs.append(s)
+
         # Build request payload
         payload = {
             "component": component,
             "component_type": component_type,
             "input": input_data,
-            "scorers": scorers,
+            "scorers": scorer_specs,
         }
         if expected is not None:
             payload["expected"] = expected
@@ -1934,7 +1955,7 @@ class AsyncClient:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         expected: Optional[Any] = None,
-        scorers: Optional[List[str]] = None,
+        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -1943,14 +1964,15 @@ class AsyncClient:
         """Evaluate a component's output using specified scorers.
 
         This method executes a component and runs one or more scorers against
-        its output. Scorers can be built-in (exact_match, contains, etc.) or
-        custom scorers registered with the @scorer decorator.
+        its output. Scorers can be built-in (exact_match, contains, etc.),
+        custom scorers registered with the @scorer decorator, or LLMJudge
+        instances for LLM-based evaluation.
 
         Args:
             component: Name of the component to evaluate
             input_data: Input data for the component (will be sent as JSON body)
             expected: Expected output for comparison scorers (optional)
-            scorers: List of scorer names to run (default: ["exact_match"] if expected provided)
+            scorers: List of scorer names or LLMJudge instances (default: ["exact_match"] if expected provided)
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
@@ -1964,6 +1986,8 @@ class AsyncClient:
 
         Example:
             ```python
+            from agnt5.eval import LLMJudge
+
             async with AsyncClient() as client:
                 # Simple evaluation
                 result = await client.eval(
@@ -1974,12 +1998,15 @@ class AsyncClient:
                 )
                 print(f"Passed: {result.passed}")
 
-                # Multiple scorers
+                # Evaluate with LLM judge
                 result = await client.eval(
                     component="summarize",
                     component_type="agent",
                     input_data={"text": "Long article..."},
-                    scorers=["format_checker", "llm_judge"]
+                    scorers=[
+                        "json_valid",
+                        LLMJudge(criteria="Is the summary concise and accurate?")
+                    ]
                 )
                 for score in result.scores:
                     print(f"{score.scorer}: {score.score}")
@@ -1992,12 +2019,24 @@ class AsyncClient:
         if scorers is None:
             scorers = ["exact_match"] if expected is not None else []
 
+        # Normalize scorers to spec format
+        scorer_specs = []
+        for s in scorers:
+            if isinstance(s, str):
+                scorer_specs.append({"name": s})
+            elif hasattr(s, "to_scorer_spec"):
+                # LLMJudge or other scorer objects with to_scorer_spec method
+                scorer_specs.append(s.to_scorer_spec())
+            else:
+                # Assume it's already a dict spec
+                scorer_specs.append(s)
+
         # Build request payload
         payload = {
             "component": component,
             "component_type": component_type,
             "input": input_data,
-            "scorers": scorers,
+            "scorers": scorer_specs,
         }
         if expected is not None:
             payload["expected"] = expected
