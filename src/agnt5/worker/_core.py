@@ -155,12 +155,13 @@ class Worker(ExecutorMixin):
         )
         self._rust_worker = self._PyWorker(self._rust_config)
 
-        # Create entity state adapter
-        # TODO: tenant_id should be handled by Rust core, but it still requires it for now
+        # Create entity state adapter with tenant_id from metadata for multi-tenancy support
         from .._core import EntityStateManager as RustEntityStateManager
         from .._state_adapter import StateAdapter as EntityStateAdapter
 
-        rust_core = RustEntityStateManager(tenant_id="default")
+        # Use tenant_id from metadata (populated from AGNT5_TENANT_ID env var or explicit metadata)
+        tenant_id = self.metadata.get("tenant_id", "")
+        rust_core = RustEntityStateManager(tenant_id=tenant_id)
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
 
         # Create CheckpointClient for step-level memoization

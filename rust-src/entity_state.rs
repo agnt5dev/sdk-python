@@ -203,9 +203,14 @@ impl EntityStateManager {
         };
 
         // Wrap in ServiceMessage with RuntimeService
+        // Include tenant_id in metadata for managed mode multi-tenancy
+        let mut metadata = std::collections::HashMap::new();
+        if !self.tenant_id.is_empty() {
+            metadata.insert("tenant_id".to_string(), self.tenant_id.clone());
+        }
         let service_message = ServiceMessage {
             worker_id: String::new(), // Will be set by worker
-            metadata: std::collections::HashMap::new(),
+            metadata,
             message_type: Some(service_message::MessageType::RuntimeService(request)),
         };
 
