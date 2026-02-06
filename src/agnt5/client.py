@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 if TYPE_CHECKING:
+    from .batch_eval import BatchEvalItem, BatchEvalResult
     from .eval import LLMJudge
 from urllib.parse import urljoin
 
@@ -1101,6 +1102,166 @@ class Client:
 
         return BatchResult.from_dict(response.json())
 
+    def batch_eval(
+        self,
+        component: str,
+        items: List[Union[Dict[str, Any], "BatchEvalItem"]],
+        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        expected: Optional[List[Any]] = None,
+        component_type: str = "function",
+        max_concurrency: int = 10,
+        timeout: Optional[float] = None,
+    ) -> "BatchEvalResult":
+        """Evaluate a component in batch with multiple inputs and scoring.
+
+        This method runs client.eval() in parallel for each input item with
+        controlled concurrency. Results are returned in the same order as inputs.
+
+        Args:
+            component: Name of the component to evaluate
+            items: List of input dicts or BatchEvalItem objects
+            scorers: List of scorer names or LLMJudge instances
+            expected: Optional list of expected outputs (parallel to items)
+            component_type: Type of component - "function", "workflow", "agent" (default: "function")
+            max_concurrency: Maximum evaluations to run in parallel (default: 10)
+            timeout: Per-item timeout in seconds (optional)
+
+        Returns:
+            BatchEvalResult with all item results and statistics
+
+        Raises:
+            httpx.HTTPError: If HTTP requests fail
+
+        Example:
+            ```python
+            from agnt5 import Client, BatchEvalItem
+
+            client = Client("http://localhost:34181")
+
+            # Simple batch eval with expected values
+            result = client.batch_eval(
+                component="greet",
+                items=[{"name": "Alice"}, {"name": "Bob"}],
+                expected=["Hello, Alice!", "Hello, Bob!"],
+                scorers=["exact_match"],
+            )
+            print(f"Pass rate: {result.pass_rate:.0%}")
+
+            # Using BatchEvalItem for more control
+            result = client.batch_eval(
+                component="summarize",
+                component_type="agent",
+                items=[
+                    BatchEvalItem(input={"text": "Long text..."}, item_id="doc-1"),
+                    BatchEvalItem(input={"text": "Another..."}, item_id="doc-2"),
+                ],
+                scorers=["json_valid", LLMJudge(criteria="Is the summary concise?")],
+            )
+            for item in result.results:
+                print(f"{item.item_id}: passed={item.passed}")
+            ```
+        """
+        import asyncio
+        import time
+        import uuid
+
+        from .batch_eval import (
+            BatchEvalItem,
+            BatchEvalItemResult,
+            BatchEvalResult,
+            BatchEvalStats,
+            normalize_batch_eval_items,
+        )
+
+        # Normalize items to BatchEvalItem list
+        normalized_items = normalize_batch_eval_items(items, expected)
+
+        if not normalized_items:
+            # Return empty result for empty input
+            return BatchEvalResult(
+                batch_id=str(uuid.uuid4()),
+                status="completed",
+                results=[],
+                stats=BatchEvalStats(),
+            )
+
+        start_time = time.time()
+
+        # Run async internally using asyncio.to_thread for each eval
+        async def _run_batch():
+            semaphore = asyncio.Semaphore(max_concurrency)
+
+            async def eval_one(item: BatchEvalItem, idx: int):
+                async with semaphore:
+                    return await asyncio.to_thread(
+                        self.eval,
+                        component=component,
+                        input_data=item.input,
+                        expected=item.expected,
+                        scorers=scorers,
+                        component_type=component_type,
+                        timeout=timeout,
+                    )
+
+            tasks = [eval_one(item, i) for i, item in enumerate(normalized_items)]
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Run in event loop
+        try:
+            # Try to get existing event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, use nest_asyncio pattern
+                # or run in a new thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, _run_batch())
+                    raw_results = future.result()
+            else:
+                raw_results = loop.run_until_complete(_run_batch())
+        except RuntimeError:
+            # No event loop exists, create one
+            raw_results = asyncio.run(_run_batch())
+
+        total_duration_ms = int((time.time() - start_time) * 1000)
+
+        # Convert results to BatchEvalItemResult
+        results: List[BatchEvalItemResult] = []
+        for i, (item, raw) in enumerate(zip(normalized_items, raw_results)):
+            if isinstance(raw, Exception):
+                results.append(BatchEvalItemResult.from_exception(
+                    raw,
+                    index=item.index if item.index is not None else i,
+                    item_id=item.item_id,
+                ))
+            else:
+                results.append(BatchEvalItemResult.from_eval_response(
+                    raw,
+                    index=item.index if item.index is not None else i,
+                    item_id=item.item_id,
+                ))
+
+        # Sort results by index
+        results.sort(key=lambda r: r.index)
+
+        # Calculate stats
+        stats = BatchEvalStats.from_results(results, total_duration_ms)
+
+        # Determine overall status
+        if stats.failed_items == 0:
+            status = "completed"
+        elif stats.completed_items > 0:
+            status = "partial_failure"
+        else:
+            status = "failed"
+
+        return BatchEvalResult(
+            batch_id=str(uuid.uuid4()),
+            status=status,
+            results=results,
+            stats=stats,
+        )
+
     def get_batch_status(
         self,
         batch_id: str,
@@ -2163,6 +2324,131 @@ class AsyncClient:
         response.raise_for_status()
 
         return BatchResult.from_dict(response.json())
+
+    async def batch_eval(
+        self,
+        component: str,
+        items: List[Union[Dict[str, Any], "BatchEvalItem"]],
+        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        expected: Optional[List[Any]] = None,
+        component_type: str = "function",
+        max_concurrency: int = 10,
+        timeout: Optional[float] = None,
+    ) -> "BatchEvalResult":
+        """Evaluate a component in batch with multiple inputs and scoring.
+
+        This method runs eval() in parallel for each input item with
+        controlled concurrency using asyncio.Semaphore.
+
+        Args:
+            component: Name of the component to evaluate
+            items: List of input dicts or BatchEvalItem objects
+            scorers: List of scorer names or LLMJudge instances
+            expected: Optional list of expected outputs (parallel to items)
+            component_type: Type of component - "function", "workflow", "agent" (default: "function")
+            max_concurrency: Maximum evaluations to run in parallel (default: 10)
+            timeout: Per-item timeout in seconds (optional)
+
+        Returns:
+            BatchEvalResult with all item results and statistics
+
+        Raises:
+            httpx.HTTPError: If HTTP requests fail
+
+        Example:
+            ```python
+            from agnt5 import AsyncClient, BatchEvalItem
+
+            async with AsyncClient() as client:
+                result = await client.batch_eval(
+                    component="greet",
+                    items=[{"name": "Alice"}, {"name": "Bob"}],
+                    expected=["Hello, Alice!", "Hello, Bob!"],
+                    scorers=["exact_match"],
+                )
+                print(f"Pass rate: {result.pass_rate:.0%}")
+            ```
+        """
+        import asyncio
+        import time
+        import uuid
+
+        from .batch_eval import (
+            BatchEvalItem,
+            BatchEvalItemResult,
+            BatchEvalResult,
+            BatchEvalStats,
+            normalize_batch_eval_items,
+        )
+
+        # Normalize items to BatchEvalItem list
+        normalized_items = normalize_batch_eval_items(items, expected)
+
+        if not normalized_items:
+            # Return empty result for empty input
+            return BatchEvalResult(
+                batch_id=str(uuid.uuid4()),
+                status="completed",
+                results=[],
+                stats=BatchEvalStats(),
+            )
+
+        start_time = time.time()
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def eval_one(item: BatchEvalItem, idx: int):
+            async with semaphore:
+                return await self.eval(
+                    component=component,
+                    input_data=item.input,
+                    expected=item.expected,
+                    scorers=scorers,
+                    component_type=component_type,
+                    timeout=timeout,
+                )
+
+        tasks = [eval_one(item, i) for i, item in enumerate(normalized_items)]
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        total_duration_ms = int((time.time() - start_time) * 1000)
+
+        # Convert results to BatchEvalItemResult
+        results: List[BatchEvalItemResult] = []
+        for i, (item, raw) in enumerate(zip(normalized_items, raw_results)):
+            if isinstance(raw, Exception):
+                results.append(BatchEvalItemResult.from_exception(
+                    raw,
+                    index=item.index if item.index is not None else i,
+                    item_id=item.item_id,
+                ))
+            else:
+                results.append(BatchEvalItemResult.from_eval_response(
+                    raw,
+                    index=item.index if item.index is not None else i,
+                    item_id=item.item_id,
+                ))
+
+        # Sort results by index
+        results.sort(key=lambda r: r.index)
+
+        # Calculate stats
+        stats = BatchEvalStats.from_results(results, total_duration_ms)
+
+        # Determine overall status
+        if stats.failed_items == 0:
+            status = "completed"
+        elif stats.completed_items > 0:
+            status = "partial_failure"
+        else:
+            status = "failed"
+
+        return BatchEvalResult(
+            batch_id=str(uuid.uuid4()),
+            status=status,
+            results=results,
+            stats=stats,
+        )
 
     async def get_batch_status(
         self,

@@ -18,6 +18,12 @@ from .batch import (
     BatchStatusResult,
     CancelBatchResult,
 )
+from .batch_eval import (
+    BatchEvalItem,
+    BatchEvalItemResult,
+    BatchEvalResult,
+    BatchEvalStats,
+)
 from .agent import (
     Agent,
     AgentCompleted,
@@ -273,6 +279,11 @@ __all__ = [
     "BatchStats",
     "BatchStatusResult",
     "CancelBatchResult",
+    # Batch eval components
+    "BatchEvalItem",
+    "BatchEvalItemResult",
+    "BatchEvalResult",
+    "BatchEvalStats",
     # Response types
     "EvalResponse",
     "Event",

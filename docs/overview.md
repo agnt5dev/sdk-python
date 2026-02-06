@@ -505,6 +505,7 @@ async def fetch_data(ctx: Context, url: str) -> dict:
    - [Workflow Component](workflow.md)
    - [Tool Component](tool.md)
    - [Agent Component](agent.md)
+   - [Batch Evaluation](batch_eval.md) - Evaluate components with multiple inputs and scoring
 
 2. **Explore Examples**: Working code in `examples/` directory
    - Basic functions
