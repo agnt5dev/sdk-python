@@ -1437,6 +1437,31 @@ class WorkflowContext(Context):
 
         # Emit workflow.paused - workflow is pausing for user input
         # This should arrive AFTER workflow.step.paused in the event stream
+        # Include checkpoint metadata so the EE can store it in run.Metadata
+        # for proper resume (step replay, state restoration)
+        import json as _json
+
+        checkpoint_metadata: dict[str, str] = {
+            "question": question,
+            "input_type": input_type,
+            "pause_index": str(pause_index),
+            "step_name": step_name,
+            "step_correlation_id": step_correlation_id,
+            "workflow_correlation_id": self._correlation_id,
+        }
+        if options:
+            checkpoint_metadata["options"] = _json.dumps(options)
+        if checkpoint_state:
+            checkpoint_metadata["checkpoint_state"] = _json.dumps(checkpoint_state)
+        # Include step events for replay on resume
+        if self._workflow_entity._step_events:
+            checkpoint_metadata["step_events"] = _json.dumps(self._workflow_entity._step_events)
+        # Include workflow state snapshot
+        if hasattr(self, '_workflow_entity') and self._workflow_entity._state is not None:
+            if self._workflow_entity._state.has_changes():
+                state_snapshot = self._workflow_entity._state.get_state_snapshot()
+                checkpoint_metadata["workflow_state"] = _json.dumps(state_snapshot)
+
         workflow_paused = Paused(
             name=self._workflow_name or "workflow",
             correlation_id=self._correlation_id,
@@ -1451,6 +1476,7 @@ class WorkflowContext(Context):
                 "step_name": step_name,
                 "step_correlation_id": step_correlation_id,
             },
+            metadata=checkpoint_metadata,
         )
         self.emit(workflow_paused)
 

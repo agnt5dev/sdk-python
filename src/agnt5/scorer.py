@@ -136,6 +136,61 @@ class ScorerRegistry:
         return list(_SCORER_REGISTRY.keys())
 
 
+_builtin_handlers_registered = False
+
+
+def register_builtin_scorer_handlers() -> None:
+    """Register Python handlers for built-in scorers that need Python execution.
+
+    Built-in scorers like llm_judge fall through the Rust fast path and need
+    a Python handler in the ScorerRegistry. This is called once during worker startup.
+    """
+    global _builtin_handlers_registered
+    if _builtin_handlers_registered:
+        return
+    _builtin_handlers_registered = True
+
+    # Register llm_judge handler
+    if "llm_judge" not in _SCORER_REGISTRY:
+
+        async def _llm_judge_handler(ctx: "ScorerContext", request: Any) -> Any:
+            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+            from .eval.types import ScorerResult
+
+            config = request.config or {}
+            provider = config.get("provider", "openai")
+            model = config.get("model", "gpt-4o-mini")
+
+            llm_config = LLMJudgeConfig(
+                criteria=config.get("criteria", ""),
+                model=f"{provider}/{model}",
+                temperature=config.get("temperature", 0.0),
+                include_input=config.get("include_input", False),
+            )
+
+            result = await llm_judge(
+                output=request.output,
+                config=llm_config,
+                expected=request.expected,
+                input_data=request.input,
+            )
+
+            return ScorerResult(
+                score=result.score,
+                passed=result.passed,
+                label=result.label,
+                explanation=result.explanation,
+                metadata=result.metadata,
+            )
+
+        _SCORER_REGISTRY["llm_judge"] = ScorerConfig(
+            name="llm_judge",
+            handler=_llm_judge_handler,
+            description="LLM-as-judge scorer for semantic evaluation",
+            is_async=True,
+        )
+
+
 def scorer(
     _func: Optional[Callable[..., Any]] = None,
     *,

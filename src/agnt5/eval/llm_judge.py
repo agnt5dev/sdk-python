@@ -223,12 +223,16 @@ def _parse_llm_response(content: str) -> LLMJudgeResult:
         explanation = data.get("explanation")
         label = data.get("label")
 
+        # Strip fields already promoted to top-level attributes so
+        # metadata only carries extra/custom keys from the LLM response.
+        extra = {k: v for k, v in data.items() if k not in ("score", "passed", "explanation", "label")}
+
         return LLMJudgeResult(
             score=score,
             passed=passed,
             explanation=explanation,
             label=label,
-            metadata=data,
+            metadata=extra,
         )
 
     except (json.JSONDecodeError, ValueError, TypeError) as e:

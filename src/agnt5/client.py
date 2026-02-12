@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 if TYPE_CHECKING:
+    from .batch import BatchItemInput
     from .batch_eval import BatchEvalItem, BatchEvalResult
     from .eval import LLMJudge
 from urllib.parse import urljoin
@@ -340,16 +341,23 @@ class Client:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
+        metadata: Optional[Dict[str, str]] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
         This is a non-blocking call that returns a SubmitResponse with the run ID.
         Use get_status() to check progress and get_result() to retrieve the output.
 
+        In managed edition, submitted jobs are written to a durable queue and
+        survive worker disconnects and platform restarts.
+
         Args:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
+            metadata: Optional metadata key-value pairs passed through to the execution.
+                In managed edition, metadata is stored on the job queue entry and
+                forwarded to the worker handling the job.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -364,6 +372,13 @@ class Client:
             print(f"Submitted: {response.run_id}")
             print(f"Status URL: {response.status_url}")
 
+            # Submit with metadata for job queue tracking
+            response = client.submit(
+                "process_video",
+                {"url": "https://..."},
+                metadata={"priority_group": "high", "source": "api"},
+            )
+
             # Check status later
             status = client.get_status(response.run_id)
             if status.status == RunStatus.COMPLETED:
@@ -376,10 +391,16 @@ class Client:
         # Build URL with component type (plural form)
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
+        # Build request body - wrap input_data with metadata if provided
+        if metadata:
+            request_body: Any = {"input": input_data, "metadata": metadata}
+        else:
+            request_body = input_data
+
         # Make request with auth headers
         response = self._client.post(
             url,
-            json=input_data,
+            json=request_body,
             headers=self._build_headers(),
         )
 
@@ -1020,12 +1041,13 @@ class Client:
     def batch(
         self,
         component: str,
-        items: List[Dict[str, Any]],
+        items: List[Union[Dict[str, Any], "BatchItemInput"]],
         component_type: str = "function",
         max_concurrency: int = 10,
         continue_on_failure: bool = True,
         batch_timeout_ms: Optional[int] = None,
         item_timeout_ms: Optional[int] = None,
+        metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs.
@@ -1033,14 +1055,23 @@ class Client:
         Sends all items to the platform for parallel execution with controlled
         concurrency. Results are returned in the same order as the input items.
 
+        In managed edition, batch items are written to a durable job queue backed
+        by PostgreSQL. Workers pull jobs at their own pace with automatic retry
+        on failure.
+
         Args:
             component: Name of the component to execute
-            items: List of input dictionaries, one per batch item
+            items: List of inputs for the batch. Each item can be either:
+                - A plain dict (used as the input payload), or
+                - A ``BatchItemInput`` with per-item metadata and timeout overrides.
             component_type: Type of component - "function" or "workflow" (default: "function")
             max_concurrency: Maximum items to execute in parallel (default: 10)
             continue_on_failure: Continue processing if an item fails (default: True)
             batch_timeout_ms: Overall batch timeout in milliseconds (default: 1 hour)
             item_timeout_ms: Default timeout per item in milliseconds (default: 30 seconds)
+            metadata: Optional batch-level metadata key-value pairs. Merged with
+                per-item metadata (item metadata takes precedence on key conflicts).
+                In managed edition this is stored on each job queue entry.
             timeout: HTTP request timeout in seconds (optional)
 
         Returns:
@@ -1052,22 +1083,27 @@ class Client:
 
         Example:
             ```python
-            # Batch process multiple items
+            # Simple batch with plain dicts
             result = client.batch(
                 "process_item",
                 items=[{"id": 1}, {"id": 2}, {"id": 3}],
                 max_concurrency=5,
             )
 
+            # Batch with per-item metadata and timeouts
+            from agnt5 import BatchItemInput
+            result = client.batch(
+                "process_item",
+                items=[
+                    BatchItemInput(input={"id": 1}, metadata={"source": "api"}),
+                    BatchItemInput(input={"id": 2}, timeout_ms=60000),
+                ],
+                metadata={"batch_group": "nightly"},
+            )
+
             # Check overall status
             if result.is_success:
                 print(f"All {result.stats.total_items} items completed")
-            else:
-                print(f"Failed: {result.stats.failed_items} items")
-
-            # Access individual outputs
-            for i, output in enumerate(result.outputs):
-                print(f"Item {i}: {output}")
 
             # Get only successful outputs
             successful = result.successful_outputs()
@@ -1089,12 +1125,22 @@ class Client:
             default_item_timeout_ms=item_timeout_ms or 30000,
         )
 
-        batch_items = [BatchItemInput(input=item, index=i).to_dict() for i, item in enumerate(items)]
+        # Normalize items: accept plain dicts or BatchItemInput objects
+        batch_items = []
+        for i, item in enumerate(items):
+            if isinstance(item, BatchItemInput):
+                if item.index is None:
+                    item.index = i
+                batch_items.append(item.to_dict())
+            else:
+                batch_items.append(BatchItemInput(input=item, index=i).to_dict())
 
-        request_body = {
+        request_body: Dict[str, Any] = {
             "items": batch_items,
             "config": config.to_dict(),
         }
+        if metadata:
+            request_body["metadata"] = metadata
 
         headers = self._build_headers()
         response = self._client.post(url, json=request_body, headers=headers, timeout=timeout)
@@ -1989,13 +2035,20 @@ class AsyncClient:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
+        metadata: Optional[Dict[str, str]] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
+
+        In managed edition, submitted jobs are written to a durable queue and
+        survive worker disconnects and platform restarts.
 
         Args:
             component: Name of the component to execute
             input_data: Input data for the component
             component_type: Type of component
+            metadata: Optional metadata key-value pairs passed through to the execution.
+                In managed edition, metadata is stored on the job queue entry and
+                forwarded to the worker handling the job.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -2006,9 +2059,15 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/submit")
 
+        # Build request body - wrap input_data with metadata if provided
+        if metadata:
+            request_body: Any = {"input": input_data, "metadata": metadata}
+        else:
+            request_body = input_data
+
         response = await client.post(
             url,
-            json=input_data,
+            json=request_body,
             headers=self._build_headers(),
         )
         response.raise_for_status()
@@ -2248,12 +2307,13 @@ class AsyncClient:
     async def batch(
         self,
         component: str,
-        items: List[Dict[str, Any]],
+        items: List[Union[Dict[str, Any], "BatchItemInput"]],
         component_type: str = "function",
         max_concurrency: int = 10,
         continue_on_failure: bool = True,
         batch_timeout_ms: Optional[int] = None,
         item_timeout_ms: Optional[int] = None,
+        metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs asynchronously.
@@ -2261,14 +2321,23 @@ class AsyncClient:
         Sends all items to the platform for parallel execution with controlled
         concurrency. Results are returned in the same order as the input items.
 
+        In managed edition, batch items are written to a durable job queue backed
+        by PostgreSQL. Workers pull jobs at their own pace with automatic retry
+        on failure.
+
         Args:
             component: Name of the component to execute
-            items: List of input dictionaries, one per batch item
+            items: List of inputs for the batch. Each item can be either:
+                - A plain dict (used as the input payload), or
+                - A ``BatchItemInput`` with per-item metadata and timeout overrides.
             component_type: Type of component - "function" or "workflow" (default: "function")
             max_concurrency: Maximum items to execute in parallel (default: 10)
             continue_on_failure: Continue processing if an item fails (default: True)
             batch_timeout_ms: Overall batch timeout in milliseconds (default: 1 hour)
             item_timeout_ms: Default timeout per item in milliseconds (default: 30 seconds)
+            metadata: Optional batch-level metadata key-value pairs. Merged with
+                per-item metadata (item metadata takes precedence on key conflicts).
+                In managed edition this is stored on each job queue entry.
             timeout: HTTP request timeout in seconds (optional)
 
         Returns:
@@ -2280,11 +2349,22 @@ class AsyncClient:
 
         Example:
             ```python
-            # Batch process multiple items
+            # Simple batch with plain dicts
             result = await client.batch(
                 "process_item",
                 items=[{"id": 1}, {"id": 2}, {"id": 3}],
                 max_concurrency=5,
+            )
+
+            # Batch with per-item metadata and timeouts
+            from agnt5 import BatchItemInput
+            result = await client.batch(
+                "process_item",
+                items=[
+                    BatchItemInput(input={"id": 1}, metadata={"source": "api"}),
+                    BatchItemInput(input={"id": 2}, timeout_ms=60000),
+                ],
+                metadata={"batch_group": "nightly"},
             )
 
             # Check overall status
@@ -2311,12 +2391,22 @@ class AsyncClient:
             default_item_timeout_ms=item_timeout_ms or 30000,
         )
 
-        batch_items = [BatchItemInput(input=item, index=i).to_dict() for i, item in enumerate(items)]
+        # Normalize items: accept plain dicts or BatchItemInput objects
+        batch_items = []
+        for i, item in enumerate(items):
+            if isinstance(item, BatchItemInput):
+                if item.index is None:
+                    item.index = i
+                batch_items.append(item.to_dict())
+            else:
+                batch_items.append(BatchItemInput(input=item, index=i).to_dict())
 
-        request_body = {
+        request_body: Dict[str, Any] = {
             "items": batch_items,
             "config": config.to_dict(),
         }
+        if metadata:
+            request_body["metadata"] = metadata
 
         client = await self._ensure_client()
         headers = self._build_headers()

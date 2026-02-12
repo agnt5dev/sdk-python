@@ -13,7 +13,7 @@ from .. import _sentry
 from .._serialization import serialize_to_str
 from .._telemetry import setup_module_logger
 from ..function import FunctionRegistry
-from ..scorer import ScorerRegistry
+from ..scorer import ScorerRegistry, register_builtin_scorer_handlers
 
 # from ..workflow import WorkflowRegistry  # COMMENTED OUT - functions only for now
 from ._executors import ExecutorMixin
@@ -689,6 +689,10 @@ class Worker(ExecutorMixin):
         This is the main entry point for your worker service.
         """
         try:
+            # Register Python handlers for built-in scorers (e.g. llm_judge)
+            # that fall through the Rust fast path
+            register_builtin_scorer_handlers()
+
             components = self._discover_components()
             self._print_startup_banner(components)
             self._rust_worker.set_components(components)

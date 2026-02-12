@@ -1408,64 +1408,14 @@ class ExecutorMixin:
 
         except WaitingForUserInputException as e:
             # Workflow paused for user input
+            # The workflow.paused event (with checkpoint metadata) was already
+            # emitted via ctx.emit() in workflow.py's wait_for_input().
+            # That event flows through WriteCheckpoint RPC to the EE, which
+            # writes run.paused and stores checkpoint data in run.Metadata.
+            # No need to return a PyExecuteComponentResponse — return None
+            # to let the event queue handle delivery (same pattern as run.completed).
             logger.info(f"Workflow paused waiting for user input: {e.question}")
-
-            pause_metadata = {
-                "status": "awaiting_user_input",
-                "question": e.question,
-                "input_type": e.input_type,
-                "pause_index": str(e.pause_index),
-            }
-
-            # Store step correlation info for proper event pairing on resume
-            if e.step_correlation_id:
-                pause_metadata["step_correlation_id"] = e.step_correlation_id
-            if e.step_name:
-                pause_metadata["step_name"] = e.step_name
-
-            if e.options:
-                pause_metadata["options"] = json.dumps(e.options)
-            if e.checkpoint_state:
-                pause_metadata["checkpoint_state"] = json.dumps(e.checkpoint_state)
-            if session_id:
-                pause_metadata["session_id"] = session_id
-
-            # Add step events and correlation ID to pause metadata
-            if ctx is not None:
-                step_events = ctx._workflow_entity._step_events
-                if step_events:
-                    pause_metadata["step_events"] = json.dumps(step_events)
-
-                # Add current workflow state
-                if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
-                    if ctx._workflow_entity._state.has_changes():
-                        state_snapshot = ctx._workflow_entity._state.get_state_snapshot()
-                        pause_metadata["workflow_state"] = json.dumps(state_snapshot)
-
-                # Preserve workflow correlation ID for resume
-                # This ensures the same correlation ID is used after resume
-                if ctx._correlation_id:
-                    pause_metadata["workflow_correlation_id"] = ctx._correlation_id
-
-            output = {
-                "question": e.question,
-                "input_type": e.input_type,
-                "options": e.options,
-            }
-            output_data = serialize(output)
-
-            return PyExecuteComponentResponse(
-                invocation_id=request.invocation_id,
-                success=True,
-                output_data=output_data,
-                state_update=None,
-                error_message=None,
-                metadata=pause_metadata,
-                event_type="run.paused",
-                content_index=0,
-                sequence=0,
-                attempt=getattr(request, 'attempt', 0),
-            )
+            return None
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
