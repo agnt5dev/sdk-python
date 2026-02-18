@@ -129,11 +129,11 @@ async def hitl_approval(ctx: WorkflowContext, action: str, resource: str) -> dic
 
 
 @workflow
-async def hitl_choice(ctx: WorkflowContext, question: str, options: list) -> dict:
+async def hitl_select(ctx: WorkflowContext, question: str, options: list) -> dict:
     """
-    Workflow that presents multiple choice options to user.
+    Workflow that presents single-select options to user.
 
-    Demonstrates the choice input type for selecting from options.
+    Demonstrates the select input type for choosing one option.
 
     Args:
         question: Question to ask the user
@@ -143,31 +143,31 @@ async def hitl_choice(ctx: WorkflowContext, question: str, options: list) -> dic
         Dict with selected choice and processing result
 
     Example:
-        result = client.run("choice_workflow", {
+        result = client.run("select_workflow", {
             "question": "Select your preferred language",
             "options": ["Python", "JavaScript", "Go", "Rust"]
         }, component_type="workflow")
     """
-    ctx.logger.info(f"[choice_workflow] Question: {question}")
+    ctx.logger.info(f"[select_workflow] Question: {question}")
 
-    # Build choice options
-    choice_options = [
+    # Build select options
+    select_options = [
         {"id": opt.lower().replace(" ", "_"), "label": opt}
         for opt in options
     ]
 
-    # Present choices to user
+    # Present single-select to user
     selection = await ctx.wait_for_user(
         question=question,
-        input_type="choice",
-        options=choice_options,
+        input_type="select",
+        options=select_options,
     )
 
-    ctx.logger.info(f"[choice_workflow] Selection: {selection}")
+    ctx.logger.info(f"[select_workflow] Selection: {selection}")
 
     # Find the selected option label
     selected_label = next(
-        (opt["label"] for opt in choice_options if opt["id"] == selection),
+        (opt["label"] for opt in select_options if opt["id"] == selection),
         selection
     )
 
@@ -176,6 +176,91 @@ async def hitl_choice(ctx: WorkflowContext, question: str, options: list) -> dic
         "available_options": options,
         "selected_id": selection,
         "selected_label": selected_label,
+    }
+
+
+@workflow
+async def hitl_multiselect(ctx: WorkflowContext, question: str, options: list) -> dict:
+    """
+    Workflow that presents multi-select options to user.
+
+    Demonstrates the multiselect input type for choosing multiple options.
+
+    Args:
+        question: Question to ask the user
+        options: List of option strings to present
+
+    Returns:
+        Dict with selected choices and processing result
+
+    Example:
+        result = client.run("multiselect_workflow", {
+            "question": "Which topics interest you?",
+            "options": ["AI", "Web", "Data", "Security"]
+        }, component_type="workflow")
+    """
+    ctx.logger.info(f"[multiselect_workflow] Question: {question}")
+
+    # Build multiselect options
+    choice_options = [
+        {"id": opt.lower().replace(" ", "_"), "label": opt}
+        for opt in options
+    ]
+
+    # Present multi-select to user
+    selection = await ctx.wait_for_user(
+        question=question,
+        input_type="multiselect",
+        options=choice_options,
+    )
+
+    ctx.logger.info(f"[multiselect_workflow] Selection: {selection}")
+
+    return {
+        "question": question,
+        "available_options": options,
+        "selected": selection,
+    }
+
+
+@workflow
+async def hitl_custom_and_skip(ctx: WorkflowContext) -> dict:
+    """
+    Workflow demonstrating allow_custom and skippable modifiers.
+
+    Shows how to let users provide free-text answers or skip questions.
+
+    Example:
+        result = client.run("custom_and_skip_workflow", {},
+                            component_type="workflow")
+    """
+    ctx.logger.info("[custom_and_skip] Starting")
+
+    # Select with custom option — user can pick from list or type their own
+    color = await ctx.wait_for_user(
+        question="What's your favourite colour?",
+        input_type="select",
+        options=[
+            {"id": "red", "label": "Red"},
+            {"id": "blue", "label": "Blue"},
+            {"id": "green", "label": "Green"},
+        ],
+        allow_custom=True,
+    )
+    ctx.logger.info(f"[custom_and_skip] Color: {color}")
+
+    # Skippable question — user can skip without answering
+    nickname = await ctx.wait_for_user(
+        question="Do you have a nickname? (optional)",
+        input_type="text",
+        skippable=True,
+    )
+    ctx.logger.info(f"[custom_and_skip] Nickname: {nickname}")
+
+    return {
+        "color": color,
+        "nickname": nickname,
+        "skipped_nickname": nickname is None,
     }
 
 
@@ -215,7 +300,7 @@ async def hitl_onboarding(ctx: WorkflowContext, welcome_message: str) -> dict:
     # Step 2: Get preferences
     preference = await ctx.wait_for_user(
         question=f"Hello {name}! What type of content interests you most?",
-        input_type="choice",
+        input_type="select",
         options=[
             {"id": "tech", "label": "Technology"},
             {"id": "business", "label": "Business"},
@@ -412,10 +497,12 @@ To test HITL workflows:
     print("\n--- Available HITL Workflows ---")
     print("1. text_input_workflow - Collects free-form text input")
     print("2. approval_workflow - Binary approve/reject decision")
-    print("3. choice_workflow - Multiple choice selection")
-    print("4. onboarding_workflow - Multi-step user onboarding")
-    print("5. agent_with_questions - Agent that can ask questions")
-    print("6. conditional_approval - Approval only for large amounts")
+    print("3. select_workflow - Single-select from options")
+    print("4. multiselect_workflow - Multi-select from options")
+    print("5. onboarding_workflow - Multi-step user onboarding")
+    print("6. agent_with_questions - Agent that can ask questions")
+    print("7. conditional_approval - Approval only for large amounts")
+    print("8. custom_and_skip_workflow - allow_custom + skippable modifiers")
 
     # Demonstrate conditional approval auto-approve case
     print("\n--- Conditional Approval (Auto-Approve Case) ---")

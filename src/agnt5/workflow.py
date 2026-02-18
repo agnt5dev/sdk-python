@@ -1258,8 +1258,13 @@ class WorkflowContext(Context):
         self._logger.info(f"⏰ Sleep '{sleep_name}' completed")
 
     async def wait_for_user(
-        self, question: str, input_type: str = "text", options: Optional[List[Dict]] = None
-    ) -> str:
+        self,
+        question: str,
+        input_type: str = "text",
+        options: Optional[List[Dict]] = None,
+        allow_custom: bool = False,
+        skippable: bool = False,
+    ) -> Optional[str]:
         """
         Pause workflow execution and wait for user input.
 
@@ -1269,11 +1274,14 @@ class WorkflowContext(Context):
 
         Args:
             question: Question to ask the user
-            input_type: Type of input - "text", "approval", or "choice"
-            options: For approval/choice, list of option dicts with 'id' and 'label'
+            input_type: Type of input - "text", "approval", "select", or "multiselect".
+                Legacy aliases: "choice" → "multiselect", "selection" → "select"
+            options: For approval/select/multiselect, list of option dicts with 'id' and 'label'
+            allow_custom: If True, adds a free-text "Something else" option to select/multiselect
+            skippable: If True, adds a "Skip" button. Returns None when skipped.
 
         Returns:
-            User's response string
+            User's response string, or None if skipped
 
         Raises:
             WaitingForUserInputException: When no cached response exists (first call)
@@ -1295,18 +1303,62 @@ class WorkflowContext(Context):
             )
             ```
 
-        Example (choice):
+        Example (select — single choice):
             ```python
             model = await ctx.wait_for_user(
                 "Which model?",
-                input_type="choice",
+                input_type="select",
                 options=[
                     {"id": "gpt4", "label": "GPT-4"},
                     {"id": "claude", "label": "Claude"}
                 ]
             )
             ```
+
+        Example (multiselect — multiple choices):
+            ```python
+            topics = await ctx.wait_for_user(
+                "Which topics?",
+                input_type="multiselect",
+                options=[
+                    {"id": "ai", "label": "AI"},
+                    {"id": "web", "label": "Web"},
+                    {"id": "data", "label": "Data"}
+                ]
+            )
+            ```
+
+        Example (skippable with custom option):
+            ```python
+            preference = await ctx.wait_for_user(
+                "Pick a theme:",
+                input_type="select",
+                options=[{"id": "dark", "label": "Dark"}, {"id": "light", "label": "Light"}],
+                allow_custom=True,
+                skippable=True,
+            )
+            if preference is None:
+                # User skipped
+                ...
+            ```
         """
+        import warnings
+
+        # Normalize legacy type aliases
+        if input_type == "choice":
+            warnings.warn(
+                'input_type="choice" is deprecated, use "multiselect" instead',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            input_type = "multiselect"
+        elif input_type == "selection":
+            warnings.warn(
+                'input_type="selection" is deprecated, use "select" instead',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            input_type = "select"
         from .events import Completed, ComponentType, OperationType, Paused, Resumed, Started
         from .exceptions import WaitingForUserInputException
 
@@ -1373,6 +1425,11 @@ class WorkflowContext(Context):
             self._workflow_entity._resumed_step_correlation_id = None
             self._workflow_entity._resumed_step_name = None
 
+            # Decode wire format
+            if response == "__skipped__":
+                return None
+            if isinstance(response, str) and response.startswith("__custom__:"):
+                return response[len("__custom__:"):]
             return response
 
         # No cached response - this is a fresh execution, emit step.started
@@ -1414,6 +1471,8 @@ class WorkflowContext(Context):
             input_type=input_type,
             options=options or [],
             step_key=step_name,
+            allow_custom=allow_custom,
+            skippable=skippable,
         )
         self.emit(approval_requested)
 
@@ -1431,6 +1490,8 @@ class WorkflowContext(Context):
                 "input_type": input_type,
                 "options": options,
                 "pause_index": pause_index,
+                "allow_custom": allow_custom,
+                "skippable": skippable,
             },
         )
         self.emit(step_paused)
@@ -1444,10 +1505,13 @@ class WorkflowContext(Context):
         checkpoint_metadata: dict[str, str] = {
             "question": question,
             "input_type": input_type,
+            "pause_reason": "user_input_required",
             "pause_index": str(pause_index),
             "step_name": step_name,
             "step_correlation_id": step_correlation_id,
             "workflow_correlation_id": self._correlation_id,
+            "allow_custom": str(allow_custom),
+            "skippable": str(skippable),
         }
         if options:
             checkpoint_metadata["options"] = _json.dumps(options)
@@ -1475,6 +1539,8 @@ class WorkflowContext(Context):
                 "pause_index": pause_index,
                 "step_name": step_name,
                 "step_correlation_id": step_correlation_id,
+                "allow_custom": allow_custom,
+                "skippable": skippable,
             },
             metadata=checkpoint_metadata,
         )
@@ -1488,6 +1554,8 @@ class WorkflowContext(Context):
             pause_index=pause_index,  # Pass the pause index for multi-step HITL
             step_name=step_name,  # Pass step info for proper event completion on resume
             step_correlation_id=step_correlation_id,
+            allow_custom=allow_custom,
+            skippable=skippable,
         )
 
 

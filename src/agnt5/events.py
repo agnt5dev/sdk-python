@@ -360,10 +360,10 @@ class ApprovalRequested(Event):
     # Question to ask the user
     question: str
 
-    # Type of input: "approval", "text", "choice"
+    # Type of input: "text", "approval", "select", "multiselect"
     input_type: str = "approval"
 
-    # Options for approval/choice (list of dicts with 'id' and 'label')
+    # Options for approval/select/multiselect (list of dicts with 'id' and 'label')
     options: list[dict[str, str]] = field(default_factory=list)
 
     # Step key for tracking this approval request
@@ -371,6 +371,12 @@ class ApprovalRequested(Event):
 
     # Previous output to show for context
     previous_output: Any = None
+
+    # Whether to allow a free-text "Something else" option
+    allow_custom: bool = False
+
+    # Whether the user can skip this input
+    skippable: bool = False
 
     def __post_init__(self) -> None:
         self.event_type = "approval.requested"

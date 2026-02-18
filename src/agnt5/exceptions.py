@@ -80,14 +80,16 @@ class WaitingForUserInputException(BaseException):
 
     Attributes:
         question: The question to ask the user
-        input_type: Type of input ("text", "approval", or "choice")
-        options: List of options for approval/choice inputs
+        input_type: Type of input ("text", "approval", "select", or "multiselect")
+        options: List of options for approval/select/multiselect inputs
         checkpoint_state: Current workflow state for resume
         pause_index: The index of this pause point (for multi-step HITL)
         step_name: The name of the wait_for_user step (e.g., "wait_for_user_0")
         step_correlation_id: Correlation ID for the step events
         agent_context: Optional agent execution state for agent-level HITL
             Contains: agent_name, iteration, messages, tool_results, pending_tool_call, etc.
+        allow_custom: Whether to allow a free-text "Something else" option
+        skippable: Whether the user can skip this input
     """
 
     def __init__(
@@ -100,13 +102,15 @@ class WaitingForUserInputException(BaseException):
         agent_context: Optional[Dict] = None,
         step_name: Optional[str] = None,
         step_correlation_id: Optional[str] = None,
+        allow_custom: bool = False,
+        skippable: bool = False,
     ) -> None:
         """Initialize WaitingForUserInputException.
 
         Args:
             question: Question to ask the user
-            input_type: Type of input - "text", "approval", or "choice"
-            options: List of option dicts (for approval/choice)
+            input_type: Type of input - "text", "approval", "select", or "multiselect"
+            options: List of option dicts (for approval/select/multiselect)
             checkpoint_state: Workflow state snapshot for resume
             pause_index: Index of this pause point (0-indexed, for multi-step HITL)
             agent_context: Optional agent execution state for resuming agents
@@ -120,6 +124,8 @@ class WaitingForUserInputException(BaseException):
                 - model_config: Model settings for resume
             step_name: Name of the wait_for_user step for event correlation
             step_correlation_id: Correlation ID for the step events
+            allow_custom: Whether to allow a free-text "Something else" option
+            skippable: Whether the user can skip this input
         """
         super().__init__(f"Waiting for user input: {question}")
         self.question = question
@@ -130,3 +136,5 @@ class WaitingForUserInputException(BaseException):
         self.agent_context = agent_context
         self.step_name = step_name
         self.step_correlation_id = step_correlation_id
+        self.allow_custom = allow_custom
+        self.skippable = skippable

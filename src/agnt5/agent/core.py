@@ -724,6 +724,8 @@ class Agent:
                                     input_type=e.input_type,
                                     options=e.options,
                                     checkpoint_state=e.checkpoint_state,
+                                    allow_custom=e.allow_custom,
+                                    skippable=e.skippable,
                                     agent_context={
                                         "agent_name": self.name,
                                         "iteration": iteration,
@@ -1536,6 +1538,8 @@ class Agent:
                                         input_type=e.input_type,
                                         options=e.options,
                                         checkpoint_state=e.checkpoint_state,
+                                        allow_custom=e.allow_custom,
+                                        skippable=e.skippable,
                                         agent_context={
                                             "agent_name": self.name,
                                             "iteration": iteration,
@@ -1947,6 +1951,8 @@ class Agent:
                             input_type=e.input_type,
                             options=e.options,
                             checkpoint_state=e.checkpoint_state,
+                            allow_custom=e.allow_custom,
+                            skippable=e.skippable,
                             agent_context={
                                 "agent_name": self.name,
                                 "iteration": iteration,
