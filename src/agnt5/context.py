@@ -58,6 +58,7 @@ class Context:
         enable_memoization: bool = False,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         self._run_id = run_id
         self._attempt = attempt
@@ -65,6 +66,7 @@ class Context:
         self._session_id = session_id
         self._is_streaming = is_streaming
         self._worker = worker
+        self._trace_metadata = trace_metadata
 
         # Correlation tracking for event hierarchy (required, never null)
         self._correlation_id: str = correlation_id
@@ -141,7 +143,17 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            self._emitter = EventEmitter(run_id=self._run_id)
+            # Pass trace metadata (traceparent/tracestate) as base_metadata
+            # so every checkpoint event carries it back to the EE
+            trace_base = {}
+            if self._trace_metadata:
+                for key in ("traceparent", "tracestate"):
+                    if key in self._trace_metadata:
+                        trace_base[key] = self._trace_metadata[key]
+            self._emitter = EventEmitter(
+                run_id=self._run_id,
+                base_metadata=trace_base or None,
+            )
             if self._worker is not None:
                 self._emitter.set_worker(self._worker)
                 logging.getLogger(__name__).debug(
@@ -168,6 +180,14 @@ class Context:
             f"[Context.emit] Got emitter, has_worker={emitter._worker is not None}"
         )
         return emitter.emit(event)
+
+    async def emit_async(self, event: Event) -> EventEnvelope:
+        """Emit a typed event asynchronously.
+
+        Checkpoint gRPC runs on the tokio runtime natively, avoiding thread pool overhead.
+        """
+        emitter = self._get_emitter()
+        return await emitter.emit_async(event)
 
     @contextmanager
     def as_parent(self) -> Generator[None, None, None]:

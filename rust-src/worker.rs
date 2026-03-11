@@ -360,6 +360,31 @@ impl PyWorker {
     ) -> PyResult<()> {
         let data_bytes = event_data.into_bytes();
 
+        // Inject traceparent from Python _trace_metadata contextvar if not already
+        // in metadata. This propagates the dispatch trace context through
+        // WriteCheckpoint calls back to the Execution Engine, linking checkpoint
+        // spans to the original request trace.
+        // The traceparent should already be in metadata, injected by the Python
+        // EventEmitter's base_metadata (populated from request.metadata in _executors.py).
+        // As a fallback, check the _trace_metadata contextvar.
+        let mut metadata = metadata;
+        if !metadata.contains_key("traceparent") {
+            if let Ok(worker_module) = py.import("agnt5.worker") {
+                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
+                    if let Ok(trace_dict) = trace_var.call_method0("get") {
+                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
+                            if let Some(tp) = dict.get("traceparent") {
+                                metadata.insert("traceparent".to_string(), tp.clone());
+                            }
+                            if let Some(ts) = dict.get("tracestate") {
+                                metadata.insert("tracestate".to_string(), ts.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Get the worker (using std::sync::Mutex, not tokio)
         let worker = {
             let worker_guard = self.worker.lock().map_err(|e| {
@@ -398,6 +423,84 @@ impl PyWorker {
         })?;
 
         Ok(())
+    }
+
+    /// Emit a checkpoint event asynchronously, returning a Python awaitable.
+    ///
+    /// Unlike emit_event_sync which blocks on a thread via block_on(), this method
+    /// uses future_into_py to return a native Python coroutine. The gRPC call runs
+    /// on the tokio runtime without occupying a thread pool slot, and the Python
+    /// event loop is free to schedule other tasks while awaiting.
+    #[pyo3(signature = (run_id, event_type, event_data, sequence_number, metadata, source_timestamp_ns, timeout_ms=5000))]
+    fn emit_event_async<'py>(
+        &self,
+        py: Python<'py>,
+        run_id: String,
+        event_type: String,
+        event_data: String,
+        sequence_number: i64,
+        metadata: HashMap<String, String>,
+        source_timestamp_ns: i64,
+        timeout_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let data_bytes = event_data.into_bytes();
+
+        // Inject traceparent from Python _trace_metadata contextvar if not already
+        // in metadata (same logic as emit_event_sync).
+        let mut metadata = metadata;
+        if !metadata.contains_key("traceparent") {
+            if let Ok(worker_module) = py.import("agnt5.worker") {
+                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
+                    if let Ok(trace_dict) = trace_var.call_method0("get") {
+                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
+                            if let Some(tp) = dict.get("traceparent") {
+                                metadata.insert("traceparent".to_string(), tp.clone());
+                            }
+                            if let Some(ts) = dict.get("tracestate") {
+                                metadata.insert("tracestate".to_string(), ts.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clone the worker while GIL is held (brief std::sync::Mutex lock)
+        let worker = {
+            let worker_guard = self.worker.lock().map_err(|e| {
+                let err_msg = format!("Failed to lock worker: {}", e);
+                log::error!("{}", err_msg);
+                pyo3::exceptions::PyRuntimeError::new_err(err_msg)
+            })?;
+            worker_guard
+                .as_ref()
+                .ok_or_else(|| {
+                    log::error!("Worker not initialized");
+                    pyo3::exceptions::PyRuntimeError::new_err("Worker not initialized")
+                })?
+                .clone()
+        };
+
+        // Return a Python awaitable — the gRPC call runs on tokio, no thread pool
+        future_into_py(py, async move {
+            worker
+                .emit_checkpoint_sync(
+                    run_id,
+                    event_type,
+                    data_bytes,
+                    sequence_number,
+                    metadata,
+                    source_timestamp_ns,
+                    timeout_ms,
+                )
+                .await
+                .map_err(|e| {
+                    let err_msg = format!("Failed to emit checkpoint async: {}", e);
+                    log::error!("{}", err_msg);
+                    pyo3::exceptions::PyRuntimeError::new_err(err_msg)
+                })?;
+            Ok(())
+        })
     }
 
     /// Set the Python event loop for concurrent async execution

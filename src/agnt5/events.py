@@ -574,6 +574,26 @@ class EventEmitter:
         self._queue_event(envelope, event.correlation_id, event.parent_correlation_id)
         return envelope
 
+    async def emit_async(self, event: Event) -> EventEnvelope:
+        """Emit a typed event asynchronously.
+
+        Checkpoint gRPC runs on tokio runtime natively via future_into_py,
+        avoiding thread pool overhead entirely.
+        """
+        event_data = event.to_dict()
+        content_index = getattr(event, "index", 0)
+
+        envelope = EventEnvelope(
+            event_type=event.event_type,
+            data=event_data,
+            source_timestamp_ns=event.timestamp_ns,
+            content_index=content_index,
+            metadata=dict(event.metadata) if event.metadata else None,
+        )
+
+        await self._queue_event_async(envelope, event.correlation_id, event.parent_correlation_id)
+        return envelope
+
     def __call__(self, event: Event) -> EventEnvelope:
         """Callable interface - delegates to emit()."""
         return self.emit(event)
@@ -622,8 +642,8 @@ class EventEmitter:
                     f"sequence={self._sequence}"
                 )
 
-                # Use sync emit that blocks until platform acknowledges
-                await self._worker.emit_event_sync(
+                # Use async emit — runs gRPC on tokio, returns Python awaitable
+                await self._worker.emit_event_async(
                     run_id=self._run_id,
                     event_type=envelope.event_type,
                     event_data=serialize_to_str(envelope.data),

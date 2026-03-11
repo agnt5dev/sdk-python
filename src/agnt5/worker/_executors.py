@@ -142,6 +142,7 @@ class ExecutorMixin:
                 runtime_context=req.runtime_context,
                 retry_policy=config.retries,
                 worker=self._rust_worker,
+                trace_metadata=getattr(req, "metadata", None),
             )
 
         async def execute(ctx: FunctionContext, input_dict: dict, req: Any):
@@ -154,6 +155,7 @@ class ExecutorMixin:
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
+            exec_start = time.time_ns()
 
             # Emit run.started before executing handler
             run_started_event = Started(
@@ -164,12 +166,14 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.debug(
-                f"[_execute_function] Emitting run.started event: "
-                f"component={config.name}, correlation_id={run_correlation_id}"
+            t0 = time.time_ns()
+            await ctx.emit_async(run_started_event)
+            t1 = time.time_ns()
+            cp1_ms = (t1 - t0) / 1_000_000
+            logger.warning(
+                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
+                f"checkpoint=run.started took={cp1_ms:.1f}ms"
             )
-            ctx.emit(run_started_event)
-            logger.info(f"Executing function {config.name}")
 
             # Emit function.started (child of run)
             start_time_ns = time.time_ns()
@@ -182,14 +186,18 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            logger.debug(
-                f"[_execute_function] Emitting function.started event: "
-                f"component={config.name}, correlation_id={fn_correlation_id}"
+            t0 = time.time_ns()
+            await ctx.emit_async(fn_started_event)
+            t1 = time.time_ns()
+            cp2_ms = (t1 - t0) / 1_000_000
+            logger.warning(
+                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
+                f"checkpoint=function.started took={cp2_ms:.1f}ms"
             )
-            ctx.emit(fn_started_event)
 
             # Execute function with error handling for proper event emission
             try:
+                t0 = time.time_ns()
                 result = config.handler(ctx, **input_dict) if input_dict else config.handler(ctx)
 
                 # Handle coroutine with optional timeout
@@ -203,6 +211,12 @@ class ExecutorMixin:
                             )
                     else:
                         result = await result
+                t1 = time.time_ns()
+                exec_ms = (t1 - t0) / 1_000_000
+                logger.warning(
+                    f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
+                    f"handler_execution took={exec_ms:.1f}ms"
+                )
 
                 # Handle streaming
                 if inspect.isasyncgen(result):
@@ -225,11 +239,7 @@ class ExecutorMixin:
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
-                logger.debug(
-                    f"[_execute_function] Emitting function.failed event: "
-                    f"component={config.name}, error={error_msg}"
-                )
-                ctx.emit(fn_failed_event)
+                await ctx.emit_async(fn_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -240,12 +250,8 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                logger.debug(
-                    f"[_execute_function] Emitting run.failed event: "
-                    f"component={config.name}, correlation_id={run_correlation_id}"
-                )
                 logger.info(f"Function {config.name} failed: {error_msg}")
-                ctx.emit(run_failed_event)
+                await ctx.emit_async(run_failed_event)
 
                 # Return None - the event queue handles delivery
                 return None
@@ -263,11 +269,14 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=duration_ms,
             )
-            logger.debug(
-                f"[_execute_function] Emitting function.completed event: "
-                f"component={config.name}, duration_ms={duration_ms}"
+            t0 = time.time_ns()
+            await ctx.emit_async(fn_completed_event)
+            t1 = time.time_ns()
+            cp3_ms = (t1 - t0) / 1_000_000
+            logger.warning(
+                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
+                f"checkpoint=function.completed took={cp3_ms:.1f}ms"
             )
-            ctx.emit(fn_completed_event)
 
             # Emit run.completed via event queue (not synchronous return)
             # This ensures proper event ordering: started -> completed
@@ -278,12 +287,18 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            logger.debug(
-                f"[_execute_function] Emitting run.completed event: "
-                f"component={config.name}, correlation_id={run_correlation_id}"
+            t0 = time.time_ns()
+            await ctx.emit_async(run_completed_event)
+            t1 = time.time_ns()
+            cp4_ms = (t1 - t0) / 1_000_000
+            total_ms = (t1 - exec_start) / 1_000_000
+            logger.warning(
+                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
+                f"checkpoint=run.completed took={cp4_ms:.1f}ms | "
+                f"TOTAL={total_ms:.1f}ms "
+                f"(cp1={cp1_ms:.1f} cp2={cp2_ms:.1f} exec={exec_ms:.1f} "
+                f"cp3={cp3_ms:.1f} cp4={cp4_ms:.1f})"
             )
-            logger.info(f"Function {config.name} completed ({duration_ms}ms)")
-            ctx.emit(run_completed_event)
 
             # Return None - the event queue handles delivery
             return None

@@ -1,6 +1,6 @@
 [project]
 name = "agnt5"
-version = "0.4.0"
+version = "0.4.1"
 description = "AGNT5 Python SDK - Build durable, resilient agent-first applications"
 authors = [{name = "AGNT5 Team", email = "team@agnt5.com"}]
 license = {text = "Apache-2.0"}

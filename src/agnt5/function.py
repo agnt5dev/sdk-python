@@ -36,6 +36,7 @@ class FunctionContext(Context):
         retry_policy: Optional[Any] = None,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         super().__init__(
             run_id,
@@ -45,6 +46,7 @@ class FunctionContext(Context):
             runtime_context,
             is_streaming=is_streaming,
             worker=worker,
+            trace_metadata=trace_metadata,
         )
         self._retry_policy = retry_policy
 
