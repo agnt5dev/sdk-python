@@ -155,8 +155,6 @@ class ExecutorMixin:
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
-            exec_start = time.time_ns()
-
             # Emit run.started before executing handler
             run_started_event = Started(
                 name=config.name,
@@ -166,14 +164,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            t0 = time.time_ns()
             await ctx.emit_async(run_started_event)
-            t1 = time.time_ns()
-            cp1_ms = (t1 - t0) / 1_000_000
-            logger.warning(
-                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
-                f"checkpoint=run.started took={cp1_ms:.1f}ms"
-            )
 
             # Emit function.started (child of run)
             start_time_ns = time.time_ns()
@@ -186,18 +177,10 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            t0 = time.time_ns()
             await ctx.emit_async(fn_started_event)
-            t1 = time.time_ns()
-            cp2_ms = (t1 - t0) / 1_000_000
-            logger.warning(
-                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
-                f"checkpoint=function.started took={cp2_ms:.1f}ms"
-            )
 
             # Execute function with error handling for proper event emission
             try:
-                t0 = time.time_ns()
                 result = config.handler(ctx, **input_dict) if input_dict else config.handler(ctx)
 
                 # Handle coroutine with optional timeout
@@ -211,12 +194,6 @@ class ExecutorMixin:
                             )
                     else:
                         result = await result
-                t1 = time.time_ns()
-                exec_ms = (t1 - t0) / 1_000_000
-                logger.warning(
-                    f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
-                    f"handler_execution took={exec_ms:.1f}ms"
-                )
 
                 # Handle streaming
                 if inspect.isasyncgen(result):
@@ -269,14 +246,7 @@ class ExecutorMixin:
                 output_data=result,
                 duration_ms=duration_ms,
             )
-            t0 = time.time_ns()
             await ctx.emit_async(fn_completed_event)
-            t1 = time.time_ns()
-            cp3_ms = (t1 - t0) / 1_000_000
-            logger.warning(
-                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
-                f"checkpoint=function.completed took={cp3_ms:.1f}ms"
-            )
 
             # Emit run.completed via event queue (not synchronous return)
             # This ensures proper event ordering: started -> completed
@@ -287,18 +257,7 @@ class ExecutorMixin:
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
-            t0 = time.time_ns()
             await ctx.emit_async(run_completed_event)
-            t1 = time.time_ns()
-            cp4_ms = (t1 - t0) / 1_000_000
-            total_ms = (t1 - exec_start) / 1_000_000
-            logger.warning(
-                f"[PERF] {config.name} run_id={ctx.run_id[:8]} "
-                f"checkpoint=run.completed took={cp4_ms:.1f}ms | "
-                f"TOTAL={total_ms:.1f}ms "
-                f"(cp1={cp1_ms:.1f} cp2={cp2_ms:.1f} exec={exec_ms:.1f} "
-                f"cp3={cp3_ms:.1f} cp4={cp4_ms:.1f})"
-            )
 
             # Return None - the event queue handles delivery
             return None

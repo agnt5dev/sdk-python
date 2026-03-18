@@ -143,11 +143,11 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            # Pass trace metadata (traceparent/tracestate) as base_metadata
-            # so every checkpoint event carries it back to the EE
+            # Pass trace metadata and experiment_id as base_metadata
+            # so every checkpoint event carries them back to the EE
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate"):
+                for key in ("traceparent", "tracestate", "experiment_id"):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(
