@@ -61,8 +61,11 @@ class ContextLogger(logging.LoggerAdapter):
 class OpenTelemetryHandler(logging.Handler):
     """Forwards Python logs to Rust OpenTelemetry system and emits log events for SSE streaming."""
 
-    def __init__(self, level: int = logging.NOTSET):
+    def __init__(self, level: int = logging.NOTSET, context: Any = None):
         super().__init__(level)
+        # Direct context reference — bypasses contextvars which don't propagate
+        # across run_in_executor thread boundaries reliably.
+        self._ctx_ref = context
         try:
             from ._core import log_from_python
             self._log_from_python = log_from_python
@@ -114,14 +117,16 @@ class OpenTelemetryHandler(logging.Handler):
 
             # Also emit as event for SSE streaming (if we have an active context)
             try:
-                from .context import get_current_context
                 from .events import EventEnvelope
                 import time
 
-                ctx = get_current_context()
+                # Use direct reference first (works across threads), fall back to contextvar
+                ctx = self._ctx_ref
+                if ctx is None:
+                    from .context import get_current_context
+                    ctx = get_current_context()
 
                 if ctx is not None and hasattr(ctx, 'emit'):
-                    # Create log event with proper correlation IDs from context
                     log_event_data = {
                         "event_type": f"log.{record.levelname.lower()}",
                         "name": record.name,
@@ -137,12 +142,9 @@ class OpenTelemetryHandler(logging.Handler):
                         "metadata": {},
                     }
 
-                    # Add custom attributes if present
                     if attributes:
                         log_event_data["attributes"] = attributes
 
-                    # Queue the log event for SSE streaming
-                    # Note: Context uses _emitter attribute accessed via _get_emitter()
                     emitter = ctx._get_emitter() if hasattr(ctx, '_get_emitter') else None
                     if emitter:
                         envelope = EventEnvelope(
@@ -158,7 +160,6 @@ class OpenTelemetryHandler(logging.Handler):
                             log_event_data["parent_correlation_id"],
                         )
             except Exception:
-                # Silently fail log event emission - don't break logging
                 pass
 
         except Exception:
@@ -206,8 +207,14 @@ def set_log_level(level: Union[int, str]) -> None:
         _default_log_level = level
 
 
-def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None) -> None:
-    """Configure a Context logger with OpenTelemetry and console handlers."""
+def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None, context: Any = None) -> None:
+    """Configure a Context logger with OpenTelemetry and console handlers.
+
+    Args:
+        context: Optional Context instance stored directly on the OTel handler,
+                 so log events can be emitted for SSE streaming even from
+                 run_in_executor threads where contextvars don't propagate.
+    """
     logger.handlers.clear()
 
     # Priority: explicit log_level > user-configured default > AGNT5_DEBUG > INFO
@@ -220,8 +227,8 @@ def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None
     else:
         effective_level = logging.INFO
 
-    # OpenTelemetry handler (forwards to Rust)
-    otel_handler = OpenTelemetryHandler()
+    # OpenTelemetry handler (forwards to Rust + SSE streaming)
+    otel_handler = OpenTelemetryHandler(context=context)
     otel_handler.setLevel(logging.DEBUG)  # Always forward to OTel
     otel_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(otel_handler)

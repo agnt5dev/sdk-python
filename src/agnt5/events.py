@@ -609,7 +609,7 @@ class EventEmitter:
         For checkpoint events, this method blocks until the platform acknowledges
         that the event has been persisted. This ensures correct event ordering.
         """
-        logger.info(
+        logger.debug(
             f"[EventEmitter._queue_event_async] ENTRY: type={envelope.event_type}, "
             f"run_id={self._run_id}, has_worker={self._worker is not None}"
         )
@@ -636,7 +636,7 @@ class EventEmitter:
                 if parent_correlation_id:
                     merged_metadata["parent_correlation_id"] = parent_correlation_id
 
-                logger.info(
+                logger.debug(
                     f"[EventEmitter._queue_event_async] Emitting checkpoint event (sync): "
                     f"type={envelope.event_type}, run_id={self._run_id}, "
                     f"sequence={self._sequence}"
@@ -657,7 +657,7 @@ class EventEmitter:
                     f"type={envelope.event_type}"
                 )
             else:
-                logger.info(
+                logger.debug(
                     f"[EventEmitter._queue_event_async] Queueing observability event (async): "
                     f"type={envelope.event_type}, run_id={self._run_id}, "
                     f"sequence={self._sequence}"

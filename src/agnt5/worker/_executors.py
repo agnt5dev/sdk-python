@@ -146,6 +146,7 @@ class ExecutorMixin:
             )
 
         async def execute(ctx: FunctionContext, input_dict: dict, req: Any):
+
             # Set up trace parent-child linking
             if req.runtime_context:
                 trace_id = req.runtime_context.trace_id

@@ -4,6 +4,17 @@ AGNT5 Python SDK - Build durable, resilient agent-first applications.
 Supports functions, workflows, agents, and LLM integration.
 """
 
+import logging as _logging
+import os as _os
+
+# Configure the agnt5 parent logger so all internal SDK loggers (agnt5.events,
+# agnt5.context, etc.) default to INFO. AGNT5_DEBUG=1 lowers to DEBUG.
+# This only affects agnt5.* loggers — user loggers are untouched.
+_agnt5_logger = _logging.getLogger("agnt5")
+if not _agnt5_logger.handlers:
+    _debug = _os.environ.get("AGNT5_DEBUG", "").lower() in ("1", "true", "yes")
+    _agnt5_logger.setLevel(_logging.DEBUG if _debug else _logging.INFO)
+
 from . import eval
 from . import events
 from . import lm

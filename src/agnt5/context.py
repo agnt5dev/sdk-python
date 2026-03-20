@@ -85,7 +85,7 @@ class Context:
         base_logger = logging.getLogger(f"agnt5.{run_id}")
         from ._telemetry import setup_context_logger
 
-        setup_context_logger(base_logger)
+        setup_context_logger(base_logger, context=self)
         if runtime_context:
             base_logger.addFilter(_CorrelationFilter(runtime_context))
         self._logger = ContextLogger(base_logger)
