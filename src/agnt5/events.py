@@ -693,7 +693,7 @@ class EventEmitter:
         Note: For checkpoint events, emit_event_sync blocks until the platform
         acknowledges persistence. For observability events, the async queue is used.
         """
-        logger.info(
+        logger.debug(
             f"[EventEmitter._queue_event] ENTRY: type={envelope.event_type}, "
             f"run_id={self._run_id}, has_worker={self._worker is not None}"
         )
@@ -720,7 +720,7 @@ class EventEmitter:
                 if parent_correlation_id:
                     merged_metadata["parent_correlation_id"] = parent_correlation_id
 
-                logger.info(
+                logger.debug(
                     f"[EventEmitter._queue_event] Emitting checkpoint event (sync): "
                     f"type={envelope.event_type}, run_id={self._run_id}, "
                     f"sequence={self._sequence}"
@@ -762,7 +762,7 @@ class EventEmitter:
                         parent_correlation_id=parent_correlation_id,
                     )
             else:
-                logger.info(
+                logger.debug(
                     f"[EventEmitter._queue_event] Queueing observability event (async): "
                     f"type={envelope.event_type}, run_id={self._run_id}, "
                     f"sequence={self._sequence}"

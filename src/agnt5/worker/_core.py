@@ -155,6 +155,10 @@ class Worker(ExecutorMixin):
         )
         self._rust_worker = self._PyWorker(self._rust_config)
 
+        # ChatBot registry: maps agent name -> ChatBot instance
+        # Populated when ChatBot instances are passed in the agents list
+        self._chatbots: dict[str, Any] = {}
+
         # Create entity state adapter with tenant_id from metadata for multi-tenancy support
         from .._core import EntityStateManager as RustEntityStateManager
         from .._state_adapter import StateAdapter as EntityStateAdapter
@@ -211,11 +215,25 @@ class Worker(ExecutorMixin):
 
             self._auto_discover_components(source_paths)
         else:
+            # Separate ChatBot instances from plain agents.
+            # ChatBots wrap agents and register as agent components, but
+            # we need to track them separately for webhook dispatch.
+            raw_agents = list(agents or [])
+            resolved_agents = []
+            for a in raw_agents:
+                from ..chat import ChatBot
+                if isinstance(a, ChatBot):
+                    self._chatbots[a.name] = a
+                    resolved_agents.append(a.agent)
+                    logger.debug(f"Registered ChatBot for agent '{a.name}'")
+                else:
+                    resolved_agents.append(a)
+
             self._explicit_components = {
                 "functions": list(functions or []),
                 "workflows": list(workflows or []),
                 "entities": list(entities or []),
-                "agents": list(agents or []),
+                "agents": resolved_agents,
                 "tools": list(tools or []),
                 "scorers": list(scorers or []),
             }
@@ -612,6 +630,12 @@ class Worker(ExecutorMixin):
 
             # Agents
             elif component_type == "agent":
+                # Check if this is a chat webhook dispatch
+                if self._chatbots and self._is_chat_webhook(input_data):
+                    chatbot = self._chatbots.get(component_name)
+                    if chatbot:
+                        return self._execute_chat_webhook(chatbot, input_data, request)
+
                 from ..agent import AgentRegistry
                 agent = AgentRegistry.get(component_name)
                 if agent:
@@ -633,6 +657,56 @@ class Worker(ExecutorMixin):
             return error_response()
 
         return handle_message
+
+    def _is_chat_webhook(self, input_data: bytes) -> bool:
+        """Check if input_data is a chat webhook envelope."""
+        import json
+        try:
+            data = json.loads(input_data)
+            return isinstance(data, dict) and data.get("_chat_webhook") is True
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+
+    def _execute_chat_webhook(self, chatbot: Any, input_data: bytes, request: Any) -> Any:
+        """Execute a chat webhook via the ChatBot wrapper.
+
+        The Gateway wraps webhook payloads in an envelope:
+        { "_chat_webhook": true, "platform": "slack", "headers": {...}, "body": "..." }
+
+        The ChatBot handles verification, parsing, agent execution, and
+        sending the response back to the platform.
+        """
+        import json
+
+        async def _run():
+            from .._core import PyExecuteComponentResponse
+
+            try:
+                envelope = json.loads(input_data)
+                platform = envelope["platform"]
+                headers = envelope.get("headers", {})
+                body = envelope.get("body", "").encode("utf-8")
+
+                logger.info(
+                    f"Chat webhook received: platform={platform}, bot={chatbot.name}"
+                )
+
+                result = await chatbot.handle_webhook(platform, headers, body)
+
+                # If the handler returns a challenge response, send it back
+                output = json.dumps(result) if result else "{}"
+                return PyExecuteComponentResponse(
+                    invocation_id=request.invocation_id,
+                    output=output.encode("utf-8"),
+                )
+            except Exception as e:
+                logger.error(f"Chat webhook execution failed: {e}", exc_info=True)
+                return PyExecuteComponentResponse(
+                    invocation_id=request.invocation_id,
+                    error=str(e),
+                )
+
+        return _run()
 
     def _print_startup_banner(self, components: list) -> None:
         """Print startup banner with component tree and dashboard link."""

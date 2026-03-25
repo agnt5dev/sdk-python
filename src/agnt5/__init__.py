@@ -15,6 +15,7 @@ if not _agnt5_logger.handlers:
     _debug = _os.environ.get("AGNT5_DEBUG", "").lower() in ("1", "true", "yes")
     _agnt5_logger.setLevel(_logging.DEBUG if _debug else _logging.INFO)
 
+from . import chat
 from . import eval
 from . import events
 from . import lm
@@ -52,6 +53,7 @@ from .agent import (
     agent,
     handoff,
 )
+from .chat import ChatBot, SlackConfig
 from .client import AsyncClient, Client, ReceivedEvent, RunError
 from .responses import (
     EvalResponse,
@@ -183,9 +185,13 @@ __all__ = [
     # Version
     "__version__",
     # Modules
+    "chat",
     "eval",
     "events",
     "lm",
+    # Chat SDK
+    "ChatBot",
+    "SlackConfig",
     # Core components
     "Context",
     "FunctionContext",
