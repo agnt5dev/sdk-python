@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 // Trace correlation is done via runs.trace_id lookup if needed.
 
 mod adk;
+mod chat;
 mod checkpoint_client;
 mod entity_state;
 mod eval;
@@ -654,6 +655,7 @@ fn log_from_python(
     match level.to_uppercase().as_str() {
         "DEBUG" => tracing::debug!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -667,6 +669,7 @@ fn log_from_python(
         ),
         "INFO" => tracing::info!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -680,6 +683,7 @@ fn log_from_python(
         ),
         "WARNING" | "WARN" => tracing::warn!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -693,6 +697,7 @@ fn log_from_python(
         ),
         "ERROR" => tracing::error!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -706,6 +711,7 @@ fn log_from_python(
         ),
         "CRITICAL" => tracing::error!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -719,6 +725,7 @@ fn log_from_python(
         ),
         _ => tracing::info!(
             target: "agnt5_sdk_python",
+            log_source = "application",
             python_module = module_path.as_deref(),
             python_filename = filename.as_deref(),
             python_line = line,
@@ -827,6 +834,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Graph database
     graph::register(m.py(), m)?;
+
+    // Chat SDK (Slack, Discord, etc.)
+    chat::register_chat(m)?;
 
     // Evaluation framework
     eval::register_eval(m.py(), m)?;
