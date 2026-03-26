@@ -650,9 +650,14 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> AgentContext:
-            session_id = input_dict.get("session_id") or str(uuid.uuid4())
+            # Prefer session_id from request header (X-Session-ID), then input payload, then generate
+            session_id = (
+                (getattr(req, "session_id", None))
+                or input_dict.get("session_id")
+                or str(uuid.uuid4())
+            )
 
-            if not input_dict.get("session_id"):
+            if not (getattr(req, "session_id", None) or input_dict.get("session_id")):
                 logger.debug(f"Created new agent session: {session_id}")
             else:
                 logger.debug(f"Using existing agent session: {session_id}")

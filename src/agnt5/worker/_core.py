@@ -475,12 +475,9 @@ class Worker(ExecutorMixin):
         """
         components = []
 
-        # Process functions only
-        for func in self._explicit_components["functions"]:
-            config = FunctionRegistry.get(func.__name__)
-            if not config:
-                logger.warning(f"Function '{func.__name__}' not found in FunctionRegistry")
-                continue
+        # Process functions — match by handler identity, not by name,
+        # so @function(name="custom") works correctly.
+        for config in FunctionRegistry.all().values():
 
             config_dict = {}
             if config.retries:
@@ -506,13 +503,10 @@ class Worker(ExecutorMixin):
 
         # Entity API removed in 0.4.0 - entities list is always empty
 
-        # Process workflows
         from ..workflow import WorkflowRegistry
-        for workflow_handler in self._explicit_components["workflows"]:
-            config = WorkflowRegistry.get(workflow_handler.__name__)
-            if not config:
-                logger.warning(f"Workflow '{workflow_handler.__name__}' not found in WorkflowRegistry")
-                continue
+        # Process workflows — iterate registry directly,
+        # so @workflow(name="custom") works correctly.
+        for config in WorkflowRegistry.all().values():
 
             components.append(self._create_component_info(
                 name=config.name,

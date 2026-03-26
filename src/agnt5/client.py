@@ -27,8 +27,11 @@ from .responses import (
     parse_submit_response,
 )
 
-# Environment variable for API key
+# Environment variables
 AGNT5_API_KEY_ENV = "AGNT5_API_KEY"
+AGNT5_GATEWAY_URL_ENV = "AGNT5_GATEWAY_URL"
+AGNT5_TENANT_ID_ENV = "AGNT5_TENANT_ID"
+AGNT5_DEPLOYMENT_ID_ENV = "AGNT5_DEPLOYMENT_ID"
 
 
 @dataclass
@@ -155,23 +158,34 @@ class Client:
 
     def __init__(
         self,
-        gateway_url: str = "https://gw.agnt5.com",
+        gateway_url: Optional[str] = None,
         timeout: float = 30.0,
         api_key: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ):
         """Initialize the AGNT5 client.
 
         Args:
-            gateway_url: Base URL of the AGNT5 gateway (default: https://gw.agnt5.com)
+            gateway_url: Base URL of the AGNT5 gateway. Falls back to
+                         AGNT5_GATEWAY_URL env var, then https://gw.agnt5.com.
             timeout: Request timeout in seconds (default: 30.0)
-            api_key: Service key for authentication. If not provided, falls back to
-                     AGNT5_API_KEY environment variable. Keys start with "agnt5_sk_".
+            api_key: Service key for authentication. Falls back to
+                     AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
+            tenant_id: Tenant/project ID for routing. Falls back to
+                       AGNT5_TENANT_ID env var.
+            deployment_id: Deployment ID for routing. Falls back to
+                           AGNT5_DEPLOYMENT_ID env var.
         """
-        self.gateway_url = gateway_url.rstrip("/")
+        self.gateway_url = (
+            gateway_url or os.environ.get(AGNT5_GATEWAY_URL_ENV) or "https://gw.agnt5.com"
+        ).rstrip("/")
         self.timeout = timeout
 
-        # Use provided api_key or fallback to environment variable
+        # Use provided values or fallback to environment variables
         self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
+        self.tenant_id = tenant_id or os.environ.get(AGNT5_TENANT_ID_ENV)
+        self.deployment_id = deployment_id or os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
 
         # Validate if the key starts with "agnt5_sk_"
         if self.api_key and not self.api_key.startswith("agnt5_sk_"):
@@ -196,6 +210,10 @@ class Client:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
+        if self.tenant_id:
+            headers["X-TENANT-ID"] = self.tenant_id
+        if self.deployment_id:
+            headers["X-DEPLOYMENT-ID"] = self.deployment_id
         if session_id:
             headers["X-Session-ID"] = session_id
         if user_id:
@@ -1799,22 +1817,33 @@ class AsyncClient:
 
     def __init__(
         self,
-        gateway_url: str = "http://localhost:34181",
+        gateway_url: Optional[str] = None,
         timeout: float = 30.0,
         api_key: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ):
         """Initialize the async AGNT5 client.
 
         Args:
-            gateway_url: Base URL of the AGNT5 gateway (default: http://localhost:34181)
+            gateway_url: Base URL of the AGNT5 gateway. Falls back to
+                         AGNT5_GATEWAY_URL env var, then https://gw.agnt5.com.
             timeout: Request timeout in seconds (default: 30.0)
-            api_key: Service key for authentication. If not provided, falls back to
-                     AGNT5_API_KEY environment variable. Keys start with "agnt5_sk_".
+            api_key: Service key for authentication. Falls back to
+                     AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
+            tenant_id: Tenant/project ID for routing. Falls back to
+                       AGNT5_TENANT_ID env var.
+            deployment_id: Deployment ID for routing. Falls back to
+                           AGNT5_DEPLOYMENT_ID env var.
         """
-        self.gateway_url = gateway_url.rstrip("/")
+        self.gateway_url = (
+            gateway_url or os.environ.get(AGNT5_GATEWAY_URL_ENV) or "https://gw.agnt5.com"
+        ).rstrip("/")
         self.timeout = timeout
-        # Use provided api_key or fallback to environment variable
+        # Use provided values or fallback to environment variables
         self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
+        self.tenant_id = tenant_id or os.environ.get(AGNT5_TENANT_ID_ENV)
+        self.deployment_id = deployment_id or os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
         self._client: Optional[httpx.AsyncClient] = None
 
     def _build_headers(
@@ -1834,6 +1863,10 @@ class AsyncClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
+        if self.tenant_id:
+            headers["X-TENANT-ID"] = self.tenant_id
+        if self.deployment_id:
+            headers["X-DEPLOYMENT-ID"] = self.deployment_id
         if session_id:
             headers["X-Session-ID"] = session_id
         if user_id:

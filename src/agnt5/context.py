@@ -170,13 +170,13 @@ class Context:
 
         The event already contains correlation_id and parent_correlation_id.
         """
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__).debug(
             f"[Context.emit] Emitting event: type={event.event_type}, "
             f"run_id={self._run_id}, correlation_id={event.correlation_id}, "
             f"has_worker={self._worker is not None}"
         )
         emitter = self._get_emitter()
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__).debug(
             f"[Context.emit] Got emitter, has_worker={emitter._worker is not None}"
         )
         return emitter.emit(event)

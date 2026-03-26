@@ -26,6 +26,7 @@ class RunStatus(str, Enum):
     CANCELLED = "cancelled"
     PAUSED = "paused"
     AWAITING_INPUT = "awaiting_input"
+    AWAITING_USER_INPUT = "awaiting_user_input"
     TIMEOUT = "timeout"
     UNKNOWN = "unknown"
 

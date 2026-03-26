@@ -399,12 +399,13 @@ class WorkflowContext(Context):
 
         # Extract handler name from function reference or use string
         if callable(handler):
-            handler_name = handler.__name__
             if not hasattr(handler, "_agnt5_config"):
                 raise ValueError(
-                    f"Function '{handler_name}' is not a registered @function. "
+                    f"Function '{handler.__name__}' is not a registered @function. "
                     f"Did you forget to add the @function decorator?"
                 )
+            # Use registered name (supports @function(name="custom"))
+            handler_name = handler._agnt5_config.name
         else:
             handler_name = handler
 
@@ -1387,12 +1388,13 @@ class WorkflowContext(Context):
             original_step_name = self._workflow_entity._resumed_step_name or step_name
 
             if original_step_correlation_id:
-                self._logger.info(f"Using restored step correlation ID: {original_step_correlation_id}")
+                self._logger.debug(f"Using restored step correlation ID: {original_step_correlation_id}")
             else:
-                # Fallback: generate new ID (shouldn't happen in normal resume flow)
+                # Normal during multi-step HITL replay — only the latest paused step
+                # has a correlation ID from the platform; earlier replayed steps generate new ones.
                 step_event_id = str(uuid.uuid4())
                 original_step_correlation_id = generate_cid()
-                self._logger.warning(f"No restored step correlation ID, using new: {original_step_correlation_id}")
+                self._logger.debug(f"No restored step correlation ID, using new: {original_step_correlation_id}")
 
             # Emit workflow.resumed FIRST - workflow is continuing after pause
             workflow_resumed = Resumed(
