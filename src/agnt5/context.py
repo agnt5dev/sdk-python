@@ -143,11 +143,13 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            # Pass trace metadata and experiment_id as base_metadata
-            # so every checkpoint event carries them back to the EE
+            # Pass trace metadata, experiment_id, and tenant/deployment IDs as base_metadata
+            # so every checkpoint event carries them back to the engine.
+            # tenant_id and deployment_id are critical: the engine cache key is
+            # (tenant_id, run_id), so events must use the same tenant_id as run.queued.
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate", "experiment_id"):
+                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id"):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(
