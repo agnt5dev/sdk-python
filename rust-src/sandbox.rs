@@ -23,9 +23,9 @@ type BoxedWorkspace = Arc<dyn SandboxWorkspace>;
 /// Provides sandboxed code execution and workspace file operations.
 /// Backend is selected at construction time:
 ///
-/// - ``RustSandbox(endpoint="http://...")`` → RemoteSandbox (HTTP)
-/// - ``RustSandbox(backend="wasm")`` → WasmSandbox (embedded, requires wasm-sandbox feature)
-#[pyclass(name = "RustSandbox")]
+/// - ``Sandbox(endpoint="http://...")`` → RemoteSandbox (HTTP)
+/// - ``Sandbox(backend="wasm")`` → WasmSandbox (embedded, requires wasm-sandbox feature)
+#[pyclass(name = "Sandbox")]
 pub struct PySandbox {
     executor: BoxedExecutor,
     workspace: BoxedWorkspace,
@@ -415,7 +415,7 @@ impl PySandbox {
     }
 
     fn __repr__(&self) -> String {
-        format!("RustSandbox(backend='{}')", self.backend_kind)
+        format!("Sandbox(backend='{}')", self.backend_kind)
     }
 }
 
