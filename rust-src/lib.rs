@@ -20,6 +20,7 @@ mod eval;
 mod graph;
 mod language_model;
 mod memory;
+mod sandbox;
 mod types;
 mod worker;
 use entity_state::EntityStateManager;
@@ -840,6 +841,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Evaluation framework
     eval::register_eval(m.py(), m)?;
+
+    // Sandbox (Wasm + Remote)
+    sandbox::register_sandbox(m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;
