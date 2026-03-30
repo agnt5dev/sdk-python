@@ -17,6 +17,7 @@ from .events import Event, EventEmitter, EventEnvelope
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
+    from .sandbox import Sandbox
 
 
 # Task-local storage (NOT global) - each asyncio task gets its own copy
@@ -74,6 +75,7 @@ class Context:
         self._component_name: Optional[str] = None
 
         self._emitter: Optional[EventEmitter] = None
+        self._sandbox: Optional["Sandbox"] = None
 
         if enable_memoization:
             from .memoization import MemoizationManager
@@ -104,6 +106,19 @@ class Context:
     def logger(self) -> ContextLogger:
         """Logger with correlation IDs. Supports keyword args as log attributes."""
         return self._logger
+
+    @property
+    def sandbox(self) -> Optional["Sandbox"]:
+        """Sandbox for code execution and workspace file operations.
+
+        Available when a sandbox is configured on the worker or passed explicitly.
+        Returns None if no sandbox is configured.
+        """
+        return self._sandbox
+
+    @sandbox.setter
+    def sandbox(self, value: Optional["Sandbox"]) -> None:
+        self._sandbox = value
 
     @property
     def session_id(self) -> Optional[str]:

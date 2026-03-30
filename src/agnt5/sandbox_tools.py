@@ -31,10 +31,18 @@ Usage:
     ```
 """
 
+import secrets
 from typing import List, Optional
 
 from .context import Context
 from .sandbox import Sandbox
+from .sandbox_events import (
+    SandboxExecuteCompleted,
+    SandboxExecuteFailed,
+    SandboxExecuteStarted,
+    SandboxFileRead,
+    SandboxFileWritten,
+)
 from .tool import Tool
 
 
@@ -121,13 +129,48 @@ def _make_execute_code_handler(state: _SandboxToolState):
             language: Programming language — "javascript", "python", or "bash".
         """
         sandbox = state.get_sandbox(ctx)
-        result = await sandbox.execute_code(code, language=language)
-        return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.exit_code,
-            "execution_time_ms": result.execution_time_ms,
-        }
+        cid = f"sandbox-{secrets.token_hex(5)}"
+
+        ctx.emit(SandboxExecuteStarted(
+            name="sandbox_execute_code",
+            correlation_id=cid,
+            parent_correlation_id=ctx.correlation_id,
+            language=language,
+            code_length=len(code),
+            input_data={"language": language, "code_length": len(code)},
+        ))
+
+        try:
+            result = await sandbox.execute_code(code, language=language)
+            ctx.emit(SandboxExecuteCompleted(
+                name="sandbox_execute_code",
+                correlation_id=cid,
+                parent_correlation_id=ctx.correlation_id,
+                language=language,
+                exit_code=result.exit_code,
+                execution_time_ms=result.execution_time_ms,
+                output_data={
+                    "exit_code": result.exit_code,
+                    "stdout_length": len(result.stdout),
+                    "execution_time_ms": result.execution_time_ms,
+                },
+            ))
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+                "execution_time_ms": result.execution_time_ms,
+            }
+        except Exception as e:
+            ctx.emit(SandboxExecuteFailed(
+                name="sandbox_execute_code",
+                correlation_id=cid,
+                parent_correlation_id=ctx.correlation_id,
+                language=language,
+                error_code="SANDBOX_EXECUTION_FAILED",
+                error_message=str(e),
+            ))
+            raise
 
     return sandbox_execute_code
 
@@ -142,6 +185,14 @@ def _make_write_file_handler(state: _SandboxToolState):
         """
         sandbox = state.get_sandbox(ctx)
         result = await sandbox.write_file(path, content.encode("utf-8"))
+        ctx.emit(SandboxFileWritten(
+            name="sandbox_write_file",
+            correlation_id=f"sandbox-{secrets.token_hex(5)}",
+            parent_correlation_id=ctx.correlation_id,
+            file_path=path,
+            file_size=result.size,
+            output_data={"path": result.path, "size": result.size},
+        ))
         return {
             "success": result.success,
             "path": result.path,
@@ -160,6 +211,14 @@ def _make_read_file_handler(state: _SandboxToolState):
         """
         sandbox = state.get_sandbox(ctx)
         result = await sandbox.read_file(path)
+        ctx.emit(SandboxFileRead(
+            name="sandbox_read_file",
+            correlation_id=f"sandbox-{secrets.token_hex(5)}",
+            parent_correlation_id=ctx.correlation_id,
+            file_path=path,
+            file_size=result.size,
+            output_data={"path": result.path, "size": result.size},
+        ))
         return {
             "path": result.path,
             "content": result.content.decode("utf-8", errors="replace"),
