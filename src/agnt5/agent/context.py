@@ -63,6 +63,7 @@ class AgentContext(Context):
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
         parent_correlation_id: Optional[str] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ):
         """
         Initialize agent context.
@@ -105,6 +106,7 @@ class AgentContext(Context):
             session_id=session_id,
             enable_memoization=True,  # Agents get memoization by default
             worker=worker,
+            trace_metadata=trace_metadata,
         )
 
         self._agent_name = agent_name

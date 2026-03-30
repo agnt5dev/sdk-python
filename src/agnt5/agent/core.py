@@ -435,21 +435,21 @@ class Agent:
         elif hasattr(context, '_workflow_entity'):
             entity_key, scope = self._detect_memory_scope(context)
             detected_session_id = entity_key.split(":", 1)[1] if ":" in entity_key else context.run_id
-            # Use parent's run_id (valid UUID) for events, session_id for conversation history
             context = AgentContext(
-                run_id=context.run_id,  # Use parent's UUID, not compound ID
+                run_id=context.run_id,
                 agent_name=self.name,
                 session_id=detected_session_id,
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),
+                trace_metadata=getattr(context, '_trace_metadata', None),
             )
         else:
-            # Use parent's run_id (valid UUID) for events
             context = AgentContext(
-                run_id=context.run_id,  # Use parent's UUID, not compound ID
+                run_id=context.run_id,
                 agent_name=self.name,
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),
+                trace_metadata=getattr(context, '_trace_metadata', None),
             )
 
         # Emit agent.started checkpoint for journal persistence
@@ -1226,15 +1226,16 @@ class Agent:
                 session_id=detected_session_id,  # Use auto-detected scope
                 parent_context=context,
                 runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
+                trace_metadata=getattr(context, '_trace_metadata', None),  # Inherit tenant_id
             )
         else:
             # FunctionContext or other - create new AgentContext
-            # Use parent's run_id (valid UUID) for events
             context = AgentContext(
-                run_id=context.run_id,  # Use parent's UUID, not compound ID
+                run_id=context.run_id,
                 agent_name=self.name,
-                parent_context=context,  # Inherit streaming context
-                runtime_context=getattr(context, '_runtime_context', None),  # Inherit trace context
+                parent_context=context,
+                runtime_context=getattr(context, '_runtime_context', None),
+                trace_metadata=getattr(context, '_trace_metadata', None),
             )
 
         # Emit agent.started checkpoint for journal persistence

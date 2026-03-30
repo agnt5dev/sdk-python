@@ -204,6 +204,7 @@ class ExecutorMixin:
                 # Calculate function duration even on failure
                 end_time_ns = time.time_ns()
                 duration_ms = (end_time_ns - start_time_ns) // 1_000_000
+                error_code = "TIMEOUT" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else type(e).__name__
                 error_msg = f"{type(e).__name__}: {str(e)}"
 
                 # Emit function.failed (child of run)
@@ -213,7 +214,7 @@ class ExecutorMixin:
                     correlation_id=fn_correlation_id,
                     parent_correlation_id=run_correlation_id,
                     component_type=ComponentType.FUNCTION,
-                    error_code=type(e).__name__,
+                    error_code=error_code,
                     error_message=error_msg,
                     duration_ms=duration_ms,
                 )
@@ -225,7 +226,7 @@ class ExecutorMixin:
                     correlation_id=run_correlation_id,
                     parent_correlation_id=ctx.parent_correlation_id,
                     component_type=ComponentType.RUN,
-                    error_code=type(e).__name__,
+                    error_code=error_code,
                     error_message=error_msg,
                 )
                 logger.info(f"Function {config.name} failed: {error_msg}")
@@ -672,6 +673,7 @@ class ExecutorMixin:
                 worker=self._rust_worker,
                 correlation_id=correlation_id,
                 parent_correlation_id=generate_cid(),
+                trace_metadata=getattr(req, "metadata", None),
             )
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
@@ -781,6 +783,22 @@ class ExecutorMixin:
                     )
                     ctx.emit(run_completed_event)
 
+                    # Emit session.created so the session projection materializes
+                    # this session for GET /v1/sessions/{id} queries.
+                    from ..events import Event as _BaseEvent
+                    session_event = _BaseEvent(
+                        name=agent.name,
+                        correlation_id=run_correlation_id,
+                        parent_correlation_id="",
+                    )
+                    object.__setattr__(session_event, "event_type", "session.created")
+                    session_event.metadata = {
+                        "session_id": ctx.session_id or ctx.run_id,
+                        "component_name": agent.name,
+                        "session_type": "agent",
+                    }
+                    ctx.emit(session_event)
+
                     logger.debug(f"Agent streaming queued {sequence + 1} events")
                     return None
 
@@ -822,6 +840,22 @@ class ExecutorMixin:
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
                 ctx.emit(run_completed_event)
+
+                # Emit session.created so the session projection materializes
+                # this session for GET /v1/sessions/{id} queries.
+                from ..events import Event as _BaseEvent
+                session_event = _BaseEvent(
+                    name=agent.name,
+                    correlation_id=run_correlation_id,
+                    parent_correlation_id="",
+                )
+                object.__setattr__(session_event, "event_type", "session.created")
+                session_event.metadata = {
+                    "session_id": ctx.session_id or ctx.run_id,
+                    "component_name": agent.name,
+                    "session_type": "agent",
+                }
+                ctx.emit(session_event)
 
                 return None
 
@@ -897,6 +931,7 @@ class ExecutorMixin:
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
+                trace_metadata=getattr(req, "metadata", None),
             )
 
         async def execute(ctx: ScorerContext, input_dict: dict, req: Any):
@@ -1215,6 +1250,7 @@ class ExecutorMixin:
                 runtime_context=request.runtime_context,
                 is_streaming=is_streaming,
                 worker=self._rust_worker,
+                trace_metadata=getattr(request, "metadata", None),
             )
 
             # Set context in contextvar

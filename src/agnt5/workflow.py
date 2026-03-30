@@ -63,6 +63,7 @@ class WorkflowContext(Context):
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
         parent_correlation_id: Optional[str] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -90,6 +91,7 @@ class WorkflowContext(Context):
             session_id=session_id,
             is_streaming=is_streaming,
             worker=worker,
+            trace_metadata=trace_metadata,
         )
         self._is_streaming = is_streaming
         self._workflow_entity = workflow_entity
@@ -420,6 +422,19 @@ class WorkflowContext(Context):
         if self._workflow_entity.has_completed_step(step_name):
             result = self._workflow_entity.get_completed_step(step_name)
             self._logger.info(f"🔄 Replaying cached step: {step_name}")
+            # Emit a step.completed event with cache_hit metadata so tests can
+            # prove replay happened (vs re-execution which emits started+completed)
+            from .events import Completed, ComponentType, OperationType
+            replay_event = Completed(
+                name=step_name,
+                correlation_id=generate_cid(),
+                parent_correlation_id=self._correlation_id,
+                component_type=ComponentType.WORKFLOW,
+                operation=OperationType.STEP,
+                output_data=result,
+                metadata={"cache_hit": "true"},
+            )
+            self.emit(replay_event)
             return result
 
         # Use step_event_id as correlation_id for pairing started ↔ completed
