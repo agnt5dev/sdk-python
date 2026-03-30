@@ -155,6 +155,7 @@ from .sandbox import (
     SandboxHealthResult,
     StreamEvent,
 )
+from .sandbox_tools import sandbox_tools
 
 # MCP (Model Context Protocol) components
 from .mcp import (
