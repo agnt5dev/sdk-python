@@ -156,7 +156,10 @@ class ExecutorMixin:
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
-            # Emit run.started before executing handler
+            start_time_ns = time.time_ns()
+            fn_correlation_id = generate_cid()
+
+            # Batch run.started + function.started into a single AppendBatch RPC
             run_started_event = Started(
                 name=config.name,
                 correlation_id=run_correlation_id,
@@ -165,11 +168,6 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            await ctx.emit_async(run_started_event)
-
-            # Emit function.started (child of run)
-            start_time_ns = time.time_ns()
-            fn_correlation_id = generate_cid()
             fn_started_event = Started(
                 name=config.name,
                 correlation_id=fn_correlation_id,
@@ -178,7 +176,7 @@ class ExecutorMixin:
                 input_data=input_dict,
                 attempt=ctx.attempt,
             )
-            await ctx.emit_async(fn_started_event)
+            await ctx.emit_batch_async([run_started_event, fn_started_event])
 
             # Execute function with error handling for proper event emission
             try:

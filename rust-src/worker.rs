@@ -503,6 +503,45 @@ impl PyWorker {
         })
     }
 
+    /// Emit a batch of events in a single AppendBatch RPC (async).
+    ///
+    /// Reduces gRPC overhead by sending multiple non-terminal events together.
+    /// Each event is a tuple: (run_id, event_type, event_data, sequence, metadata, timestamp_ns)
+    #[pyo3(signature = (events,))]
+    fn emit_event_batch_async<'py>(
+        &self,
+        py: Python<'py>,
+        events: Vec<(String, String, String, i64, HashMap<String, String>, i64)>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Convert string data to bytes
+        let events_bytes: Vec<_> = events
+            .into_iter()
+            .map(|(rid, et, data, seq, meta, ts)| (rid, et, data.into_bytes(), seq, meta, ts))
+            .collect();
+
+        let worker = {
+            let worker_guard = self.worker.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to lock worker: {}", e))
+            })?;
+            worker_guard
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Worker not initialized"))?
+                .clone()
+        };
+
+        future_into_py(py, async move {
+            worker
+                .emit_checkpoint_batch(events_bytes)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        format!("Failed to emit batch: {}", e),
+                    )
+                })?;
+            Ok(())
+        })
+    }
+
     /// Set the Python event loop for concurrent async execution
     ///
     /// This method stores a reference to the Python event loop via TaskLocals.

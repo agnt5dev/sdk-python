@@ -594,6 +594,42 @@ class EventEmitter:
         await self._queue_event_async(envelope, event.correlation_id, event.parent_correlation_id)
         return envelope
 
+    async def emit_batch_async(self, events: list[Event]) -> None:
+        """Emit multiple events in a single AppendBatch RPC.
+
+        Reduces gRPC overhead by batching non-terminal events together.
+        Terminal events (.completed, .failed) should still use emit_async() for sync ack.
+        """
+        if not events or self._worker is None:
+            return
+
+        batch_tuples = []
+        for event in events:
+            event_data = event.to_dict()
+            merged_metadata = dict(self._base_metadata)
+            if event.metadata:
+                merged_metadata.update(event.metadata)
+            if event.correlation_id:
+                merged_metadata["correlation_id"] = event.correlation_id
+            if event.parent_correlation_id:
+                merged_metadata["parent_correlation_id"] = event.parent_correlation_id
+
+            self._sequence += 1
+            batch_tuples.append((
+                self._run_id,
+                event.event_type,
+                serialize_to_str(event_data),
+                self._sequence,
+                merged_metadata,
+                event.timestamp_ns,
+            ))
+
+        await self._worker.emit_event_batch_async(batch_tuples)
+        logger.debug(
+            f"[EventEmitter.emit_batch_async] Batch emitted: {len(events)} events, "
+            f"types={[e.event_type for e in events]}"
+        )
+
     def __call__(self, event: Event) -> EventEnvelope:
         """Callable interface - delegates to emit()."""
         return self.emit(event)

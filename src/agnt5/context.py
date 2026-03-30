@@ -207,6 +207,14 @@ class Context:
         emitter = self._get_emitter()
         return await emitter.emit_async(event)
 
+    async def emit_batch_async(self, events: list) -> None:
+        """Emit multiple events in a single AppendBatch RPC.
+
+        Reduces gRPC overhead by batching non-terminal events (e.g., started events).
+        """
+        emitter = self._get_emitter()
+        await emitter.emit_batch_async(events)
+
     @contextmanager
     def as_parent(self) -> Generator[None, None, None]:
         """Set this context's correlation_id as parent for nested component events."""
