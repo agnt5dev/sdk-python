@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Union
 from .types import BackoffPolicy, BackoffType, RetryPolicy
 
 
-def parse_retry_policy(retries: Optional[Union[int, Dict[str, Any], RetryPolicy]]) -> RetryPolicy:
+def parse_retry_policy(retries: Optional[Union[int, Dict[str, Any], RetryPolicy]]) -> Optional[RetryPolicy]:
     """Parse retry configuration from various forms.
 
     Args:
@@ -19,13 +19,13 @@ def parse_retry_policy(retries: Optional[Union[int, Dict[str, Any], RetryPolicy]
             - int: max_attempts (e.g., 5)
             - dict: RetryPolicy parameters (e.g., {"max_attempts": 5, "initial_interval_ms": 1000})
             - RetryPolicy: pass through
-            - None: use default
+            - None: no retry (returns None)
 
     Returns:
-        RetryPolicy instance
+        RetryPolicy instance or None
     """
     if retries is None:
-        return RetryPolicy()
+        return None
     elif isinstance(retries, int):
         return RetryPolicy(max_attempts=retries)
     elif isinstance(retries, dict):

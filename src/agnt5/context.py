@@ -149,7 +149,8 @@ class Context:
             # (tenant_id, run_id), so events must use the same tenant_id as run.queued.
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id"):
+                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id",
+                            "attempt", "max_attempts", "component_name", "component_type"):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(
