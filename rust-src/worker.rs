@@ -244,7 +244,7 @@ impl PyWorker {
     /// # Arguments
     /// * `invocation_id` - Run ID for this invocation
     /// * `event_type` - Event type (e.g., "workflow.step.started", "agent.completed")
-    /// * `event_data` - JSON payload as string
+    /// * `event_data` - JSON payload as bytes
     /// * `content_index` - Index for parallel content blocks (streaming only)
     /// * `sequence` - Monotonic sequence number for ordering
     /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
@@ -257,7 +257,7 @@ impl PyWorker {
         &self,
         invocation_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         content_index: i32,
         sequence: i64,
         metadata: HashMap<String, String>,
@@ -266,7 +266,7 @@ impl PyWorker {
         correlation_id: Option<String>,
         parent_correlation_id: Option<String>,
     ) -> PyResult<()> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
         let correlation_id_str = correlation_id.unwrap_or_default();
         let parent_correlation_id_str = parent_correlation_id.unwrap_or_default();
 
@@ -352,38 +352,17 @@ impl PyWorker {
         py: Python<'_>,
         run_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         sequence_number: i64,
         metadata: HashMap<String, String>,
         source_timestamp_ns: i64,
         timeout_ms: u64,
     ) -> PyResult<()> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
 
-        // Inject traceparent from Python _trace_metadata contextvar if not already
-        // in metadata. This propagates the dispatch trace context through
-        // WriteCheckpoint calls back to the Execution Engine, linking checkpoint
-        // spans to the original request trace.
-        // The traceparent should already be in metadata, injected by the Python
-        // EventEmitter's base_metadata (populated from request.metadata in _executors.py).
-        // As a fallback, check the _trace_metadata contextvar.
-        let mut metadata = metadata;
-        if !metadata.contains_key("traceparent") {
-            if let Ok(worker_module) = py.import("agnt5.worker") {
-                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
-                    if let Ok(trace_dict) = trace_var.call_method0("get") {
-                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
-                            if let Some(tp) = dict.get("traceparent") {
-                                metadata.insert("traceparent".to_string(), tp.clone());
-                            }
-                            if let Some(ts) = dict.get("tracestate") {
-                                metadata.insert("tracestate".to_string(), ts.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // traceparent is injected by the Python EventEmitter's base_metadata
+        // (populated from request.metadata in _executors.py). No Rust-side
+        // fallback needed — avoids py.import() + attribute lookups on every emit.
 
         // Get the worker (using std::sync::Mutex, not tokio)
         let worker = {
@@ -437,33 +416,15 @@ impl PyWorker {
         py: Python<'py>,
         run_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         sequence_number: i64,
         metadata: HashMap<String, String>,
         source_timestamp_ns: i64,
         timeout_ms: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
 
-        // Inject traceparent from Python _trace_metadata contextvar if not already
-        // in metadata (same logic as emit_event_sync).
-        let mut metadata = metadata;
-        if !metadata.contains_key("traceparent") {
-            if let Ok(worker_module) = py.import("agnt5.worker") {
-                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
-                    if let Ok(trace_dict) = trace_var.call_method0("get") {
-                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
-                            if let Some(tp) = dict.get("traceparent") {
-                                metadata.insert("traceparent".to_string(), tp.clone());
-                            }
-                            if let Some(ts) = dict.get("tracestate") {
-                                metadata.insert("tracestate".to_string(), ts.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // traceparent is injected by the Python EventEmitter's base_metadata.
 
         // Clone the worker while GIL is held (brief std::sync::Mutex lock)
         let worker = {
@@ -511,13 +472,10 @@ impl PyWorker {
     fn emit_event_batch_async<'py>(
         &self,
         py: Python<'py>,
-        events: Vec<(String, String, String, i64, HashMap<String, String>, i64)>,
+        events: Vec<(String, String, Vec<u8>, i64, HashMap<String, String>, i64)>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Convert string data to bytes
-        let events_bytes: Vec<_> = events
-            .into_iter()
-            .map(|(rid, et, data, seq, meta, ts)| (rid, et, data.into_bytes(), seq, meta, ts))
-            .collect();
+        // Data already arrives as bytes — no conversion needed
+        let events_bytes = events;
 
         let worker = {
             let worker_guard = self.worker.lock().map_err(|e| {
