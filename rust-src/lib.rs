@@ -17,7 +17,6 @@ mod chat;
 mod checkpoint_client;
 mod entity_state;
 mod eval;
-mod graph;
 mod language_model;
 mod memory;
 mod sandbox;
@@ -833,8 +832,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Semantic memory
     memory::register_memory(m)?;
 
-    // Graph database
-    graph::register(m.py(), m)?;
+    // Graph database — removed (in-memory only, no persistence)
 
     // Chat SDK (Slack, Discord, etc.)
     chat::register_chat(m)?;

@@ -131,11 +131,22 @@ from .scorer import (
 )
 from .eval.types import ScorerRequest, ScorerResult
 
-# Memory components
+# Memory components (new architecture)
 from .memory import (
-    ConversationMemory, MemoryMessage, MemoryMetadata, MemoryResult, MemoryScope, SemanticMemory,
-    GraphMemory, GraphNode, GraphRelationship, GraphTraversalResult
+    ConversationAccessor,
+    ConversationMessage,
+    KVMemory,
+    MemoryAccessor,
+    MemoryMessage,
+    MemoryMetadata,
+    MemoryResult,
+    MemoryScope,
+    SemanticMemoryProvider,
+    SemanticSearchResult,
+    WorkingMemory,
 )
+# Legacy re-exports: ConversationMemory, SemanticMemory emit DeprecationWarning
+# on access. GraphMemory/GraphNode/GraphRelationship/GraphTraversalResult are removed.
 
 # Sandbox components
 from .sandbox import (
@@ -219,16 +230,17 @@ __all__ = [
     "SessionContext",
     "UserContext",
     # Memory components
-    "ConversationMemory",
+    "ConversationAccessor",
+    "ConversationMessage",
+    "KVMemory",
+    "MemoryAccessor",
     "MemoryMessage",
     "MemoryMetadata",
     "MemoryResult",
     "MemoryScope",
-    "SemanticMemory",
-    "GraphMemory",
-    "GraphNode",
-    "GraphRelationship",
-    "GraphTraversalResult",
+    "SemanticMemoryProvider",
+    "SemanticSearchResult",
+    "WorkingMemory",
     # Agent components
     "Agent",
     "AgentContext",

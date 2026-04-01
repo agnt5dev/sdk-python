@@ -265,6 +265,80 @@ class WorkflowContext(Context):
             state._set_emitter(self.emit)
         return state
 
+    @property
+    def memory(self):
+        """
+        Get unified memory accessor.
+
+        Provides:
+        - KV memory: ctx.memory.get/set/delete (session-scoped by default)
+        - Scoped KV: ctx.memory.user(), ctx.memory.run(), ctx.memory.global_()
+        - Working memory: ctx.memory.working
+        - Semantic memory: ctx.memory.semantic (if configured at worker level)
+
+        Returns:
+            MemoryAccessor instance
+
+        Example:
+            await ctx.memory.set("theme", "dark")
+            theme = await ctx.memory.get("theme", "light")
+            wm = await ctx.memory.working.get()
+        """
+        from .memory import MemoryAccessor
+
+        if not hasattr(self, '_memory_accessor'):
+            # Get state adapter from worker context
+            try:
+                adapter = _get_state_adapter()
+            except RuntimeError:
+                from ._state_adapter import StateAdapter
+                adapter = StateAdapter()
+
+            self._memory_accessor = MemoryAccessor(
+                state_adapter=adapter,
+                session_id=self._session_id,
+                user_id=self._user_id,
+                run_id=self._run_id,
+                semantic_provider=getattr(self, '_semantic_provider', None),
+            )
+
+        return self._memory_accessor
+
+    @property
+    def conversation(self):
+        """
+        Get conversation memory for this session.
+
+        Provides message history management:
+        - ctx.conversation.add(role, content) — record a message
+        - ctx.conversation.get_messages(limit) — load history
+        - ctx.conversation.get_as_lm_messages(limit) — history as LM Messages
+        - ctx.conversation.clear() — wipe history
+
+        Returns:
+            ConversationAccessor instance
+
+        Example:
+            await ctx.conversation.add("user", user_input)
+            history = await ctx.conversation.get_as_lm_messages(limit=20)
+        """
+        from .memory import ConversationAccessor
+
+        if not hasattr(self, '_conversation_accessor'):
+            try:
+                adapter = _get_state_adapter()
+            except RuntimeError:
+                from ._state_adapter import StateAdapter
+                adapter = StateAdapter()
+
+            self._conversation_accessor = ConversationAccessor(
+                state_adapter=adapter,
+                session_id=self._session_id,
+                component_name=self._workflow_entity.key if self._workflow_entity else "",
+            )
+
+        return self._conversation_accessor
+
     # === Orchestration ===
 
     async def step(
