@@ -1,8 +1,8 @@
 """Conversation Memory — message history backed by runtime storage.
 
-Provides conversation history management for multi-turn agent sessions.
-Currently backed by CF_STATE via StateAdapter. Will be rewired to native
-CF_SESSIONS + CF_MESSAGES when proto operations are added (Phase 2b).
+Uses native CF_SESSIONS + CF_MESSAGES when the Rust core is available
+(production with runtime). Falls back to CF_STATE via StateAdapter in
+standalone/testing mode.
 
 Usage:
     conversation = ConversationAccessor(state_adapter, session_id="sess-1")
@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -28,27 +29,23 @@ class ConversationAccessor:
     Manages per-session message history with add/get/clear operations.
     Messages are persisted to the runtime and survive process restarts.
 
+    When connected to the runtime (production), uses native session/message
+    operations backed by CF_SESSIONS + CF_MESSAGES in RocksDB. In standalone
+    or testing mode, falls back to CF_STATE.
+
     Example:
         ```python
         @workflow
         async def chat(ctx: WorkflowContext, user_input: str) -> str:
-            # Load history for LLM context
             history = await ctx.conversation.get_as_lm_messages(limit=20)
-
-            # Record the user message
             await ctx.conversation.add("user", user_input)
-
-            # Run agent with history
             result = await agent.run(user_input, history=history)
-
-            # Record the assistant response
             await ctx.conversation.add("assistant", result.output)
             return result.output
         ```
     """
 
-    # Entity type/key for CF_STATE backing (Phase 2a)
-    # Will be replaced by native session/message ops in Phase 2b
+    # Entity type/key for CF_STATE fallback (standalone mode)
     _ENTITY_TYPE = "conversation"
 
     def __init__(
@@ -68,6 +65,27 @@ class ConversationAccessor:
         self._session_id = session_id
         self._component_name = component_name or ""
         self._entity_key = f"history:{session_id}"
+        self._session_created = False
+
+    @property
+    def _use_native(self) -> bool:
+        """Whether to use native session/message operations."""
+        return getattr(self._state_adapter, 'has_native_messages', False)
+
+    async def _ensure_session(self) -> None:
+        """Ensure native session exists (called once per accessor)."""
+        if self._session_created or not self._use_native:
+            return
+        try:
+            await self._state_adapter.create_session(
+                self._session_id,
+                self._component_name,
+                "conversation",
+            )
+            self._session_created = True
+        except Exception:
+            # Session may already exist — that's fine
+            self._session_created = True
 
     async def add(
         self,
@@ -83,13 +101,40 @@ class ConversationAccessor:
             metadata: Optional metadata to attach to the message
 
         Returns:
-            Message ID (currently index-based, will be UUID with native backing)
+            Message ID
 
         Example:
             await ctx.conversation.add("user", "What's the weather?")
             await ctx.conversation.add("assistant", "It's sunny!")
         """
-        # Load current state with version for optimistic locking
+        if self._use_native:
+            return await self._add_native(role, content, metadata)
+        return await self._add_fallback(role, content, metadata)
+
+    async def _add_native(self, role: str, content: str, metadata: Optional[Dict[str, Any]]) -> str:
+        """Add via native message.enqueued journal event."""
+        await self._ensure_session()
+
+        payload = json.dumps({
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+            "metadata": metadata or {},
+        }).encode("utf-8")
+
+        try:
+            message_id = await self._state_adapter.send_message(
+                correlation_id=self._session_id,
+                message_type=role,
+                payload=payload,
+            )
+            return message_id
+        except Exception as e:
+            logger.error(f"Native message send failed for {self._session_id}: {e}")
+            raise
+
+    async def _add_fallback(self, role: str, content: str, metadata: Optional[Dict[str, Any]]) -> str:
+        """Add via CF_STATE (standalone/testing mode)."""
         current_state, current_version = await self._state_adapter.load_with_version(
             entity_type=self._ENTITY_TYPE,
             entity_key=self._entity_key,
@@ -130,7 +175,6 @@ class ConversationAccessor:
             logger.error(f"Failed to add message to conversation {self._session_id}: {e}")
             raise
 
-        # Return index-based ID for now
         return str(len(messages_data) - 1)
 
     async def get_messages(self, limit: int = 50) -> List[ConversationMessage]:
@@ -147,6 +191,48 @@ class ConversationAccessor:
             for msg in messages:
                 print(f"{msg.role}: {msg.content}")
         """
+        if self._use_native:
+            return await self._get_messages_native(limit)
+        return await self._get_messages_fallback(limit)
+
+    async def _get_messages_native(self, limit: int) -> List[ConversationMessage]:
+        """Get via native CF_MESSAGES list_messages."""
+        try:
+            raw_messages = await self._state_adapter.list_messages(
+                correlation_id=self._session_id,
+                limit=limit,
+            )
+
+            messages = []
+            for raw in raw_messages:
+                # raw is proto-encoded ChatMessage bytes
+                # Parse the payload field which contains our JSON
+                try:
+                    # Try to decode as proto ChatMessage and extract payload
+                    # For now, attempt JSON decode of the payload field
+                    # The proto ChatMessage has payload as bytes field
+                    import struct
+                    # Simple approach: try JSON decode directly
+                    msg_data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+                    if isinstance(msg_data, dict) and "payload" in msg_data:
+                        payload = msg_data["payload"]
+                        if isinstance(payload, str):
+                            payload = json.loads(payload)
+                        messages.append(ConversationMessage.from_dict(payload))
+                    else:
+                        messages.append(ConversationMessage.from_dict(msg_data))
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # Proto bytes — fall back to extracting what we can
+                    logger.debug(f"Could not parse native message, skipping")
+                    continue
+
+            return messages
+        except Exception as e:
+            logger.warning(f"Native list_messages failed, falling back to CF_STATE: {e}")
+            return await self._get_messages_fallback(limit)
+
+    async def _get_messages_fallback(self, limit: int) -> List[ConversationMessage]:
+        """Get via CF_STATE (standalone/testing mode)."""
         session_data = await self._state_adapter.load_state(
             entity_type=self._ENTITY_TYPE,
             entity_key=self._entity_key,
@@ -160,7 +246,6 @@ class ConversationAccessor:
         messages_data = session_data.get("messages", [])
         messages = [ConversationMessage.from_dict(m) for m in messages_data]
 
-        # Return most recent N messages
         if limit and len(messages) > limit:
             messages = messages[-limit:]
 

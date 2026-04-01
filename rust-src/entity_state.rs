@@ -558,6 +558,100 @@ impl EntityStateManager {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Session / Message operations (Phase 2 — conversation memory)
+    // -------------------------------------------------------------------
+
+    /// Send a message to a conversation thread via the runtime
+    pub async fn send_message(
+        &self,
+        correlation_id: String,
+        message_type: String,
+        payload: Vec<u8>,
+    ) -> Result<String, EntityError> {
+        use agnt5_sdk_core::pb::{runtime_service_request, MessageSendRequest};
+
+        let operation = runtime_service_request::Operation::MessageSend(
+            MessageSendRequest {
+                correlation_id,
+                message_type,
+                payload,
+                from_service: String::new(),
+            },
+        );
+
+        let response = self.send_request(operation).await?;
+
+        match response.result {
+            Some(runtime_service_response::Result::MessageSend(result)) => {
+                Ok(result.message_id)
+            }
+            _ => Err(EntityError::PlatformError(
+                "Unexpected response type for message send".to_string(),
+            )),
+        }
+    }
+
+    /// List messages in a conversation by correlation ID
+    pub async fn list_messages(
+        &self,
+        correlation_id: String,
+        limit: i32,
+    ) -> Result<Vec<Vec<u8>>, EntityError> {
+        use agnt5_sdk_core::pb::{runtime_service_request, MessageListRequest};
+
+        let operation = runtime_service_request::Operation::MessageList(
+            MessageListRequest {
+                correlation_id,
+                limit,
+                after_message_id: String::new(),
+            },
+        );
+
+        let response = self.send_request(operation).await?;
+
+        match response.result {
+            Some(runtime_service_response::Result::MessageList(result)) => {
+                Ok(result.messages)
+            }
+            _ => Err(EntityError::PlatformError(
+                "Unexpected response type for message list".to_string(),
+            )),
+        }
+    }
+
+    /// Create a conversation session in the runtime
+    pub async fn create_session(
+        &self,
+        session_id: String,
+        component_name: String,
+        session_type: String,
+    ) -> Result<String, EntityError> {
+        use agnt5_sdk_core::pb::{runtime_service_request, SessionCreateRequest};
+
+        let operation = runtime_service_request::Operation::SessionCreate(
+            SessionCreateRequest {
+                session_id,
+                component_name,
+                session_type,
+                state: vec![],
+                metadata: vec![],
+                expires_at_ns: 0,
+            },
+        );
+
+        let response = self.send_request(operation).await?;
+
+        match response.result {
+            Some(runtime_service_response::Result::SessionCreate(result)) => {
+                Ok(result.session_id)
+            }
+            _ => Err(EntityError::PlatformError(
+                "Unexpected response type for session create".to_string(),
+            )),
+        }
+    }
+
     /// Clear entire cache (useful for testing)
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.write().await;
@@ -686,6 +780,64 @@ impl EntityStateManager {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             manager.clear_cache().await;
             Ok(())
+        })
+    }
+
+    // --- Session / Message PyO3 bindings ---
+
+    /// Send a message to a conversation (Python-facing async method)
+    ///
+    /// Returns message_id
+    pub fn py_send_message<'py>(
+        &self,
+        py: Python<'py>,
+        correlation_id: String,
+        message_type: String,
+        payload: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let manager = self.clone_arc();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let message_id = manager.send_message(correlation_id, message_type, payload).await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            Ok(message_id)
+        })
+    }
+
+    /// List messages by correlation ID (Python-facing async method)
+    ///
+    /// Returns list of proto-encoded message bytes
+    pub fn py_list_messages<'py>(
+        &self,
+        py: Python<'py>,
+        correlation_id: String,
+        limit: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let manager = self.clone_arc();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let messages = manager.list_messages(correlation_id, limit).await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            Ok(messages)
+        })
+    }
+
+    /// Create a session (Python-facing async method)
+    ///
+    /// Returns session_id
+    pub fn py_create_session<'py>(
+        &self,
+        py: Python<'py>,
+        session_id: String,
+        component_name: String,
+        session_type: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let manager = self.clone_arc();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sid = manager.create_session(session_id, component_name, session_type).await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            Ok(sid)
         })
     }
 
