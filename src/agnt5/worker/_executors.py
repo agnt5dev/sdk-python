@@ -23,6 +23,27 @@ if TYPE_CHECKING:
 logger = setup_module_logger(__name__)
 
 
+def _trace_id_from_request(request: Any) -> str:
+    """Extract trace_id from request's runtime_context, or return 'none'."""
+    rc = getattr(request, "runtime_context", None)
+    if rc is not None:
+        tid = getattr(rc, "trace_id", None)
+        if tid:
+            return tid
+    return "none"
+
+
+def _truncate_input(input_dict: dict, max_len: int = 200) -> str:
+    """Return a truncated string repr of input for logging."""
+    keys = list(input_dict.keys())
+    if not keys:
+        return "{}"
+    s = str(input_dict)
+    if len(s) > max_len:
+        return s[:max_len] + "..."
+    return s
+
+
 class ExecutorMixin:
     """Mixin providing component execution methods for Worker.
 
@@ -178,6 +199,12 @@ class ExecutorMixin:
             )
             await ctx.emit_batch_async([run_started_event, fn_started_event])
 
+            trace_id = _trace_id_from_request(req)
+            logger.info(
+                f"run.started | run_id={req.invocation_id} component={config.name} "
+                f"type=function trace_id={trace_id} input={_truncate_input(input_dict)}"
+            )
+
             # Execute function with error handling for proper event emission
             try:
                 result = config.handler(ctx, **input_dict) if input_dict else config.handler(ctx)
@@ -227,7 +254,10 @@ class ExecutorMixin:
                     error_code=error_code,
                     error_message=error_msg,
                 )
-                logger.info(f"Function {config.name} failed: {error_msg}")
+                logger.info(
+                    f"run.failed | run_id={req.invocation_id} component={config.name} "
+                    f"type=function trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
+                )
                 await ctx.emit_async(run_failed_event)
 
                 # Return None - the event queue handles delivery
@@ -258,6 +288,11 @@ class ExecutorMixin:
                 output_data=result,
             )
             await ctx.emit_async(run_completed_event)
+
+            logger.info(
+                f"run.completed | run_id={req.invocation_id} component={config.name} "
+                f"type=function trace_id={trace_id} duration_ms={duration_ms}"
+            )
 
             # Return None - the event queue handles delivery
             return None
@@ -367,6 +402,12 @@ class ExecutorMixin:
             )
             ctx.emit(run_started_event)
 
+            trace_id = _trace_id_from_request(req)
+            logger.info(
+                f"run.started | run_id={req.invocation_id} component={tool.name} "
+                f"type=tool trace_id={trace_id} input={_truncate_input(input_dict)}"
+            )
+
             # Emit tool.started (child of run)
             start_time_ns = time.time_ns()
             tool_correlation_id = f"tool-{secrets.token_hex(5)}"
@@ -425,6 +466,11 @@ class ExecutorMixin:
                 )
                 ctx.emit(run_failed_event)
 
+                logger.info(
+                    f"run.failed | run_id={req.invocation_id} component={tool.name} "
+                    f"type=tool trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
+                )
+
                 # Return None - the event queue handles delivery
                 return None
 
@@ -460,6 +506,11 @@ class ExecutorMixin:
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_completed_event)
+
+            logger.info(
+                f"run.completed | run_id={req.invocation_id} component={tool.name} "
+                f"type=tool trace_id={trace_id} duration_ms={duration_ms}"
+            )
 
             # Return None - the event queue handles delivery
             return None
@@ -524,6 +575,12 @@ class ExecutorMixin:
             )
             ctx.emit(run_started_event)
 
+            trace_id = _trace_id_from_request(req)
+            logger.info(
+                f"run.started | run_id={req.invocation_id} component={entity_type.name} "
+                f"type=entity trace_id={trace_id} input={_truncate_input({{'key': entity_key, 'method': method_name, **input_dict}})}"
+            )
+
             # Emit entity.started (child of run)
             start_time_ns = time.time_ns()
             entity_correlation_id = f"ent-{secrets.token_hex(5)}"
@@ -587,6 +644,11 @@ class ExecutorMixin:
                 )
                 ctx.emit(run_failed_event)
 
+                logger.info(
+                    f"run.failed | run_id={req.invocation_id} component={entity_type.name} "
+                    f"type=entity trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
+                )
+
                 # Return None - the event queue handles delivery
                 return None
 
@@ -622,6 +684,11 @@ class ExecutorMixin:
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_completed_event)
+
+            logger.info(
+                f"run.completed | run_id={req.invocation_id} component={entity_type.name} "
+                f"type=entity trace_id={trace_id} duration_ms={duration_ms}"
+            )
 
             # Return None - the event queue handles delivery
             return None
@@ -698,6 +765,12 @@ class ExecutorMixin:
                 f"agent={agent.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_started_event)
+
+            trace_id = _trace_id_from_request(req)
+            logger.info(
+                f"run.started | run_id={req.invocation_id} component={agent.name} "
+                f"type=agent trace_id={trace_id} input={_truncate_input(input_dict)}"
+            )
 
             # Emit agent.started (child of run)
             start_time_ns = time.time_ns()
@@ -797,6 +870,10 @@ class ExecutorMixin:
                     }
                     ctx.emit(session_event)
 
+                    logger.info(
+                        f"run.completed | run_id={req.invocation_id} component={agent.name} "
+                        f"type=agent trace_id={trace_id} duration_ms={duration_ms}"
+                    )
                     logger.debug(f"Agent streaming queued {sequence + 1} events")
                     return None
 
@@ -838,6 +915,11 @@ class ExecutorMixin:
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
                 ctx.emit(run_completed_event)
+
+                logger.info(
+                    f"run.completed | run_id={req.invocation_id} component={agent.name} "
+                    f"type=agent trace_id={trace_id} duration_ms={duration_ms}"
+                )
 
                 # Emit session.created so the session projection materializes
                 # this session for GET /v1/sessions/{id} queries.
@@ -893,6 +975,11 @@ class ExecutorMixin:
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
                 ctx.emit(run_failed_event)
+
+                logger.info(
+                    f"run.failed | run_id={req.invocation_id} component={agent.name} "
+                    f"type=agent trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
+                )
 
                 # Return None - the event queue handles delivery
                 return None
@@ -959,6 +1046,12 @@ class ExecutorMixin:
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_started_event)
+
+            trace_id = _trace_id_from_request(req)
+            logger.info(
+                f"run.started | run_id={req.invocation_id} component={config.name} "
+                f"type=scorer trace_id={trace_id} input={_truncate_input(input_dict)}"
+            )
 
             # Emit scorer.started (child of run)
             start_time_ns = time.time_ns()
@@ -1033,6 +1126,11 @@ class ExecutorMixin:
                 )
                 ctx.emit(run_failed_event)
 
+                logger.info(
+                    f"run.failed | run_id={req.invocation_id} component={config.name} "
+                    f"type=scorer trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
+                )
+
                 return None
 
             # Calculate scorer duration
@@ -1076,6 +1174,11 @@ class ExecutorMixin:
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
             ctx.emit(run_completed_event)
+
+            logger.info(
+                f"run.completed | run_id={req.invocation_id} component={config.name} "
+                f"type=scorer trace_id={trace_id} duration_ms={duration_ms}"
+            )
 
             return None
 
@@ -1296,7 +1399,12 @@ class ExecutorMixin:
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
                 ctx.emit(run_started_event)
-                logger.info(f"Executing workflow {config.name}")
+
+                wf_trace_id = _trace_id_from_request(request)
+                logger.info(
+                    f"run.started | run_id={request.invocation_id} component={config.name} "
+                    f"type=workflow trace_id={wf_trace_id} input={_truncate_input(input_dict)}"
+                )
 
                 # Emit workflow.started event (child of run)
                 workflow_started_event = Started(
@@ -1336,6 +1444,10 @@ class ExecutorMixin:
                 workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
                 error_msg = f"{type(workflow_error).__name__}: {str(workflow_error)}"
 
+                logger.info(
+                    f"run.failed | run_id={request.invocation_id} component={config.name} "
+                    f"type=workflow trace_id={wf_trace_id} duration_ms={workflow_duration_ms} error={error_msg}"
+                )
                 logger.error(f"Workflow failed after {workflow_duration_ms}ms: {error_msg}", exc_info=True)
 
                 # Emit workflow.failed (child of run)
@@ -1376,7 +1488,10 @@ class ExecutorMixin:
             end_time_ns = time.time_ns()
             workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
 
-            logger.info(f"Workflow {config.name} completed ({workflow_duration_ms}ms)")
+            logger.info(
+                f"run.completed | run_id={request.invocation_id} component={config.name} "
+                f"type=workflow trace_id={wf_trace_id} duration_ms={workflow_duration_ms}"
+            )
 
             # Persist workflow entity state
             if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
@@ -1454,6 +1569,12 @@ class ExecutorMixin:
                     error_message=error_msg,
                 )
                 ctx.emit(run_failed_event)
+
+                outer_trace_id = _trace_id_from_request(request)
+                logger.info(
+                    f"run.failed | run_id={request.invocation_id} component={config.name} "
+                    f"type=workflow trace_id={outer_trace_id} duration_ms={workflow_duration_ms} error={error_msg}"
+                )
                 return None
 
             # Fallback: if no context, return synchronous error response

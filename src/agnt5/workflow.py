@@ -1944,18 +1944,15 @@ class WorkflowEntity:
         This is prefixed with _ so it won't be wrapped by the entity method wrapper.
         Called after workflow execution completes to ensure state is durable.
         """
-        logger.info(f"🔍 DEBUG: _persist_state() CALLED for workflow {self.run_id}")
+        logger.debug(f"_persist_state() called for workflow {self.run_id}")
 
         try:
-            logger.info(f"🔍 DEBUG: Getting state adapter...")
             # Get the state adapter (must be in Worker context)
             adapter = _get_state_adapter()
-            logger.info(f"🔍 DEBUG: Got state adapter: {type(adapter).__name__}")
 
-            logger.info(f"🔍 DEBUG: Getting state snapshot...")
             # Get current state snapshot
             state_dict = self.state.get_state_snapshot()
-            logger.info(f"🔍 DEBUG: State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
+            logger.debug(f"State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
 
             # Determine scope and scope_id based on memory scope
             scope = self._memory_scope  # "session", "user", or "run"
@@ -1967,24 +1964,19 @@ class WorkflowEntity:
             elif self._memory_scope == "run":
                 scope_id = self._run_id
 
-            logger.info(f"🔍 DEBUG: Loading current version for optimistic locking (scope={scope}, scope_id={scope_id})...")
             # Load current version (for optimistic locking) with proper scope
             _, current_version = await adapter.load_with_version(
                 self._entity_type, self._key, scope=scope, scope_id=scope_id
             )
-            logger.info(f"🔍 DEBUG: Current version: {current_version}")
 
-            logger.info(f"🔍 DEBUG: Saving state to database...")
-
-            logger.info(f"🔍 DEBUG: Using scope={scope}, scope_id={scope_id}")
             # Save state with version check and proper scope
             new_version = await adapter.save_state(
                 self._entity_type, self._key, state_dict, current_version,
                 scope=scope, scope_id=scope_id
             )
 
-            logger.info(
-                f"✅ SUCCESS: Persisted WorkflowEntity state for {self.run_id} "
+            logger.debug(
+                f"Persisted WorkflowEntity state for {self.run_id} "
                 f"(version {current_version} -> {new_version}, {len(state_dict)} keys)"
             )
         except Exception as e:
