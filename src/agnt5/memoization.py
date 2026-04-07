@@ -24,6 +24,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Process-wide flag: once the platform's checkpoint backend signals it is
+# unavailable (e.g. RPC returns UNIMPLEMENTED), every MemoizationManager in
+# this process becomes a no-op. This avoids per-call WARNING spam when the
+# Rust runtime hasn't implemented the Checkpoint/GetMemoizedStep RPCs.
+_BACKEND_DISABLED = False
+
+
+def _is_unimplemented_error(exc: BaseException) -> bool:
+    """Detect 'feature not implemented by backend' style failures."""
+    msg = str(exc).lower()
+    return (
+        "not yet implemented" in msg
+        or "unimplemented" in msg
+        or "operation is not implemented or not supported" in msg
+    )
+
+
+def _disable_backend(reason: str) -> None:
+    """Disable platform-side memoization for the rest of this process."""
+    global _BACKEND_DISABLED
+    if not _BACKEND_DISABLED:
+        _BACKEND_DISABLED = True
+        logger.info(
+            "Platform-side step memoization disabled: %s. "
+            "Subsequent cache attempts will be skipped silently.",
+            reason,
+        )
+
 
 class MemoizationManager:
     """
@@ -73,6 +101,9 @@ class MemoizationManager:
         Returns:
             True if client is ready, False if unavailable
         """
+        if _BACKEND_DISABLED:
+            return False
+
         if self._connected and self._checkpoint_client is not None:
             return True
 
@@ -232,7 +263,10 @@ class MemoizationManager:
                     return GenerateResponse.from_dict(output_data)
 
         except Exception as e:
-            logger.debug(f"Failed to lookup cached LLM result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"GetMemoizedStep unsupported: {e}")
+            else:
+                logger.debug(f"Failed to lookup cached LLM result for {step_key}: {e}")
 
         return None
 
@@ -276,7 +310,10 @@ class MemoizationManager:
             logger.debug(f"Cached LLM result for {step_key}")
 
         except Exception as e:
-            logger.warning(f"Failed to cache LLM result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"Checkpoint unsupported: {e}")
+            else:
+                logger.warning(f"Failed to cache LLM result for {step_key}: {e}")
 
     async def get_cached_tool_result(
         self,
@@ -325,7 +362,10 @@ class MemoizationManager:
                 return True, output_data
 
         except Exception as e:
-            logger.debug(f"Failed to lookup cached tool result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"GetMemoizedStep unsupported: {e}")
+            else:
+                logger.debug(f"Failed to lookup cached tool result for {step_key}: {e}")
 
         return False, None
 
@@ -366,7 +406,10 @@ class MemoizationManager:
             logger.debug(f"Cached tool result for {step_key}")
 
         except Exception as e:
-            logger.warning(f"Failed to cache tool result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"Checkpoint unsupported: {e}")
+            else:
+                logger.warning(f"Failed to cache tool result for {step_key}: {e}")
 
     def reset(self) -> None:
         """

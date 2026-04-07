@@ -1342,6 +1342,8 @@ class ExecutorMixin:
                 workflow_entity._state = WorkflowState(initial_state.copy(), workflow_entity)
                 logger.debug(f"Initialized workflow entity state with {len(initial_state)} keys")
 
+            wf_trace_id = _trace_id_from_request(request)
+
             # Create WorkflowContext
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
