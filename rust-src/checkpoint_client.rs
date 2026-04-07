@@ -99,6 +99,7 @@ impl PyCheckpointClient {
     /// the result will contain the cached output and you can skip execution.
     ///
     /// # Arguments
+    /// * `tenant_id` - Tenant that owns the run (required for engine lookups)
     /// * `run_id` - The workflow run ID
     /// * `step_key` - Unique key for this step (e.g., "step:greet:0")
     /// * `step_name` - Human-readable step name
@@ -110,6 +111,7 @@ impl PyCheckpointClient {
     fn step_started<'py>(
         &self,
         py: Python<'py>,
+        tenant_id: String,
         run_id: String,
         step_key: String,
         step_name: String,
@@ -128,6 +130,7 @@ impl PyCheckpointClient {
 
             let result = client
                 .checkpoint(
+                    tenant_id,
                     run_id,
                     step_key,
                     step_name,
@@ -156,6 +159,7 @@ impl PyCheckpointClient {
     /// for future memoization.
     ///
     /// # Arguments
+    /// * `tenant_id` - Tenant that owns the run
     /// * `run_id` - The workflow run ID
     /// * `step_key` - Unique key for this step
     /// * `step_name` - Human-readable step name
@@ -165,6 +169,7 @@ impl PyCheckpointClient {
     fn step_completed<'py>(
         &self,
         py: Python<'py>,
+        tenant_id: String,
         run_id: String,
         step_key: String,
         step_name: String,
@@ -184,6 +189,7 @@ impl PyCheckpointClient {
 
             let result = client
                 .checkpoint(
+                    tenant_id,
                     run_id,
                     step_key,
                     step_name,
@@ -212,6 +218,7 @@ impl PyCheckpointClient {
     /// and to prevent re-execution on replay.
     ///
     /// # Arguments
+    /// * `tenant_id` - Tenant that owns the run
     /// * `run_id` - The workflow run ID
     /// * `step_key` - Unique key for this step
     /// * `step_name` - Human-readable step name
@@ -221,6 +228,7 @@ impl PyCheckpointClient {
     fn step_failed<'py>(
         &self,
         py: Python<'py>,
+        tenant_id: String,
         run_id: String,
         step_key: String,
         step_name: String,
@@ -240,6 +248,7 @@ impl PyCheckpointClient {
 
             let result = client
                 .checkpoint(
+                    tenant_id,
                     run_id,
                     step_key,
                     step_name,
@@ -262,11 +271,15 @@ impl PyCheckpointClient {
         })
     }
 
-    /// Check if a step result is memoized without sending a full checkpoint
+    /// Check if a step result is memoized without sending a full checkpoint.
     ///
-    /// Use this for quick memoization lookups before executing expensive steps.
+    /// Uses EngineService.FindByStepKey under the hood (replaces the legacy
+    /// WorkerCoordinatorService.GetMemoizedStep RPC). The tenant id is part
+    /// of the engine's (tenant_id, run_id) cache key and must be supplied by
+    /// the caller.
     ///
     /// # Arguments
+    /// * `tenant_id` - The tenant that owns the run
     /// * `run_id` - The workflow run ID
     /// * `step_key` - Unique key for this step
     ///
@@ -275,6 +288,7 @@ impl PyCheckpointClient {
     fn get_memoized_step<'py>(
         &self,
         py: Python<'py>,
+        tenant_id: String,
         run_id: String,
         step_key: String,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -289,11 +303,11 @@ impl PyCheckpointClient {
             })?;
 
             let result = client
-                .get_memoized_step(run_id, step_key)
+                .get_memoized_step(tenant_id, run_id, step_key)
                 .await
                 .map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "GetMemoizedStep call failed: {}",
+                        "FindByStepKey call failed: {}",
                         e
                     ))
                 })?;

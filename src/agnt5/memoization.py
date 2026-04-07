@@ -94,6 +94,19 @@ class MemoizationManager:
         self._checkpoint_client = None
         self._connected = False
 
+    def _tenant_id(self) -> str:
+        """
+        Read the tenant id from the context's trace metadata.
+
+        The engine's memoization cache key is (tenant_id, run_id), so any
+        FindByStepKey lookup must pass the same tenant id that was stamped
+        on `run.queued` when the run was created.
+        """
+        trace_metadata = getattr(self._ctx, "_trace_metadata", None)
+        if trace_metadata:
+            return trace_metadata.get("tenant_id", "") or ""
+        return ""
+
     async def _ensure_client(self) -> bool:
         """
         Lazily initialize and connect the checkpoint client.
@@ -234,11 +247,12 @@ class MemoizationManager:
             return None
 
         run_id = self._ctx.run_id
+        tenant_id = self._tenant_id()
 
         try:
-            # Use platform's GetMemoizedStep RPC
+            # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
             cached_bytes = await self._checkpoint_client.get_memoized_step(
-                run_id, step_key
+                tenant_id, run_id, step_key
             )
 
             if cached_bytes:
@@ -288,6 +302,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
+        tenant_id = self._tenant_id()
 
         try:
             # Convert result to dict for storage
@@ -301,6 +316,7 @@ class MemoizationManager:
 
             # Use platform's Checkpoint RPC with step_completed
             await self._checkpoint_client.step_completed(
+                tenant_id=tenant_id,
                 run_id=run_id,
                 step_key=step_key,
                 step_name="lm_call",
@@ -336,11 +352,12 @@ class MemoizationManager:
             return False, None
 
         run_id = self._ctx.run_id
+        tenant_id = self._tenant_id()
 
         try:
-            # Use platform's GetMemoizedStep RPC
+            # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
             cached_bytes = await self._checkpoint_client.get_memoized_step(
-                run_id, step_key
+                tenant_id, run_id, step_key
             )
 
             if cached_bytes:
@@ -363,7 +380,7 @@ class MemoizationManager:
 
         except Exception as e:
             if _is_unimplemented_error(e):
-                _disable_backend(f"GetMemoizedStep unsupported: {e}")
+                _disable_backend(f"FindByStepKey unsupported: {e}")
             else:
                 logger.debug(f"Failed to lookup cached tool result for {step_key}: {e}")
 
@@ -387,6 +404,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
+        tenant_id = self._tenant_id()
 
         try:
             # Build cache payload with hash for validation
@@ -397,6 +415,7 @@ class MemoizationManager:
 
             # Use platform's Checkpoint RPC with step_completed
             await self._checkpoint_client.step_completed(
+                tenant_id=tenant_id,
                 run_id=run_id,
                 step_key=step_key,
                 step_name="tool_call",

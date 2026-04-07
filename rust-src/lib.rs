@@ -19,6 +19,7 @@ mod entity_state;
 mod eval;
 mod language_model;
 mod memory;
+mod mcp;
 mod sandbox;
 mod types;
 mod worker;
@@ -842,6 +843,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Sandbox (Wasm + Remote)
     sandbox::register_sandbox(m)?;
+
+    // MCP client bindings
+    mcp::register_mcp(m)?;
 
     // Telemetry classes
     m.add_class::<PySpan>()?;

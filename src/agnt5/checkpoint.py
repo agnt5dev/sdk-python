@@ -102,6 +102,7 @@ class CheckpointClient:
 
     async def step_started(
         self,
+        tenant_id: str,
         run_id: str,
         step_key: str,
         step_name: str,
@@ -114,6 +115,7 @@ class CheckpointClient:
         the result will contain the cached output.
 
         Args:
+            tenant_id: Tenant that owns the run (required for engine lookups)
             run_id: The workflow run ID
             step_key: Unique key for this step (e.g., "step:greet:0")
             step_name: Human-readable step name
@@ -130,7 +132,7 @@ class CheckpointClient:
             await self.connect()
 
         result = await self._client.step_started(
-            run_id, step_key, step_name, step_type, input_payload
+            tenant_id, run_id, step_key, step_name, step_type, input_payload
         )
 
         return CheckpointResult(
@@ -142,6 +144,7 @@ class CheckpointClient:
 
     async def step_completed(
         self,
+        tenant_id: str,
         run_id: str,
         step_key: str,
         step_name: str,
@@ -155,6 +158,7 @@ class CheckpointClient:
         for future memoization.
 
         Args:
+            tenant_id: Tenant that owns the run
             run_id: The workflow run ID
             step_key: Unique key for this step
             step_name: Human-readable step name
@@ -172,7 +176,7 @@ class CheckpointClient:
             await self.connect()
 
         result = await self._client.step_completed(
-            run_id, step_key, step_name, step_type, output_payload, latency_ms
+            tenant_id, run_id, step_key, step_name, step_type, output_payload, latency_ms
         )
 
         return CheckpointResult(
@@ -184,6 +188,7 @@ class CheckpointClient:
 
     async def step_failed(
         self,
+        tenant_id: str,
         run_id: str,
         step_key: str,
         step_name: str,
@@ -196,6 +201,7 @@ class CheckpointClient:
         Call this when a step fails to record the error.
 
         Args:
+            tenant_id: Tenant that owns the run
             run_id: The workflow run ID
             step_key: Unique key for this step
             step_name: Human-readable step name
@@ -213,7 +219,7 @@ class CheckpointClient:
             await self.connect()
 
         result = await self._client.step_failed(
-            run_id, step_key, step_name, step_type, error_message, error_type
+            tenant_id, run_id, step_key, step_name, step_type, error_message, error_type
         )
 
         return CheckpointResult(
@@ -224,13 +230,17 @@ class CheckpointClient:
         )
 
     async def get_memoized_step(
-        self, run_id: str, step_key: str
+        self, tenant_id: str, run_id: str, step_key: str
     ) -> Optional[bytes]:
         """Check if a step result is memoized.
 
         Use this for quick memoization lookups before executing expensive steps.
 
+        Uses the engine's FindByStepKey RPC under the hood. The tenant id is
+        part of the engine's (tenant_id, run_id) cache key.
+
         Args:
+            tenant_id: The tenant that owns the run
             run_id: The workflow run ID
             step_key: Unique key for this step
 
@@ -243,4 +253,4 @@ class CheckpointClient:
         if not self._connected:
             await self.connect()
 
-        return await self._client.get_memoized_step(run_id, step_key)
+        return await self._client.get_memoized_step(tenant_id, run_id, step_key)
