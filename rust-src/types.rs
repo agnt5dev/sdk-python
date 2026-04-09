@@ -519,6 +519,7 @@ impl From<PyExecuteComponentResponse> for DispatchComponentResponse {
             sequence: resp.sequence,
             attempt: resp.attempt,
             source_timestamp_ns: 0, // Not used when converting from Python
+            lease_id: String::new(),
         }
     }
 }
@@ -608,6 +609,7 @@ impl From<PyComponentInfo> for ComponentInfo {
             "agent" => ComponentType::Agent as i32,
             "tool" => ComponentType::Tool as i32,
             "mcp" => ComponentType::Mcp as i32,
+            "scorer" => ComponentType::Scorer as i32,
             _ => ComponentType::Unspecified as i32,
         };
 

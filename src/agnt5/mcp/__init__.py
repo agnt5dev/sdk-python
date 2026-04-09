@@ -1,7 +1,8 @@
 """MCP (Model Context Protocol) support for AGNT5.
 
 This module provides MCP client functionality for connecting to external
-MCP servers and using their tools within AGNT5 agents.
+MCP servers and using their tools within AGNT5 agents, plus a developer-
+facing MCP server abstraction for exposing AGNT5 primitives.
 
 Example:
     ```python
@@ -43,10 +44,13 @@ For integration with AGNT5 agents:
 """
 
 from .client import MCPClient, MCPError
+from .server import MCPServer, MCPServerError
 from .types import (
     CallToolResult,
     McpTool,
     McpToolWithServer,
+    Prompt,
+    Resource,
     ServerCapabilities,
     ServerConfig,
     ServerInfo,
@@ -60,10 +64,15 @@ __all__ = [
     # Client
     "MCPClient",
     "MCPError",
+    # Server
+    "MCPServer",
+    "MCPServerError",
     # Types
     "CallToolResult",
     "McpTool",
     "McpToolWithServer",
+    "Prompt",
+    "Resource",
     "ServerCapabilities",
     "ServerConfig",
     "ServerInfo",
