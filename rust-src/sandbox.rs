@@ -43,9 +43,10 @@ impl PySandbox {
     ///     api_key: API key for remote auth.
     ///     bearer_token: Bearer token for remote auth.
     ///     timeout_secs: Request timeout in seconds (default: 300).
+    ///     api_prefix: Path prefix for remote API routes (e.g. "/v1/sandbox" for AGNT5 platform).
     ///     quickjs_wasm_path: Path to QuickJS WASI binary (for wasm backend).
     #[new]
-    #[pyo3(signature = (backend=None, endpoint=None, sandbox_id=None, api_key=None, bearer_token=None, timeout_secs=None, quickjs_wasm_path=None))]
+    #[pyo3(signature = (backend=None, endpoint=None, sandbox_id=None, api_key=None, bearer_token=None, timeout_secs=None, api_prefix=None, quickjs_wasm_path=None))]
     fn new(
         backend: Option<String>,
         endpoint: Option<String>,
@@ -53,10 +54,12 @@ impl PySandbox {
         api_key: Option<String>,
         bearer_token: Option<String>,
         timeout_secs: Option<u64>,
+        api_prefix: Option<String>,
         quickjs_wasm_path: Option<String>,
     ) -> PyResult<Self> {
         let backend_str = backend.as_deref().unwrap_or("auto");
         let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300));
+        let prefix = api_prefix.unwrap_or_default();
 
         match backend_str {
             "remote" => {
@@ -77,6 +80,7 @@ impl PySandbox {
                     sandbox_id: sandbox_id.unwrap_or_else(|| "default".to_string()),
                     auth,
                     timeout,
+                    api_prefix: prefix.clone(),
                 };
                 let remote = RemoteSandbox::new(config).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
