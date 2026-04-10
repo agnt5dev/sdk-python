@@ -383,7 +383,7 @@ impl PyWorker {
         // Release the GIL during the blocking wait for checkpoint acknowledgement.
         // This allows other Python coroutines to run concurrently, enabling true
         // parallel execution of batch items instead of serializing on the GIL.
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             worker.emit_checkpoint_sync_blocking(
                 run_id,
                 event_type,

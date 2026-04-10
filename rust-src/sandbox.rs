@@ -136,6 +136,7 @@ impl PySandbox {
                         sandbox_id: sandbox_id.unwrap_or_else(|| "default".to_string()),
                         auth,
                         timeout,
+                        api_prefix: prefix.clone(),
                     };
                     let remote = RemoteSandbox::new(config).map_err(|e| {
                         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -191,7 +192,7 @@ impl PySandbox {
     }
 
     /// Get sandbox capabilities as a dict.
-    fn capabilities(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn capabilities(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let caps = self.executor.capabilities();
         let dict = pyo3::types::PyDict::new(py);
         let languages: Vec<String> = caps.languages.iter().map(|l| l.to_string()).collect();
@@ -239,7 +240,7 @@ impl PySandbox {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("execute_code failed: {}", e))
             })?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("stdout", &result.stdout)?;
                 dict.set_item("stderr", &result.stderr)?;
@@ -278,7 +279,7 @@ impl PySandbox {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("write_file failed: {}", e))
             })?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("success", result.success)?;
                 dict.set_item("path", &result.path)?;
@@ -304,7 +305,7 @@ impl PySandbox {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("read_file failed: {}", e))
             })?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("path", &result.path)?;
                 dict.set_item("content", pyo3::types::PyBytes::new(py, &result.content))?;
@@ -370,7 +371,7 @@ impl PySandbox {
                     ))
                 })?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("path", &result.path)?;
                 dict.set_item("total", result.total)?;
@@ -406,7 +407,7 @@ impl PySandbox {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("health check failed: {}", e))
             })?;
 
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = pyo3::types::PyDict::new(py);
                 dict.set_item("status", &result.status)?;
                 dict.set_item("sandbox_id", &result.sandbox_id)?;

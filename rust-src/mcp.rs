@@ -104,7 +104,7 @@ impl PyMcpClientCore {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let result = Python::with_gil(|py| -> PyResult<PyObject> {
+            let result = Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let items = tools
                     .into_iter()
                     .map(|item| {
@@ -134,7 +134,7 @@ impl PyMcpClientCore {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let result = Python::with_gil(|py| -> PyResult<PyObject> {
+            let result = Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let items = tools
                     .into_iter()
                     .map(|tool| {
@@ -169,7 +169,7 @@ impl PyMcpClientCore {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let result = Python::with_gil(|py| -> PyResult<PyObject> {
+            let result = Python::attach(|py| -> PyResult<Py<PyAny>> {
                 Ok(json_to_python(py, &call_tool_result_to_json(&result))?)
             })?;
 
@@ -193,7 +193,7 @@ impl PyMcpClientCore {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let result = Python::with_gil(|py| -> PyResult<PyObject> {
+            let result = Python::attach(|py| -> PyResult<Py<PyAny>> {
                 Ok(json_to_python(py, &call_tool_result_to_json(&result))?)
             })?;
 
@@ -298,7 +298,7 @@ fn python_to_json(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     serde_json::from_str(&dumped).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-fn json_to_python(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
+fn json_to_python(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let json_module = py.import("json")?;
     let dumped = serde_json::to_string(value).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let loaded = json_module.call_method1("loads", (dumped,))?;

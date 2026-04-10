@@ -1538,13 +1538,11 @@ class ExecutorMixin:
             return None
 
         except WaitingForUserInputException as e:
-            # Workflow paused for user input
-            # The workflow.paused event (with checkpoint metadata) was already
-            # emitted via ctx.emit() in workflow.py's wait_for_input().
-            # That event flows through WriteCheckpoint RPC to the EE, which
-            # writes run.paused and stores checkpoint data in run.Metadata.
-            # No need to return a PyExecuteComponentResponse — return None
-            # to let the event queue handle delivery (same pattern as run.completed).
+            # Workflow paused for user input.
+            # The workflow.paused event was already emitted via ctx.emit()
+            # and flows through WriteCheckpoint to the Engine, which writes
+            # run.paused. The coordinator's journal consumer watches for
+            # run.paused and decrements active_invocations.
             logger.info(f"Workflow paused waiting for user input: {e.question}")
             return None
 
