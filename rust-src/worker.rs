@@ -669,17 +669,14 @@ impl PyWorker {
         runtime_message: RuntimeMessage,
         tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
-        // On first message, set the sender on EntityStateManager if it exists
+        // Always update the sender on EntityStateManager so it points to the
+        // current connection's response channel.  On reconnect a fresh
+        // (response_tx, response_rx) pair is created; the old sender's receiver
+        // has been dropped, so any send on it would fail with "closed channel".
         {
             let manager_guard = entity_state_manager_arc.lock().await;
             if let Some(ref manager) = *manager_guard {
-                // Check if sender is not already set
-                let sender_guard = manager.request_sender.lock().await;
-                if sender_guard.is_none() {
-                    drop(sender_guard); // Release lock before calling set_request_sender
-                    manager.set_request_sender(tx.clone()).await;
-                    log::debug!("Entity state manager connected to worker stream");
-                }
+                manager.set_request_sender(tx.clone()).await;
             }
         }
         // Get the Python handler by cloning it properly
