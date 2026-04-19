@@ -469,6 +469,11 @@ def client(platform):
     """
     Create AGNT5 client for testing.
 
+    Requires AGNT5_API_KEY in the environment — the gateway authenticates
+    every request. In embedded mode, provision a key by seeding the
+    standalone binary's DB (see tests/integration/README for details) or
+    by pointing at a pre-seeded hosted CP with `--hosted`.
+
     Args:
         platform: Platform fixture with connection details
 
@@ -477,10 +482,18 @@ def client(platform):
     """
     from agnt5 import Client
 
-    gateway_url = platform["gateway_url"]
-    client = Client(gateway_url=gateway_url, timeout=60)
+    api_key = os.environ.get("AGNT5_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "AGNT5_API_KEY is not set — the gateway authenticates every "
+            "request. Export an agnt5_sk_* key before running integration "
+            "tests (see tests/integration/README.md)."
+        )
 
-    logger.info(f"✅ Client created: {gateway_url} (timeout=60s)")
+    gateway_url = platform["gateway_url"]
+    client = Client(gateway_url=gateway_url, api_key=api_key, timeout=60)
+
+    logger.info(f"✅ Client created: {gateway_url} (timeout=60s, auth=X-API-KEY)")
 
     return client
 
