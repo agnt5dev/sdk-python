@@ -115,7 +115,8 @@ class CheckpointClient:
         the result will contain the cached output.
 
         Args:
-            tenant_id: Tenant that owns the run (required for engine lookups)
+            tenant_id: Legacy engine routing key for the run. On worker/runtime
+                paths this currently carries project identity.
             run_id: The workflow run ID
             step_key: Unique key for this step (e.g., "step:greet:0")
             step_name: Human-readable step name
@@ -158,7 +159,8 @@ class CheckpointClient:
         for future memoization.
 
         Args:
-            tenant_id: Tenant that owns the run
+            tenant_id: Legacy engine routing key for the run. On worker/runtime
+                paths this currently carries project identity.
             run_id: The workflow run ID
             step_key: Unique key for this step
             step_name: Human-readable step name
@@ -201,7 +203,8 @@ class CheckpointClient:
         Call this when a step fails to record the error.
 
         Args:
-            tenant_id: Tenant that owns the run
+            tenant_id: Legacy engine routing key for the run. On worker/runtime
+                paths this currently carries project identity.
             run_id: The workflow run ID
             step_key: Unique key for this step
             step_name: Human-readable step name
@@ -237,10 +240,12 @@ class CheckpointClient:
         Use this for quick memoization lookups before executing expensive steps.
 
         Uses the engine's FindByStepKey RPC under the hood. The tenant id is
-        part of the engine's (tenant_id, run_id) cache key.
+        still part of the engine's `(tenant_id, run_id)` cache key; on
+        worker/runtime paths it currently carries project identity.
 
         Args:
-            tenant_id: The tenant that owns the run
+            tenant_id: Legacy engine routing key for the run. On worker/runtime
+                paths this currently carries project identity.
             run_id: The workflow run ID
             step_key: Unique key for this step
 

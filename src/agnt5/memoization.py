@@ -94,17 +94,18 @@ class MemoizationManager:
         self._checkpoint_client = None
         self._connected = False
 
-    def _tenant_id(self) -> str:
+    def _project_or_tenant_id(self) -> str:
         """
-        Read the tenant id from the context's trace metadata.
+        Read the engine routing key from the context's trace metadata.
 
-        The engine's memoization cache key is (tenant_id, run_id), so any
-        FindByStepKey lookup must pass the same tenant id that was stamped
-        on `run.queued` when the run was created.
+        The engine's memoization cache key is still `(tenant_id, run_id)`.
+        On worker/runtime paths that tenant_id is currently a legacy alias for
+        project identity, so prefer `project_id` when present and fall back to
+        `tenant_id`.
         """
         trace_metadata = getattr(self._ctx, "_trace_metadata", None)
         if trace_metadata:
-            return trace_metadata.get("tenant_id", "") or ""
+            return trace_metadata.get("project_id", "") or trace_metadata.get("tenant_id", "") or ""
         return ""
 
     async def _ensure_client(self) -> bool:
@@ -247,7 +248,7 @@ class MemoizationManager:
             return None
 
         run_id = self._ctx.run_id
-        tenant_id = self._tenant_id()
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
@@ -302,7 +303,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
-        tenant_id = self._tenant_id()
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Convert result to dict for storage
@@ -352,7 +353,7 @@ class MemoizationManager:
             return False, None
 
         run_id = self._ctx.run_id
-        tenant_id = self._tenant_id()
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
@@ -404,7 +405,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
-        tenant_id = self._tenant_id()
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Build cache payload with hash for validation

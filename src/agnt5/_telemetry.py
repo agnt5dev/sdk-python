@@ -2,10 +2,12 @@
 
 import json
 import logging
+import warnings
 from typing import Any, Dict, MutableMapping, Optional, Union
 
 # Module-level default log level (set via set_log_level())
 _default_log_level: Optional[int] = None
+_telemetry_initialized = False
 
 # Standard logging kwargs that should NOT be treated as custom attributes
 _STANDARD_LOGGING_KWARGS = frozenset({
@@ -164,6 +166,49 @@ class OpenTelemetryHandler(logging.Handler):
 
         except Exception:
             self.handleError(record)
+
+
+def init_sdk_telemetry(service_name: str, service_version: str) -> bool:
+    """Initialize Rust OTEL telemetry early for Python worker startup logs."""
+    global _telemetry_initialized
+
+    if _telemetry_initialized:
+        return True
+
+    try:
+        from ._core import init_telemetry
+    except ImportError as e:
+        warnings.warn(f"Rust telemetry init unavailable: {e}", RuntimeWarning)
+        return False
+
+    try:
+        init_telemetry(service_name, service_version)
+        _telemetry_initialized = True
+        return True
+    except Exception as e:
+        warnings.warn(f"Failed to initialize SDK telemetry: {e}", RuntimeWarning)
+        return False
+
+
+def ensure_root_otel_handler() -> bool:
+    """Attach a non-invasive OTEL handler to the root logger once.
+
+    This preserves user console/file handlers configured via logging.basicConfig()
+    while also forwarding records to the Rust OTEL bridge.
+    """
+    root_logger = logging.getLogger()
+
+    for handler in root_logger.handlers:
+        if isinstance(handler, OpenTelemetryHandler):
+            return True
+
+    otel_handler = OpenTelemetryHandler()
+    otel_handler.setLevel(logging.DEBUG)
+    otel_handler.setFormatter(logging.Formatter('%(message)s'))
+    root_logger.addHandler(otel_handler)
+
+    # Leave the logger's level untouched so we don't widen the user's local output.
+    return True
 
 
 def _is_debug_enabled() -> bool:
