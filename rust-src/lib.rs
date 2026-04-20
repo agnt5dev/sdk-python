@@ -7,7 +7,13 @@ use opentelemetry::trace::Span;
 use opentelemetry::Context;
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Long-lived Tokio runtime used to drive the OTEL exporter built during
+/// `init_telemetry`. The exporter spawns hyper connection-pool tasks via
+/// `hyper_util::rt::TokioExecutor`, which require a runtime that outlives
+/// the exporter itself — a scope-local `Runtime` won't do.
+static TELEMETRY_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 // Note: Span export has been removed. Spans are no longer sent to the journal.
 // Trace correlation is done via runs.trace_id lookup if needed.
@@ -802,6 +808,35 @@ fn log_from_python(
     Ok(())
 }
 
+/// Initialize SDK telemetry early from Python.
+///
+/// This is used by the Python worker path so startup logs emitted before
+/// `worker.run()` still flow through the OTEL pipeline.
+#[pyfunction]
+fn init_telemetry(service_name: String, service_version: String) -> PyResult<()> {
+    let runtime = TELEMETRY_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("agnt5-telemetry")
+            .build()
+            .expect("failed to build telemetry Tokio runtime")
+    });
+    let _guard = runtime.enter();
+
+    agnt5_sdk_core::init_telemetry(&service_name, &service_version).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to initialize telemetry: {}",
+            e
+        ))
+    })
+}
+
+/// Flush and shut down SDK telemetry from Python.
+#[pyfunction]
+fn shutdown_telemetry() {
+    agnt5_sdk_core::shutdown_telemetry();
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize PyO3-log to bridge Rust logs to Python
@@ -853,6 +888,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRuntimeContext>()?;
 
     // Utility functions
+    m.add_function(wrap_pyfunction!(init_telemetry, m)?)?;
+    m.add_function(wrap_pyfunction!(shutdown_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;

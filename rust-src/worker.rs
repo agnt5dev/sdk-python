@@ -714,12 +714,13 @@ impl PyWorker {
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
 
-                // Extract tenant_id and deployment_id from request metadata
-                // These are set by the Gateway and passed through Worker Coordinator
+                // Extract canonical project identity and deployment_id from request metadata.
+                // During the migration window, `tenant_id` remains a legacy alias for project_id.
                 let tenant_id = invoke_request
                     .metadata
-                    .get("tenant_id")
+                    .get("project_id")
                     .cloned()
+                    .or_else(|| invoke_request.metadata.get("tenant_id").cloned())
                     .unwrap_or_default();
                 let deployment_id = invoke_request
                     .metadata

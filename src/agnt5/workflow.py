@@ -1112,11 +1112,15 @@ class WorkflowContext(Context):
         # Check platform-side memoization first (Phase 3)
         if self._checkpoint_client:
             try:
-                # Engine cache key is (tenant_id, run_id); pull tenant from trace
-                # metadata stamped at run.queued time.
-                tenant_id = (self._trace_metadata or {}).get("tenant_id", "")
+                # Engine cache key is still (tenant_id, run_id). On worker
+                # paths that tenant_id is a legacy alias for project identity,
+                # so prefer project_id when present and fall back to tenant_id.
+                project_or_tenant_id = (
+                    (self._trace_metadata or {}).get("project_id", "")
+                    or (self._trace_metadata or {}).get("tenant_id", "")
+                )
                 result = await self._checkpoint_client.step_started(
-                    tenant_id,
+                    project_or_tenant_id,
                     self.run_id,
                     step_key,
                     name,
@@ -1184,9 +1188,12 @@ class WorkflowContext(Context):
             if self._checkpoint_client:
                 try:
                     output_bytes = serialize_to_str(result).encode("utf-8")
-                    tenant_id = (self._trace_metadata or {}).get("tenant_id", "")
+                    project_or_tenant_id = (
+                        (self._trace_metadata or {}).get("project_id", "")
+                        or (self._trace_metadata or {}).get("tenant_id", "")
+                    )
                     await self._checkpoint_client.step_completed(
-                        tenant_id,
+                        project_or_tenant_id,
                         self.run_id,
                         step_key,
                         name,
@@ -1234,9 +1241,12 @@ class WorkflowContext(Context):
             # Record failure to platform (Phase 3)
             if self._checkpoint_client:
                 try:
-                    tenant_id = (self._trace_metadata or {}).get("tenant_id", "")
+                    project_or_tenant_id = (
+                        (self._trace_metadata or {}).get("project_id", "")
+                        or (self._trace_metadata or {}).get("tenant_id", "")
+                    )
                     await self._checkpoint_client.step_failed(
-                        tenant_id,
+                        project_or_tenant_id,
                         self.run_id,
                         step_key,
                         name,
