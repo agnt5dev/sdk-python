@@ -11,7 +11,7 @@ from typing import Any
 
 from .. import _sentry
 from .._serialization import serialize_to_str
-from .._telemetry import setup_module_logger
+from .._telemetry import ensure_root_otel_handler, init_sdk_telemetry, setup_module_logger
 from ..function import FunctionRegistry
 from ..scorer import ScorerRegistry, register_builtin_scorer_handlers
 
@@ -102,15 +102,26 @@ class Worker(ExecutorMixin):
         self.coordinator_endpoint = coordinator_endpoint
         self.runtime = runtime
 
+        # Initialize telemetry before autodiscovery and user startup logs so
+        # `agnt5 dev` and headless worker boot logs reach OTEL.
+        if init_sdk_telemetry(service_name, service_version):
+            ensure_root_otel_handler()
+
         # Initialize metadata with user-provided values
         self.metadata = metadata or {}
 
-        # Auto-populate tenant_id and deployment_id from environment if not provided
-        # These are required for journal writes in managed mode
+        # Auto-populate canonical project identity and legacy tenant alias from
+        # environment if not provided. The checkpoint/journal path still expects
+        # `tenant_id`, so we dual-stamp during the migration window.
         import os
 
+        if "project_id" not in self.metadata:
+            project_id = os.getenv("AGNT5_PROJECT_ID") or os.getenv("AGNT5_TENANT_ID")
+            if project_id:
+                self.metadata["project_id"] = project_id
+
         if "tenant_id" not in self.metadata:
-            tenant_id = os.getenv("AGNT5_TENANT_ID")
+            tenant_id = self.metadata.get("project_id") or os.getenv("AGNT5_TENANT_ID")
             if tenant_id:
                 self.metadata["tenant_id"] = tenant_id
 
@@ -159,13 +170,13 @@ class Worker(ExecutorMixin):
         # Populated when ChatBot instances are passed in the agents list
         self._chatbots: dict[str, Any] = {}
 
-        # Create entity state adapter with tenant_id from metadata for multi-tenancy support
+        # Create entity state adapter with canonical project identity. The Rust
+        # state path still uses the legacy `tenant_id` field name internally.
         from .._core import EntityStateManager as RustEntityStateManager
         from .._state_adapter import StateAdapter as EntityStateAdapter
 
-        # Use tenant_id from metadata (populated from AGNT5_TENANT_ID env var or explicit metadata)
-        tenant_id = self.metadata.get("tenant_id", "")
-        rust_core = RustEntityStateManager(tenant_id=tenant_id)
+        project_id = self.metadata.get("project_id") or self.metadata.get("tenant_id", "")
+        rust_core = RustEntityStateManager(tenant_id=project_id)
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
 
         # Create CheckpointClient for step-level memoization
@@ -714,9 +725,11 @@ class Worker(ExecutorMixin):
                 by_type[comp_type] = []
             by_type[comp_type].append(comp.name)
 
+        banner_lines = [f"{self.service_name} v{self.service_version}", "─" * 40]
+
         # Print service info
-        print(f"\n  {self.service_name} v{self.service_version}")
-        print("  " + "─" * 40)
+        print(f"\n  {banner_lines[0]}")
+        print("  " + banner_lines[1])
 
         # Print component tree
         type_order = ["workflow", "function", "agent", "tool", "scorer"]
@@ -733,16 +746,22 @@ class Worker(ExecutorMixin):
                 icon = type_icons.get(comp_type, "•")
                 names = by_type[comp_type]
                 print(f"  {icon} {comp_type}s ({len(names)})")
+                banner_lines.append(f"{comp_type}s ({len(names)})")
                 for i, name in enumerate(sorted(names)):
                     is_last = i == len(names) - 1
                     prefix = "└──" if is_last else "├──"
                     print(f"    {prefix} {name}")
+                    banner_lines.append(f"{comp_type}:{name}")
 
         # Print dashboard link
         dashboard_url = os.getenv("AGNT5_DASHBOARD_URL", "http://localhost:34181")
         print("  " + "─" * 40)
         print(f"  Dashboard: {dashboard_url}")
         print()
+        banner_lines.append("─" * 40)
+        banner_lines.append(f"Dashboard: {dashboard_url}")
+
+        logger.info("Worker startup banner\n%s", "\n".join(banner_lines))
 
     async def run(self) -> None:
         """Run the worker (register and start message loop).

@@ -244,7 +244,7 @@ impl PyWorker {
     /// # Arguments
     /// * `invocation_id` - Run ID for this invocation
     /// * `event_type` - Event type (e.g., "workflow.step.started", "agent.completed")
-    /// * `event_data` - JSON payload as string
+    /// * `event_data` - JSON payload as bytes
     /// * `content_index` - Index for parallel content blocks (streaming only)
     /// * `sequence` - Monotonic sequence number for ordering
     /// * `metadata` - Dictionary of metadata (tenant_id, deployment_id, etc.)
@@ -257,7 +257,7 @@ impl PyWorker {
         &self,
         invocation_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         content_index: i32,
         sequence: i64,
         metadata: HashMap<String, String>,
@@ -266,7 +266,7 @@ impl PyWorker {
         correlation_id: Option<String>,
         parent_correlation_id: Option<String>,
     ) -> PyResult<()> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
         let correlation_id_str = correlation_id.unwrap_or_default();
         let parent_correlation_id_str = parent_correlation_id.unwrap_or_default();
 
@@ -352,38 +352,17 @@ impl PyWorker {
         py: Python<'_>,
         run_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         sequence_number: i64,
         metadata: HashMap<String, String>,
         source_timestamp_ns: i64,
         timeout_ms: u64,
     ) -> PyResult<()> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
 
-        // Inject traceparent from Python _trace_metadata contextvar if not already
-        // in metadata. This propagates the dispatch trace context through
-        // WriteCheckpoint calls back to the Execution Engine, linking checkpoint
-        // spans to the original request trace.
-        // The traceparent should already be in metadata, injected by the Python
-        // EventEmitter's base_metadata (populated from request.metadata in _executors.py).
-        // As a fallback, check the _trace_metadata contextvar.
-        let mut metadata = metadata;
-        if !metadata.contains_key("traceparent") {
-            if let Ok(worker_module) = py.import("agnt5.worker") {
-                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
-                    if let Ok(trace_dict) = trace_var.call_method0("get") {
-                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
-                            if let Some(tp) = dict.get("traceparent") {
-                                metadata.insert("traceparent".to_string(), tp.clone());
-                            }
-                            if let Some(ts) = dict.get("tracestate") {
-                                metadata.insert("tracestate".to_string(), ts.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // traceparent is injected by the Python EventEmitter's base_metadata
+        // (populated from request.metadata in _executors.py). No Rust-side
+        // fallback needed — avoids py.import() + attribute lookups on every emit.
 
         // Get the worker (using std::sync::Mutex, not tokio)
         let worker = {
@@ -404,7 +383,7 @@ impl PyWorker {
         // Release the GIL during the blocking wait for checkpoint acknowledgement.
         // This allows other Python coroutines to run concurrently, enabling true
         // parallel execution of batch items instead of serializing on the GIL.
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             worker.emit_checkpoint_sync_blocking(
                 run_id,
                 event_type,
@@ -437,33 +416,15 @@ impl PyWorker {
         py: Python<'py>,
         run_id: String,
         event_type: String,
-        event_data: String,
+        event_data: Vec<u8>,
         sequence_number: i64,
         metadata: HashMap<String, String>,
         source_timestamp_ns: i64,
         timeout_ms: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let data_bytes = event_data.into_bytes();
+        let data_bytes = event_data;
 
-        // Inject traceparent from Python _trace_metadata contextvar if not already
-        // in metadata (same logic as emit_event_sync).
-        let mut metadata = metadata;
-        if !metadata.contains_key("traceparent") {
-            if let Ok(worker_module) = py.import("agnt5.worker") {
-                if let Ok(trace_var) = worker_module.getattr("_trace_metadata") {
-                    if let Ok(trace_dict) = trace_var.call_method0("get") {
-                        if let Ok(dict) = trace_dict.extract::<HashMap<String, String>>() {
-                            if let Some(tp) = dict.get("traceparent") {
-                                metadata.insert("traceparent".to_string(), tp.clone());
-                            }
-                            if let Some(ts) = dict.get("tracestate") {
-                                metadata.insert("tracestate".to_string(), ts.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // traceparent is injected by the Python EventEmitter's base_metadata.
 
         // Clone the worker while GIL is held (brief std::sync::Mutex lock)
         let worker = {
@@ -498,6 +459,42 @@ impl PyWorker {
                     let err_msg = format!("Failed to emit checkpoint async: {}", e);
                     log::error!("{}", err_msg);
                     pyo3::exceptions::PyRuntimeError::new_err(err_msg)
+                })?;
+            Ok(())
+        })
+    }
+
+    /// Emit a batch of events in a single AppendBatch RPC (async).
+    ///
+    /// Reduces gRPC overhead by sending multiple non-terminal events together.
+    /// Each event is a tuple: (run_id, event_type, event_data, sequence, metadata, timestamp_ns)
+    #[pyo3(signature = (events,))]
+    fn emit_event_batch_async<'py>(
+        &self,
+        py: Python<'py>,
+        events: Vec<(String, String, Vec<u8>, i64, HashMap<String, String>, i64)>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Data already arrives as bytes — no conversion needed
+        let events_bytes = events;
+
+        let worker = {
+            let worker_guard = self.worker.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to lock worker: {}", e))
+            })?;
+            worker_guard
+                .as_ref()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Worker not initialized"))?
+                .clone()
+        };
+
+        future_into_py(py, async move {
+            worker
+                .emit_checkpoint_batch(events_bytes)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        format!("Failed to emit batch: {}", e),
+                    )
                 })?;
             Ok(())
         })
@@ -672,17 +669,14 @@ impl PyWorker {
         runtime_message: RuntimeMessage,
         tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
-        // On first message, set the sender on EntityStateManager if it exists
+        // Always update the sender on EntityStateManager so it points to the
+        // current connection's response channel.  On reconnect a fresh
+        // (response_tx, response_rx) pair is created; the old sender's receiver
+        // has been dropped, so any send on it would fail with "closed channel".
         {
             let manager_guard = entity_state_manager_arc.lock().await;
             if let Some(ref manager) = *manager_guard {
-                // Check if sender is not already set
-                let sender_guard = manager.request_sender.lock().await;
-                if sender_guard.is_none() {
-                    drop(sender_guard); // Release lock before calling set_request_sender
-                    manager.set_request_sender(tx.clone()).await;
-                    log::debug!("Entity state manager connected to worker stream");
-                }
+                manager.set_request_sender(tx.clone()).await;
             }
         }
         // Get the Python handler by cloning it properly
@@ -720,12 +714,13 @@ impl PyWorker {
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
 
-                // Extract tenant_id and deployment_id from request metadata
-                // These are set by the Gateway and passed through Worker Coordinator
+                // Extract canonical project identity and deployment_id from request metadata.
+                // During the migration window, `tenant_id` remains a legacy alias for project_id.
                 let tenant_id = invoke_request
                     .metadata
-                    .get("tenant_id")
+                    .get("project_id")
                     .cloned()
+                    .or_else(|| invoke_request.metadata.get("tenant_id").cloned())
                     .unwrap_or_default();
                 let deployment_id = invoke_request
                     .metadata

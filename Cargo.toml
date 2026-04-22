@@ -1,6 +1,6 @@
 [package]
 name = "agnt5-sdk-python"
-version = "0.4.3"
+version = "0.6.1"
 edition = "2021"
 authors = ["AGNT5 Team"]
 
@@ -46,6 +46,10 @@ hex = "0.4"
 
 # UUID generation
 uuid = { version = "1.18.1", features = ["v4"] }
+
+[features]
+default = ["wasm-sandbox"]
+wasm-sandbox = ["agnt5-sdk-core/wasm-sandbox"]
 
 [build-dependencies]
 pyo3-build-config = "0.27"

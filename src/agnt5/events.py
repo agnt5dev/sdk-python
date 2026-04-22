@@ -35,7 +35,7 @@ from typing import Any, ClassVar, Optional, Union
 
 from edwh_uuid7 import uuid7
 
-from agnt5._serialization import serialize_to_str
+from agnt5._serialization import serialize
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +250,28 @@ class Started(LifecycleEvent):
     # attempt number
     attempt: int = 1
 
+    def to_dict(self) -> dict[str, Any]:
+        """Optimized to_dict — explicit fields, no __dict__ iteration."""
+        result: dict[str, Any] = {
+            "event_type": self.event_type,
+            "event_id": self.event_id,
+            "name": self.name,
+            "correlation_id": self.correlation_id,
+            "parent_correlation_id": self.parent_correlation_id,
+            "timestamp_ns": self.timestamp_ns,
+            "component_type": self.component_type.value,
+            "input_type": self.input_type,
+            "index": self.index,
+            "attempt": self.attempt,
+        }
+        if self.input_data is not None:
+            result["input_data"] = self.input_data
+        if self.metadata:
+            result["metadata"] = self.metadata
+        if self.operation is not None:
+            result["operation"] = self.operation.value
+        return result
+
 
 @dataclass(kw_only=True)
 class Completed(LifecycleEvent):
@@ -269,6 +291,28 @@ class Completed(LifecycleEvent):
     # Content block index (for streaming)
     index: int = 0
 
+    def to_dict(self) -> dict[str, Any]:
+        """Optimized to_dict — explicit fields, no __dict__ iteration."""
+        result: dict[str, Any] = {
+            "event_type": self.event_type,
+            "event_id": self.event_id,
+            "name": self.name,
+            "correlation_id": self.correlation_id,
+            "parent_correlation_id": self.parent_correlation_id,
+            "timestamp_ns": self.timestamp_ns,
+            "component_type": self.component_type.value,
+            "output_type": self.output_type,
+            "duration_ms": self.duration_ms,
+            "index": self.index,
+        }
+        if self.output_data is not None:
+            result["output_data"] = self.output_data
+        if self.metadata:
+            result["metadata"] = self.metadata
+        if self.operation is not None:
+            result["operation"] = self.operation.value
+        return result
+
 
 @dataclass(kw_only=True)
 class Failed(LifecycleEvent):
@@ -287,6 +331,28 @@ class Failed(LifecycleEvent):
 
     # Time spent before failure
     duration_ms: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Optimized to_dict — explicit fields, no __dict__ iteration."""
+        result: dict[str, Any] = {
+            "event_type": self.event_type,
+            "event_id": self.event_id,
+            "name": self.name,
+            "correlation_id": self.correlation_id,
+            "parent_correlation_id": self.parent_correlation_id,
+            "timestamp_ns": self.timestamp_ns,
+            "component_type": self.component_type.value,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "duration_ms": self.duration_ms,
+        }
+        if self.error_traceback is not None:
+            result["error_traceback"] = self.error_traceback
+        if self.metadata:
+            result["metadata"] = self.metadata
+        if self.operation is not None:
+            result["operation"] = self.operation.value
+        return result
 
 
 @dataclass(kw_only=True)
@@ -579,20 +645,110 @@ class EventEmitter:
 
         Checkpoint gRPC runs on tokio runtime natively via future_into_py,
         avoiding thread pool overhead entirely.
-        """
-        event_data = event.to_dict()
-        content_index = getattr(event, "index", 0)
 
-        envelope = EventEnvelope(
+        Hot path optimized: no intermediate EventEnvelope, single-pass metadata
+        merge, single serialization call.
+        """
+        if self._worker is None:
+            logger.warning(
+                "[EventEmitter.emit_async] No worker set, dropping event: "
+                "type=%s, run_id=%s", event.event_type, self._run_id,
+            )
+            return EventEnvelope(
+                event_type=event.event_type,
+                data=event.to_dict(),
+                source_timestamp_ns=event.timestamp_ns,
+            )
+
+        # Single-pass metadata merge
+        merged_metadata = {**self._base_metadata}
+        if event.metadata:
+            merged_metadata.update(event.metadata)
+
+        self._sequence += 1
+        event_data = event.to_dict()
+        json_bytes = serialize(event_data)
+
+        if is_checkpoint_event(event.event_type):
+            if event.correlation_id:
+                merged_metadata["correlation_id"] = event.correlation_id
+            if event.parent_correlation_id:
+                merged_metadata["parent_correlation_id"] = event.parent_correlation_id
+
+            try:
+                await self._worker.emit_event_async(
+                    run_id=self._run_id,
+                    event_type=event.event_type,
+                    event_data=json_bytes,
+                    sequence_number=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=event.timestamp_ns,
+                    timeout_ms=5000,
+                )
+            except Exception as e:
+                logger.error("[EventEmitter.emit_async] Failed to emit checkpoint: %s", e)
+        else:
+            content_index = getattr(event, "index", 0)
+            try:
+                self._worker.queue_event(
+                    invocation_id=self._run_id,
+                    event_type=event.event_type,
+                    event_data=json_bytes,
+                    content_index=content_index,
+                    sequence=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=event.timestamp_ns,
+                    is_streaming=True,
+                    correlation_id=event.correlation_id,
+                    parent_correlation_id=event.parent_correlation_id,
+                )
+            except Exception as e:
+                logger.error("[EventEmitter.emit_async] Failed to queue event: %s", e)
+
+        return EventEnvelope(
             event_type=event.event_type,
             data=event_data,
             source_timestamp_ns=event.timestamp_ns,
-            content_index=content_index,
+            content_index=getattr(event, "index", 0),
             metadata=dict(event.metadata) if event.metadata else None,
         )
 
-        await self._queue_event_async(envelope, event.correlation_id, event.parent_correlation_id)
-        return envelope
+    async def emit_batch_async(self, events: list[Event]) -> None:
+        """Emit multiple events in a single AppendBatch RPC.
+
+        Reduces gRPC overhead by batching non-terminal events together.
+        Terminal events (.completed, .failed) should still use emit_async() for sync ack.
+        """
+        if not events or self._worker is None:
+            return
+
+        batch_tuples = []
+        for event in events:
+            event_data = event.to_dict()
+            merged_metadata = dict(self._base_metadata)
+            if event.metadata:
+                merged_metadata.update(event.metadata)
+            if event.correlation_id:
+                merged_metadata["correlation_id"] = event.correlation_id
+            if event.parent_correlation_id:
+                merged_metadata["parent_correlation_id"] = event.parent_correlation_id
+
+            self._sequence += 1
+            batch_tuples.append((
+                self._run_id,
+                event.event_type,
+                serialize(event_data),
+                self._sequence,
+                merged_metadata,
+                event.timestamp_ns,
+            ))
+
+        await self._worker.emit_event_batch_async(batch_tuples)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[EventEmitter.emit_batch_async] Batch emitted: %d events, types=%s",
+                len(events), [e.event_type for e in events],
+            )
 
     def __call__(self, event: Event) -> EventEnvelope:
         """Callable interface - delegates to emit()."""
@@ -609,14 +765,15 @@ class EventEmitter:
         For checkpoint events, this method blocks until the platform acknowledges
         that the event has been persisted. This ensures correct event ordering.
         """
-        logger.debug(
-            f"[EventEmitter._queue_event_async] ENTRY: type={envelope.event_type}, "
-            f"run_id={self._run_id}, has_worker={self._worker is not None}"
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[EventEmitter._queue_event_async] ENTRY: type=%s, run_id=%s, has_worker=%s",
+                envelope.event_type, self._run_id, self._worker is not None,
+            )
         if self._worker is None:
             logger.warning(
-                f"[EventEmitter._queue_event_async] No worker set, dropping event: "
-                f"type={envelope.event_type}, run_id={self._run_id}"
+                "[EventEmitter._queue_event_async] No worker set, dropping event: "
+                "type=%s, run_id=%s", envelope.event_type, self._run_id,
             )
             return
 
@@ -630,44 +787,27 @@ class EventEmitter:
             # Check if this is a checkpoint event that needs sync acknowledgement
             if is_checkpoint_event(envelope.event_type):
                 # Add correlation IDs to metadata for journal persistence
-                # Platform extracts these as "correlation_id" and "parent_correlation_id"
                 if correlation_id:
                     merged_metadata["correlation_id"] = correlation_id
                 if parent_correlation_id:
                     merged_metadata["parent_correlation_id"] = parent_correlation_id
 
-                logger.debug(
-                    f"[EventEmitter._queue_event_async] Emitting checkpoint event (sync): "
-                    f"type={envelope.event_type}, run_id={self._run_id}, "
-                    f"sequence={self._sequence}"
-                )
-
                 # Use async emit — runs gRPC on tokio, returns Python awaitable
                 await self._worker.emit_event_async(
                     run_id=self._run_id,
                     event_type=envelope.event_type,
-                    event_data=serialize_to_str(envelope.data),
+                    event_data=serialize(envelope.data),
                     sequence_number=self._sequence,
                     metadata=merged_metadata,
                     source_timestamp_ns=envelope.source_timestamp_ns,
                     timeout_ms=5000,  # 5 second timeout
                 )
-                logger.debug(
-                    f"[EventEmitter._queue_event_async] Checkpoint event acknowledged: "
-                    f"type={envelope.event_type}"
-                )
             else:
-                logger.debug(
-                    f"[EventEmitter._queue_event_async] Queueing observability event (async): "
-                    f"type={envelope.event_type}, run_id={self._run_id}, "
-                    f"sequence={self._sequence}"
-                )
-
                 # Use async queue for observability/streaming events
                 self._worker.queue_event(
                     invocation_id=self._run_id,
                     event_type=envelope.event_type,
-                    event_data=serialize_to_str(envelope.data),
+                    event_data=serialize(envelope.data),
                     content_index=envelope.content_index,
                     sequence=self._sequence,
                     metadata=merged_metadata,
@@ -676,11 +816,8 @@ class EventEmitter:
                     correlation_id=correlation_id,
                     parent_correlation_id=parent_correlation_id,
                 )
-                logger.debug(
-                    f"[EventEmitter._queue_event_async] Event queued: type={envelope.event_type}"
-                )
         except Exception as e:
-            logger.error(f"[EventEmitter._queue_event_async] Failed to queue event: {e}")
+            logger.error("[EventEmitter._queue_event_async] Failed to queue event: %s", e)
 
     def _queue_event(
         self,
@@ -693,14 +830,15 @@ class EventEmitter:
         Note: For checkpoint events, emit_event_sync blocks until the platform
         acknowledges persistence. For observability events, the async queue is used.
         """
-        logger.debug(
-            f"[EventEmitter._queue_event] ENTRY: type={envelope.event_type}, "
-            f"run_id={self._run_id}, has_worker={self._worker is not None}"
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[EventEmitter._queue_event] ENTRY: type=%s, run_id=%s, has_worker=%s",
+                envelope.event_type, self._run_id, self._worker is not None,
+            )
         if self._worker is None:
             logger.warning(
-                f"[EventEmitter._queue_event] No worker set, dropping event: "
-                f"type={envelope.event_type}, run_id={self._run_id}"
+                "[EventEmitter._queue_event] No worker set, dropping event: "
+                "type=%s, run_id=%s", envelope.event_type, self._run_id,
             )
             return
 
@@ -714,45 +852,33 @@ class EventEmitter:
             # Check if this is a checkpoint event that needs sync acknowledgement
             if is_checkpoint_event(envelope.event_type):
                 # Add correlation IDs to metadata for journal persistence
-                # Platform extracts these as "correlation_id" and "parent_correlation_id"
                 if correlation_id:
                     merged_metadata["correlation_id"] = correlation_id
                 if parent_correlation_id:
                     merged_metadata["parent_correlation_id"] = parent_correlation_id
 
-                logger.debug(
-                    f"[EventEmitter._queue_event] Emitting checkpoint event (sync): "
-                    f"type={envelope.event_type}, run_id={self._run_id}, "
-                    f"sequence={self._sequence}"
-                )
-
                 # For checkpoint events, use emit_event_sync which blocks until
                 # the platform acknowledges the event has been persisted.
-                # This is a TRULY SYNCHRONOUS call - no async/await needed.
                 try:
                     self._worker.emit_event_sync(
                         run_id=self._run_id,
                         event_type=envelope.event_type,
-                        event_data=serialize_to_str(envelope.data),
+                        event_data=serialize(envelope.data),
                         sequence_number=self._sequence,
                         metadata=merged_metadata,
                         source_timestamp_ns=envelope.source_timestamp_ns,
                         timeout_ms=5000,
                     )
-                    logger.debug(
-                        f"[EventEmitter._queue_event] Checkpoint event acknowledged: "
-                        f"type={envelope.event_type}"
-                    )
                 except Exception as e:
                     # On failure, fall back to async queue to ensure event isn't lost
                     logger.warning(
-                        f"[EventEmitter._queue_event] Checkpoint sync emit failed ({e}), "
-                        f"falling back to async: type={envelope.event_type}"
+                        "[EventEmitter._queue_event] Checkpoint sync emit failed (%s), "
+                        "falling back to async: type=%s", e, envelope.event_type,
                     )
                     self._worker.queue_event(
                         invocation_id=self._run_id,
                         event_type=envelope.event_type,
-                        event_data=serialize_to_str(envelope.data),
+                        event_data=serialize(envelope.data),
                         content_index=envelope.content_index,
                         sequence=self._sequence,
                         metadata=merged_metadata,
@@ -762,17 +888,11 @@ class EventEmitter:
                         parent_correlation_id=parent_correlation_id,
                     )
             else:
-                logger.debug(
-                    f"[EventEmitter._queue_event] Queueing observability event (async): "
-                    f"type={envelope.event_type}, run_id={self._run_id}, "
-                    f"sequence={self._sequence}"
-                )
-
                 # Use async queue for observability/streaming events
                 self._worker.queue_event(
                     invocation_id=self._run_id,
                     event_type=envelope.event_type,
-                    event_data=serialize_to_str(envelope.data),
+                    event_data=serialize(envelope.data),
                     content_index=envelope.content_index,
                     sequence=self._sequence,
                     metadata=merged_metadata,
@@ -781,11 +901,8 @@ class EventEmitter:
                     correlation_id=correlation_id,
                     parent_correlation_id=parent_correlation_id,
                 )
-                logger.debug(
-                    f"[EventEmitter._queue_event] Event queued: type={envelope.event_type}"
-                )
         except Exception as e:
-            logger.error(f"[EventEmitter._queue_event] Failed to queue event: {e}")
+            logger.error("[EventEmitter._queue_event] Failed to queue event: %s", e)
 
     @property
     def run_id(self) -> str:

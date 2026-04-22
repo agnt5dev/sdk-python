@@ -172,8 +172,13 @@ class Client:
             timeout: Request timeout in seconds (default: 30.0)
             api_key: Service key for authentication. Falls back to
                      AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
-            tenant_id: Tenant/project ID for routing. Falls back to
-                       AGNT5_TENANT_ID env var.
+            tenant_id: Default sub-tenant for all invocations (sent as
+                       X-TENANT-ID). Use this to segment traffic for your
+                       own customers / end-users — drives per-tenant
+                       metrics and ingress fairness at the gateway.
+                       Opaque string; must match [A-Za-z0-9_-]{1,64}.
+                       Falls back to AGNT5_TENANT_ID env var. Per-call
+                       override available via `tenant=` on run/submit.
             deployment_id: Deployment ID for routing. Falls back to
                            AGNT5_DEPLOYMENT_ID env var.
         """
@@ -197,21 +202,25 @@ class Client:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant_override: Optional[str] = None,
     ) -> Dict[str, str]:
         """Build request headers with authentication and optional session/user context.
 
         Args:
             session_id: Session identifier for multi-turn conversations
             user_id: User identifier for user-scoped memory
+            tenant_override: Per-call sub-tenant override. Wins over the
+                             client-level `tenant_id` when set.
 
         Returns:
             Dictionary of HTTP headers
         """
+        effective_tenant = tenant_override if tenant_override is not None else self.tenant_id
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
-        if self.tenant_id:
-            headers["X-TENANT-ID"] = self.tenant_id
+        if effective_tenant:
+            headers["X-TENANT-ID"] = effective_tenant
         if self.deployment_id:
             headers["X-DEPLOYMENT-ID"] = self.deployment_id
         if session_id:
@@ -228,6 +237,7 @@ class Client:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant: Optional[str] = None,
         timeout: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> RunResponse[Any]:
@@ -242,6 +252,9 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            tenant: Sub-tenant override for this call (X-TENANT-ID). Opaque
+                customer string. Wins over client-level tenant_id when set.
+                See Client.__init__ docstring for semantics.
             timeout: Request timeout in seconds (optional, defaults to client timeout)
             headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
 
@@ -278,7 +291,9 @@ class Client:
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
         # Build headers and merge with custom headers
-        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+        request_headers = self._build_headers(
+            session_id=session_id, user_id=user_id, tenant_override=tenant
+        )
         if headers:
             request_headers.update(headers)
 
@@ -360,6 +375,7 @@ class Client:
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
         metadata: Optional[Dict[str, str]] = None,
+        tenant: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -376,6 +392,8 @@ class Client:
             metadata: Optional metadata key-value pairs passed through to the execution.
                 In managed edition, metadata is stored on the job queue entry and
                 forwarded to the worker handling the job.
+            tenant: Sub-tenant override for this call (X-TENANT-ID). See
+                Client.__init__ docstring.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -419,7 +437,7 @@ class Client:
         response = self._client.post(
             url,
             json=request_body,
-            headers=self._build_headers(),
+            headers=self._build_headers(tenant_override=tenant),
         )
 
         # Handle errors
@@ -1831,8 +1849,13 @@ class AsyncClient:
             timeout: Request timeout in seconds (default: 30.0)
             api_key: Service key for authentication. Falls back to
                      AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
-            tenant_id: Tenant/project ID for routing. Falls back to
-                       AGNT5_TENANT_ID env var.
+            tenant_id: Default sub-tenant for all invocations (sent as
+                       X-TENANT-ID). Use this to segment traffic for your
+                       own customers / end-users — drives per-tenant
+                       metrics and ingress fairness at the gateway.
+                       Opaque string; must match [A-Za-z0-9_-]{1,64}.
+                       Falls back to AGNT5_TENANT_ID env var. Per-call
+                       override available via `tenant=` on run/submit.
             deployment_id: Deployment ID for routing. Falls back to
                            AGNT5_DEPLOYMENT_ID env var.
         """
@@ -1850,21 +1873,25 @@ class AsyncClient:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant_override: Optional[str] = None,
     ) -> Dict[str, str]:
         """Build request headers with authentication and optional session/user context.
 
         Args:
             session_id: Session identifier for multi-turn conversations
             user_id: User identifier for user-scoped memory
+            tenant_override: Per-call sub-tenant override. Wins over the
+                             client-level `tenant_id` when set.
 
         Returns:
             Dictionary of HTTP headers
         """
+        effective_tenant = tenant_override if tenant_override is not None else self.tenant_id
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
-        if self.tenant_id:
-            headers["X-TENANT-ID"] = self.tenant_id
+        if effective_tenant:
+            headers["X-TENANT-ID"] = effective_tenant
         if self.deployment_id:
             headers["X-DEPLOYMENT-ID"] = self.deployment_id
         if session_id:
@@ -1903,6 +1930,7 @@ class AsyncClient:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant: Optional[str] = None,
     ) -> RunResponse[Any]:
         """Execute a component asynchronously and wait for the result.
 
@@ -1912,6 +1940,7 @@ class AsyncClient:
             component_type: Type of component - "function", "workflow", "agent", "tool"
             session_id: Session identifier for multi-turn conversations
             user_id: User identifier for user-scoped memory
+            tenant: Sub-tenant override for this call (X-TENANT-ID).
 
         Returns:
             RunResponse containing the output and metadata
@@ -1928,7 +1957,9 @@ class AsyncClient:
         response = await client.post(
             url,
             json=input_data,
-            headers=self._build_headers(session_id=session_id, user_id=user_id),
+            headers=self._build_headers(
+                session_id=session_id, user_id=user_id, tenant_override=tenant
+            ),
         )
 
         # Handle HTTP errors
@@ -2069,6 +2100,7 @@ class AsyncClient:
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
         metadata: Optional[Dict[str, str]] = None,
+        tenant: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -2082,6 +2114,7 @@ class AsyncClient:
             metadata: Optional metadata key-value pairs passed through to the execution.
                 In managed edition, metadata is stored on the job queue entry and
                 forwarded to the worker handling the job.
+            tenant: Sub-tenant override for this call (X-TENANT-ID).
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -2101,7 +2134,7 @@ class AsyncClient:
         response = await client.post(
             url,
             json=request_body,
-            headers=self._build_headers(),
+            headers=self._build_headers(tenant_override=tenant),
         )
         response.raise_for_status()
 

@@ -63,6 +63,7 @@ class AgentContext(Context):
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
         parent_correlation_id: Optional[str] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ):
         """
         Initialize agent context.
@@ -105,6 +106,7 @@ class AgentContext(Context):
             session_id=session_id,
             enable_memoization=True,  # Agents get memoization by default
             worker=worker,
+            trace_metadata=trace_metadata,
         )
 
         self._agent_name = agent_name
@@ -257,49 +259,73 @@ class AgentContext(Context):
     @property
     def memory(self):
         """
-        Get semantic memory for storing and searching facts.
+        Get unified memory accessor.
 
-        Memory is automatically scoped:
-        - If user_id is available: User-scoped (long-term, cross-session)
-        - Otherwise: Session-scoped (temporary, single conversation)
-
-        Semantic memory uses vector embeddings for similarity search,
-        enabling natural language queries over stored facts.
-
-        Requires:
-        - OPENAI_API_KEY for embeddings
-        - Vector database: QDRANT_URL, PINECONE_API_KEY+PINECONE_HOST, or POSTGRES_URL
+        Provides:
+        - KV memory: ctx.memory.get/set/delete (session-scoped by default)
+        - Scoped KV: ctx.memory.user(), ctx.memory.run(), ctx.memory.global_()
+        - Working memory: ctx.memory.working
+        - Semantic memory: ctx.memory.semantic (if configured at worker level)
 
         Returns:
-            SemanticMemory instance for storing and searching facts
+            MemoryAccessor instance
 
         Example:
-            # Store facts
-            await ctx.memory.store("User prefers dark mode")
-            await ctx.memory.store("User's favorite color is blue")
+            # KV memory (session-scoped by default)
+            await ctx.memory.set("theme", "dark")
+            theme = await ctx.memory.get("theme", "light")
 
-            # Search for relevant facts
-            results = await ctx.memory.search("color preferences", limit=5)
-            for result in results:
-                print(f"{result.content} (score: {result.score:.2f})")
+            # User-scoped KV
+            await ctx.memory.user().set("lang", "en")
 
-            # Delete a fact
-            await ctx.memory.forget(results[0].id)
+            # Working memory
+            wm = await ctx.memory.working.get()
+
+            # Semantic (if configured)
+            if ctx.memory.semantic:
+                results = await ctx.memory.semantic.search("preferences")
         """
-        from ..memory import SemanticMemory, MemoryScope
+        from ..memory import MemoryAccessor
 
-        if not hasattr(self, '_memory'):
-            # Use user scope if available, otherwise session scope
-            if self._user_id:
-                scope = MemoryScope.USER
-                scope_id = self._user_id
-            else:
-                scope = MemoryScope.SESSION
-                scope_id = self._session_id
+        if not hasattr(self, '_memory_accessor'):
+            self._memory_accessor = MemoryAccessor(
+                state_adapter=self._state_adapter,
+                session_id=self._session_id,
+                user_id=self._user_id,
+                run_id=self._run_id,
+                semantic_provider=getattr(self, '_semantic_provider', None),
+            )
 
-            self._memory = SemanticMemory(scope, scope_id)
+        return self._memory_accessor
 
-        return self._memory
+    @property
+    def conversation(self):
+        """
+        Get conversation memory for this session.
+
+        Provides message history management:
+        - ctx.conversation.add(role, content) — record a message
+        - ctx.conversation.get_messages(limit) — load history
+        - ctx.conversation.get_as_lm_messages(limit) — history as LM Messages
+        - ctx.conversation.clear() — wipe history
+
+        Returns:
+            ConversationAccessor instance
+
+        Example:
+            await ctx.conversation.add("user", user_input)
+            history = await ctx.conversation.get_as_lm_messages(limit=20)
+        """
+        from ..memory import ConversationAccessor
+
+        if not hasattr(self, '_conversation_accessor'):
+            self._conversation_accessor = ConversationAccessor(
+                state_adapter=self._state_adapter,
+                session_id=self._session_id,
+                component_name=self._agent_name,
+            )
+
+        return self._conversation_accessor
 
     @property
     def session_id(self) -> str:

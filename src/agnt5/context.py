@@ -17,6 +17,7 @@ from .events import Event, EventEmitter, EventEnvelope
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
+    from .sandbox import Sandbox
 
 
 # Task-local storage (NOT global) - each asyncio task gets its own copy
@@ -74,6 +75,7 @@ class Context:
         self._component_name: Optional[str] = None
 
         self._emitter: Optional[EventEmitter] = None
+        self._sandbox: Optional["Sandbox"] = None
 
         if enable_memoization:
             from .memoization import MemoizationManager
@@ -104,6 +106,19 @@ class Context:
     def logger(self) -> ContextLogger:
         """Logger with correlation IDs. Supports keyword args as log attributes."""
         return self._logger
+
+    @property
+    def sandbox(self) -> Optional["Sandbox"]:
+        """Sandbox for code execution and workspace file operations.
+
+        Available when a sandbox is configured on the worker or passed explicitly.
+        Returns None if no sandbox is configured.
+        """
+        return self._sandbox
+
+    @sandbox.setter
+    def sandbox(self, value: Optional["Sandbox"]) -> None:
+        self._sandbox = value
 
     @property
     def session_id(self) -> Optional[str]:
@@ -143,11 +158,16 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            # Pass trace metadata and experiment_id as base_metadata
-            # so every checkpoint event carries them back to the EE
+            # Pass trace metadata, experiment_id, and project/deployment IDs as base_metadata
+            # so every checkpoint event carries them back to the engine.
+            # The current engine cache key is still (tenant_id, run_id), where
+            # tenant_id is a legacy alias for project identity on worker/runtime
+            # paths. Events must therefore preserve the same value stamped on
+            # run.queued during the migration window.
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate", "experiment_id"):
+                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id",
+                            "attempt", "max_attempts", "component_name", "component_type"):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(
@@ -170,15 +190,7 @@ class Context:
 
         The event already contains correlation_id and parent_correlation_id.
         """
-        logging.getLogger(__name__).debug(
-            f"[Context.emit] Emitting event: type={event.event_type}, "
-            f"run_id={self._run_id}, correlation_id={event.correlation_id}, "
-            f"has_worker={self._worker is not None}"
-        )
         emitter = self._get_emitter()
-        logging.getLogger(__name__).debug(
-            f"[Context.emit] Got emitter, has_worker={emitter._worker is not None}"
-        )
         return emitter.emit(event)
 
     async def emit_async(self, event: Event) -> EventEnvelope:
@@ -188,6 +200,14 @@ class Context:
         """
         emitter = self._get_emitter()
         return await emitter.emit_async(event)
+
+    async def emit_batch_async(self, events: list) -> None:
+        """Emit multiple events in a single AppendBatch RPC.
+
+        Reduces gRPC overhead by batching non-terminal events (e.g., started events).
+        """
+        emitter = self._get_emitter()
+        await emitter.emit_batch_async(events)
 
     @contextmanager
     def as_parent(self) -> Generator[None, None, None]:

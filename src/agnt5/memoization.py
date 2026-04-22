@@ -24,6 +24,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Process-wide flag: once the platform's checkpoint backend signals it is
+# unavailable (e.g. RPC returns UNIMPLEMENTED), every MemoizationManager in
+# this process becomes a no-op. This avoids per-call WARNING spam when the
+# Rust runtime hasn't implemented the Checkpoint/GetMemoizedStep RPCs.
+_BACKEND_DISABLED = False
+
+
+def _is_unimplemented_error(exc: BaseException) -> bool:
+    """Detect 'feature not implemented by backend' style failures."""
+    msg = str(exc).lower()
+    return (
+        "not yet implemented" in msg
+        or "unimplemented" in msg
+        or "operation is not implemented or not supported" in msg
+    )
+
+
+def _disable_backend(reason: str) -> None:
+    """Disable platform-side memoization for the rest of this process."""
+    global _BACKEND_DISABLED
+    if not _BACKEND_DISABLED:
+        _BACKEND_DISABLED = True
+        logger.info(
+            "Platform-side step memoization disabled: %s. "
+            "Subsequent cache attempts will be skipped silently.",
+            reason,
+        )
+
 
 class MemoizationManager:
     """
@@ -66,6 +94,20 @@ class MemoizationManager:
         self._checkpoint_client = None
         self._connected = False
 
+    def _project_or_tenant_id(self) -> str:
+        """
+        Read the engine routing key from the context's trace metadata.
+
+        The engine's memoization cache key is still `(tenant_id, run_id)`.
+        On worker/runtime paths that tenant_id is currently a legacy alias for
+        project identity, so prefer `project_id` when present and fall back to
+        `tenant_id`.
+        """
+        trace_metadata = getattr(self._ctx, "_trace_metadata", None)
+        if trace_metadata:
+            return trace_metadata.get("project_id", "") or trace_metadata.get("tenant_id", "") or ""
+        return ""
+
     async def _ensure_client(self) -> bool:
         """
         Lazily initialize and connect the checkpoint client.
@@ -73,6 +115,9 @@ class MemoizationManager:
         Returns:
             True if client is ready, False if unavailable
         """
+        if _BACKEND_DISABLED:
+            return False
+
         if self._connected and self._checkpoint_client is not None:
             return True
 
@@ -203,11 +248,12 @@ class MemoizationManager:
             return None
 
         run_id = self._ctx.run_id
+        tenant_id = self._project_or_tenant_id()
 
         try:
-            # Use platform's GetMemoizedStep RPC
+            # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
             cached_bytes = await self._checkpoint_client.get_memoized_step(
-                run_id, step_key
+                tenant_id, run_id, step_key
             )
 
             if cached_bytes:
@@ -232,7 +278,10 @@ class MemoizationManager:
                     return GenerateResponse.from_dict(output_data)
 
         except Exception as e:
-            logger.debug(f"Failed to lookup cached LLM result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"GetMemoizedStep unsupported: {e}")
+            else:
+                logger.debug(f"Failed to lookup cached LLM result for {step_key}: {e}")
 
         return None
 
@@ -254,6 +303,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Convert result to dict for storage
@@ -267,6 +317,7 @@ class MemoizationManager:
 
             # Use platform's Checkpoint RPC with step_completed
             await self._checkpoint_client.step_completed(
+                tenant_id=tenant_id,
                 run_id=run_id,
                 step_key=step_key,
                 step_name="lm_call",
@@ -276,7 +327,10 @@ class MemoizationManager:
             logger.debug(f"Cached LLM result for {step_key}")
 
         except Exception as e:
-            logger.warning(f"Failed to cache LLM result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"Checkpoint unsupported: {e}")
+            else:
+                logger.warning(f"Failed to cache LLM result for {step_key}: {e}")
 
     async def get_cached_tool_result(
         self,
@@ -299,11 +353,12 @@ class MemoizationManager:
             return False, None
 
         run_id = self._ctx.run_id
+        tenant_id = self._project_or_tenant_id()
 
         try:
-            # Use platform's GetMemoizedStep RPC
+            # Use engine's FindByStepKey RPC (replaces legacy GetMemoizedStep).
             cached_bytes = await self._checkpoint_client.get_memoized_step(
-                run_id, step_key
+                tenant_id, run_id, step_key
             )
 
             if cached_bytes:
@@ -325,7 +380,10 @@ class MemoizationManager:
                 return True, output_data
 
         except Exception as e:
-            logger.debug(f"Failed to lookup cached tool result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"FindByStepKey unsupported: {e}")
+            else:
+                logger.debug(f"Failed to lookup cached tool result for {step_key}: {e}")
 
         return False, None
 
@@ -347,6 +405,7 @@ class MemoizationManager:
             return
 
         run_id = self._ctx.run_id
+        tenant_id = self._project_or_tenant_id()
 
         try:
             # Build cache payload with hash for validation
@@ -357,6 +416,7 @@ class MemoizationManager:
 
             # Use platform's Checkpoint RPC with step_completed
             await self._checkpoint_client.step_completed(
+                tenant_id=tenant_id,
                 run_id=run_id,
                 step_key=step_key,
                 step_name="tool_call",
@@ -366,7 +426,10 @@ class MemoizationManager:
             logger.debug(f"Cached tool result for {step_key}")
 
         except Exception as e:
-            logger.warning(f"Failed to cache tool result for {step_key}: {e}")
+            if _is_unimplemented_error(e):
+                _disable_backend(f"Checkpoint unsupported: {e}")
+            else:
+                logger.warning(f"Failed to cache tool result for {step_key}: {e}")
 
     def reset(self) -> None:
         """

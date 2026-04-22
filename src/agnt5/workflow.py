@@ -63,6 +63,7 @@ class WorkflowContext(Context):
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
         parent_correlation_id: Optional[str] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -90,6 +91,7 @@ class WorkflowContext(Context):
             session_id=session_id,
             is_streaming=is_streaming,
             worker=worker,
+            trace_metadata=trace_metadata,
         )
         self._is_streaming = is_streaming
         self._workflow_entity = workflow_entity
@@ -263,6 +265,80 @@ class WorkflowContext(Context):
             state._set_emitter(self.emit)
         return state
 
+    @property
+    def memory(self):
+        """
+        Get unified memory accessor.
+
+        Provides:
+        - KV memory: ctx.memory.get/set/delete (session-scoped by default)
+        - Scoped KV: ctx.memory.user(), ctx.memory.run(), ctx.memory.global_()
+        - Working memory: ctx.memory.working
+        - Semantic memory: ctx.memory.semantic (if configured at worker level)
+
+        Returns:
+            MemoryAccessor instance
+
+        Example:
+            await ctx.memory.set("theme", "dark")
+            theme = await ctx.memory.get("theme", "light")
+            wm = await ctx.memory.working.get()
+        """
+        from .memory import MemoryAccessor
+
+        if not hasattr(self, '_memory_accessor'):
+            # Get state adapter from worker context
+            try:
+                adapter = _get_state_adapter()
+            except RuntimeError:
+                from ._state_adapter import StateAdapter
+                adapter = StateAdapter()
+
+            self._memory_accessor = MemoryAccessor(
+                state_adapter=adapter,
+                session_id=self._session_id,
+                user_id=self._user_id,
+                run_id=self._run_id,
+                semantic_provider=getattr(self, '_semantic_provider', None),
+            )
+
+        return self._memory_accessor
+
+    @property
+    def conversation(self):
+        """
+        Get conversation memory for this session.
+
+        Provides message history management:
+        - ctx.conversation.add(role, content) — record a message
+        - ctx.conversation.get_messages(limit) — load history
+        - ctx.conversation.get_as_lm_messages(limit) — history as LM Messages
+        - ctx.conversation.clear() — wipe history
+
+        Returns:
+            ConversationAccessor instance
+
+        Example:
+            await ctx.conversation.add("user", user_input)
+            history = await ctx.conversation.get_as_lm_messages(limit=20)
+        """
+        from .memory import ConversationAccessor
+
+        if not hasattr(self, '_conversation_accessor'):
+            try:
+                adapter = _get_state_adapter()
+            except RuntimeError:
+                from ._state_adapter import StateAdapter
+                adapter = StateAdapter()
+
+            self._conversation_accessor = ConversationAccessor(
+                state_adapter=adapter,
+                session_id=self._session_id,
+                component_name=self._workflow_entity.key if self._workflow_entity else "",
+            )
+
+        return self._conversation_accessor
+
     # === Orchestration ===
 
     async def step(
@@ -420,6 +496,19 @@ class WorkflowContext(Context):
         if self._workflow_entity.has_completed_step(step_name):
             result = self._workflow_entity.get_completed_step(step_name)
             self._logger.info(f"🔄 Replaying cached step: {step_name}")
+            # Emit a step.completed event with cache_hit metadata so tests can
+            # prove replay happened (vs re-execution which emits started+completed)
+            from .events import Completed, ComponentType, OperationType
+            replay_event = Completed(
+                name=step_name,
+                correlation_id=generate_cid(),
+                parent_correlation_id=self._correlation_id,
+                component_type=ComponentType.WORKFLOW,
+                operation=OperationType.STEP,
+                output_data=result,
+                metadata={"cache_hit": "true"},
+            )
+            self.emit(replay_event)
             return result
 
         # Use step_event_id as correlation_id for pairing started ↔ completed
@@ -1023,7 +1112,15 @@ class WorkflowContext(Context):
         # Check platform-side memoization first (Phase 3)
         if self._checkpoint_client:
             try:
+                # Engine cache key is still (tenant_id, run_id). On worker
+                # paths that tenant_id is a legacy alias for project identity,
+                # so prefer project_id when present and fall back to tenant_id.
+                project_or_tenant_id = (
+                    (self._trace_metadata or {}).get("project_id", "")
+                    or (self._trace_metadata or {}).get("tenant_id", "")
+                )
                 result = await self._checkpoint_client.step_started(
+                    project_or_tenant_id,
                     self.run_id,
                     step_key,
                     name,
@@ -1091,7 +1188,12 @@ class WorkflowContext(Context):
             if self._checkpoint_client:
                 try:
                     output_bytes = serialize_to_str(result).encode("utf-8")
+                    project_or_tenant_id = (
+                        (self._trace_metadata or {}).get("project_id", "")
+                        or (self._trace_metadata or {}).get("tenant_id", "")
+                    )
                     await self._checkpoint_client.step_completed(
+                        project_or_tenant_id,
                         self.run_id,
                         step_key,
                         name,
@@ -1139,7 +1241,12 @@ class WorkflowContext(Context):
             # Record failure to platform (Phase 3)
             if self._checkpoint_client:
                 try:
+                    project_or_tenant_id = (
+                        (self._trace_metadata or {}).get("project_id", "")
+                        or (self._trace_metadata or {}).get("tenant_id", "")
+                    )
                     await self._checkpoint_client.step_failed(
+                        project_or_tenant_id,
                         self.run_id,
                         step_key,
                         name,
@@ -1855,18 +1962,15 @@ class WorkflowEntity:
         This is prefixed with _ so it won't be wrapped by the entity method wrapper.
         Called after workflow execution completes to ensure state is durable.
         """
-        logger.info(f"🔍 DEBUG: _persist_state() CALLED for workflow {self.run_id}")
+        logger.debug(f"_persist_state() called for workflow {self.run_id}")
 
         try:
-            logger.info(f"🔍 DEBUG: Getting state adapter...")
             # Get the state adapter (must be in Worker context)
             adapter = _get_state_adapter()
-            logger.info(f"🔍 DEBUG: Got state adapter: {type(adapter).__name__}")
 
-            logger.info(f"🔍 DEBUG: Getting state snapshot...")
             # Get current state snapshot
             state_dict = self.state.get_state_snapshot()
-            logger.info(f"🔍 DEBUG: State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
+            logger.debug(f"State snapshot has {len(state_dict)} keys: {list(state_dict.keys())}")
 
             # Determine scope and scope_id based on memory scope
             scope = self._memory_scope  # "session", "user", or "run"
@@ -1878,24 +1982,19 @@ class WorkflowEntity:
             elif self._memory_scope == "run":
                 scope_id = self._run_id
 
-            logger.info(f"🔍 DEBUG: Loading current version for optimistic locking (scope={scope}, scope_id={scope_id})...")
             # Load current version (for optimistic locking) with proper scope
             _, current_version = await adapter.load_with_version(
                 self._entity_type, self._key, scope=scope, scope_id=scope_id
             )
-            logger.info(f"🔍 DEBUG: Current version: {current_version}")
 
-            logger.info(f"🔍 DEBUG: Saving state to database...")
-
-            logger.info(f"🔍 DEBUG: Using scope={scope}, scope_id={scope_id}")
             # Save state with version check and proper scope
             new_version = await adapter.save_state(
                 self._entity_type, self._key, state_dict, current_version,
                 scope=scope, scope_id=scope_id
             )
 
-            logger.info(
-                f"✅ SUCCESS: Persisted WorkflowEntity state for {self.run_id} "
+            logger.debug(
+                f"Persisted WorkflowEntity state for {self.run_id} "
                 f"(version {current_version} -> {new_version}, {len(state_dict)} keys)"
             )
         except Exception as e:

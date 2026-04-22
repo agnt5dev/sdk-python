@@ -72,6 +72,7 @@ class ScorerContext(Context):
         runtime_context: Optional[Any] = None,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
+        trace_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         super().__init__(
             run_id,
@@ -81,6 +82,7 @@ class ScorerContext(Context):
             runtime_context,
             is_streaming=is_streaming,
             worker=worker,
+            trace_metadata=trace_metadata,
         )
 
     def log(self, message: str, **extra: Any) -> None:

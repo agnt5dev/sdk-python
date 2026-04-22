@@ -1,13 +1,13 @@
 """MCP (Model Context Protocol) support for AGNT5.
 
 This module provides MCP client functionality for connecting to external
-MCP servers and using their tools within AGNT5 agents.
+MCP servers and using their tools within AGNT5 agents, plus a developer-
+facing MCP server abstraction for exposing AGNT5 primitives.
 
 Example:
     ```python
     from agnt5.mcp import MCPClient
 
-    # Create client with server configurations
     async with MCPClient(
         id="research-client",
         servers={
@@ -15,10 +15,10 @@ Example:
             "weather": {"url": "https://smithery.ai/.../weather-mcp"},
         }
     ) as client:
-        # List available tools
         tools = await client.list_tools()
+        for tool in tools:
+            print(tool.server, tool.tool.name)
 
-        # Call a tool
         result = await client.call_tool("wikipedia", "search", {"query": "Rust"})
         print(result.get_text())
     ```
@@ -35,20 +35,22 @@ For integration with AGNT5 agents:
     )
     await mcp.connect()
 
-    # Get tools as AGNT5 Tool objects
-    tools = await mcp.list_tools()
+    # Convert MCP tools into AGNT5 Tool objects
+    tools = mcp.get_tools()
 
-    # Use with agent (tools are automatically converted)
     agent = Agent(name="research", model="openai/gpt-4o", tools=tools)
     result = await agent.run("What is the population of France?")
     ```
 """
 
 from .client import MCPClient, MCPError
+from .server import MCPServer, MCPServerError
 from .types import (
     CallToolResult,
     McpTool,
     McpToolWithServer,
+    Prompt,
+    Resource,
     ServerCapabilities,
     ServerConfig,
     ServerInfo,
@@ -62,10 +64,15 @@ __all__ = [
     # Client
     "MCPClient",
     "MCPError",
+    # Server
+    "MCPServer",
+    "MCPServerError",
     # Types
     "CallToolResult",
     "McpTool",
     "McpToolWithServer",
+    "Prompt",
+    "Resource",
     "ServerCapabilities",
     "ServerConfig",
     "ServerInfo",

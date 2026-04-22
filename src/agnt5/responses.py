@@ -476,7 +476,11 @@ def parse_run_response(data: Dict[str, Any]) -> RunResponse[Any]:
                 details=err_data.get("details"),
             )
         else:
-            error = RunErrorDetail(code="UNKNOWN", message=str(err_data))
+            # error is a plain string — check for top-level error_code field
+            error = RunErrorDetail(
+                code=data.get("error_code", "UNKNOWN"),
+                message=str(err_data),
+            )
 
     # Extract output - handle various response formats
     output = data.get("output")

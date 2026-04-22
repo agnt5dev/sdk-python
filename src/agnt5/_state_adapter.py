@@ -372,6 +372,73 @@ class StateAdapter:
         if self._rust_core:
             await self._rust_core.py_clear_cache()
 
+    # -------------------------------------------------------------------
+    # Session / Message operations (Phase 2 — conversation memory)
+    # -------------------------------------------------------------------
+
+    @property
+    def has_native_messages(self) -> bool:
+        """Whether native session/message operations are available."""
+        return self._rust_core is not None
+
+    async def send_message(
+        self,
+        correlation_id: str,
+        message_type: str,
+        payload: bytes,
+    ) -> str:
+        """Send a message via native runtime path.
+
+        Args:
+            correlation_id: Conversation thread ID (= session_id)
+            message_type: "user", "assistant", "system", "tool"
+            payload: JSON-encoded message content
+
+        Returns:
+            Message ID assigned by the runtime
+        """
+        if not self._rust_core:
+            raise RuntimeError("Native message operations require Rust core (not in standalone mode)")
+        return await self._rust_core.py_send_message(correlation_id, message_type, payload)
+
+    async def list_messages(
+        self,
+        correlation_id: str,
+        limit: int = 50,
+    ) -> list:
+        """List messages via native runtime path.
+
+        Args:
+            correlation_id: Conversation thread ID
+            limit: Max messages to return
+
+        Returns:
+            List of proto-encoded message bytes
+        """
+        if not self._rust_core:
+            raise RuntimeError("Native message operations require Rust core (not in standalone mode)")
+        return await self._rust_core.py_list_messages(correlation_id, limit)
+
+    async def create_session(
+        self,
+        session_id: str,
+        component_name: str,
+        session_type: str = "conversation",
+    ) -> str:
+        """Create a session via native runtime path.
+
+        Args:
+            session_id: Session identifier
+            component_name: Agent or workflow name
+            session_type: Session type
+
+        Returns:
+            Session ID
+        """
+        if not self._rust_core:
+            raise RuntimeError("Native session operations require Rust core (not in standalone mode)")
+        return await self._rust_core.py_create_session(session_id, component_name, session_type)
+
     def clear_all(self) -> None:
         """Clear all local locks (for testing)."""
         self._local_locks.clear()

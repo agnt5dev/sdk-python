@@ -1,7 +1,7 @@
 """MCP type definitions for Python SDK."""
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from enum import Enum
 
 
@@ -169,3 +169,47 @@ class ServerConfig:
             )
         else:
             raise ValueError("Invalid server config: must have 'command' or 'url'")
+
+
+PromptHandler = Callable[..., Awaitable[Any]]
+ResourceReadHandler = Callable[..., Awaitable[Any]]
+
+
+@dataclass
+class Prompt:
+    """Prompt exposed by an MCP server."""
+
+    name: str
+    description: Optional[str] = None
+    arguments_schema: Optional[dict[str, Any]] = None
+    handler: Optional[PromptHandler] = None
+
+
+@dataclass
+class Resource:
+    """Resource exposed by an MCP server."""
+
+    uri: str
+    name: str
+    read: ResourceReadHandler
+    description: Optional[str] = None
+    mime_type: Optional[str] = None
+
+    @classmethod
+    def text(
+        cls,
+        *,
+        uri: str,
+        name: str,
+        read: ResourceReadHandler,
+        description: Optional[str] = None,
+        mime_type: str = "text/plain",
+    ) -> "Resource":
+        """Create a text resource."""
+        return cls(
+            uri=uri,
+            name=name,
+            read=read,
+            description=description,
+            mime_type=mime_type,
+        )
