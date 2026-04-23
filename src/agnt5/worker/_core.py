@@ -725,13 +725,11 @@ class Worker(ExecutorMixin):
                 by_type[comp_type] = []
             by_type[comp_type].append(comp.name)
 
-        banner_lines = [f"{self.service_name} v{self.service_version}", "─" * 40]
+        # Service header
+        print(f"\n  {self.service_name} v{self.service_version}")
+        print("  " + "─" * 40)
 
-        # Print service info
-        print(f"\n  {banner_lines[0]}")
-        print("  " + banner_lines[1])
-
-        # Print component tree
+        # Component tree
         type_order = ["workflow", "function", "agent", "tool", "scorer"]
         type_icons = {
             "workflow": "◆",
@@ -746,22 +744,16 @@ class Worker(ExecutorMixin):
                 icon = type_icons.get(comp_type, "•")
                 names = by_type[comp_type]
                 print(f"  {icon} {comp_type}s ({len(names)})")
-                banner_lines.append(f"{comp_type}s ({len(names)})")
                 for i, name in enumerate(sorted(names)):
                     is_last = i == len(names) - 1
                     prefix = "└──" if is_last else "├──"
                     print(f"    {prefix} {name}")
-                    banner_lines.append(f"{comp_type}:{name}")
 
-        # Print dashboard link
+        # Dashboard link
         dashboard_url = os.getenv("AGNT5_DASHBOARD_URL", "http://localhost:34181")
         print("  " + "─" * 40)
         print(f"  Dashboard: {dashboard_url}")
         print()
-        banner_lines.append("─" * 40)
-        banner_lines.append(f"Dashboard: {dashboard_url}")
-
-        logger.info("Worker startup banner\n%s", "\n".join(banner_lines))
 
     async def run(self) -> None:
         """Run the worker (register and start message loop).
