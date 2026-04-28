@@ -110,20 +110,17 @@ class Worker(ExecutorMixin):
         # Initialize metadata with user-provided values
         self.metadata = metadata or {}
 
-        # Auto-populate canonical project identity and legacy tenant alias from
-        # environment if not provided. The checkpoint/journal path still expects
-        # `tenant_id`, so we dual-stamp during the migration window.
+        # Auto-populate identity scopes from environment if not provided.
+        # `project_id` carries the project routing key. `tenant_id` is
+        # reserved for the customer sub-tenant on the dispatch path and is
+        # not stamped from the worker's static config — it arrives per
+        # request via dispatch metadata.
         import os
 
         if "project_id" not in self.metadata:
-            project_id = os.getenv("AGNT5_PROJECT_ID") or os.getenv("AGNT5_TENANT_ID")
+            project_id = os.getenv("AGNT5_PROJECT_ID")
             if project_id:
                 self.metadata["project_id"] = project_id
-
-        if "tenant_id" not in self.metadata:
-            tenant_id = self.metadata.get("project_id") or os.getenv("AGNT5_TENANT_ID")
-            if tenant_id:
-                self.metadata["tenant_id"] = tenant_id
 
         if "deployment_id" not in self.metadata:
             deployment_id = os.getenv("AGNT5_DEPLOYMENT_ID")
@@ -175,7 +172,7 @@ class Worker(ExecutorMixin):
         from .._core import EntityStateManager as RustEntityStateManager
         from .._state_adapter import StateAdapter as EntityStateAdapter
 
-        project_id = self.metadata.get("project_id") or self.metadata.get("tenant_id", "")
+        project_id = self.metadata.get("project_id", "")
         rust_core = RustEntityStateManager(tenant_id=project_id)
         self._entity_state_adapter = EntityStateAdapter(rust_core=rust_core)
 

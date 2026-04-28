@@ -202,11 +202,13 @@ impl EntityStateManager {
             operation: Some(operation),
         };
 
-        // Wrap in ServiceMessage with RuntimeService
-        // Include tenant_id in metadata for managed mode multi-tenancy
+        // Wrap in ServiceMessage with RuntimeService.
+        // Include project_id in metadata for managed-mode multi-tenancy.
+        // `self.tenant_id` is the legacy Rust field name for the project
+        // routing key (Phase A renames it).
         let mut metadata = std::collections::HashMap::new();
         if !self.tenant_id.is_empty() {
-            metadata.insert("tenant_id".to_string(), self.tenant_id.clone());
+            metadata.insert("project_id".to_string(), self.tenant_id.clone());
         }
         let service_message = ServiceMessage {
             worker_id: String::new(), // Will be set by worker

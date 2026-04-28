@@ -714,13 +714,14 @@ impl PyWorker {
                 let parent_context =
                     agnt5_sdk_core::extract_context_from_runtime_message(&invoke_request.metadata);
 
-                // Extract canonical project identity and deployment_id from request metadata.
-                // During the migration window, `tenant_id` remains a legacy alias for project_id.
+                // Extract canonical project identity from request metadata.
+                // The local Rust variable is named `tenant_id` because the
+                // surrounding code uses the legacy field name pending the
+                // Phase A type rename; the metadata key is `project_id`.
                 let tenant_id = invoke_request
                     .metadata
                     .get("project_id")
                     .cloned()
-                    .or_else(|| invoke_request.metadata.get("tenant_id").cloned())
                     .unwrap_or_default();
                 let deployment_id = invoke_request
                     .metadata
