@@ -9,7 +9,6 @@ import asyncio
 import inspect
 import secrets
 import time
-import uuid
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from .._ids import generate_cid
@@ -42,6 +41,17 @@ def _truncate_input(input_dict: dict, max_len: int = 200) -> str:
     if len(s) > max_len:
         return s[:max_len] + "..."
     return s
+
+
+def _resolve_session_user_ids(request: Any, input_dict: dict) -> tuple[str, str | None]:
+    """Resolve durable execution scope IDs from request metadata, payload, then run ID."""
+    session_id = (
+        getattr(request, "session_id", None)
+        or input_dict.get("session_id")
+        or request.invocation_id
+    )
+    user_id = getattr(request, "user_id", None) or input_dict.get("user_id") or None
+    return session_id, user_id
 
 
 class ExecutorMixin:
@@ -716,23 +726,18 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> AgentContext:
-            # Prefer session_id from request header (X-Session-ID), then input payload, then generate
-            session_id = (
-                (getattr(req, "session_id", None))
-                or input_dict.get("session_id")
-                or str(uuid.uuid4())
-            )
-
-            if not (getattr(req, "session_id", None) or input_dict.get("session_id")):
-                logger.debug(f"Created new agent session: {session_id}")
+            session_id, user_id = _resolve_session_user_ids(req, input_dict)
+            if getattr(req, "session_id", None) or input_dict.get("session_id"):
+                logger.debug(f"Using agent session: {session_id}")
             else:
-                logger.debug(f"Using existing agent session: {session_id}")
+                logger.debug(f"Using invocation_id as ephemeral agent session: {session_id}")
 
             correlation_id = generate_cid()
             return AgentContext(
                 run_id=req.invocation_id,
                 agent_name=agent.name,
                 session_id=session_id,
+                user_id=user_id,
                 runtime_context=req.runtime_context,
                 is_streaming=getattr(req, "is_streaming", False),
                 worker=self._rust_worker,
@@ -1201,8 +1206,6 @@ class ExecutorMixin:
         import json
         import time as _time
         import traceback as _traceback
-        import uuid as _uuid
-
         from .._core import PyExecuteComponentResponse
         from ..context import set_current_context
         from .._state_adapter import _entity_state_adapter_ctx, _get_state_adapter
@@ -1224,14 +1227,6 @@ class ExecutorMixin:
         try:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
-
-            # Extract or generate session_id for multi-turn conversation support
-            session_id = input_dict.get("session_id")
-            if not session_id:
-                session_id = str(_uuid.uuid4())
-                logger.debug(f"Created new workflow session: {session_id}")
-            else:
-                logger.debug(f"Using existing workflow session: {session_id}")
 
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
@@ -1294,9 +1289,14 @@ class ExecutorMixin:
                     resumed_step_name = request.metadata["step_name"]
                     logger.debug(f"Restoring step name: {resumed_step_name}")
 
-            # Extract session_id and user_id for memory scoping
-            session_id = request.session_id if hasattr(request, 'session_id') and request.session_id else request.invocation_id
-            user_id = request.user_id if hasattr(request, 'user_id') and request.user_id else None
+            # Resolve session/user scopes for state and memory. Platform metadata
+            # wins, payload fields are honored for legacy direct calls, and
+            # invocation_id is the ephemeral fallback for non-session runs.
+            session_id, user_id = _resolve_session_user_ids(request, input_dict)
+            if getattr(request, "session_id", None) or input_dict.get("session_id"):
+                logger.debug(f"Using workflow session: {session_id}")
+            else:
+                logger.debug(f"Using invocation_id as ephemeral workflow session: {session_id}")
             is_streaming = getattr(request, 'is_streaming', False)
             component_name = getattr(request, 'component_name', None)
 

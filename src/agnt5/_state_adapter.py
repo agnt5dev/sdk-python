@@ -187,11 +187,21 @@ class StateAdapter:
         # Standalone mode: in-memory state storage when no Rust core
         # This enables testing without the full platform stack
         if rust_core is None:
-            self._standalone_states: Dict[Tuple[str, str], Dict[str, Any]] = {}
-            self._standalone_versions: Dict[Tuple[str, str], int] = {}
+            self._standalone_states: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+            self._standalone_versions: Dict[Tuple[str, str, str, str], int] = {}
             logger.debug("Created StateAdapter in standalone mode (in-memory state)")
         else:
             logger.debug("Created StateAdapter with Rust core")
+
+    @staticmethod
+    def _scoped_state_key(
+        entity_type: str,
+        entity_key: str,
+        scope: str = "global",
+        scope_id: str = "",
+    ) -> Tuple[str, str, str, str]:
+        """Build the same logical identity used by platform entity state."""
+        return (entity_type, entity_key, scope or "global", scope_id or "")
 
     def get_local_lock(self, state_key: Tuple[str, str]) -> asyncio.Lock:
         """
@@ -233,7 +243,7 @@ class StateAdapter:
         """
         if not self._rust_core:
             # Standalone mode - return from in-memory storage
-            state_key = (entity_type, entity_key)
+            state_key = self._scoped_state_key(entity_type, entity_key, scope, scope_id)
             return self._standalone_states.get(state_key, {}).copy()
 
         try:
@@ -282,7 +292,7 @@ class StateAdapter:
         """
         if not self._rust_core:
             # Standalone mode - store in memory with version tracking
-            state_key = (entity_type, entity_key)
+            state_key = self._scoped_state_key(entity_type, entity_key, scope, scope_id)
             current_version = self._standalone_versions.get(state_key, 0)
 
             # Optimistic locking check (even in standalone mode for consistency)
@@ -335,7 +345,7 @@ class StateAdapter:
         """
         if not self._rust_core:
             # Standalone mode - return from in-memory storage with version
-            state_key = (entity_type, entity_key)
+            state_key = self._scoped_state_key(entity_type, entity_key, scope, scope_id)
             state = self._standalone_states.get(state_key, {}).copy()
             version = self._standalone_versions.get(state_key, 0)
             return state, version
@@ -440,9 +450,12 @@ class StateAdapter:
         return await self._rust_core.py_create_session(session_id, component_name, session_type)
 
     def clear_all(self) -> None:
-        """Clear all local locks (for testing)."""
+        """Clear all standalone state and local locks (for testing)."""
         self._local_locks.clear()
-        logger.debug("Cleared StateAdapter local locks")
+        if hasattr(self, '_standalone_states'):
+            self._standalone_states.clear()
+            self._standalone_versions.clear()
+        logger.debug("Cleared StateAdapter local state and locks")
 
     async def get_state(self, entity_type: str, key: str) -> Optional[Dict[str, Any]]:
         """Get state for debugging/testing."""
@@ -459,7 +472,7 @@ class StateAdapter:
             return []
 
         keys = []
-        for (etype, ekey) in self._standalone_states.keys():
+        for (etype, ekey, _scope, _scope_id) in self._standalone_states.keys():
             if etype == entity_type:
                 keys.append(ekey)
         return keys

@@ -265,6 +265,55 @@ class WorkflowContext(Context):
             state._set_emitter(self.emit)
         return state
 
+    def _get_or_create_state_adapter(self):
+        """Get the worker-bound state adapter, falling back to standalone mode."""
+        if not hasattr(self, '_state_adapter'):
+            try:
+                self._state_adapter = _get_state_adapter()
+            except RuntimeError:
+                from ._state_adapter import StateAdapter
+                self._state_adapter = StateAdapter()
+        return self._state_adapter
+
+    @property
+    def session(self):
+        """
+        Get session context with state property.
+
+        Session-scoped state persists across runs that share the same session_id.
+
+        Example:
+            await ctx.session.state.set("topic", "AI")
+            topic = await ctx.session.state.get("topic")
+        """
+        from .state import SessionContext
+
+        if not hasattr(self, '_session_context'):
+            self._session_context = SessionContext(
+                state_adapter=self._get_or_create_state_adapter(),
+                session_id=self._session_id,
+            )
+        return self._session_context
+
+    @property
+    def user(self):
+        """
+        Get user context with state property.
+
+        Returns None when this workflow was not started with a user_id.
+        """
+        if not self._user_id:
+            return None
+
+        from .state import UserContext
+
+        if not hasattr(self, '_user_context'):
+            self._user_context = UserContext(
+                state_adapter=self._get_or_create_state_adapter(),
+                user_id=self._user_id,
+            )
+        return self._user_context
+
     @property
     def memory(self):
         """
