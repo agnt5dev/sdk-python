@@ -36,6 +36,20 @@ from .batch_eval import (
     BatchEvalResult,
     BatchEvalStats,
 )
+from .callbacks import (
+    AgentCallbackContext,
+    AgentCallbacks,
+    AfterAgentCallback,
+    AfterModelCallback,
+    AfterToolCallback,
+    BeforeAgentCallback,
+    BeforeModelCallback,
+    BeforeToolCallback,
+    CallbackOverride,
+    ModelCallbackContext,
+    ToolCallbackContext,
+    override,
+)
 from .agent import (
     Agent,
     AgentCompleted,
@@ -68,6 +82,7 @@ from .responses import (
     SubmitResponse,
 )
 from .context import Context
+
 # Entity API was removed in v0.4.0
 # Use State API (ctx.state) and Memory API (ctx.memory) instead
 # See migration guide: https://docs.agnt5.dev/migrations/entity-to-state-memory
@@ -110,7 +125,7 @@ from .lm import (
     LMFailed,
     LMStarted,
 )
-from .types import BackoffPolicy, BackoffType, RetryPolicy, WorkflowConfig
+from .types import BackoffPolicy, BackoffType, RetryPolicy, TriggerSpec, WorkflowConfig, event
 from .version import _get_version
 from .worker import Worker
 from ._telemetry import get_logger, set_log_level
@@ -145,6 +160,7 @@ from .memory import (
     SemanticSearchResult,
     WorkingMemory,
 )
+
 # Legacy re-exports: ConversationMemory, SemanticMemory emit DeprecationWarning
 # on access. GraphMemory/GraphNode/GraphRelationship/GraphTraversalResult are removed.
 
@@ -229,6 +245,8 @@ __all__ = [
     "WorkflowRegistry",
     "workflow",
     "WorkflowConfig",
+    "TriggerSpec",
+    "event",
     # State components
     "StateManager",
     "SessionContext",
@@ -253,6 +271,18 @@ __all__ = [
     "Handoff",
     "agent",
     "handoff",
+    "AgentCallbackContext",
+    "AgentCallbacks",
+    "AfterAgentCallback",
+    "AfterModelCallback",
+    "AfterToolCallback",
+    "BeforeAgentCallback",
+    "BeforeModelCallback",
+    "BeforeToolCallback",
+    "CallbackOverride",
+    "ModelCallbackContext",
+    "ToolCallbackContext",
+    "override",
     # Tool components
     "Tool",
     "ToolRegistry",

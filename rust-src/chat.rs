@@ -18,19 +18,27 @@ pub struct PyPlatform {
 impl PyPlatform {
     #[staticmethod]
     fn slack() -> Self {
-        Self { inner: chat::Platform::Slack }
+        Self {
+            inner: chat::Platform::Slack,
+        }
     }
     #[staticmethod]
     fn discord() -> Self {
-        Self { inner: chat::Platform::Discord }
+        Self {
+            inner: chat::Platform::Discord,
+        }
     }
     #[staticmethod]
     fn teams() -> Self {
-        Self { inner: chat::Platform::Teams }
+        Self {
+            inner: chat::Platform::Teams,
+        }
     }
     #[staticmethod]
     fn telegram() -> Self {
-        Self { inner: chat::Platform::Telegram }
+        Self {
+            inner: chat::Platform::Telegram,
+        }
     }
 
     #[staticmethod]
@@ -69,11 +77,16 @@ impl PyChatUser {
     }
     #[getter]
     fn platform(&self) -> PyPlatform {
-        PyPlatform { inner: self.inner.platform }
+        PyPlatform {
+            inner: self.inner.platform,
+        }
     }
 
     fn __repr__(&self) -> String {
-        format!("ChatUser(id='{}', name='{}')", self.inner.id, self.inner.name)
+        format!(
+            "ChatUser(id='{}', name='{}')",
+            self.inner.id, self.inner.name
+        )
     }
 }
 
@@ -119,7 +132,9 @@ impl PyChatMessage {
     }
     #[getter]
     fn platform(&self) -> PyPlatform {
-        PyPlatform { inner: self.inner.platform }
+        PyPlatform {
+            inner: self.inner.platform,
+        }
     }
     #[getter]
     fn channel_id(&self) -> &str {
@@ -131,7 +146,9 @@ impl PyChatMessage {
     }
     #[getter]
     fn author(&self) -> PyChatUser {
-        PyChatUser { inner: self.inner.author.clone() }
+        PyChatUser {
+            inner: self.inner.author.clone(),
+        }
     }
     #[getter]
     fn content(&self) -> &str {

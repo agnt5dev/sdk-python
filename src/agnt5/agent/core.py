@@ -1,5 +1,6 @@
 """Agent class - core LLM-driven agent with tool orchestration."""
 
+import inspect
 import json
 import logging
 import secrets
@@ -9,6 +10,19 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Opt
 
 from .._ids import generate_cid
 from .._serialization import serialize_to_str
+from ..callbacks import (
+    AgentCallbackContext,
+    AgentCallbacks,
+    AfterAgentCallback,
+    AfterModelCallback,
+    AfterToolCallback,
+    BeforeAgentCallback,
+    BeforeModelCallback,
+    BeforeToolCallback,
+    CallbackOverride,
+    ModelCallbackContext,
+    ToolCallbackContext,
+)
 from ..context import Context, get_current_context, set_current_context
 from .. import lm
 from ..lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
@@ -108,6 +122,13 @@ class Agent:
         tools: Optional[List[Any]] = None,
         model_config: Optional[ModelConfig] = None,
         handoffs: Optional[List[Union["Agent", Handoff]]] = None,
+        callbacks: Optional[AgentCallbacks] = None,
+        before_agent_callback: Optional[BeforeAgentCallback] = None,
+        after_agent_callback: Optional[AfterAgentCallback] = None,
+        before_model_callback: Optional[BeforeModelCallback] = None,
+        after_model_callback: Optional[AfterModelCallback] = None,
+        before_tool_callback: Optional[BeforeToolCallback] = None,
+        after_tool_callback: Optional[AfterToolCallback] = None,
         # Legacy parameters (kept for backward compatibility)
         model_name: Optional[str] = None,
         temperature: float = 0.7,
@@ -126,6 +147,13 @@ class Agent:
             tools: List of tools, Tool instances, or Agents (used as tools)
             model_config: Model configuration (temperature, max_tokens, etc.)
             handoffs: List of agents to hand off to (creates transfer_to_* tools)
+            callbacks: Grouped execution callbacks for agent/model/tool stages
+            before_agent_callback: Callback before the agent loop starts
+            after_agent_callback: Callback after a successful agent result
+            before_model_callback: Callback before each model request is sent
+            after_model_callback: Callback after each model response is received
+            before_tool_callback: Callback before each tool call executes
+            after_tool_callback: Callback after each successful tool call
             model_name: Deprecated - use `model` parameter instead
             temperature: LLM temperature (0-1). Legacy parameter - prefer model_config.
             max_tokens: Maximum tokens in response. Legacy parameter - prefer model_config.
@@ -136,6 +164,15 @@ class Agent:
         self.instructions = instructions
         self.max_iterations = max_iterations
         self.logger = logging.getLogger(f"agnt5.agent.{name}")
+        base_callbacks = callbacks or AgentCallbacks()
+        self.callbacks = AgentCallbacks(
+            before_agent=before_agent_callback or base_callbacks.before_agent,
+            after_agent=after_agent_callback or base_callbacks.after_agent,
+            before_model=before_model_callback or base_callbacks.before_model,
+            after_model=after_model_callback or base_callbacks.after_model,
+            before_tool=before_tool_callback or base_callbacks.before_tool,
+            after_tool=after_tool_callback or base_callbacks.after_tool,
+        )
 
         # Handle model parameter: string or LanguageModel
         if isinstance(model, str):
@@ -387,6 +424,174 @@ class Agent:
             fallback_run_id = f"agent-{self.name}-{uuid.uuid4().hex[:8]}"
             return (f"run:{fallback_run_id}", "run")
 
+    async def _maybe_await_callback(self, value: Any) -> Any:
+        """Await a callback result when it is awaitable."""
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _callback_value(self, result: Any) -> tuple[bool, Any]:
+        """Return whether a callback supplied an override and its value."""
+        if isinstance(result, CallbackOverride):
+            return True, result.value
+        if result is None:
+            return False, None
+        return True, result
+
+    def _agent_result_from_callback(self, value: Any, context: Context) -> AgentResult:
+        """Convert a callback replacement value into an AgentResult."""
+        if isinstance(value, AgentResult):
+            if value.context is None:
+                value.context = context
+            return value
+
+        if isinstance(value, dict):
+            output_value = value.get("output", value)
+            output = output_value if isinstance(output_value, str) else _serialize_tool_result(output_value)
+            tool_calls = value.get("tool_calls") or value.get("toolCalls") or []
+            handoff_to = value.get("handoff_to") or value.get("handoffTo")
+            return AgentResult(
+                output=output,
+                tool_calls=tool_calls,
+                context=context,
+                handoff_to=handoff_to,
+                handoff_metadata=value if handoff_to else None,
+            )
+
+        output = value if isinstance(value, str) else _serialize_tool_result(value)
+        return AgentResult(output=output, tool_calls=[], context=context)
+
+    async def _run_before_agent_callback(
+        self,
+        context: Context,
+        user_message: str,
+        history: Optional[List[Message]],
+        prompt_context: Optional[Dict[str, Any]],
+    ) -> Optional[AgentResult]:
+        callback = self.callbacks.before_agent
+        if callback is None:
+            return None
+
+        callback_context = AgentCallbackContext(
+            agent=self,
+            context=context,
+            user_message=user_message,
+            history=history,
+            prompt_context=prompt_context,
+        )
+        raw_result = await self._maybe_await_callback(callback(callback_context))
+        has_value, value = self._callback_value(raw_result)
+        if not has_value:
+            return None
+        return self._agent_result_from_callback(value, context)
+
+    async def _run_after_agent_callback(
+        self,
+        context: Context,
+        user_message: str,
+        history: Optional[List[Message]],
+        prompt_context: Optional[Dict[str, Any]],
+        result: AgentResult,
+    ) -> AgentResult:
+        callback = self.callbacks.after_agent
+        if callback is None:
+            return result
+
+        callback_context = AgentCallbackContext(
+            agent=self,
+            context=context,
+            user_message=user_message,
+            history=history,
+            prompt_context=prompt_context,
+        )
+        raw_result = await self._maybe_await_callback(callback(callback_context, result))
+        has_value, value = self._callback_value(raw_result)
+        if not has_value:
+            return result
+        return self._agent_result_from_callback(value, context)
+
+    async def _call_model_generate(self, request: GenerateRequest) -> GenerateResponse:
+        from ..lm import LMClient as _LanguageModel
+
+        if self._language_model is not None:
+            return await self._language_model.generate(request)
+
+        provider, _model_name = self.model.split('/', 1)
+        internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+        return await internal_lm.generate(request)
+
+    def _validate_model_response(self, response: Any) -> GenerateResponse:
+        if not isinstance(response, GenerateResponse):
+            raise TypeError(
+                "model callbacks must return GenerateResponse, CallbackOverride, or None"
+            )
+        return response
+
+    async def _generate_with_callbacks(
+        self,
+        context: Context,
+        request: GenerateRequest,
+        iteration: int,
+        messages: List[Message],
+        tool_definitions: List[ToolDefinition],
+    ) -> GenerateResponse:
+        callback_context = ModelCallbackContext(
+            agent=self,
+            context=context,
+            iteration=iteration,
+            messages=messages,
+            tool_definitions=tool_definitions,
+        )
+
+        response: Optional[GenerateResponse] = None
+        before = self.callbacks.before_model
+        if before is not None:
+            raw_result = await self._maybe_await_callback(before(callback_context, request))
+            has_value, value = self._callback_value(raw_result)
+            if has_value:
+                response = self._validate_model_response(value)
+
+        if response is None:
+            response = await self._call_model_generate(request)
+            self._track_llm_cost(response, context)
+
+        after = self.callbacks.after_model
+        if after is not None:
+            raw_result = await self._maybe_await_callback(after(callback_context, request, response))
+            has_value, value = self._callback_value(raw_result)
+            if has_value:
+                response = self._validate_model_response(value)
+
+        return response
+
+    async def _invoke_tool_with_callbacks(
+        self,
+        callback_context: ToolCallbackContext,
+    ) -> Any:
+        before = self.callbacks.before_tool
+        if before is not None:
+            raw_result = await self._maybe_await_callback(before(callback_context))
+            has_value, value = self._callback_value(raw_result)
+            if has_value:
+                return value
+
+        if callback_context.tool is None:
+            raise ValueError(f"Tool '{callback_context.tool_name}' not found")
+
+        result = await callback_context.tool.invoke(
+            callback_context.context,
+            **callback_context.arguments,
+        )
+
+        after = self.callbacks.after_tool
+        if after is not None:
+            raw_result = await self._maybe_await_callback(after(callback_context, result))
+            has_value, value = self._callback_value(raw_result)
+            if has_value:
+                return value
+
+        return result
+
     async def _run_core(
         self,
         user_message: str,
@@ -481,12 +686,41 @@ class Agent:
                     agent_context=resume_info["agent_context"],
                     user_response=resume_info["user_response"],
                 )
+                result = await self._run_after_agent_callback(
+                    result.context or context,
+                    user_message,
+                    history,
+                    prompt_context,
+                    result,
+                )
                 yield result
                 return
 
         # Set context in task-local storage
         token = set_current_context(context)
         try:
+            before_agent_result = await self._run_before_agent_callback(
+                context,
+                user_message,
+                history,
+                prompt_context,
+            )
+            if before_agent_result is not None:
+                context.restore_parent(original_agent_parent)
+                if context and not getattr(context, '_executor_managed_lifecycle', False):
+                    context.emit(AgentCompleted(
+                        name=self.name,
+                        correlation_id=agent_correlation_id,
+                        parent_correlation_id=context._parent_correlation_id,
+                        iterations=0,
+                        tool_calls_count=len(before_agent_result.tool_calls),
+                        handoff_to=before_agent_result.handoff_to,
+                        output_length=len(before_agent_result.output),
+                        metadata={"name": self.name},
+                    ))
+                yield before_agent_result
+                return
+
             # Build conversation messages
             messages: List[Message] = []
 
@@ -587,7 +821,15 @@ class Agent:
                     response_text = ""
                     response_tool_calls = []
 
-                    async for item, seq in self._stream_lm_call(request, sequence, iteration_correlation_id):
+                    async for item, seq in self._stream_lm_call(
+                        request,
+                        sequence,
+                        iteration_correlation_id,
+                        context,
+                        iteration + 1,
+                        messages,
+                        tool_defs,
+                    ):
                         if isinstance(item, _StreamedLMResponse):
                             response_text = item.text
                             response_tool_calls = item.tool_calls
@@ -650,7 +892,18 @@ class Agent:
                                 if not tool:
                                     result_text = f"Error: Tool '{tool_name}' not found"
                                 else:
-                                    result = await tool.invoke(context, **tool_args)
+                                    result = await self._invoke_tool_with_callbacks(
+                                        ToolCallbackContext(
+                                            agent=self,
+                                            context=context,
+                                            iteration=iteration + 1,
+                                            tool_name=tool_name,
+                                            tool_call_id=tool_call_id or "",
+                                            tool_call=tool_call,
+                                            arguments=tool_args,
+                                            tool=tool,
+                                        )
+                                    )
 
                                     if isinstance(result, dict) and result.get("_handoff"):
                                         self.logger.info(f"Handoff to '{result['to_agent']}'")
@@ -678,13 +931,21 @@ class Agent:
                                         # Add output data to span for trace visibility
                                         span.set_attribute("output.data", _serialize_tool_result(result["output"]))
 
-                                        yield AgentResult(
+                                        agent_result = AgentResult(
                                             output=result["output"],
                                             tool_calls=all_tool_calls + result.get("tool_calls", []),
                                             context=context,
                                             handoff_to=result["to_agent"],
                                             handoff_metadata=result,
                                         )
+                                        agent_result = await self._run_after_agent_callback(
+                                            context,
+                                            user_message,
+                                            history,
+                                            prompt_context,
+                                            agent_result,
+                                        )
+                                        yield agent_result
                                         return
 
                                     result_text = _serialize_tool_result(result)
@@ -835,11 +1096,19 @@ class Agent:
                         # Add output data to span for trace visibility
                         span.set_attribute("output.data", _serialize_tool_result(response_text))
 
-                        yield AgentResult(
+                        agent_result = AgentResult(
                             output=response_text,
                             tool_calls=all_tool_calls,
                             context=context,
                         )
+                        agent_result = await self._run_after_agent_callback(
+                            context,
+                            user_message,
+                            history,
+                            prompt_context,
+                            agent_result,
+                        )
+                        yield agent_result
                         return
 
                 # Max iterations reached
@@ -871,11 +1140,19 @@ class Agent:
                 # Add output data to span for trace visibility
                 span.set_attribute("output.data", _serialize_tool_result(final_output))
 
-                yield AgentResult(
+                agent_result = AgentResult(
                     output=final_output,
                     tool_calls=all_tool_calls,
                     context=context,
                 )
+                agent_result = await self._run_after_agent_callback(
+                    context,
+                    user_message,
+                    history,
+                    prompt_context,
+                    agent_result,
+                )
+                yield agent_result
 
         except Exception as e:
             # Reset parent to workflow before emitting agent.failed
@@ -902,6 +1179,10 @@ class Agent:
         request: GenerateRequest,
         sequence_start: int = 0,
         parent_correlation_id: str = "",
+        context: Optional[Context] = None,
+        iteration: int = 0,
+        messages: Optional[List[Message]] = None,
+        tool_definitions: Optional[List[ToolDefinition]] = None,
     ) -> AsyncGenerator[Tuple[Event, int], None]:
         """Stream an LLM call and yield events.
 
@@ -931,15 +1212,22 @@ class Agent:
         # When tools are present, use generate() since streaming doesn't support tool calls
         # When no tools, use real streaming for proper thinking block support
         has_tools = bool(request.tools)
+        has_model_callbacks = (
+            self.callbacks.before_model is not None
+            or self.callbacks.after_model is not None
+        )
 
-        if has_tools:
-            # Use generate() - streaming doesn't support tool calls yet
-            if self._language_model is not None:
-                response = await self._language_model.generate(request)
+        if has_tools or has_model_callbacks:
+            if context is not None:
+                response = await self._generate_with_callbacks(
+                    context=context,
+                    request=request,
+                    iteration=iteration,
+                    messages=messages or request.messages,
+                    tool_definitions=tool_definitions or request.tools,
+                )
             else:
-                provider, model_name = self.model.split('/', 1)
-                internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                response = await internal_lm.generate(request)
+                response = await self._call_model_generate(request)
 
             # Emit synthetic LM events for compatibility
             lm_correlation_id = generate_cid()
@@ -1833,45 +2121,25 @@ class Agent:
         while iteration < self.max_iterations:
             self.logger.debug(f"Agent iteration {iteration + 1}/{self.max_iterations}")
 
-            # Call LLM for next response
-            if self._language_model:
-                # Legacy API: model is a LanguageModel instance
-                request = GenerateRequest(
-                    system_prompt=self.instructions,
-                    messages=messages,
-                    tools=tool_defs if tool_defs else [],
-                )
-                request.config.temperature = self.temperature
-                if self.max_tokens:
-                    request.config.max_tokens = self.max_tokens
-                if self.top_p:
-                    request.config.top_p = self.top_p
-                response = await self._language_model.generate(request)
+            request = GenerateRequest(
+                model=self.model if self._language_model is None else "mock-model",
+                system_prompt=self.instructions,
+                messages=messages,
+                tools=tool_defs if tool_defs else [],
+            )
+            request.config.temperature = self.temperature
+            if self.max_tokens:
+                request.config.max_tokens = self.max_tokens
+            if self.top_p:
+                request.config.top_p = self.top_p
 
-                # Track cost for this LLM call
-                self._track_llm_cost(response, context)
-            else:
-                # New API: model is a string, create internal LM instance
-                request = GenerateRequest(
-                    model=self.model,
-                    system_prompt=self.instructions,
-                    messages=messages,
-                    tools=tool_defs if tool_defs else [],
-                )
-                request.config.temperature = self.temperature
-                if self.max_tokens:
-                    request.config.max_tokens = self.max_tokens
-                if self.top_p:
-                    request.config.top_p = self.top_p
-
-                # Create internal LM instance for generation
-                from ..lm import LMClient as _LanguageModel
-                provider, model_name = self.model.split('/', 1)
-                internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                response = await internal_lm.generate(request)
-
-                # Track cost for this LLM call
-                self._track_llm_cost(response, context)
+            response = await self._generate_with_callbacks(
+                context=context,
+                request=request,
+                iteration=iteration + 1,
+                messages=messages,
+                tool_definitions=tool_defs,
+            )
 
             # Add assistant response to messages
             messages.append(Message.assistant(response.text))
@@ -1908,8 +2176,18 @@ class Agent:
                         if not tool:
                             result_text = f"Error: Tool '{tool_name}' not found"
                         else:
-                            # Execute tool
-                            result = await tool.invoke(context, **tool_args)
+                            result = await self._invoke_tool_with_callbacks(
+                                ToolCallbackContext(
+                                    agent=self,
+                                    context=context,
+                                    iteration=iteration + 1,
+                                    tool_name=tool_name,
+                                    tool_call_id=tool_call.get("id", ""),
+                                    tool_call=tool_call,
+                                    arguments=tool_args,
+                                    tool=tool,
+                                )
+                            )
 
                             # Check if this was a handoff
                             if isinstance(result, dict) and result.get("_handoff"):
@@ -1946,7 +2224,6 @@ class Agent:
                         ]
 
                         # Enhance exception with agent execution context
-                        from ..exceptions import WaitingForUserInputException
                         raise WaitingForUserInputException(
                             question=e.question,
                             input_type=e.input_type,

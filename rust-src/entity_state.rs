@@ -6,7 +6,6 @@
 /// - Version tracking for optimistic concurrency control
 /// - Retry logic with exponential backoff
 /// - gRPC-based platform persistence
-
 use agnt5_sdk_core::pb::{
     runtime_service_request, runtime_service_response, service_message, EntityStateLoadRequest,
     EntityStateSaveRequest, RuntimeServiceRequest, RuntimeServiceResponse, ServiceMessage,
@@ -70,10 +69,7 @@ pub struct EntitySaveResult {
 #[derive(Debug)]
 pub enum EntityError {
     /// Version conflict - expected version doesn't match
-    VersionConflict {
-        expected: i64,
-        actual: i64,
-    },
+    VersionConflict { expected: i64, actual: i64 },
     /// Platform communication error
     PlatformError(String),
     /// Timeout error
@@ -88,7 +84,11 @@ impl std::fmt::Display for EntityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EntityError::VersionConflict { expected, actual } => {
-                write!(f, "Version conflict: expected {} but got {}", expected, actual)
+                write!(
+                    f,
+                    "Version conflict: expected {} but got {}",
+                    expected, actual
+                )
             }
             EntityError::PlatformError(msg) => write!(f, "Platform error: {}", msg),
             EntityError::Timeout => write!(f, "Operation timed out"),
@@ -118,7 +118,8 @@ pub struct EntityStateManager {
     pub(crate) cache: Arc<RwLock<HashMap<StateKey, CachedState>>>,
 
     /// Pending requests awaiting responses (request_id -> oneshot sender)
-    pub(crate) pending_requests: Arc<RwLock<HashMap<String, oneshot::Sender<RuntimeServiceResponse>>>>,
+    pub(crate) pending_requests:
+        Arc<RwLock<HashMap<String, oneshot::Sender<RuntimeServiceResponse>>>>,
 
     /// Channel for sending requests to the worker stream
     pub(crate) request_sender: Arc<Mutex<Option<agnt5_sdk_core::flume::Sender<ServiceMessage>>>>,
@@ -182,7 +183,10 @@ impl EntityStateManager {
     }
 
     /// Send a request and wait for response
-    async fn send_request(&self, operation: runtime_service_request::Operation) -> Result<RuntimeServiceResponse, EntityError> {
+    async fn send_request(
+        &self,
+        operation: runtime_service_request::Operation,
+    ) -> Result<RuntimeServiceResponse, EntityError> {
         // Generate unique request ID
         let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -220,10 +224,9 @@ impl EntityStateManager {
         {
             let sender = self.request_sender.lock().await;
             if let Some(ref sender) = *sender {
-                sender
-                    .send_async(service_message)
-                    .await
-                    .map_err(|e| EntityError::PlatformError(format!("Failed to send request: {}", e)))?;
+                sender.send_async(service_message).await.map_err(|e| {
+                    EntityError::PlatformError(format!("Failed to send request: {}", e))
+                })?;
             } else {
                 return Err(EntityError::NotConnected);
             }
@@ -235,23 +238,20 @@ impl EntityStateManager {
         );
 
         // Wait for response with timeout
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            response_rx
-        )
-        .await
-        .map_err(|_| {
-            // Remove from pending on timeout
-            let request_id = request_id.clone();
-            let pending = self.pending_requests.clone();
-            tokio::spawn(async move {
-                let mut pending = pending.write().await;
-                pending.remove(&request_id);
-            });
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
+            .await
+            .map_err(|_| {
+                // Remove from pending on timeout
+                let request_id = request_id.clone();
+                let pending = self.pending_requests.clone();
+                tokio::spawn(async move {
+                    let mut pending = pending.write().await;
+                    pending.remove(&request_id);
+                });
 
-            EntityError::Timeout
-        })?
-        .map_err(|_| EntityError::Cancelled)?;
+                EntityError::Timeout
+            })?
+            .map_err(|_| EntityError::Cancelled)?;
 
         // Check if response indicates error
         if !response.success {
@@ -277,14 +277,13 @@ impl EntityStateManager {
             scope_id
         );
 
-        let operation = runtime_service_request::Operation::EntityStateLoad(
-            EntityStateLoadRequest {
+        let operation =
+            runtime_service_request::Operation::EntityStateLoad(EntityStateLoadRequest {
                 entity_type,
                 entity_key,
                 scope,
                 scope_id,
-            },
-        );
+            });
 
         let response = self.send_request(operation).await?;
 
@@ -303,7 +302,9 @@ impl EntityStateManager {
                     version: result.version,
                 })
             }
-            _ => Err(EntityError::PlatformError("Unexpected response type for entity load".to_string())),
+            _ => Err(EntityError::PlatformError(
+                "Unexpected response type for entity load".to_string(),
+            )),
         }
     }
 
@@ -326,16 +327,15 @@ impl EntityStateManager {
             scope_id
         );
 
-        let operation = runtime_service_request::Operation::EntityStateSave(
-            EntityStateSaveRequest {
+        let operation =
+            runtime_service_request::Operation::EntityStateSave(EntityStateSaveRequest {
                 entity_type: entity_type.clone(),
                 entity_key: entity_key.clone(),
                 state_json: state_json.clone(),
                 expected_version,
                 scope: scope.clone(),
                 scope_id: scope_id.clone(),
-            },
-        );
+            });
 
         let response = self.send_request(operation).await?;
 
@@ -359,7 +359,9 @@ impl EntityStateManager {
                     new_version: result.new_version,
                 })
             }
-            _ => Err(EntityError::PlatformError("Unexpected response type for entity save".to_string())),
+            _ => Err(EntityError::PlatformError(
+                "Unexpected response type for entity save".to_string(),
+            )),
         }
     }
 
@@ -378,7 +380,12 @@ impl EntityStateManager {
         scope_id: String,
     ) -> Result<(Vec<u8>, i64), EntityError> {
         // Cache key includes scope info for proper isolation
-        let state_key = (entity_type.clone(), entity_key.clone(), scope.clone(), scope_id.clone());
+        let state_key = (
+            entity_type.clone(),
+            entity_key.clone(),
+            scope.clone(),
+            scope_id.clone(),
+        );
 
         // Check cache first
         {
@@ -409,12 +416,9 @@ impl EntityStateManager {
             entity_key
         );
 
-        let result = self.load_from_platform(
-            entity_type.clone(),
-            entity_key.clone(),
-            scope,
-            scope_id,
-        ).await?;
+        let result = self
+            .load_from_platform(entity_type.clone(), entity_key.clone(), scope, scope_id)
+            .await?;
 
         // Update cache if found
         if result.found {
@@ -441,14 +445,16 @@ impl EntityStateManager {
         scope: String,
         scope_id: String,
     ) -> Result<i64, EntityError> {
-        let result = self.save_to_platform(
-            entity_type,
-            entity_key,
-            state_json,
-            expected_version,
-            scope,
-            scope_id,
-        ).await?;
+        let result = self
+            .save_to_platform(
+                entity_type,
+                entity_key,
+                state_json,
+                expected_version,
+                scope,
+                scope_id,
+            )
+            .await?;
 
         Ok(result.new_version)
     }
@@ -478,25 +484,30 @@ impl EntityStateManager {
 
         loop {
             // Load current state
-            let (current_state, current_version) = self.get_cached_or_load(
-                entity_type.clone(),
-                entity_key.clone(),
-                scope.clone(),
-                scope_id.clone(),
-            ).await?;
+            let (current_state, current_version) = self
+                .get_cached_or_load(
+                    entity_type.clone(),
+                    entity_key.clone(),
+                    scope.clone(),
+                    scope_id.clone(),
+                )
+                .await?;
 
             // Apply update function
             let new_state = update_fn(current_state).await?;
 
             // Try to save with version check
-            match self.save_with_version_check(
-                entity_type.clone(),
-                entity_key.clone(),
-                new_state,
-                current_version,
-                scope.clone(),
-                scope_id.clone(),
-            ).await {
+            match self
+                .save_with_version_check(
+                    entity_type.clone(),
+                    entity_key.clone(),
+                    new_state,
+                    current_version,
+                    scope.clone(),
+                    scope_id.clone(),
+                )
+                .await
+            {
                 Ok(new_version) => {
                     log::debug!(
                         "EntityStateManager: Update successful for {}:{} (version {} -> {}) after {} attempts",
@@ -536,7 +547,8 @@ impl EntityStateManager {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
                     // Invalidate cache to force reload (include scope for proper isolation)
-                    self.invalidate_cache(&entity_type, &entity_key, &scope, &scope_id).await;
+                    self.invalidate_cache(&entity_type, &entity_key, &scope, &scope_id)
+                        .await;
                 }
                 Err(e) => {
                     // Other errors are not retryable
@@ -547,8 +559,19 @@ impl EntityStateManager {
     }
 
     /// Invalidate cache entry for specific entity (includes scope for proper isolation)
-    pub async fn invalidate_cache(&self, entity_type: &str, entity_key: &str, scope: &str, scope_id: &str) {
-        let state_key = (entity_type.to_string(), entity_key.to_string(), scope.to_string(), scope_id.to_string());
+    pub async fn invalidate_cache(
+        &self,
+        entity_type: &str,
+        entity_key: &str,
+        scope: &str,
+        scope_id: &str,
+    ) {
+        let state_key = (
+            entity_type.to_string(),
+            entity_key.to_string(),
+            scope.to_string(),
+            scope_id.to_string(),
+        );
         let mut cache = self.cache.write().await;
         cache.remove(&state_key);
         log::debug!(
@@ -573,21 +596,17 @@ impl EntityStateManager {
     ) -> Result<String, EntityError> {
         use agnt5_sdk_core::pb::{runtime_service_request, MessageSendRequest};
 
-        let operation = runtime_service_request::Operation::MessageSend(
-            MessageSendRequest {
-                correlation_id,
-                message_type,
-                payload,
-                from_service: String::new(),
-            },
-        );
+        let operation = runtime_service_request::Operation::MessageSend(MessageSendRequest {
+            correlation_id,
+            message_type,
+            payload,
+            from_service: String::new(),
+        });
 
         let response = self.send_request(operation).await?;
 
         match response.result {
-            Some(runtime_service_response::Result::MessageSend(result)) => {
-                Ok(result.message_id)
-            }
+            Some(runtime_service_response::Result::MessageSend(result)) => Ok(result.message_id),
             _ => Err(EntityError::PlatformError(
                 "Unexpected response type for message send".to_string(),
             )),
@@ -602,20 +621,16 @@ impl EntityStateManager {
     ) -> Result<Vec<Vec<u8>>, EntityError> {
         use agnt5_sdk_core::pb::{runtime_service_request, MessageListRequest};
 
-        let operation = runtime_service_request::Operation::MessageList(
-            MessageListRequest {
-                correlation_id,
-                limit,
-                after_message_id: String::new(),
-            },
-        );
+        let operation = runtime_service_request::Operation::MessageList(MessageListRequest {
+            correlation_id,
+            limit,
+            after_message_id: String::new(),
+        });
 
         let response = self.send_request(operation).await?;
 
         match response.result {
-            Some(runtime_service_response::Result::MessageList(result)) => {
-                Ok(result.messages)
-            }
+            Some(runtime_service_response::Result::MessageList(result)) => Ok(result.messages),
             _ => Err(EntityError::PlatformError(
                 "Unexpected response type for message list".to_string(),
             )),
@@ -631,23 +646,19 @@ impl EntityStateManager {
     ) -> Result<String, EntityError> {
         use agnt5_sdk_core::pb::{runtime_service_request, SessionCreateRequest};
 
-        let operation = runtime_service_request::Operation::SessionCreate(
-            SessionCreateRequest {
-                session_id,
-                component_name,
-                session_type,
-                state: vec![],
-                metadata: vec![],
-                expires_at_ns: 0,
-            },
-        );
+        let operation = runtime_service_request::Operation::SessionCreate(SessionCreateRequest {
+            session_id,
+            component_name,
+            session_type,
+            state: vec![],
+            metadata: vec![],
+            expires_at_ns: 0,
+        });
 
         let response = self.send_request(operation).await?;
 
         match response.result {
-            Some(runtime_service_response::Result::SessionCreate(result)) => {
-                Ok(result.session_id)
-            }
+            Some(runtime_service_response::Result::SessionCreate(result)) => Ok(result.session_id),
             _ => Err(EntityError::PlatformError(
                 "Unexpected response type for session create".to_string(),
             )),
@@ -693,7 +704,9 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = manager.load_from_platform(entity_type, entity_key, scope, scope_id).await
+            let result = manager
+                .load_from_platform(entity_type, entity_key, scope, scope_id)
+                .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             // Return tuple: (found, state_json, version)
@@ -718,15 +731,17 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let new_version = manager.save_with_version_check(
-                entity_type,
-                entity_key,
-                state_json,
-                expected_version,
-                scope,
-                scope_id,
-            ).await
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            let new_version = manager
+                .save_with_version_check(
+                    entity_type,
+                    entity_key,
+                    state_json,
+                    expected_version,
+                    scope,
+                    scope_id,
+                )
+                .await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             // Return new_version
             Ok(new_version)
@@ -748,7 +763,9 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (state_json, version) = manager.get_cached_or_load(entity_type, entity_key, scope, scope_id).await
+            let (state_json, version) = manager
+                .get_cached_or_load(entity_type, entity_key, scope, scope_id)
+                .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
             Ok((state_json, version))
@@ -767,16 +784,15 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            manager.invalidate_cache(&entity_type, &entity_key, &scope, &scope_id).await;
+            manager
+                .invalidate_cache(&entity_type, &entity_key, &scope, &scope_id)
+                .await;
             Ok(())
         })
     }
 
     /// Clear entire cache (Python-facing method)
-    pub fn py_clear_cache<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    pub fn py_clear_cache<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -800,7 +816,9 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let message_id = manager.send_message(correlation_id, message_type, payload).await
+            let message_id = manager
+                .send_message(correlation_id, message_type, payload)
+                .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
             Ok(message_id)
         })
@@ -818,7 +836,9 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let messages = manager.list_messages(correlation_id, limit).await
+            let messages = manager
+                .list_messages(correlation_id, limit)
+                .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
             Ok(messages)
         })
@@ -837,7 +857,9 @@ impl EntityStateManager {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sid = manager.create_session(session_id, component_name, session_type).await
+            let sid = manager
+                .create_session(session_id, component_name, session_type)
+                .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
             Ok(sid)
         })
@@ -846,10 +868,7 @@ impl EntityStateManager {
     /// Get cache statistics (Python-facing method)
     ///
     /// Returns tuple: (total_entries, expired_entries)
-    pub fn py_cache_stats<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    pub fn py_cache_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

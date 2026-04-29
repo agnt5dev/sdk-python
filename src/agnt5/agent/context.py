@@ -294,6 +294,8 @@ class AgentContext(Context):
                 user_id=self._user_id,
                 run_id=self._run_id,
                 semantic_provider=getattr(self, '_semantic_provider', None),
+                tenant_id=(self._trace_metadata or {}).get("tenant_id"),
+                deployment_id=(self._trace_metadata or {}).get("deployment_id"),
             )
 
         return self._memory_accessor

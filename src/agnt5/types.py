@@ -51,6 +51,44 @@ class BackoffPolicy:
 
 
 @dataclass
+class TriggerSpec:
+    """Typed trigger declaration attached to a component registration."""
+
+    trigger_type: str
+    event_name: str = ""
+    trigger_id: str = ""
+    filter_expression: str = ""
+    input_mapping: str = ""
+    batch_window_ms: int = 0
+    delay_expression: str = ""
+
+
+def event(
+    name: str,
+    *,
+    trigger_id: str = "",
+    filter_expression: str = "",
+    input_mapping: str = "",
+    batch_window_ms: int = 0,
+    delay_expression: str = "",
+) -> TriggerSpec:
+    """Declare an event trigger for a workflow."""
+
+    event_name = name.strip()
+    if not event_name:
+        raise ValueError("event trigger name is required")
+    return TriggerSpec(
+        trigger_id=trigger_id,
+        trigger_type="event",
+        event_name=event_name,
+        filter_expression=filter_expression,
+        input_mapping=input_mapping,
+        batch_window_ms=batch_window_ms,
+        delay_expression=delay_expression,
+    )
+
+
+@dataclass
 class FunctionConfig:
     """Configuration for a function handler."""
 
@@ -73,3 +111,4 @@ class WorkflowConfig:
     input_schema: Optional[Dict[str, Any]] = None
     output_schema: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, str]] = None
+    triggers: Optional[List[TriggerSpec]] = None

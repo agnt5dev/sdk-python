@@ -5,30 +5,42 @@ Built-in memory (zero-config, backed by runtime RocksDB):
 - WorkingMemory: Structured JSON scratchpad
 - MemoryAccessor: Unified facade (attached to ctx.memory)
 
+AGNT5-native semantic memory:
+- ctx.memory.session.save/search: Session-scoped semantic memory
+- ctx.memory.user.save/search: User-scoped semantic memory
+- NativeMemoryService: Lazy bridge to the configured Rust MemoryRuntime
+
 Pluggable memory (user brings their own):
 - SemanticMemoryProvider: ABC for vector-backed semantic search
 
 Types:
 - MemoryScope: Scope enum (SESSION, USER, RUN, GLOBAL)
 - ConversationMessage: Message in a conversation
+- MemoryRecord: Saved semantic memory record
+- MemorySearchResult: Result from AGNT5-native semantic search
 - SemanticSearchResult: Result from semantic search
 """
-
-from .accessor import MemoryAccessor
-from .conversation import ConversationAccessor
-from .kv import KVMemory
-from .semantic import SemanticMemoryProvider
-from .types import ConversationMessage, MemoryScope, SemanticSearchResult
-from .working import WorkingMemory
 
 # --------------------------------------------------------------------------- #
 # Backward-compatible re-exports from the legacy memory module.
 # These emit DeprecationWarnings on first use via __getattr__.
 # --------------------------------------------------------------------------- #
-
 # Legacy types that are re-exported directly (no deprecation needed — they are
 # simple data classes that still work fine).
 from .._memory_legacy import MemoryMessage, MemoryMetadata, MemoryResult
+from .accessor import MemoryAccessor
+from .conversation import ConversationAccessor
+from .kv import KVMemory
+from .native import DisabledMemoryService, MemoryService, NativeMemoryService
+from .semantic import SemanticMemoryProvider
+from .types import (
+    ConversationMessage,
+    MemoryRecord,
+    MemoryScope,
+    MemorySearchResult,
+    SemanticSearchResult,
+)
+from .working import WorkingMemory
 
 # Legacy classes that get deprecation warnings are exposed via __getattr__
 # below so we don't import them eagerly.
@@ -70,11 +82,16 @@ __all__ = [
     # Built-in memory
     "KVMemory",
     "WorkingMemory",
+    "DisabledMemoryService",
+    "MemoryService",
+    "NativeMemoryService",
     # Pluggable memory
     "SemanticMemoryProvider",
     # Types
     "ConversationMessage",
+    "MemoryRecord",
     "MemoryScope",
+    "MemorySearchResult",
     "SemanticSearchResult",
     # Legacy re-exports (no deprecation)
     "MemoryMessage",

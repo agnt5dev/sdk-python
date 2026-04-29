@@ -1,19 +1,19 @@
 use crate::entity_state::EntityStateManager;
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
+use agnt5_sdk_core::journal_queue::JournalEventQueue;
 use agnt5_sdk_core::pb::{
     runtime_message, ComponentInfo, ComponentType, DispatchComponentResponse, RuntimeMessage,
     ServiceMessage,
 };
-use agnt5_sdk_core::journal_queue::JournalEventQueue;
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
+use opentelemetry::global;
+use opentelemetry::trace::{Span, TraceContextExt};
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
-use pyo3_async_runtimes::{TaskLocals, into_future_with_locals};
+use pyo3_async_runtimes::{into_future_with_locals, TaskLocals};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Mutex as AsyncMutex;
-use opentelemetry::trace::{TraceContextExt, Span};
-use opentelemetry::global;
 use tracing;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -192,9 +192,10 @@ impl PyWorker {
     /// Returns the number of events that were initially queued.
     fn flush_workflow_checkpoints(&self, py: Python) -> PyResult<usize> {
         let worker_guard = self.worker.lock().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Failed to lock worker: {}", e)
-            )
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to lock worker: {}",
+                e
+            ))
         })?;
 
         let worker = worker_guard.as_ref().ok_or_else(|| {
@@ -208,7 +209,10 @@ impl PyWorker {
             return Ok(0); // No events to flush
         }
 
-        log::debug!("Waiting 200ms to flush {} queued events before response", initial_queued);
+        log::debug!(
+            "Waiting 200ms to flush {} queued events before response",
+            initial_queued
+        );
 
         // Release the lock while waiting
         drop(worker_guard);
@@ -279,41 +283,47 @@ impl PyWorker {
         if let Some(ref worker) = *worker_guard {
             if is_streaming {
                 // Immediate delivery via delta queue
-                worker.queue_delta(
-                    invocation_id,
-                    event_type,
-                    data_bytes,
-                    content_index,
-                    sequence,
-                    metadata,
-                    source_timestamp_ns,
-                    correlation_id_str,
-                    parent_correlation_id_str,
-                ).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        format!("Failed to queue event (streaming): {}", e)
+                worker
+                    .queue_delta(
+                        invocation_id,
+                        event_type,
+                        data_bytes,
+                        content_index,
+                        sequence,
+                        metadata,
+                        source_timestamp_ns,
+                        correlation_id_str,
+                        parent_correlation_id_str,
                     )
-                })?;
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to queue event (streaming): {}",
+                            e
+                        ))
+                    })?;
             } else {
                 // Buffered delivery via checkpoint queue
-                worker.queue_checkpoint(
-                    invocation_id,
-                    event_type,
-                    data_bytes,
-                    sequence,
-                    metadata,
-                    source_timestamp_ns,
-                    correlation_id_str,
-                    parent_correlation_id_str,
-                ).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        format!("Failed to queue event (buffered): {}", e)
+                worker
+                    .queue_checkpoint(
+                        invocation_id,
+                        event_type,
+                        data_bytes,
+                        sequence,
+                        metadata,
+                        source_timestamp_ns,
+                        correlation_id_str,
+                        parent_correlation_id_str,
                     )
-                })?;
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to queue event (buffered): {}",
+                            e
+                        ))
+                    })?;
             }
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Worker not initialized"
+                "Worker not initialized",
             ));
         }
 
@@ -492,9 +502,10 @@ impl PyWorker {
                 .emit_checkpoint_batch(events_bytes)
                 .await
                 .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        format!("Failed to emit batch: {}", e),
-                    )
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to emit batch: {}",
+                        e
+                    ))
                 })?;
             Ok(())
         })
@@ -586,9 +597,13 @@ impl PyWorker {
         );
 
         // Initialize worker if not already done
-        let needs_init = self.worker.lock().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Worker mutex poisoned: {}", e))
-        })?.is_none();
+        let needs_init = self
+            .worker
+            .lock()
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Worker mutex poisoned: {}", e))
+            })?
+            .is_none();
 
         if needs_init {
             log::debug!("Worker not initialized, initializing now");
@@ -634,8 +649,9 @@ impl PyWorker {
                             event_loop_locals_inner,
                             entity_state_manager_inner,
                             runtime_message,
-                            tx
-                        ).await
+                            tx,
+                        )
+                        .await
                     }
                 }
             };
@@ -794,10 +810,8 @@ impl PyWorker {
                 // Add is_streaming attribute for journal exporter filtering
                 // Only spans with this attribute set to true will be exported to the journal
                 if invoke_request.is_streaming {
-                    otel_span.set_attribute(opentelemetry::KeyValue::new(
-                        "agnt5.is_streaming",
-                        true,
-                    ));
+                    otel_span
+                        .set_attribute(opentelemetry::KeyValue::new("agnt5.is_streaming", true));
                 }
 
                 // IMPORTANT: Attach the span to the parent context so Python code executes inside it
@@ -813,7 +827,11 @@ impl PyWorker {
 
                 // Capture fields needed for journal export (only used if is_streaming)
                 let is_streaming_request = invoke_request.is_streaming;
-                let tenant_id_for_journal = if tenant_id_for_journal_early.is_empty() { None } else { Some(tenant_id_for_journal_early) };
+                let tenant_id_for_journal = if tenant_id_for_journal_early.is_empty() {
+                    None
+                } else {
+                    Some(tenant_id_for_journal_early)
+                };
                 let execution_start_nano = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos() as i64)
@@ -1030,16 +1048,15 @@ impl PyWorker {
                         }
 
                         // Try to extract as list first (legacy streaming case - kept for backward compatibility)
-                        if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>() {
-                                    // Send each response via tx
-                                    for py_response in py_list.into_iter() {
+                        if let Ok(py_list) = py_result.extract::<Vec<PyExecuteComponentResponse>>()
+                        {
+                            // Send each response via tx
+                            for py_response in py_list.into_iter() {
+                                // Convert to Rust types
+                                let rust_response: DispatchComponentResponse = py_response.into();
 
-                                        // Convert to Rust types
-                                        let rust_response: DispatchComponentResponse =
-                                            py_response.into();
-
-                                        // Create ServiceMessage
-                                        let service_message = ServiceMessage {
+                                // Create ServiceMessage
+                                let service_message = ServiceMessage {
                                             worker_id: worker_id.clone(),
                                             metadata: std::collections::HashMap::new(),
                                             message_type: Some(
@@ -1047,90 +1064,90 @@ impl PyWorker {
                                             ),
                                         };
 
-                                        // Send via channel (blocking send)
-                                        if let Err(e) = tx_clone.send(service_message) {
-                                            log::error!("Failed to send streaming chunk: {}", e);
-                                            return Err(agnt5_sdk_core::error::SdkError::Other(
-                                                anyhow::anyhow!(
-                                                    "Failed to send streaming chunk: {}",
-                                                    e
-                                                ),
-                                            ));
-                                        }
-                                    }
+                                // Send via channel (blocking send)
+                                if let Err(e) = tx_clone.send(service_message) {
+                                    log::error!("Failed to send streaming chunk: {}", e);
+                                    return Err(agnt5_sdk_core::error::SdkError::Other(
+                                        anyhow::anyhow!("Failed to send streaming chunk: {}", e),
+                                    ));
+                                }
+                            }
 
-                                    // Return None to indicate we handled sending ourselves
-                                    return Ok(None);
+                            // Return None to indicate we handled sending ourselves
+                            return Ok(None);
                         }
 
                         // Not a list, try single response (non-streaming case)
                         match py_result.extract::<PyExecuteComponentResponse>() {
-                                    Ok(py_response) => {
-                                        // Calculate execution duration
-                                        let execution_duration_ms = execution_start.elapsed().as_millis() as i64;
+                            Ok(py_response) => {
+                                // Calculate execution duration
+                                let execution_duration_ms =
+                                    execution_start.elapsed().as_millis() as i64;
 
-                                        // Record span result based on success/error
-                                        let span = cx.span();
+                                // Record span result based on success/error
+                                let span = cx.span();
 
-                                        // Always add execution duration and output data
+                                // Always add execution duration and output data
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "component.execution_ms",
+                                    execution_duration_ms,
+                                ));
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "output.data",
+                                    String::from_utf8_lossy(&py_response.output_data).to_string(),
+                                ));
+
+                                if py_response.success {
+                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                        "function.status",
+                                        "success",
+                                    ));
+                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                        "function.output_size",
+                                        py_response.output_data.len() as i64,
+                                    ));
+                                    span.set_status(opentelemetry::trace::Status::Ok);
+                                } else {
+                                    let error_msg = py_response
+                                        .error_message
+                                        .as_deref()
+                                        .unwrap_or("Unknown error");
+                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                        "function.status",
+                                        "error",
+                                    ));
+                                    span.set_attribute(opentelemetry::KeyValue::new(
+                                        "function.error",
+                                        error_msg.to_string(),
+                                    ));
+
+                                    // Add stack trace if available from metadata
+                                    if let Some(stack_trace) =
+                                        py_response.metadata.get("stack_trace")
+                                    {
                                         span.set_attribute(opentelemetry::KeyValue::new(
-                                            "component.execution_ms",
-                                            execution_duration_ms,
+                                            "exception.stacktrace",
+                                            stack_trace.clone(),
                                         ));
+                                    }
+                                    if let Some(error_type) = py_response.metadata.get("error_type")
+                                    {
                                         span.set_attribute(opentelemetry::KeyValue::new(
-                                            "output.data",
-                                            String::from_utf8_lossy(&py_response.output_data).to_string(),
+                                            "exception.type",
+                                            error_type.clone(),
                                         ));
+                                    }
 
-                                        if py_response.success {
-                                            span.set_attribute(opentelemetry::KeyValue::new(
-                                                "function.status",
-                                                "success",
-                                            ));
-                                            span.set_attribute(opentelemetry::KeyValue::new(
-                                                "function.output_size",
-                                                py_response.output_data.len() as i64,
-                                            ));
-                                            span.set_status(opentelemetry::trace::Status::Ok);
-                                        } else {
-                                            let error_msg = py_response
-                                                .error_message
-                                                .as_deref()
-                                                .unwrap_or("Unknown error");
-                                            span.set_attribute(opentelemetry::KeyValue::new(
-                                                "function.status",
-                                                "error",
-                                            ));
-                                            span.set_attribute(opentelemetry::KeyValue::new(
-                                                "function.error",
-                                                error_msg.to_string(),
-                                            ));
+                                    span.set_status(opentelemetry::trace::Status::error(
+                                        error_msg.to_string(),
+                                    ));
+                                }
 
-                                            // Add stack trace if available from metadata
-                                            if let Some(stack_trace) = py_response.metadata.get("stack_trace") {
-                                                span.set_attribute(opentelemetry::KeyValue::new(
-                                                    "exception.stacktrace",
-                                                    stack_trace.clone(),
-                                                ));
-                                            }
-                                            if let Some(error_type) = py_response.metadata.get("error_type") {
-                                                span.set_attribute(opentelemetry::KeyValue::new(
-                                                    "exception.type",
-                                                    error_type.clone(),
-                                                ));
-                                            }
+                                // Convert back to Rust types
+                                let rust_response: DispatchComponentResponse = py_response.into();
 
-                                            span.set_status(opentelemetry::trace::Status::error(
-                                                error_msg.to_string(),
-                                            ));
-                                        }
-
-                                        // Convert back to Rust types
-                                        let rust_response: DispatchComponentResponse =
-                                            py_response.into();
-
-                                        // Create ServiceMessage
-                                        let service_message = ServiceMessage {
+                                // Create ServiceMessage
+                                let service_message = ServiceMessage {
                                         worker_id: worker_id.clone(),
                                         metadata: std::collections::HashMap::new(),
                                         message_type: Some(
@@ -1141,8 +1158,7 @@ impl PyWorker {
                                 Ok(Some(service_message))
                             }
                             Err(e) => {
-                                let err_msg =
-                                    format!("Failed to extract Python response: {}", e);
+                                let err_msg = format!("Failed to extract Python response: {}", e);
                                 log::error!("{}", err_msg);
                                 let span = cx.span();
                                 span.set_attribute(opentelemetry::KeyValue::new(
@@ -1156,9 +1172,9 @@ impl PyWorker {
                                 span.set_status(opentelemetry::trace::Status::error(
                                     err_msg.clone(),
                                 ));
-                                Err(agnt5_sdk_core::error::SdkError::Other(
-                                    anyhow::anyhow!(err_msg),
-                                ))
+                                Err(agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(
+                                    err_msg
+                                )))
                             }
                         }
                     },

@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 class MemoryScope(str, Enum):
@@ -89,3 +89,37 @@ class SemanticSearchResult:
     content: str
     score: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryRecord:
+    """AGNT5-native semantic memory record.
+
+    This is a scoped, tenant-isolated memory item stored by the configured
+    MemoryService backend. It is not raw conversation history.
+    """
+
+    id: str
+    tenant_id: str
+    deployment_id: str
+    scope: str
+    scope_id: str
+    kind: str
+    content: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    embedding_model: str = ""
+    embedding_dim: int = 0
+    source_session_id: Optional[str] = None
+    source_run_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class MemorySearchResult:
+    """Result from AGNT5-native semantic memory search."""
+
+    record: MemoryRecord
+    score: float
+    distance: float

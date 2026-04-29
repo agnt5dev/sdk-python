@@ -1,7 +1,7 @@
 use agnt5_sdk_core::pb::{
     dispatch_component_response, ComponentInfo, ComponentSchema, ComponentType,
     DispatchComponentRequest, DispatchComponentResponse, StateTransition, StateUpdate,
-    StepCheckpoint,
+    StepCheckpoint, TriggerSpec,
 };
 use pyo3::prelude::*;
 use serde_json;
@@ -556,6 +556,72 @@ impl From<DispatchComponentResponse> for PyExecuteComponentResponse {
 
 #[pyclass]
 #[derive(Clone)]
+pub struct PyTriggerSpec {
+    #[pyo3(get, set)]
+    pub trigger_id: String,
+    #[pyo3(get, set)]
+    pub trigger_type: String,
+    #[pyo3(get, set)]
+    pub event_name: String,
+    #[pyo3(get, set)]
+    pub filter_expression: String,
+    #[pyo3(get, set)]
+    pub input_mapping: String,
+    #[pyo3(get, set)]
+    pub batch_window_ms: i64,
+    #[pyo3(get, set)]
+    pub delay_expression: String,
+}
+
+#[pymethods]
+impl PyTriggerSpec {
+    #[new]
+    #[pyo3(signature = (
+        trigger_id = String::new(),
+        trigger_type = String::new(),
+        event_name = String::new(),
+        filter_expression = String::new(),
+        input_mapping = String::new(),
+        batch_window_ms = 0,
+        delay_expression = String::new()
+    ))]
+    fn new(
+        trigger_id: String,
+        trigger_type: String,
+        event_name: String,
+        filter_expression: String,
+        input_mapping: String,
+        batch_window_ms: i64,
+        delay_expression: String,
+    ) -> Self {
+        Self {
+            trigger_id,
+            trigger_type,
+            event_name,
+            filter_expression,
+            input_mapping,
+            batch_window_ms,
+            delay_expression,
+        }
+    }
+}
+
+impl From<PyTriggerSpec> for TriggerSpec {
+    fn from(trigger: PyTriggerSpec) -> Self {
+        Self {
+            trigger_id: trigger.trigger_id,
+            trigger_type: trigger.trigger_type,
+            event_name: trigger.event_name,
+            filter_expression: trigger.filter_expression,
+            input_mapping: trigger.input_mapping,
+            batch_window_ms: trigger.batch_window_ms,
+            delay_expression: trigger.delay_expression,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
 pub struct PyComponentInfo {
     #[pyo3(get, set)]
     pub name: String,
@@ -571,11 +637,23 @@ pub struct PyComponentInfo {
     pub output_schema: Option<String>, // JSON string
     #[pyo3(get, set)]
     pub definition: Option<String>, // Source code or definition
+    #[pyo3(get, set)]
+    pub triggers: Vec<PyTriggerSpec>,
 }
 
 #[pymethods]
 impl PyComponentInfo {
     #[new]
+    #[pyo3(signature = (
+        name,
+        component_type,
+        metadata = None,
+        config = None,
+        input_schema = None,
+        output_schema = None,
+        definition = None,
+        triggers = None
+    ))]
     fn new(
         name: String,
         component_type: String,
@@ -584,6 +662,7 @@ impl PyComponentInfo {
         input_schema: Option<String>,
         output_schema: Option<String>,
         definition: Option<String>,
+        triggers: Option<Vec<PyTriggerSpec>>,
     ) -> Self {
         Self {
             name,
@@ -593,6 +672,7 @@ impl PyComponentInfo {
             input_schema,
             output_schema,
             definition,
+            triggers: triggers.unwrap_or_default(),
         }
     }
 }
@@ -657,6 +737,7 @@ impl From<PyComponentInfo> for ComponentInfo {
             max_interval_ms,
             backoff_type,
             backoff_multiplier,
+            triggers: comp.triggers.into_iter().map(Into::into).collect(),
         }
     }
 }

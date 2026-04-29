@@ -24,15 +24,15 @@ mod checkpoint_client;
 mod entity_state;
 mod eval;
 mod language_model;
-mod memory;
 mod mcp;
+mod memory;
 mod sandbox;
 mod types;
 mod worker;
 use entity_state::EntityStateManager;
 use types::{
     PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse, PyStateTransition,
-    PyStateUpdate, PyStepCheckpoint,
+    PyStateUpdate, PyStepCheckpoint, PyTriggerSpec,
 };
 use worker::{PyWorker, PyWorkerConfig};
 
@@ -105,7 +105,10 @@ impl PySpan {
         // Get span IDs before processing (kept for future journal export)
         let (_trace_id_str, _span_id_str) = if let Some(ref span) = *span_guard {
             let span_ctx = span.span_context();
-            (span_ctx.trace_id().to_string(), span_ctx.span_id().to_string())
+            (
+                span_ctx.trace_id().to_string(),
+                span_ctx.span_id().to_string(),
+            )
         } else {
             (String::new(), String::new())
         };
@@ -135,14 +138,20 @@ impl PySpan {
                 if is_hitl_pause {
                     // HITL pause is normal workflow behavior, not an error
                     span.set_attribute(opentelemetry::KeyValue::new("hitl.pause", true));
-                    span.set_attribute(opentelemetry::KeyValue::new("hitl.question", format!("{}", exc)));
+                    span.set_attribute(opentelemetry::KeyValue::new(
+                        "hitl.question",
+                        format!("{}", exc),
+                    ));
                     span.set_status(opentelemetry::trace::Status::Ok);
                 } else {
                     // Regular exception - mark as error
                     _status_code = "error";
                     let error_str = format!("{}", exc);
                     span.set_attribute(opentelemetry::KeyValue::new("error", true));
-                    span.set_attribute(opentelemetry::KeyValue::new("error.message", error_str.clone()));
+                    span.set_attribute(opentelemetry::KeyValue::new(
+                        "error.message",
+                        error_str.clone(),
+                    ));
                     span.set_status(opentelemetry::trace::Status::error(error_str));
                 }
             } else {
@@ -176,7 +185,10 @@ impl PySpan {
         })?;
         if let Some(ref mut span) = *span_guard {
             span.set_attribute(opentelemetry::KeyValue::new("error", true));
-            span.set_attribute(opentelemetry::KeyValue::new("error.message", exception.clone()));
+            span.set_attribute(opentelemetry::KeyValue::new(
+                "error.message",
+                exception.clone(),
+            ));
             span.set_status(opentelemetry::trace::Status::error(exception));
         }
         Ok(())
@@ -249,7 +261,10 @@ impl PyToolSpan {
                 if is_hitl_pause {
                     // HITL pause is normal workflow behavior, not an error
                     span.set_attribute(opentelemetry::KeyValue::new("hitl.pause", true));
-                    span.set_attribute(opentelemetry::KeyValue::new("hitl.question", format!("{}", exc)));
+                    span.set_attribute(opentelemetry::KeyValue::new(
+                        "hitl.question",
+                        format!("{}", exc),
+                    ));
                     span.set_status(opentelemetry::trace::Status::Ok);
                 } else {
                     // Regular exception - mark as error
@@ -377,7 +392,9 @@ fn create_tool_span(
 ///
 /// # Returns
 /// Tuple of (otel_context Option, service_name String, run_id String) or None
-pub(crate) fn get_runtime_context_from_contextvar(py: Python) -> PyResult<Option<(Option<opentelemetry::Context>, String, String)>> {
+pub(crate) fn get_runtime_context_from_contextvar(
+    py: Python,
+) -> PyResult<Option<(Option<opentelemetry::Context>, String, String)>> {
     // Import the context module
     let context_module = py.import("agnt5.context")?;
 
@@ -450,7 +467,9 @@ fn create_span(
     parent_trace_id: Option<String>,
     parent_span_id: Option<String>,
 ) -> PyResult<PySpan> {
-    use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
 
     let metadata = attributes.unwrap_or_default();
 
@@ -461,7 +480,10 @@ fn create_span(
         match get_runtime_context_from_contextvar(py) {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Warning: Failed to get runtime_context from contextvar: {}", e);
+                eprintln!(
+                    "Warning: Failed to get runtime_context from contextvar: {}",
+                    e
+                );
                 None
             }
         }
@@ -485,7 +507,9 @@ fn create_span(
     // 1. Explicit parent_trace_id/parent_span_id (from Python contextvar - async-safe!)
     // 2. RuntimeContext.otel_context (initial context from worker)
     // 3. Python contextvar fallback
-    let parent_context_from_ids = if let (Some(ref trace_id_str), Some(ref span_id_str)) = (&parent_trace_id, &parent_span_id) {
+    let parent_context_from_ids = if let (Some(ref trace_id_str), Some(ref span_id_str)) =
+        (&parent_trace_id, &parent_span_id)
+    {
         // Parse trace_id and span_id from hex strings
         let trace_id = TraceId::from_hex(trace_id_str).unwrap_or(TraceId::INVALID);
         let span_id = SpanId::from_hex(span_id_str).unwrap_or(SpanId::INVALID);
@@ -512,8 +536,12 @@ fn create_span(
 
     let (parent_context, service_name, run_id) = if let Some(ctx) = parent_context_from_ids {
         // Use the context from Python contextvar - ensures proper async-safe nesting
-        let svc = runtime_context.map(|c| c.inner.service_name.as_str()).unwrap_or("");
-        let rid = runtime_context.map(|c| c.inner.run_id.as_str()).unwrap_or("");
+        let svc = runtime_context
+            .map(|c| c.inner.service_name.as_str())
+            .unwrap_or("");
+        let rid = runtime_context
+            .map(|c| c.inner.run_id.as_str())
+            .unwrap_or("");
         (Some(ctx), svc, rid)
     } else if let Some(ctx) = runtime_context {
         (
@@ -554,7 +582,10 @@ fn create_span(
     let (new_trace_id, new_span_id) = {
         let span_ctx = span.span_context();
         if span_ctx.is_valid() {
-            (span_ctx.trace_id().to_string(), span_ctx.span_id().to_string())
+            (
+                span_ctx.trace_id().to_string(),
+                span_ctx.span_id().to_string(),
+            )
         } else {
             (String::new(), String::new())
         }
@@ -601,8 +632,8 @@ fn log_from_python(
     attributes: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     // Get effective tenant_id and deployment_id from parameter or global config
-    let effective_tenant_id = tenant_id
-        .or_else(|| agnt5_sdk_core::telemetry::get_tenant_id().map(|s| s.to_string()));
+    let effective_tenant_id =
+        tenant_id.or_else(|| agnt5_sdk_core::telemetry::get_tenant_id().map(|s| s.to_string()));
     let effective_deployment_id = deployment_id
         .or_else(|| agnt5_sdk_core::telemetry::get_deployment_id().map(|s| s.to_string()));
     // When there's an active span, emit logs within that span's context.
@@ -620,14 +651,16 @@ fn log_from_python(
     // CRITICAL FIX: If we have trace_id and span_id from Python, create an OpenTelemetry
     // context and attach it so the opentelemetry_appender_tracing layer can extract it
     let _cx_guard = if let (Some(tid_str), Some(sid_str)) = (&trace_id, &span_id) {
-        use opentelemetry::trace::{TraceId, SpanId, SpanContext, TraceFlags, TraceContextExt};
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
 
         // Parse hex strings to bytes
         if let (Ok(tid_bytes), Ok(sid_bytes)) = (hex::decode(tid_str), hex::decode(sid_str)) {
             if tid_bytes.len() == 16 && sid_bytes.len() == 8 {
                 // Safe unwrap: we just checked the length
-                let trace_id = TraceId::from_bytes(tid_bytes.try_into().expect("trace_id length verified"));
-                let span_id = SpanId::from_bytes(sid_bytes.try_into().expect("span_id length verified"));
+                let trace_id =
+                    TraceId::from_bytes(tid_bytes.try_into().expect("trace_id length verified"));
+                let span_id =
+                    SpanId::from_bytes(sid_bytes.try_into().expect("span_id length verified"));
 
                 let span_context = SpanContext::new(
                     trace_id,
@@ -652,9 +685,9 @@ fn log_from_python(
 
     // Serialize attributes to JSON for structured logging
     // Tracing macros require compile-time known fields, so we serialize to a single JSON string
-    let attrs_json = attributes.as_ref().map(|attrs| {
-        serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string())
-    });
+    let attrs_json = attributes
+        .as_ref()
+        .map(|attrs| serde_json::to_string(attrs).unwrap_or_else(|_| "{}".to_string()));
 
     // Emit log at appropriate level through Rust tracing
     // The opentelemetry_appender_tracing layer will now extract trace_id/span_id
@@ -783,15 +816,9 @@ fn log_from_python(
                 };
 
                 if let Err(e) = queue.push(event) {
-                    tracing::warn!(
-                        "Failed to queue log for SSE streaming: {}",
-                        e
-                    );
+                    tracing::warn!("Failed to queue log for SSE streaming: {}", e);
                 } else {
-                    tracing::debug!(
-                        "Queued log for SSE streaming (queue_size={})",
-                        queue.len()
-                    );
+                    tracing::debug!("Queued log for SSE streaming (queue_size={})", queue.len());
                 }
             } else {
                 // Journal queue not initialized - this can happen during testing or
@@ -824,10 +851,7 @@ fn init_telemetry(service_name: String, service_version: String) -> PyResult<()>
     let _guard = runtime.enter();
 
     agnt5_sdk_core::init_telemetry(&service_name, &service_version).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to initialize telemetry: {}",
-            e
-        ))
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to initialize telemetry: {}", e))
     })
 }
 
@@ -849,6 +873,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExecuteComponentRequest>()?;
     m.add_class::<PyExecuteComponentResponse>()?;
     m.add_class::<PyComponentInfo>()?;
+    m.add_class::<PyTriggerSpec>()?;
     m.add_class::<PyStepCheckpoint>()?;
     m.add_class::<PyStateTransition>()?;
     m.add_class::<PyStateUpdate>()?;

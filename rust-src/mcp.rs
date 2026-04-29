@@ -125,7 +125,11 @@ impl PyMcpClientCore {
         })
     }
 
-    fn list_server_tools<'py>(&self, py: Python<'py>, server: String) -> PyResult<Bound<'py, PyAny>> {
+    fn list_server_tools<'py>(
+        &self,
+        py: Python<'py>,
+        server: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         future_into_py(py, async move {
             let client = inner.lock().await;
@@ -161,7 +165,10 @@ impl PyMcpClientCore {
         arguments: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let arguments = arguments.map(python_to_json).transpose()?.unwrap_or(Value::Null);
+        let arguments = arguments
+            .map(python_to_json)
+            .transpose()?
+            .unwrap_or(Value::Null);
         future_into_py(py, async move {
             let client = inner.lock().await;
             let result = client
@@ -185,7 +192,10 @@ impl PyMcpClientCore {
         arguments: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let arguments = arguments.map(python_to_json).transpose()?.unwrap_or(Value::Null);
+        let arguments = arguments
+            .map(python_to_json)
+            .transpose()?
+            .unwrap_or(Value::Null);
         future_into_py(py, async move {
             let client = inner.lock().await;
             let result = client
@@ -200,7 +210,6 @@ impl PyMcpClientCore {
             Ok(result)
         })
     }
-
 }
 
 pub fn register_mcp(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -235,7 +244,10 @@ fn parse_server_config(config: Value) -> PyResult<ServerConfig> {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        let cwd = obj.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned);
+        let cwd = obj
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
 
         return Ok(ServerConfig::Stdio(StdioConfig {
             command: command.to_string(),

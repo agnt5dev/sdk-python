@@ -3,7 +3,6 @@ use std::env;
 use std::sync::{Arc, Mutex};
 
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
-use opentelemetry::Context as OtelContext;
 use agnt5_sdk_core::lm::{
     AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, DeepSeekProvider,
     GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider, GroqProvider,
@@ -12,6 +11,7 @@ use agnt5_sdk_core::lm::{
     StreamRequest, TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
+use opentelemetry::Context as OtelContext;
 use pyo3::exceptions::{PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
@@ -395,10 +395,8 @@ impl PyLanguageModel {
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
 
-        let response_format = parse_response_format(
-            response_format_str.as_deref(),
-            response_schema.as_deref(),
-        )?;
+        let response_format =
+            parse_response_format(response_format_str.as_deref(), response_schema.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
         let tool_choice = parse_tool_choice_json(tool_choice_kw.as_deref())?;
 
@@ -483,14 +481,12 @@ impl PyLanguageModel {
                                         content,
                                         index,
                                         block_type,
-                                    } => {
-                                        PyStreamChunk::delta(
-                                            model_for_chunks.clone(),
-                                            content,
-                                            index,
-                                            block_type,
-                                        )
-                                    }
+                                    } => PyStreamChunk::delta(
+                                        model_for_chunks.clone(),
+                                        content,
+                                        index,
+                                        block_type,
+                                    ),
                                     StreamChunk::ContentBlockStop { index } => {
                                         PyStreamChunk::content_block_stop(
                                             model_for_chunks.clone(),
@@ -698,7 +694,10 @@ fn build_request(
             MessageRole::Assistant => {
                 // Check if this is an assistant message with tool calls
                 if let Some(tool_calls) = parsed.tool_calls {
-                    messages.push(Message::assistant_with_tool_calls(parsed.content, tool_calls));
+                    messages.push(Message::assistant_with_tool_calls(
+                        parsed.content,
+                        tool_calls,
+                    ));
                 } else {
                     messages.push(Message::assistant(parsed.content));
                 }
@@ -785,15 +784,17 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessag
                 };
 
                 // Extract tool_calls if present (for assistant messages)
-                let tool_calls: Option<Vec<ToolCall>> = if let Some(tc_value) = dict.get_item("tool_calls")? {
+                let tool_calls: Option<Vec<ToolCall>> = if let Some(tc_value) =
+                    dict.get_item("tool_calls")?
+                {
                     if tc_value.is_none() {
                         None
                     } else {
                         // tool_calls is a list of dicts with id, name, arguments
                         #[allow(deprecated)]
-                        let tc_list = tc_value.downcast::<PyList>().map_err(|_| {
-                            PyValueError::new_err("tool_calls must be a list")
-                        })?;
+                        let tc_list = tc_value
+                            .downcast::<PyList>()
+                            .map_err(|_| PyValueError::new_err("tool_calls must be a list"))?;
                         let mut calls = Vec::with_capacity(tc_list.len());
                         for tc_item in tc_list.iter() {
                             #[allow(deprecated)]
@@ -811,18 +812,26 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessag
                                 .extract()?;
 
                             // arguments can be string (JSON) or dict
-                            let arguments_value = tc_dict
-                                .get_item("arguments")?
-                                .ok_or_else(|| PyValueError::new_err("tool_call missing 'arguments'"))?;
-                            let arguments: String = if let Ok(s) = arguments_value.extract::<String>() {
-                                s
-                            } else {
-                                // Convert dict/other to JSON string
-                                let json_mod = py.import("json")?;
-                                json_mod.call_method1("dumps", (arguments_value,))?.extract()?
-                            };
+                            let arguments_value =
+                                tc_dict.get_item("arguments")?.ok_or_else(|| {
+                                    PyValueError::new_err("tool_call missing 'arguments'")
+                                })?;
+                            let arguments: String =
+                                if let Ok(s) = arguments_value.extract::<String>() {
+                                    s
+                                } else {
+                                    // Convert dict/other to JSON string
+                                    let json_mod = py.import("json")?;
+                                    json_mod
+                                        .call_method1("dumps", (arguments_value,))?
+                                        .extract()?
+                                };
 
-                            calls.push(ToolCall { id, name, arguments });
+                            calls.push(ToolCall {
+                                id,
+                                name,
+                                arguments,
+                            });
                         }
                         Some(calls)
                     }
@@ -831,15 +840,16 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessag
                 };
 
                 // Extract tool_call_id if present (for tool result messages)
-                let tool_call_id: Option<String> = if let Some(tcid_value) = dict.get_item("tool_call_id")? {
-                    if tcid_value.is_none() {
-                        None
+                let tool_call_id: Option<String> =
+                    if let Some(tcid_value) = dict.get_item("tool_call_id")? {
+                        if tcid_value.is_none() {
+                            None
+                        } else {
+                            Some(tcid_value.extract()?)
+                        }
                     } else {
-                        Some(tcid_value.extract()?)
-                    }
-                } else {
-                    None
-                };
+                        None
+                    };
 
                 messages.push(ParsedMessage {
                     role,

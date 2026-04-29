@@ -129,11 +129,12 @@ class Worker(ExecutorMixin):
 
         # Import Rust worker
         try:
-            from .._core import PyComponentInfo, PyWorker, PyWorkerConfig
+            from .._core import PyComponentInfo, PyTriggerSpec, PyWorker, PyWorkerConfig
 
             self._PyWorker = PyWorker
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
+            self._PyTriggerSpec = PyTriggerSpec
         except ImportError as e:
             _sentry.capture_exception(
                 e,
@@ -463,8 +464,21 @@ class Worker(ExecutorMixin):
         input_schema: Any = None,
         output_schema: Any = None,
         definition: Any = None,
+        triggers: list | None = None,
     ) -> Any:
         """Create a PyComponentInfo with serialized schemas."""
+        py_triggers = [
+            self._PyTriggerSpec(
+                trigger_id=getattr(trigger, "trigger_id", ""),
+                trigger_type=getattr(trigger, "trigger_type", ""),
+                event_name=getattr(trigger, "event_name", ""),
+                filter_expression=getattr(trigger, "filter_expression", ""),
+                input_mapping=getattr(trigger, "input_mapping", ""),
+                batch_window_ms=getattr(trigger, "batch_window_ms", 0),
+                delay_expression=getattr(trigger, "delay_expression", ""),
+            )
+            for trigger in (triggers or [])
+        ]
         return self._PyComponentInfo(
             name=name,
             component_type=component_type,
@@ -473,6 +487,7 @@ class Worker(ExecutorMixin):
             input_schema=self._serialize_schema(input_schema),
             output_schema=self._serialize_schema(output_schema),
             definition=self._serialize_schema(definition),
+            triggers=py_triggers,
         )
 
     def _discover_components(self) -> list:
@@ -523,6 +538,7 @@ class Worker(ExecutorMixin):
                 config={},
                 input_schema=config.input_schema,
                 output_schema=config.output_schema,
+                triggers=config.triggers,
             ))
 
         # Process agents

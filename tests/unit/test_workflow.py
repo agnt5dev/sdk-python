@@ -14,7 +14,15 @@ import asyncio
 
 import pytest
 
-from agnt5 import FunctionContext, WorkflowContext, FunctionRegistry, WorkflowRegistry, function, workflow
+from agnt5 import (
+    FunctionContext,
+    FunctionRegistry,
+    WorkflowContext,
+    WorkflowRegistry,
+    event,
+    function,
+    workflow,
+)
 from agnt5.workflow import WorkflowEntity
 from agnt5._state_adapter import with_state_context as with_entity_context
 
@@ -55,6 +63,21 @@ def test_workflow_custom_name():
 
     assert "custom_name" in WorkflowRegistry.list_names()
     assert WorkflowRegistry.get("custom_name") is not None
+
+
+def test_workflow_event_triggers_registered():
+    """Test workflow event trigger declarations."""
+
+    @workflow(triggers=[event("user.created")])
+    async def user_created(ctx: WorkflowContext) -> None:
+        pass
+
+    config = WorkflowRegistry.get("user_created")
+    assert config is not None
+    assert config.triggers is not None
+    assert len(config.triggers) == 1
+    assert config.triggers[0].trigger_type == "event"
+    assert config.triggers[0].event_name == "user.created"
 
 
 def test_workflow_decorator_wrong_signature():

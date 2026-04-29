@@ -107,8 +107,6 @@ impl PyContext {
     }
 }
 
-
-
 fn map_sdk_error(err: SdkError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
 }
@@ -145,8 +143,6 @@ fn get_registered_tools() -> PyResult<Vec<PyToolDefinition>> {
 fn clear_tools() -> PyResult<()> {
     global_tool_registry().clear().map_err(map_sdk_error)
 }
-
-
 
 #[pyclass(name = "RuntimeControls")]
 #[derive(Clone)]

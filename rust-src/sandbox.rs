@@ -154,8 +154,7 @@ impl PySandbox {
                     #[cfg(feature = "wasm-sandbox")]
                     {
                         let config = WasmSandboxConfig {
-                            quickjs_wasm_path: quickjs_wasm_path
-                                .map(std::path::PathBuf::from),
+                            quickjs_wasm_path: quickjs_wasm_path.map(std::path::PathBuf::from),
                             ..Default::default()
                         };
                         let wasm = WasmSandbox::new(config).map_err(|e| {
@@ -365,10 +364,7 @@ impl PySandbox {
                 .list_files(&path_owned, recursive)
                 .await
                 .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "list_files failed: {}",
-                        e
-                    ))
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("list_files failed: {}", e))
                 })?;
 
             Python::attach(|py| {

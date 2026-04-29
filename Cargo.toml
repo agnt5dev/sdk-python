@@ -48,7 +48,8 @@ hex = "0.4"
 uuid = { version = "1.18.1", features = ["v4"] }
 
 [features]
-default = ["wasm-sandbox"]
+default = ["wasm-sandbox", "libsql-memory"]
+libsql-memory = ["agnt5-sdk-core/libsql-memory"]
 wasm-sandbox = ["agnt5-sdk-core/wasm-sandbox"]
 
 [build-dependencies]

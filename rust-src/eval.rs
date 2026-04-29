@@ -5,8 +5,7 @@
 use agnt5_sdk_core::eval::{
     deterministic::{self, ContainsConfig, ExactMatchConfig, LevenshteinConfig, RegexConfig},
     trace::{self, TraceAssertion as RustTraceAssertion},
-    ScorerInput as RustScorerInput, ScorerResult as RustScorerResult,
-    TraceEvent as RustTraceEvent,
+    ScorerInput as RustScorerInput, ScorerResult as RustScorerResult, TraceEvent as RustTraceEvent,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
@@ -206,20 +205,19 @@ impl PyScorerInput {
         let expected_val = expected.map(|e| py_to_value(py, e)).transpose()?;
         let input_val = input.map(|i| py_to_value(py, i)).transpose()?;
 
-        let trace_events = trace
-            .map(|t| {
-                t.iter()
-                    .filter_map(|item| {
-                        // Try to extract as dict and convert to TraceEvent
-                        #[allow(deprecated)]
-                        if let Ok(dict) = item.downcast::<PyDict>() {
-                            parse_trace_event(py, dict).ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            });
+        let trace_events = trace.map(|t| {
+            t.iter()
+                .filter_map(|item| {
+                    // Try to extract as dict and convert to TraceEvent
+                    #[allow(deprecated)]
+                    if let Ok(dict) = item.downcast::<PyDict>() {
+                        parse_trace_event(py, dict).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
 
         Ok(PyScorerInput {
             inner: RustScorerInput {
@@ -280,15 +278,13 @@ fn parse_trace_event(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<RustT
         .transpose()?
         .unwrap_or_default();
 
-    let parent_correlation_id = dict
-        .get_item("parent_correlation_id")?
-        .and_then(|v| {
-            if v.is_none() {
-                None
-            } else {
-                v.extract::<String>().ok()
-            }
-        });
+    let parent_correlation_id = dict.get_item("parent_correlation_id")?.and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract::<String>().ok()
+        }
+    });
 
     let timestamp_ns = dict
         .get_item("timestamp_ns")?
@@ -302,15 +298,13 @@ fn parse_trace_event(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<RustT
         .transpose()?
         .unwrap_or(Value::Object(Default::default()));
 
-    let name = dict
-        .get_item("name")?
-        .and_then(|v| {
-            if v.is_none() {
-                None
-            } else {
-                v.extract::<String>().ok()
-            }
-        });
+    let name = dict.get_item("name")?.and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract::<String>().ok()
+        }
+    });
 
     Ok(RustTraceEvent {
         event_type,
@@ -353,7 +347,11 @@ fn exact_match(input: &PyScorerInput, case_sensitive: Option<bool>) -> PyScorerR
 ///     ScorerResult with score 1.0 if found, 0.0 if not found
 #[pyfunction]
 #[pyo3(signature = (input, pattern, case_sensitive=None))]
-fn contains(input: &PyScorerInput, pattern: String, case_sensitive: Option<bool>) -> PyScorerResult {
+fn contains(
+    input: &PyScorerInput,
+    pattern: String,
+    case_sensitive: Option<bool>,
+) -> PyScorerResult {
     let config = ContainsConfig {
         pattern,
         case_sensitive,

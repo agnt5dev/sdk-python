@@ -9,7 +9,7 @@ import logging
 import secrets
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, Union, cast
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, TypeVar, Union, cast
 
 from ._ids import generate_cid
 from ._schema_utils import extract_function_metadata, extract_function_schemas
@@ -17,7 +17,7 @@ from ._serialization import serialize_to_str
 from ._state_adapter import StateInterface, _get_state_adapter
 from .context import Context, set_current_context
 from .function import FunctionContext
-from .types import HandlerFunc, WorkflowConfig
+from .types import HandlerFunc, TriggerSpec, WorkflowConfig
 from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
@@ -349,6 +349,8 @@ class WorkflowContext(Context):
                 user_id=self._user_id,
                 run_id=self._run_id,
                 semantic_provider=getattr(self, '_semantic_provider', None),
+                tenant_id=(self._trace_metadata or {}).get("tenant_id"),
+                deployment_id=(self._trace_metadata or {}).get("deployment_id"),
             )
 
         return self._memory_accessor
@@ -2235,6 +2237,7 @@ def workflow(
     cron: Optional[str] = None,
     webhook: bool = False,
     webhook_secret: Optional[str] = None,
+    triggers: Optional[Sequence[TriggerSpec]] = None,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as an AGNT5 durable workflow.
@@ -2248,6 +2251,7 @@ def workflow(
         cron: Cron expression for scheduled execution (e.g., "0 9 * * *" for daily at 9am)
         webhook: Enable webhook triggering for this workflow (default: False)
         webhook_secret: Optional secret for HMAC-SHA256 signature verification
+        triggers: Typed trigger declarations such as event("user.created")
 
     Example (standard workflow):
         @workflow
@@ -2364,6 +2368,7 @@ def workflow(
             input_schema=input_schema,
             output_schema=output_schema,
             metadata=metadata,
+            triggers=list(triggers or []),
         )
         WorkflowRegistry.register(config)
 
