@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agnt5_sdk_core::mcp::{McpClient, ServerConfig, SseConfig, StdioConfig, ToolContent};
+use agnt5_sdk_core::mcp::{
+    McpClient, ServerConfig, SseConfig, StdioConfig, StreamableHttpConfig, ToolContent,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -69,6 +71,26 @@ impl PyMcpClientCore {
 
         let mut client = self.inner.blocking_lock();
         client.add_server(name, ServerConfig::Sse(config));
+    }
+
+    #[pyo3(signature = (name, url, headers=None, api_key=None))]
+    fn add_streamable_http_server(
+        &self,
+        name: String,
+        url: String,
+        headers: Option<HashMap<String, String>>,
+        api_key: Option<String>,
+    ) {
+        let mut config = StreamableHttpConfig::new(url);
+        for (key, value) in headers.unwrap_or_default() {
+            config = config.with_header(key, value);
+        }
+        if let Some(api_key) = api_key {
+            config = config.with_api_key(api_key);
+        }
+
+        let mut client = self.inner.blocking_lock();
+        client.add_server(name, ServerConfig::StreamableHttp(config));
     }
 
     fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -258,15 +280,37 @@ fn parse_server_config(config: Value) -> PyResult<ServerConfig> {
     }
 
     if let Some(url) = obj.get("url").and_then(Value::as_str) {
-        let mut config = SseConfig::new(url.to_string());
-        if let Some(headers) = obj.get("headers").and_then(Value::as_object) {
-            for (key, value) in headers {
-                if let Some(value) = value.as_str() {
-                    config = config.with_header(key.clone(), value.to_string());
+        let transport = obj
+            .get("transport")
+            .and_then(Value::as_str)
+            .unwrap_or("sse")
+            .to_ascii_lowercase();
+        let headers_iter = obj
+            .get("headers")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.iter())
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())));
+
+        return match transport.as_str() {
+            "sse" => {
+                let mut config = SseConfig::new(url.to_string());
+                for (key, value) in headers_iter {
+                    config = config.with_header(key, value);
                 }
+                Ok(ServerConfig::Sse(config))
             }
-        }
-        return Ok(ServerConfig::Sse(config));
+            "streamable_http" | "streamable-http" | "http" => {
+                let mut config = StreamableHttpConfig::new(url.to_string());
+                for (key, value) in headers_iter {
+                    config = config.with_header(key, value);
+                }
+                Ok(ServerConfig::StreamableHttp(config))
+            }
+            other => Err(PyValueError::new_err(format!(
+                "Unknown transport: {other:?} (expected 'sse' or 'streamable_http')"
+            ))),
+        };
     }
 
     Err(PyValueError::new_err(
