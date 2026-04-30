@@ -181,7 +181,7 @@ async def supervisor_worker_workflow(ctx: WorkflowContext, task: str) -> dict:
         max_iterations=10,
     )
 
-    result = await supervisor.run_sync(f"Complete this task: {task}")
+    result = await supervisor.run(f"Complete this task: {task}")
 
     return {
         "task": task,
@@ -262,7 +262,7 @@ async def hierarchical_delegation(ctx: WorkflowContext, project: str) -> dict:
         max_iterations=8,
     )
 
-    result = await director.run_sync(f"Execute project: {project}")
+    result = await director.run(f"Execute project: {project}")
 
     return {
         "project": project,
@@ -345,22 +345,22 @@ async def debate_agents(ctx: WorkflowContext, topic: str) -> dict:
     )
 
     # Round 1: Opening statements
-    pro_opening = await proponent.run_sync(f"Argue FOR: {topic}")
-    con_opening = await opponent.run_sync(f"Argue AGAINST: {topic}")
+    pro_opening = await proponent.run(f"Argue FOR: {topic}")
+    con_opening = await opponent.run(f"Argue AGAINST: {topic}")
 
     ctx.logger.info(f"Pro arguments: {pro_opening.output[:100]}...")
     ctx.logger.info(f"Con arguments: {con_opening.output[:100]}...")
 
     # Round 2: Rebuttals
-    pro_rebuttal = await proponent.run_sync(
+    pro_rebuttal = await proponent.run(
         f"Respond to this opposition:\n{con_opening.output}"
     )
-    con_rebuttal = await opponent.run_sync(
+    con_rebuttal = await opponent.run(
         f"Respond to this argument:\n{pro_opening.output}"
     )
 
     # Judge's decision
-    judgment = await judge.run_sync(
+    judgment = await judge.run(
         f"""Topic: {topic}
 
 FOR arguments:
@@ -475,7 +475,7 @@ async def consensus_agents(ctx: WorkflowContext, question: str, required_agreeme
     # Collect votes from all agents
     votes = []
     for agent in agents:
-        result = await agent.run_sync(f"Question: {question}\nPlease vote YES or NO with reasoning.")
+        result = await agent.run(f"Question: {question}\nPlease vote YES or NO with reasoning.")
         vote_text = result.output.upper()
         vote = "YES" if "YES" in vote_text else "NO" if "NO" in vote_text else "ABSTAIN"
         votes.append({
@@ -602,19 +602,19 @@ async def pipeline_agents(ctx: WorkflowContext, content: str) -> dict:
     stages = []
 
     # Stage 1
-    stage1_result = await extractor.run_sync(f"Extract key facts from:\n{content}")
+    stage1_result = await extractor.run(f"Extract key facts from:\n{content}")
     stages.append({"stage": "extract", "output": stage1_result.output})
 
     # Stage 2
-    stage2_result = await enricher.run_sync(f"Enrich these facts:\n{stage1_result.output}")
+    stage2_result = await enricher.run(f"Enrich these facts:\n{stage1_result.output}")
     stages.append({"stage": "enrich", "output": stage2_result.output})
 
     # Stage 3
-    stage3_result = await synthesizer.run_sync(f"Synthesize:\n{stage2_result.output}")
+    stage3_result = await synthesizer.run(f"Synthesize:\n{stage2_result.output}")
     stages.append({"stage": "synthesize", "output": stage3_result.output})
 
     # Stage 4
-    stage4_result = await formatter.run_sync(f"Format:\n{stage3_result.output}")
+    stage4_result = await formatter.run(f"Format:\n{stage3_result.output}")
     stages.append({"stage": "format", "output": stage4_result.output})
 
     return {
@@ -702,7 +702,7 @@ async def shared_blackboard(ctx: WorkflowContext, problem: str) -> dict:
     )
 
     # Phase 1: Security expert adds constraints
-    security_result = await security_expert.run_sync(
+    security_result = await security_expert.run(
         f"Problem: {problem}\n\nAdd security constraints."
     )
     blackboard["contributions"].append({
@@ -712,7 +712,7 @@ async def shared_blackboard(ctx: WorkflowContext, problem: str) -> dict:
     blackboard["constraints"].append(security_result.output)
 
     # Phase 2: Architect proposes solution considering constraints
-    architect_result = await architect.run_sync(
+    architect_result = await architect.run(
         f"""Problem: {problem}
 
 Constraints:
@@ -727,7 +727,7 @@ Propose a solution."""
     blackboard["solutions"].append(architect_result.output)
 
     # Phase 3: Reviewer evaluates
-    reviewer_result = await reviewer.run_sync(
+    reviewer_result = await reviewer.run(
         f"""Problem: {problem}
 
 Constraints:
@@ -830,25 +830,25 @@ async def agent_messaging(ctx: WorkflowContext, task: str) -> dict:
     )
 
     # Message 1: Coordinator initiates
-    msg1 = await coordinator.run_sync(
+    msg1 = await coordinator.run(
         f"New task: {task}\nAssign to planner."
     )
     messages.append({"from": "coordinator", "to": "planner", "content": msg1.output})
 
     # Message 2: Planner creates plan
-    msg2 = await planner.run_sync(
+    msg2 = await planner.run(
         f"Received: {msg1.output}\nCreate plan and assign to executor."
     )
     messages.append({"from": "planner", "to": "executor", "content": msg2.output})
 
     # Message 3: Executor responds
-    msg3 = await executor.run_sync(
+    msg3 = await executor.run(
         f"Received plan: {msg2.output}\nExecute and report."
     )
     messages.append({"from": "executor", "to": "coordinator", "content": msg3.output})
 
     # Message 4: Coordinator summarizes
-    msg4 = await coordinator.run_sync(
+    msg4 = await coordinator.run(
         f"Received status: {msg3.output}\nProvide final summary."
     )
     messages.append({"from": "coordinator", "to": "all", "content": msg4.output})

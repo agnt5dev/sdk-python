@@ -340,7 +340,7 @@ class MCPServer:
         prompt = arguments.get("input")
         if not isinstance(prompt, str) or not prompt:
             raise MCPServerError("agent tools require a non-empty 'input' string")
-        result = await agent.run_sync(prompt, context=self._create_context(agent.name))
+        result = await agent.run(prompt, context=self._create_context(agent.name))
         return {
             "output": result.output,
             "tool_calls": result.tool_calls,

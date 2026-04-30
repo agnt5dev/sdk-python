@@ -87,7 +87,7 @@ async def stream_agent_chat(ctx: FunctionContext, message: str):
 
     # Stream events from the agent - yield Event objects directly
     # Worker handles Event serialization correctly
-    async for event in agent.run(message, context=ctx):
+    async for event in agent.stream(message, context=ctx):
         yield event
 
 
@@ -127,7 +127,7 @@ Show your work and explain the result.""",
     ctx.logger.info(f"[stream_agent_with_tools] Starting agent with message: {message[:50]}...")
 
     # Stream events from the agent - yield Event objects directly
-    async for event in agent.run(message, context=ctx):
+    async for event in agent.stream(message, context=ctx):
         yield event
 
 
@@ -164,7 +164,7 @@ async def stream_agent_simple(ctx: FunctionContext, message: str):
     ctx.logger.info(f"[stream_agent_simple] Processing: {message[:50]}...")
 
     # Stream events from the agent - yield Event objects directly
-    async for event in agent.run(message, context=ctx):
+    async for event in agent.stream(message, context=ctx):
         yield event
 
 

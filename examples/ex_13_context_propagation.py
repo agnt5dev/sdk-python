@@ -706,7 +706,7 @@ async def agent_context_chain(ctx: WorkflowContext, topic: str) -> dict:
         max_iterations=3,
     )
 
-    research_result = await researcher.run_sync(f"Research: {topic}", context=ctx)
+    research_result = await researcher.run(f"Research: {topic}", context=ctx)
     chain_context["research"] = research_result.output
     chain_context["stages"].append("research")
     ctx.logger.info(f"Research complete: {research_result.output[:100]}...")
@@ -720,7 +720,7 @@ async def agent_context_chain(ctx: WorkflowContext, topic: str) -> dict:
         max_iterations=3,
     )
 
-    analysis_result = await analyzer.run_sync(
+    analysis_result = await analyzer.run(
         f"Analyze this research about {topic}:\n{chain_context['research']}",
         context=ctx,
     )
@@ -737,7 +737,7 @@ async def agent_context_chain(ctx: WorkflowContext, topic: str) -> dict:
         max_iterations=3,
     )
 
-    summary_result = await summarizer.run_sync(
+    summary_result = await summarizer.run(
         f"Summarize:\nTopic: {topic}\nResearch: {chain_context['research']}\nAnalysis: {chain_context['analysis']}",
         context=ctx,
     )

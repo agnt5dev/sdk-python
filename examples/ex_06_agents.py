@@ -59,7 +59,7 @@ async def simple_agent(ctx: FunctionContext, message: str) -> dict:
     """
     ctx.logger.info(f"[simple_agent] Processing: {message[:50]}...")
 
-    result = await simple_assistant_agent.run_sync(message)
+    result = await simple_assistant_agent.run(message)
 
     return {
         "message": message,
@@ -92,7 +92,7 @@ async def claude_agent(ctx: FunctionContext, message: str) -> dict:
         max_iterations=5,
     )
 
-    result = await agent.run_sync(message)
+    result = await agent.run(message)
 
     return {
         "message": message,
@@ -140,7 +140,7 @@ When answering questions:
         max_iterations=5,
     )
 
-    result = await agent.run_sync(question)
+    result = await agent.run(question)
 
     return {
         "question": question,
@@ -187,7 +187,7 @@ Focus on engaging content that captivates the reader.""",
         max_iterations=5,
     )
 
-    result = await agent.run_sync(prompt)
+    result = await agent.run(prompt)
 
     return {
         "prompt": prompt,
@@ -246,7 +246,7 @@ Be helpful, engaging, and personable.""",
     conversation_history = history if history else []
 
     # Run agent with history
-    result = await agent.run_sync(message, history=conversation_history)
+    result = await agent.run(message, history=conversation_history)
 
     # Update history with new exchange
     updated_history = conversation_history + [
