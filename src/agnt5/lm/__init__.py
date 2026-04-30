@@ -27,6 +27,7 @@ from .events import (
     LMStarted,
 )
 from .types import (
+    BUILT_IN_TOOL_PROVIDER_NAMES,
     BuiltInTool,
     GenerateRequest,
     GenerateResponse,
@@ -39,6 +40,7 @@ from .types import (
     TokenUsage,
     ToolChoice,
     ToolDefinition,
+    built_in_tool_names,
 )
 
 # Re-export types
@@ -57,7 +59,9 @@ __all__ = [
     "LMFailed",
     "LMStarted",
     # Types
+    "BUILT_IN_TOOL_PROVIDER_NAMES",
     "BuiltInTool",
+    "built_in_tool_names",
     "GenerateRequest",
     "GenerateResponse",
     "GenerationConfig",

@@ -90,7 +90,7 @@ class StdioConfig:
 
 @dataclass
 class SseConfig:
-    """Configuration for SSE transport."""
+    """Configuration for legacy HTTP+SSE transport (MCP 2024-11-05 spec)."""
 
     url: str
     headers: dict[str, str] = field(default_factory=dict)
@@ -101,11 +101,29 @@ class SseConfig:
         return self
 
 
+@dataclass
+class StreamableHttpConfig:
+    """Configuration for Streamable HTTP transport (MCP 2025-03-26 spec).
+
+    Single-endpoint POST/SSE transport replacing the older HTTP+SSE design.
+    Use this for current-spec MCP servers (e.g. mcp.deepwiki.com/mcp).
+    """
+
+    url: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def with_api_key(self, api_key: str) -> "StreamableHttpConfig":
+        """Add API key header."""
+        self.headers["X-API-KEY"] = api_key
+        return self
+
+
 class TransportType(Enum):
     """Transport type for MCP connection."""
 
     STDIO = "stdio"
     SSE = "sse"
+    STREAMABLE_HTTP = "streamable_http"
 
 
 @dataclass
@@ -115,6 +133,7 @@ class ServerConfig:
     transport_type: TransportType
     stdio: Optional[StdioConfig] = None
     sse: Optional[SseConfig] = None
+    streamable_http: Optional[StreamableHttpConfig] = None
 
     @classmethod
     def from_stdio(
@@ -141,19 +160,32 @@ class ServerConfig:
         url: str,
         headers: Optional[dict[str, str]] = None,
     ) -> "ServerConfig":
-        """Create SSE server config."""
+        """Create legacy HTTP+SSE server config."""
         return cls(
             transport_type=TransportType.SSE,
             sse=SseConfig(url=url, headers=headers or {}),
         )
 
     @classmethod
+    def from_streamable_http(
+        cls,
+        url: str,
+        headers: Optional[dict[str, str]] = None,
+    ) -> "ServerConfig":
+        """Create Streamable HTTP server config (MCP 2025-03-26)."""
+        return cls(
+            transport_type=TransportType.STREAMABLE_HTTP,
+            streamable_http=StreamableHttpConfig(url=url, headers=headers or {}),
+        )
+
+    @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "ServerConfig":
         """Create server config from dictionary.
 
-        Supports two formats:
+        Supports three formats:
         1. {"command": "npx", "args": ["-y", "wikipedia-mcp"]}  -> stdio
-        2. {"url": "https://...", "headers": {...}}  -> SSE
+        2. {"url": "https://...", "headers": {...}}  -> SSE (default)
+        3. {"url": "https://...", "transport": "streamable_http"}  -> Streamable HTTP
         """
         if "command" in config:
             return cls.from_stdio(
@@ -162,13 +194,17 @@ class ServerConfig:
                 env=config.get("env", {}),
                 cwd=config.get("cwd"),
             )
-        elif "url" in config:
-            return cls.from_sse(
-                url=config["url"],
-                headers=config.get("headers", {}),
+        if "url" in config:
+            transport = (config.get("transport") or "sse").lower()
+            headers = config.get("headers", {})
+            if transport in ("streamable_http", "streamable-http", "http"):
+                return cls.from_streamable_http(url=config["url"], headers=headers)
+            if transport == "sse":
+                return cls.from_sse(url=config["url"], headers=headers)
+            raise ValueError(
+                f"Unknown transport: {transport!r} (expected 'sse' or 'streamable_http')"
             )
-        else:
-            raise ValueError("Invalid server config: must have 'command' or 'url'")
+        raise ValueError("Invalid server config: must have 'command' or 'url'")
 
 
 PromptHandler = Callable[..., Awaitable[Any]]

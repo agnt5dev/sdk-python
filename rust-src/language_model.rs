@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
 use agnt5_sdk_core::lm::{
-    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, ContentBlockType, DeepSeekProvider,
-    GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider, GroqProvider,
-    HuggingFaceProvider, JsonSchemaFormat, LanguageModel, Message, MessageRole, MistralProvider,
-    OllamaProvider, OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle,
-    StreamRequest, TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
+    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, BuiltInTool, ContentBlockType,
+    DeepSeekProvider, GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider,
+    GroqProvider, HuggingFaceProvider, JsonSchemaFormat, LanguageModel, Message, MessageRole,
+    MistralProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider, ResponseFormat,
+    StreamChunk, StreamHandle, StreamRequest, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    XaiProvider,
 };
 use futures::StreamExt;
 use opentelemetry::Context as OtelContext;
@@ -171,6 +172,8 @@ impl PyLanguageModel {
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
+        let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -202,6 +205,10 @@ impl PyLanguageModel {
         // Set previous_response_id for OpenAI Responses API conversation continuation
         if let Some(prev_id) = previous_response_id_kw {
             request.previous_response_id = Some(prev_id);
+        }
+
+        if !built_in_tools.is_empty() {
+            request.config.built_in_tools = built_in_tools;
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -260,6 +267,8 @@ impl PyLanguageModel {
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
+        let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -291,6 +300,10 @@ impl PyLanguageModel {
         // Set previous_response_id for OpenAI Responses API conversation continuation
         if let Some(prev_id) = previous_response_id_kw {
             request.previous_response_id = Some(prev_id);
+        }
+
+        if !built_in_tools.is_empty() {
+            request.config.built_in_tools = built_in_tools;
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -426,6 +439,10 @@ impl PyLanguageModel {
         // Set previous_response_id for OpenAI Responses API conversation continuation
         if let Some(prev_id) = previous_response_id_kw {
             request.previous_response_id = Some(prev_id);
+        }
+
+        if !built_in_tools.is_empty() {
+            request.config.built_in_tools = built_in_tools;
         }
 
         let provider = self.get_or_init_provider(&provider_name)?;
@@ -1011,6 +1028,29 @@ struct ToolSpec {
     strict: Option<bool>,
 }
 
+fn parse_built_in_tools_json(json: Option<&str>) -> PyResult<Vec<BuiltInTool>> {
+    let raw = match json {
+        None => return Ok(Vec::new()),
+        Some(raw) if raw.trim().is_empty() => return Ok(Vec::new()),
+        Some(raw) => raw,
+    };
+    let names: Vec<String> = serde_json::from_str(raw).map_err(|err| {
+        PyValueError::new_err(format!("Failed to parse built_in_tools: {err}"))
+    })?;
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        match BuiltInTool::from_provider_name(&name) {
+            Some(tool) => out.push(tool),
+            None => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown built_in_tool: {name}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn parse_tools_json(json: Option<&str>) -> PyResult<Option<Vec<ToolDefinition>>> {
     let raw = match json {
         None => return Ok(None),
@@ -1530,3 +1570,4 @@ fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let obj = json_module.call_method1("loads", (serialized,))?;
     Ok(obj.unbind())
 }
+

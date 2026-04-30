@@ -350,7 +350,12 @@ class MCPServer:
         config = getattr(workflow, "_agnt5_config", None)
         if config is None:
             raise MCPServerError("workflow is missing _agnt5_config metadata")
-        return await workflow(arguments)
+        # Spread arguments as kwargs. The workflow wrapper auto-creates a
+        # WorkflowContext when no positional Context is supplied, then forwards
+        # kwargs to the handler. Callers must key `arguments` by the workflow's
+        # parameter names (e.g. {"input": {...}}), matching how `_invoke_tool`
+        # spreads arguments into a tool handler.
+        return await workflow(**arguments)
 
     @staticmethod
     def _wrap_text_result(result: Any) -> dict[str, Any]:

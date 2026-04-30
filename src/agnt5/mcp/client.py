@@ -93,6 +93,25 @@ class MCPClient:
         self._server_configs[name] = ServerConfig.from_sse(url=url, headers=headers)
         self._core.add_sse_server(name, url, headers, api_key)
 
+    def add_streamable_http_server(
+        self,
+        name: str,
+        url: str,
+        headers: Optional[dict[str, str]] = None,
+        api_key: Optional[str] = None,
+    ) -> None:
+        """Add a Streamable HTTP MCP server (2025-03-26 spec).
+
+        Use this for current-spec remote MCP servers like
+        `https://mcp.deepwiki.com/mcp`. For older HTTP+SSE servers, use
+        `add_sse_server` instead.
+        """
+        headers = dict(headers or {})
+        if api_key:
+            headers["X-API-KEY"] = api_key
+        self._server_configs[name] = ServerConfig.from_streamable_http(url=url, headers=headers)
+        self._core.add_streamable_http_server(name, url, headers, api_key)
+
     async def connect(self) -> None:
         try:
             await self._core.connect()
@@ -238,5 +257,15 @@ def _server_config_to_dict(config: ServerConfig) -> dict[str, Any]:
         return {
             "url": config.sse.url,
             "headers": config.sse.headers,
+            "transport": "sse",
+        }
+    if (
+        config.transport_type == TransportType.STREAMABLE_HTTP
+        and config.streamable_http is not None
+    ):
+        return {
+            "url": config.streamable_http.url,
+            "headers": config.streamable_http.headers,
+            "transport": "streamable_http",
         }
     raise ValueError("Invalid server config")

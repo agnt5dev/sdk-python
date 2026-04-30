@@ -5,6 +5,12 @@ import pytest
 from agnt5 import Agent, Context, MCPServer, Prompt, Resource, tool, workflow
 from agnt5.agent import AgentRegistry
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, TokenUsage
+from agnt5.lm.events import (
+    LMCompleted,
+    LMContentBlockCompleted,
+    LMContentBlockDelta,
+    LMContentBlockStarted,
+)
 from agnt5.tool import ToolRegistry
 
 
@@ -16,8 +22,27 @@ class MockLanguageModel(LanguageModel):
         )
 
     async def stream(self, request: GenerateRequest):
-        if False:
-            yield None
+        # The Agent loop falls back to streaming when no tools are configured.
+        # Emit the same text the generate() path returns so both paths agree.
+        text = "Agent answer"
+        yield LMContentBlockStarted(
+            name="mock-model", correlation_id="c", parent_correlation_id="p",
+            block_type="text", index=0,
+        )
+        yield LMContentBlockDelta(
+            name="mock-model", correlation_id="c", parent_correlation_id="p",
+            content=text, block_type="text", index=0,
+        )
+        yield LMContentBlockCompleted(
+            name="mock-model", correlation_id="c", parent_correlation_id="p",
+            block_type="text", index=0,
+        )
+        yield LMCompleted(
+            name="mock-model", correlation_id="c", parent_correlation_id="p",
+            model="mock-model", provider="mock",
+            input_tokens=1, output_tokens=1, total_tokens=2,
+            output_data={"text": text},
+        )
 
 
 @pytest.fixture(autouse=True)
