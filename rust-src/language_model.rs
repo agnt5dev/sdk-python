@@ -1037,17 +1037,11 @@ fn parse_built_in_tools_json(json: Option<&str>) -> PyResult<Vec<BuiltInTool>> {
     })?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        match name.as_str() {
-            // OpenAI Responses API names
-            "web_search_preview" => out.push(BuiltInTool::WebSearch),
-            "code_interpreter" => out.push(BuiltInTool::CodeInterpreter),
-            "file_search" => out.push(BuiltInTool::FileSearch),
-            // Cross-provider name (Anthropic surfaces this; alias for WebSearch)
-            "web_search" => out.push(BuiltInTool::WebSearch),
-            "web_fetch" => out.push(BuiltInTool::WebFetch),
-            other => {
+        match BuiltInTool::from_provider_name(&name) {
+            Some(tool) => out.push(tool),
+            None => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown built_in_tool: {other}"
+                    "Unknown built_in_tool: {name}"
                 )));
             }
         }
@@ -1574,3 +1568,4 @@ fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let obj = json_module.call_method1("loads", (serialized,))?;
     Ok(obj.unbind())
 }
+
