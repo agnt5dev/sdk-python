@@ -74,6 +74,10 @@ class BuiltInTool(str, Enum):
     WEB_SEARCH = "web_search_preview"
     CODE_INTERPRETER = "code_interpreter"
     FILE_SEARCH = "file_search"
+    # Anthropic-only today. OpenAI's web_search_preview already includes
+    # fetched content; Gemini has no separate fetch tool. Setting WEB_FETCH
+    # on those providers is silently dropped at request build.
+    WEB_FETCH = "web_fetch"
 
 
 # Names a built-in tool may surface as in `response.tool_calls` across providers.
@@ -82,14 +86,15 @@ class BuiltInTool(str, Enum):
 #
 # - OpenAI Responses API uses the same string as the request type
 #   (`web_search_preview`, `code_interpreter`, `file_search`).
-# - Anthropic's `web_search_20250305` surfaces tool_use blocks named
-#   `web_search` (the request `name` field).
+# - Anthropic's web_search/web_fetch surfaces tool_use blocks named
+#   `web_search` / `web_fetch` (the request `name` field).
 # - Gemini's `google_search` does NOT surface as tool_calls — it returns
 #   grounding metadata, not function calls — so no Gemini name appears here.
 BUILT_IN_TOOL_PROVIDER_NAMES: Dict[BuiltInTool, frozenset] = {
     BuiltInTool.WEB_SEARCH: frozenset({"web_search_preview", "web_search"}),
     BuiltInTool.CODE_INTERPRETER: frozenset({"code_interpreter"}),
     BuiltInTool.FILE_SEARCH: frozenset({"file_search"}),
+    BuiltInTool.WEB_FETCH: frozenset({"web_fetch"}),
 }
 
 

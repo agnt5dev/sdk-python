@@ -192,6 +192,34 @@ async def test_anthropic_style_tool_use_name_is_recognized_as_built_in():
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_built_in_recognized_as_server_side():
+    """Anthropic's web_fetch built-in surfaces as a tool_use block named
+    `web_fetch`. Agent must filter it the same way as web_search."""
+    mock_lm = MockLanguageModel(
+        responses=["Final answer using fetched content."],
+        tool_calls=[
+            [{"id": "wf_1", "name": "web_fetch", "arguments": '{"url": "https://example.com"}'}],
+        ],
+    )
+
+    agent = Agent(
+        name="fetch_builtin",
+        model=mock_lm,
+        instructions="Fetch URLs when asked.",
+        built_in_tools=[BuiltInTool.WEB_FETCH],
+    )
+
+    result = await agent.run_sync("Read https://example.com")
+
+    assert mock_lm.call_count == 1
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "web_fetch"
+    assert result.tool_calls[0].get("built_in") is True
+    sent = mock_lm.requests[0].config.built_in_tools
+    assert sent == [BuiltInTool.WEB_FETCH]
+
+
+@pytest.mark.asyncio
 async def test_no_built_in_tools_means_no_config_change():
     """Agents without built_in_tools leave GenerationConfig.built_in_tools empty."""
 
