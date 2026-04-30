@@ -394,6 +394,8 @@ impl PyLanguageModel {
         let tools_kw = get_optional_string(kwargs_ref, "tools")?;
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
+        let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
 
         let response_format =
             parse_response_format(response_format_str.as_deref(), response_schema.as_deref())?;
