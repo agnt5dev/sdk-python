@@ -24,12 +24,25 @@ from ..callbacks import (
     ToolCallbackContext,
 )
 from ..context import Context, get_current_context, set_current_context
-from .. import lm
-from ..lm import GenerateRequest, GenerateResponse, LanguageModel, Message, ModelConfig, ToolDefinition
-from ..tool import Tool, ToolRegistry
-from .._telemetry import setup_module_logger
-from ..exceptions import WaitingForUserInputException
 from ..events import Event
+from ..exceptions import WaitingForUserInputException
+from ..lm import (
+    BuiltInTool,
+    GenerateRequest,
+    GenerateResponse,
+    LanguageModel,
+    Message,
+    ModelConfig,
+    ToolDefinition,
+)
+from ..lm.events import (
+    LMCompleted,
+    LMContentBlockCompleted,
+    LMContentBlockDelta,
+    LMContentBlockStarted,
+)
+from ..tool import Tool, ToolRegistry
+from .context import AgentContext
 from .events import (
     AgentCompleted,
     AgentFailed,
@@ -120,6 +133,7 @@ class Agent:
         model: Union[str, LanguageModel],
         instructions: str,
         tools: Optional[List[Any]] = None,
+        built_in_tools: Optional[List[BuiltInTool]] = None,
         model_config: Optional[ModelConfig] = None,
         handoffs: Optional[List[Union["Agent", Handoff]]] = None,
         callbacks: Optional[AgentCallbacks] = None,
@@ -145,6 +159,10 @@ class Agent:
                    - LanguageModel instance (legacy, for backward compatibility)
             instructions: System prompt for the agent
             tools: List of tools, Tool instances, or Agents (used as tools)
+            built_in_tools: Provider-hosted tools (currently OpenAI Responses API only:
+                BuiltInTool.WEB_SEARCH, CODE_INTERPRETER, FILE_SEARCH). These run
+                server-side; results are baked into the assistant message and the
+                Agent records the call for tracing without local dispatch.
             model_config: Model configuration (temperature, max_tokens, etc.)
             handoffs: List of agents to hand off to (creates transfer_to_* tools)
             callbacks: Grouped execution callbacks for agent/model/tool stages
@@ -186,13 +204,14 @@ class Agent:
             self.model = model_name or "mock-model"
             self.model_name = model_name or "mock-model"
         else:
-            raise ValueError(f"model must be a string (e.g., 'openai/gpt-4o-mini') or LanguageModel instance")
+            raise ValueError("model must be a string (e.g., 'openai/gpt-4o-mini') or LanguageModel instance")
 
         # Model configuration (legacy params take precedence for backward compat)
         self.model_config = model_config
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.top_p = top_p
+        self._built_in_tools: List[BuiltInTool] = list(built_in_tools or [])
 
         # Cost tracking
         self._cumulative_cost_usd: float = 0.0
@@ -816,6 +835,8 @@ class Agent:
                         request.config.max_tokens = self.max_tokens
                     if self.top_p:
                         request.config.top_p = self.top_p
+                    if self._built_in_tools:
+                        request.config.built_in_tools = list(self._built_in_tools)
 
                     # Stream LLM call and yield events
                     response_text = ""
@@ -841,6 +862,62 @@ class Agent:
 
                     # Add assistant response to messages
                     messages.append(Message.assistant(response_text))
+
+                    # Server-side built-in tools (Responses API) execute on the
+                    # provider; their results are already baked into the assistant
+                    # message. Record them in the trace and exclude from local
+                    # dispatch so the rest of the loop only handles user tools.
+                    if response_tool_calls and self._built_in_tools:
+                        built_in_names = {t.value for t in self._built_in_tools}
+                        partitioned_user_calls: List[Dict[str, Any]] = []
+                        for built_in_idx, tool_call in enumerate(response_tool_calls):
+                            if tool_call.get("name") not in built_in_names:
+                                partitioned_user_calls.append(tool_call)
+                                continue
+
+                            tool_name = tool_call["name"]
+                            tool_args_str = tool_call.get("arguments", "{}")
+                            tool_call_id = tool_call.get("id")
+                            tool_correlation_id = f"tool-{secrets.token_hex(5)}"
+
+                            all_tool_calls.append({
+                                "name": tool_name,
+                                "arguments": tool_args_str,
+                                "iteration": iteration + 1,
+                                "id": tool_call_id,
+                                "built_in": True,
+                            })
+
+                            started_event = ToolCallStarted(
+                                name=tool_name,
+                                correlation_id=tool_correlation_id,
+                                parent_correlation_id=iteration_correlation_id,
+                                tool_name=tool_name,
+                                tool_call_id=tool_call_id or "",
+                                input_data={"arguments": tool_args_str, "built_in": True},
+                                index=built_in_idx,
+                            )
+                            if context:
+                                context.emit(started_event)
+                            yield started_event
+                            sequence += 1
+
+                            completed_event = ToolCallCompleted(
+                                name=tool_name,
+                                correlation_id=tool_correlation_id,
+                                parent_correlation_id=iteration_correlation_id,
+                                tool_name=tool_name,
+                                tool_call_id=tool_call_id or "",
+                                output_data={"server_side": True},
+                                duration_ms=0,
+                                index=built_in_idx,
+                            )
+                            if context:
+                                context.emit(completed_event)
+                            yield completed_event
+                            sequence += 1
+
+                        response_tool_calls = partitioned_user_calls
 
                     # Check if LLM wants to use tools
                     self.logger.debug(f"response_tool_calls count={len(response_tool_calls) if response_tool_calls else 0}")
@@ -1212,12 +1289,13 @@ class Agent:
         # When tools are present, use generate() since streaming doesn't support tool calls
         # When no tools, use real streaming for proper thinking block support
         has_tools = bool(request.tools)
+        has_built_in_tools = bool(request.config.built_in_tools)
         has_model_callbacks = (
             self.callbacks.before_model is not None
             or self.callbacks.after_model is not None
         )
 
-        if has_tools or has_model_callbacks:
+        if has_tools or has_built_in_tools or has_model_callbacks:
             if context is not None:
                 response = await self._generate_with_callbacks(
                     context=context,
