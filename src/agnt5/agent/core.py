@@ -34,6 +34,7 @@ from ..lm import (
     Message,
     ModelConfig,
     ToolDefinition,
+    built_in_tool_names,
 )
 from ..lm.events import (
     LMCompleted,
@@ -868,7 +869,7 @@ class Agent:
                     # message. Record them in the trace and exclude from local
                     # dispatch so the rest of the loop only handles user tools.
                     if response_tool_calls and self._built_in_tools:
-                        built_in_names = {t.value for t in self._built_in_tools}
+                        built_in_names = built_in_tool_names(self._built_in_tools)
                         partitioned_user_calls: List[Dict[str, Any]] = []
                         for built_in_idx, tool_call in enumerate(response_tool_calls):
                             if tool_call.get("name") not in built_in_names:

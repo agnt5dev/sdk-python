@@ -62,11 +62,44 @@ class ToolChoice(str, Enum):
 
 
 class BuiltInTool(str, Enum):
-    """Built-in tools for OpenAI Responses API."""
+    """Provider-hosted tools enabled via `Agent(built_in_tools=[...])`.
+
+    Each variant maps to one or more provider-side tool names — OpenAI uses
+    `web_search_preview`, Anthropic surfaces `web_search` in its tool_use
+    blocks, etc. The string value of each variant is the OpenAI name for
+    backward compatibility; cross-provider names live in
+    `BUILT_IN_TOOL_PROVIDER_NAMES` below.
+    """
 
     WEB_SEARCH = "web_search_preview"
     CODE_INTERPRETER = "code_interpreter"
     FILE_SEARCH = "file_search"
+
+
+# Names a built-in tool may surface as in `response.tool_calls` across providers.
+# The Agent dispatch loop uses this set to recognize server-side built-in tool
+# calls so it doesn't try to execute them locally.
+#
+# - OpenAI Responses API uses the same string as the request type
+#   (`web_search_preview`, `code_interpreter`, `file_search`).
+# - Anthropic's `web_search_20250305` surfaces tool_use blocks named
+#   `web_search` (the request `name` field).
+# - Gemini's `google_search` does NOT surface as tool_calls — it returns
+#   grounding metadata, not function calls — so no Gemini name appears here.
+BUILT_IN_TOOL_PROVIDER_NAMES: Dict[BuiltInTool, frozenset] = {
+    BuiltInTool.WEB_SEARCH: frozenset({"web_search_preview", "web_search"}),
+    BuiltInTool.CODE_INTERPRETER: frozenset({"code_interpreter"}),
+    BuiltInTool.FILE_SEARCH: frozenset({"file_search"}),
+}
+
+
+def built_in_tool_names(tools) -> "set[str]":
+    """Return all provider-side names that should be treated as server-side
+    calls for the given list of BuiltInTools."""
+    out: set[str] = set()
+    for tool in tools:
+        out.update(BUILT_IN_TOOL_PROVIDER_NAMES.get(tool, frozenset({tool.value})))
+    return out
 
 
 class ReasoningEffort(str, Enum):

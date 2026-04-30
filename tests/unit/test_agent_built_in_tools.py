@@ -164,6 +164,34 @@ async def test_mixed_built_in_and_user_tool_calls_in_one_turn():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_style_tool_use_name_is_recognized_as_built_in():
+    """Anthropic returns tool_use blocks with name="web_search" (not the
+    OpenAI alias). The Agent must still treat these as server-side and skip
+    local dispatch."""
+    mock_lm = MockLanguageModel(
+        responses=["Final answer with grounded info."],
+        tool_calls=[
+            [{"id": "ws_1", "name": "web_search", "arguments": '{"query": "topic"}'}],
+        ],
+    )
+
+    agent = Agent(
+        name="anthropic_builtin",
+        model=mock_lm,
+        instructions="Use the built-in search.",
+        built_in_tools=[BuiltInTool.WEB_SEARCH],
+    )
+
+    result = await agent.run_sync("Look something up.")
+
+    assert mock_lm.call_count == 1
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "web_search"
+    assert result.tool_calls[0].get("built_in") is True
+    assert "Final answer" in result.output
+
+
+@pytest.mark.asyncio
 async def test_no_built_in_tools_means_no_config_change():
     """Agents without built_in_tools leave GenerationConfig.built_in_tools empty."""
 
