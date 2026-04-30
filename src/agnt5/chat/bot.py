@@ -244,7 +244,7 @@ class ChatBot:
             session_id=session_id,
         )
 
-        result = await self._agent.run_sync(msg.content, context=ctx)
+        result = await self._agent.run(msg.content, context=ctx)
         return str(result.output) if result.output is not None else None
 
     async def _send_response(

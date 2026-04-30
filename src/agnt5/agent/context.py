@@ -38,13 +38,13 @@ class AgentContext(Context):
         ```python
         # Standalone agent with conversation history
         ctx = AgentContext(run_id="session-1", agent_name="tutor")
-        result = await agent.run_sync("Hello", context=ctx)
-        result = await agent.run_sync("Continue", context=ctx)  # Remembers previous message
+        result = await agent.run("Hello", context=ctx)
+        result = await agent.run("Continue", context=ctx)  # Remembers previous message
 
         # Agent in workflow - shares workflow state
         @workflow
         async def research_workflow(ctx: WorkflowContext):
-            agent_result = await research_agent.run_sync("Find AI trends", context=ctx)
+            agent_result = await research_agent.run("Find AI trends", context=ctx)
             # Agent has access to workflow state via inherited context
         ```
     """

@@ -14,13 +14,13 @@ Example:
         instructions="You are a research assistant.",
     )
 
-    # Streaming execution (recommended)
-    async for event in agent.run("Find recent AI papers"):
+    # Streaming execution
+    async for event in agent.stream("Find recent AI papers"):
         if event.event_type == "lm.content_block.delta":
             print(event.content, end="")
 
-    # Non-streaming execution
-    result = await agent.run_sync("Find recent AI papers")
+    # Non-streaming execution (recommended)
+    result = await agent.run("Find recent AI papers")
     print(result.output)
     ```
 """

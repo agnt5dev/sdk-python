@@ -542,7 +542,7 @@ class AskUserTool(Tool):
                 tools=[AskUserTool(ctx)]
             )
 
-            result = await agent.run_sync(query, context=ctx)
+            result = await agent.run(query, context=ctx)
             return {"response": result.output}
         ```
     """
@@ -630,7 +630,7 @@ class RequestApprovalTool(Tool):
                 tools=[RequestApprovalTool(ctx)]
             )
 
-            result = await agent.run_sync(
+            result = await agent.run(
                 f"Review and deploy these changes: {changes}",
                 context=ctx
             )

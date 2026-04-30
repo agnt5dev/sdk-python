@@ -4,18 +4,19 @@ import inspect
 import json
 import logging
 import secrets
-import uuid as _uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
+from .. import lm
 from .._ids import generate_cid
 from .._serialization import serialize_to_str
+from .._telemetry import setup_module_logger
 from ..callbacks import (
-    AgentCallbackContext,
-    AgentCallbacks,
     AfterAgentCallback,
     AfterModelCallback,
     AfterToolCallback,
+    AgentCallbackContext,
+    AgentCallbacks,
     BeforeAgentCallback,
     BeforeModelCallback,
     BeforeToolCallback,
@@ -40,17 +41,9 @@ from .events import (
     ToolCallFailed,
     ToolCallStarted,
 )
-from ..lm.events import (
-    LMCompleted,
-    LMContentBlockCompleted,
-    LMContentBlockDelta,
-    LMContentBlockStarted,
-)
-
-from .context import AgentContext
-from .result import AgentResult
 from .handoff import Handoff
 from .registry import AgentRegistry
+from .result import AgentResult
 
 logger = setup_module_logger(__name__)
 
@@ -109,7 +102,7 @@ class Agent:
             tools=[search_web],
         )
 
-        result = await agent.run_sync("Find recent AI developments")
+        result = await agent.run("Find recent AI developments")
         print(result.output)
         ```
     """
@@ -305,7 +298,7 @@ class Agent:
         )
         async def agent_as_tool(ctx: Context, message: str) -> str:
             """Invoke the agent with a message and return its response."""
-            result = await agent.run_sync(message, context=ctx)
+            result = await agent.run(message, context=ctx)
             return result.output
 
         # Get the tool from registry
@@ -345,8 +338,8 @@ class Agent:
                 if hasattr(ctx, '_agent_data') and "_current_conversation" in ctx._agent_data:
                     history = ctx._agent_data["_current_conversation"]
 
-            # Run target agent (using run_sync for non-streaming invocation)
-            result = await target_agent.run_sync(
+            # Run target agent (using run for non-streaming invocation)
+            result = await target_agent.run(
                 message,
                 context=ctx,
                 history=history
@@ -610,8 +603,8 @@ class Agent:
             AgentResult as the final item
 
         Used by:
-            - run(): Wraps with agent.started/completed events
-            - run_sync(): Consumes events and extracts final result
+            - stream(): Wraps with agent.started/completed events
+            - run(): Consumes events and extracts final result
         """
         self.logger.debug(f"_run_core entered for agent '{self.name}', tools={list(self.tools.keys())}")
         sequence = sequence_start
@@ -1315,7 +1308,7 @@ class Agent:
             usage=usage_dict,
         ), sequence)
 
-    async def run(
+    async def stream(
         self,
         user_message: str,
         context: Optional[Context] = None,
@@ -1325,7 +1318,7 @@ class Agent:
         """Run agent with streaming events.
 
         This is an async generator that yields Event objects during execution.
-        Use `async for event in agent.run(...)` to process events in real-time.
+        Use `async for event in agent.stream(...)` to process events in real-time.
 
         Args:
             user_message: User's input message
@@ -1343,14 +1336,14 @@ class Agent:
         Example:
             ```python
             # Streaming execution
-            async for event in agent.run("Analyze recent tech news"):
+            async for event in agent.stream("Analyze recent tech news"):
                 if event.event_type == "lm.content_block.delta":
                     print(event.data, end="", flush=True)  # data is raw content for deltas
                 elif event.event_type == "agent.completed":
                     print(f"\\nFinal: {event.data['output']}")
 
-            # Non-streaming (use run_sync instead)
-            result = await agent.run_sync("Analyze recent tech news")
+            # Non-streaming (use run instead)
+            result = await agent.run("Analyze recent tech news")
             print(result.output)
             ```
         """
@@ -1415,7 +1408,7 @@ class Agent:
             )
             raise
 
-    async def run_sync(
+    async def run(
         self,
         user_message: str,
         context: Optional[Context] = None,
@@ -1424,8 +1417,8 @@ class Agent:
     ) -> AgentResult:
         """Run agent to completion (non-streaming).
 
-        This is the synchronous version that returns an AgentResult directly.
-        Use this when you don't need streaming events.
+        Returns an AgentResult directly. Use `agent.stream(...)` if you need
+        per-iteration events.
 
         Args:
             user_message: User's input message
@@ -1438,12 +1431,12 @@ class Agent:
 
         Example:
             ```python
-            result = await agent.run_sync("Analyze recent tech news")
+            result = await agent.run("Analyze recent tech news")
             print(result.output)
             ```
         """
         result = None
-        async for event in self.run(user_message, context, history, prompt_context):
+        async for event in self.stream(user_message, context, history, prompt_context):
             if isinstance(event, AgentCompleted):
                 # Extract result from the completed event
                 output_data = event.output_data or {}
@@ -1472,7 +1465,7 @@ class Agent:
     ) -> AgentResult:
         """Internal implementation of agent execution.
 
-        This contains the core agent loop logic. Called by both run() and run_sync().
+        This contains the core agent loop logic. Called by both run() and stream().
         """
         self.logger.debug(f" _run_impl called for agent '{self.name}', tools={list(self.tools.keys())}")
         # Create or adapt context

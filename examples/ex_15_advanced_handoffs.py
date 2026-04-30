@@ -166,7 +166,7 @@ async def chain_handoff_workflow(ctx: FunctionContext, query: str) -> dict:
     )
 
     # Start the chain
-    result = await intake_agent.run_sync(query)
+    result = await intake_agent.run(query)
 
     return {
         "query": query,
@@ -243,7 +243,7 @@ async def three_stage_pipeline(ctx: FunctionContext, document: str) -> dict:
         max_iterations=4,
     )
 
-    result = await parser.run_sync(f"Parse this document:\n{document}")
+    result = await parser.run(f"Parse this document:\n{document}")
 
     return {
         "document": document[:100] + "..." if len(document) > 100 else document,
@@ -340,7 +340,7 @@ async def conditional_handoff_router(ctx: FunctionContext, request: str) -> dict
         max_iterations=5,
     )
 
-    result = await router.run_sync(request)
+    result = await router.run(request)
 
     return {
         "request": request,
@@ -440,7 +440,7 @@ async def priority_based_routing(ctx: FunctionContext, issue: str, priority: str
         max_iterations=4,
     )
 
-    result = await router.run_sync(f"Priority: {priority}\nIssue: {issue}")
+    result = await router.run(f"Priority: {priority}\nIssue: {issue}")
 
     return {
         "issue": issue,
@@ -524,7 +524,7 @@ async def handoff_with_full_history(ctx: FunctionContext, messages: List[Dict[st
             elif m["role"] == "assistant":
                 history_messages.append(Message.assistant(m["content"]))
 
-    result = await initial_agent.run_sync(
+    result = await initial_agent.run(
         f"Previous conversation:\n{context_summary}\n\nContinue from the last message.",
         history=history_messages if history_messages else None,
     )
@@ -598,7 +598,7 @@ async def handoff_state_transfer(ctx: FunctionContext, task: str, initial_state:
 
     # Include state in the message
     state_str = "\n".join([f"- {k}: {v}" for k, v in state.items()])
-    result = await stage1_agent.run_sync(
+    result = await stage1_agent.run(
         f"Task: {task}\n\nCurrent State:\n{state_str}\n\nProcess stage 1 and hand off."
     )
 
@@ -683,7 +683,7 @@ async def handoff_with_escalation(ctx: FunctionContext, issue: str, max_escalati
         max_iterations=4,
     )
 
-    result = await level1_agent.run_sync(issue)
+    result = await level1_agent.run(issue)
 
     # Track escalation path
     escalation_path = ["level1"]
@@ -758,17 +758,17 @@ async def collaborative_handoff(ctx: WorkflowContext, problem: str) -> dict:
     contributions = []
 
     # Round 1: Architect proposes
-    arch_result = await architect.run_sync(f"Propose a solution for: {problem}")
+    arch_result = await architect.run(f"Propose a solution for: {problem}")
     contributions.append({"agent": "architect", "content": arch_result.output})
 
     # Round 2: Developer responds
-    dev_result = await developer.run_sync(
+    dev_result = await developer.run(
         f"Review and add to this proposal:\n{arch_result.output}"
     )
     contributions.append({"agent": "developer", "content": dev_result.output})
 
     # Round 3: Architect refines
-    final_result = await architect.run_sync(
+    final_result = await architect.run(
         f"Refine based on developer feedback:\n{dev_result.output}"
     )
     contributions.append({"agent": "architect", "content": final_result.output})

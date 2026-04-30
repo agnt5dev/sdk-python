@@ -160,7 +160,7 @@ Always show your work.""",
         max_iterations=10,
     )
 
-    result = await agent.run_sync(question)
+    result = await agent.run(question)
 
     return {
         "question": question,
@@ -198,7 +198,7 @@ Provide helpful summaries and comparisons when asked.""",
         max_iterations=10,
     )
 
-    result = await agent.run_sync(query)
+    result = await agent.run(query)
 
     return {
         "query": query,
@@ -240,7 +240,7 @@ Plan your approach, use tools as needed, and summarize results.""",
         max_iterations=15,
     )
 
-    result = await agent.run_sync(task)
+    result = await agent.run(task)
 
     return {
         "task": task,
@@ -312,7 +312,7 @@ Synthesize their work into a cohesive response.""",
         max_iterations=10,
     )
 
-    result = await coordinator.run_sync(f"Research and analyze: {topic}")
+    result = await coordinator.run(f"Research and analyze: {topic}")
 
     return {
         "topic": topic,
@@ -404,7 +404,7 @@ Transfer immediately without trying to answer yourself.""",
         max_iterations=5,
     )
 
-    result = await router.run_sync(query)
+    result = await router.run(query)
 
     return {
         "query": query,

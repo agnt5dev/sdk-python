@@ -80,7 +80,7 @@ class ConversationMemory:
             history = await conversation.get_messages()
 
             # Process with agent
-            result = await agent.run_sync(message, history=history)
+            result = await agent.run(message, history=history)
 
             # Save new messages
             await conversation.add("user", message)

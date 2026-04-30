@@ -100,7 +100,7 @@ async def test_before_agent_short_circuits_model_call() -> None:
         before_agent_callback=lambda ctx: "blocked by callback",
     )
 
-    result = await agent.run_sync("hello")
+    result = await agent.run("hello")
 
     assert result.output == "blocked by callback"
     assert model.call_count == 0
@@ -117,7 +117,7 @@ async def test_after_agent_replaces_output() -> None:
         after_agent_callback=lambda ctx, result: "rewritten output",
     )
 
-    result = await agent.run_sync("hello")
+    result = await agent.run("hello")
 
     assert result.output == "rewritten output"
     assert model.call_count == 1
@@ -137,7 +137,7 @@ async def test_before_model_short_circuits_provider_call() -> None:
         ),
     )
 
-    result = await agent.run_sync("hello")
+    result = await agent.run("hello")
 
     assert result.output == "cached response"
     assert model.call_count == 0
@@ -156,7 +156,7 @@ async def test_after_model_replaces_response() -> None:
         ),
     )
 
-    result = await agent.run_sync("hello")
+    result = await agent.run("hello")
 
     assert result.output == "rewritten model"
     assert model.call_count == 1
@@ -189,7 +189,7 @@ async def test_before_tool_short_circuits_tool_handler() -> None:
         before_tool_callback=lambda ctx: "cached tool result",
     )
 
-    result = await agent.run_sync("lookup x")
+    result = await agent.run("lookup x")
 
     assert result.output == "done"
     assert tool_called is False
@@ -220,7 +220,7 @@ async def test_after_tool_rewrites_tool_result() -> None:
         after_tool_callback=lambda ctx, result: override("rewritten tool result"),
     )
 
-    result = await agent.run_sync("lookup x")
+    result = await agent.run("lookup x")
 
     assert result.output == "done"
     assert "rewritten tool result" in model.requests[1].messages[-1].content

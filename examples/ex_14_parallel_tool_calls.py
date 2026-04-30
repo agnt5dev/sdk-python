@@ -663,7 +663,7 @@ async def agent_parallel_tools(ctx: WorkflowContext, query: str) -> dict:
     )
 
     start_time = time.time()
-    result = await data_agent.run_sync(query, context=ctx)
+    result = await data_agent.run(query, context=ctx)
     elapsed = (time.time() - start_time) * 1000
 
     # Analyze tool calls

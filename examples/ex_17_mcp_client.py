@@ -212,7 +212,7 @@ Provide concise, accurate answers based on the tool results.""",
         )
 
         # Run the agent
-        result = await agent.run_sync("What is the Python programming language?")
+        result = await agent.run("What is the Python programming language?")
         print(f"\nAgent response:\n{result.output[:500]}...")
         print(f"\nTool calls made: {len(result.tool_calls)}")
 
@@ -276,7 +276,7 @@ async def main():
 
         # Or use with an Agent
         agent = Agent(name="researcher", model="openai/gpt-4o-mini", tools=client.get_tools())
-        response = await agent.run_sync("Tell me about Python")
+        response = await agent.run("Tell me about Python")
     """)
 
     print("=" * 60)
