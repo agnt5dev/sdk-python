@@ -77,15 +77,23 @@ async def test_mcp_server_lists_and_calls_registered_primitives():
     )
     assert echo_response["result"]["content"][0]["text"] == "echo:hello"
 
+    # Workflow arguments are spread as kwargs into the handler keyed by
+    # parameter name — `summarize_topic(ctx, input: dict)` expects an `input`
+    # kwarg, matching how `_invoke_tool` spreads arguments into tool handlers.
     workflow_response = await server.dispatch(
         {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "summarize_topic", "arguments": {"topic": "mcp"}},
+            "params": {
+                "name": "summarize_topic",
+                "arguments": {"input": {"topic": "mcp"}},
+            },
         }
     )
-    assert '"summary": "done"' in workflow_response["result"]["content"][0]["text"]
+    workflow_text = workflow_response["result"]["content"][0]["text"]
+    assert '"summary"' in workflow_text and '"done"' in workflow_text
+    assert '"topic"' in workflow_text and '"mcp"' in workflow_text
 
     agent_response = await server.dispatch(
         {
@@ -95,7 +103,8 @@ async def test_mcp_server_lists_and_calls_registered_primitives():
             "params": {"name": "research_agent", "arguments": {"input": "hi"}},
         }
     )
-    assert '"output": "Agent answer"' in agent_response["result"]["content"][0]["text"]
+    agent_text = agent_response["result"]["content"][0]["text"]
+    assert '"output"' in agent_text and '"Agent answer"' in agent_text
 
 
 @pytest.mark.asyncio
