@@ -441,6 +441,26 @@ async def test_generate_missing_provider_prefix():
 
 
 @pytest.mark.asyncio
+async def test_generate_unsupported_provider_prefix():
+    """Test unsupported provider prefixes fail before backend/provider calls."""
+    with pytest.raises(ValueError, match="Unsupported model provider 'open'"):
+        await lm.generate(
+            model="open/gpt-5-mini",
+            prompt="Test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_empty_model_name():
+    """Test provider prefix must include a model name."""
+    with pytest.raises(ValueError, match="both provider and model name"):
+        await lm.generate(
+            model="openai/",
+            prompt="Test",
+        )
+
+
+@pytest.mark.asyncio
 async def test_stream_missing_prompt_and_messages():
     """Test stream requires either prompt or messages."""
     with pytest.raises(ValueError, match="Either 'prompt' or 'messages' must be provided"):
@@ -453,6 +473,14 @@ async def test_stream_missing_provider_prefix():
     """Test stream requires provider prefix in model."""
     with pytest.raises(ValueError, match="Model must include provider prefix"):
         async for _ in lm.stream(model="gpt-4o", prompt="Test"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_stream_unsupported_provider_prefix():
+    """Test stream rejects unsupported provider prefixes before backend/provider calls."""
+    with pytest.raises(ValueError, match="Unsupported model provider 'open'"):
+        async for _ in lm.stream(model="open/gpt-5-mini", prompt="Test"):
             pass
 
 

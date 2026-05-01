@@ -43,6 +43,25 @@ from .types import (
     built_in_tool_names,
 )
 
+SUPPORTED_MODEL_PROVIDERS = frozenset(
+    {
+        "anthropic",
+        "azure",
+        "bedrock",
+        "deepseek",
+        "gemini",
+        "google",
+        "groq",
+        "hf",
+        "huggingface",
+        "mistral",
+        "ollama",
+        "openai",
+        "openrouter",
+        "xai",
+    }
+)
+
 # Re-export types
 __all__ = [
     # Public API
@@ -78,13 +97,32 @@ __all__ = [
 
 def _parse_model(model: str) -> tuple[str, str]:
     """Parse provider and model name from model string."""
-    if '/' not in model:
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Model must be a non-empty string in 'provider/model' format")
+
+    if "/" not in model:
         raise ValueError(
             f"Model must include provider prefix (e.g., 'openai/{model}'). "
-            "Supported: openai, anthropic, groq, openrouter, azure, bedrock"
+            f"Supported providers: {', '.join(sorted(SUPPORTED_MODEL_PROVIDERS))}"
         )
-    parts = model.split('/', 1)
-    return (parts[0], parts[1])
+
+    provider, model_name = model.split("/", 1)
+    provider = provider.strip().lower()
+    model_name = model_name.strip()
+
+    if not provider or not model_name:
+        raise ValueError(
+            "Model must be in 'provider/model' format with both provider and model name"
+        )
+
+    if provider not in SUPPORTED_MODEL_PROVIDERS:
+        raise ValueError(
+            f"Unsupported model provider '{provider}' in model '{model}'. "
+            f"Did you mean 'openai/{model_name}'? "
+            f"Supported providers: {', '.join(sorted(SUPPORTED_MODEL_PROVIDERS))}"
+        )
+
+    return (provider, model_name)
 
 
 def _build_messages(
@@ -148,7 +186,8 @@ async def generate(
     Returns:
         GenerateResponse with text, usage, and optional structured output
     """
-    provider, _ = _parse_model(model)
+    provider, model_name = _parse_model(model)
+    model = f"{provider}/{model_name}"
     message_objects = _build_messages(prompt, messages)
 
     response_schema_json = None
@@ -214,7 +253,8 @@ async def stream(
     Yields:
         Event objects (lm.message.start, lm.message.delta, lm.message.stop)
     """
-    provider, _ = _parse_model(model)
+    provider, model_name = _parse_model(model)
+    model = f"{provider}/{model_name}"
     message_objects = _build_messages(prompt, messages)
 
     client = LMClient(provider=provider.lower())

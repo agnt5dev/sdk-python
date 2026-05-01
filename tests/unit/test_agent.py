@@ -163,6 +163,26 @@ def test_agent_creation_with_string_model():
     assert agent.model_name == "openai/gpt-4o-mini"
 
 
+def test_agent_rejects_unsupported_model_provider():
+    """Test invalid model providers fail during agent construction."""
+    with pytest.raises(ValueError, match="Unsupported model provider 'open'"):
+        Agent(
+            name="bad_provider_agent",
+            model="open/gpt-5-mini",
+            instructions="Test",
+        )
+
+
+def test_agent_rejects_model_without_provider_prefix():
+    """Test model strings must use provider/model format."""
+    with pytest.raises(ValueError, match="Model must include provider prefix"):
+        Agent(
+            name="bad_model_agent",
+            model="gpt-5-mini",
+            instructions="Test",
+        )
+
+
 def test_agent_with_tools(mock_lm, sample_tool):
     """Test agent creation with tools."""
     agent = Agent(

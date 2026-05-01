@@ -189,8 +189,9 @@ class Agent:
         # Handle model parameter: string or LanguageModel
         if isinstance(model, str):
             # New API: model is a string like "openai/gpt-4o-mini"
-            self.model = model
-            self.model_name = model  # For compatibility
+            provider, model_name = lm._parse_model(model)
+            self.model = f"{provider}/{model_name}"
+            self.model_name = self.model  # For compatibility
             self._language_model = None
         elif isinstance(model, LanguageModel):
             # Legacy API: model is a LanguageModel instance
