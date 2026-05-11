@@ -6,6 +6,8 @@ Built-in scorers (from Rust core):
     - exact_match: Exact string equality check
     - contains: Substring check
     - json_valid: JSON validity check
+    - json_schema: Validate output against a JSON Schema
+    - numeric_range: Check output is numeric and in [min, max]
     - regex_match: Regex pattern matching
     - levenshtein: Edit distance similarity
 
@@ -75,6 +77,8 @@ TraceAssertion = _eval.TraceAssertion
 exact_match = _eval.exact_match
 contains = _eval.contains
 json_valid = _eval.json_valid
+json_schema = _eval.json_schema
+numeric_range = _eval.numeric_range
 regex_match = _eval.regex_match
 levenshtein = _eval.levenshtein
 trace_scorer = _eval.trace_scorer
@@ -106,6 +110,8 @@ __all__ = [
     "exact_match",
     "contains",
     "json_valid",
+    "json_schema",
+    "numeric_range",
     "regex_match",
     "levenshtein",
     "trace_scorer",

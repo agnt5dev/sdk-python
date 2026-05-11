@@ -3,7 +3,10 @@
 //! Provides Python access to Rust scorers for evaluating AI component outputs.
 
 use agnt5_sdk_core::eval::{
-    deterministic::{self, ContainsConfig, ExactMatchConfig, LevenshteinConfig, RegexConfig},
+    deterministic::{
+        self, ContainsConfig, ExactMatchConfig, JsonSchemaConfig, LevenshteinConfig,
+        NumericRangeConfig, RegexConfig,
+    },
     trace::{self, TraceAssertion as RustTraceAssertion},
     ScorerInput as RustScorerInput, ScorerResult as RustScorerResult, TraceEvent as RustTraceEvent,
 };
@@ -400,6 +403,61 @@ fn levenshtein(input: &PyScorerInput, threshold: Option<f64>) -> PyScorerResult 
     deterministic::levenshtein(&input.inner, &config).into()
 }
 
+/// Validate output against a JSON Schema.
+///
+/// String outputs are parsed as JSON before validation; anything that
+/// is not valid JSON returns a `parse_error` label. A malformed schema
+/// returns `config_error`.
+///
+/// Args:
+///     input: ScorerInput with output value
+///     schema: JSON Schema (dict) to validate against
+///
+/// Returns:
+///     ScorerResult — score 1.0 on valid, 0.0 on invalid;
+///     metadata.errors carries the full error list when score is 0.0.
+#[pyfunction]
+fn json_schema(
+    py: Python<'_>,
+    input: &PyScorerInput,
+    schema: Bound<'_, PyAny>,
+) -> PyResult<PyScorerResult> {
+    let schema = py_to_value(py, &schema)?;
+    let config = JsonSchemaConfig { schema };
+    Ok(deterministic::json_schema(&input.inner, &config).into())
+}
+
+/// Check whether output's numeric value falls within `[min, max]`.
+///
+/// Accepts numbers or numeric strings (e.g. "42", "3.14"). Non-numeric
+/// output returns `parse_error`. At least one of `min` / `max` must be
+/// set; missing both returns `config_error`.
+///
+/// Args:
+///     input: ScorerInput with output value
+///     min: Lower bound (optional)
+///     max: Upper bound (optional)
+///     inclusive: When True (default), bounds are accepted; when False,
+///         strict greater-than / less-than.
+///
+/// Returns:
+///     ScorerResult — score 1.0 if in range, 0.0 otherwise.
+#[pyfunction]
+#[pyo3(signature = (input, min=None, max=None, inclusive=None))]
+fn numeric_range(
+    input: &PyScorerInput,
+    min: Option<f64>,
+    max: Option<f64>,
+    inclusive: Option<bool>,
+) -> PyScorerResult {
+    let config = NumericRangeConfig {
+        min,
+        max,
+        inclusive,
+    };
+    deterministic::numeric_range(&input.inner, &config).into()
+}
+
 // ============================================================================
 // Trace Assertions
 // ============================================================================
@@ -529,6 +587,8 @@ pub fn register_eval(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<(
     eval_module.add_function(wrap_pyfunction!(json_valid, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(regex_match, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(levenshtein, &eval_module)?)?;
+    eval_module.add_function(wrap_pyfunction!(json_schema, &eval_module)?)?;
+    eval_module.add_function(wrap_pyfunction!(numeric_range, &eval_module)?)?;
 
     // Trace scorer
     eval_module.add_function(wrap_pyfunction!(trace_scorer, &eval_module)?)?;

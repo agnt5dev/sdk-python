@@ -1,7 +1,8 @@
 """Tests for AGNT5 Evaluation Framework.
 
 Tests cover:
-- Deterministic scorers (exact_match, contains, json_valid, regex_match, levenshtein)
+- Deterministic scorers (exact_match, contains, json_valid, json_schema,
+  numeric_range, regex_match, levenshtein)
 - Trace assertions (glassbox testing)
 - Custom scorers (@scorer decorator)
 - LLM Judge (Python wrapper)
@@ -15,8 +16,10 @@ from agnt5.eval import (
     TraceAssertion,
     contains,
     exact_match,
+    json_schema,
     json_valid,
     levenshtein,
+    numeric_range,
     regex_match,
     trace_scorer,
 )
@@ -291,6 +294,116 @@ class TestLevenshtein:
         result = levenshtein(input_obj)
 
         assert result.score == 1.0
+
+
+class TestJsonSchema:
+    """Test json_schema scorer."""
+
+    def test_valid_object_passes(self):
+        schema = {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}},
+        }
+        input_obj = ScorerInput(output={"name": "Ada"})
+        result = json_schema(input_obj, schema=schema)
+        assert result.score == 1.0
+        assert result.passed is True
+        assert result.label == "valid"
+
+    def test_invalid_object_fails(self):
+        schema = {
+            "type": "object",
+            "required": ["name", "age"],
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer", "minimum": 0},
+            },
+        }
+        input_obj = ScorerInput(output={"name": "Ada", "age": -5})
+        result = json_schema(input_obj, schema=schema)
+        assert result.score == 0.0
+        assert result.passed is False
+        assert result.label == "invalid"
+        assert result.explanation  # one-line summary present
+
+    def test_string_output_is_parsed(self):
+        schema = {"type": "array", "items": {"type": "integer"}}
+        input_obj = ScorerInput(output="[1, 2, 3]")
+        result = json_schema(input_obj, schema=schema)
+        assert result.score == 1.0
+
+    def test_unparseable_string_is_parse_error(self):
+        schema = {"type": "object"}
+        input_obj = ScorerInput(output="{not json")
+        result = json_schema(input_obj, schema=schema)
+        assert result.score == 0.0
+        assert result.label == "parse_error"
+
+    def test_bad_schema_is_config_error(self):
+        # Schemas are objects or booleans, not strings.
+        input_obj = ScorerInput(output={"x": 1})
+        result = json_schema(input_obj, schema="not a schema")
+        assert result.label == "config_error"
+
+
+class TestNumericRange:
+    """Test numeric_range scorer."""
+
+    def test_in_range_inclusive_default(self):
+        input_obj = ScorerInput(output=5)
+        result = numeric_range(input_obj, min=1, max=10)
+        assert result.score == 1.0
+        assert result.label == "in_range"
+
+    def test_on_boundary_inclusive(self):
+        for boundary in (1, 10):
+            input_obj = ScorerInput(output=boundary)
+            result = numeric_range(input_obj, min=1, max=10)
+            assert result.score == 1.0, f"boundary {boundary} should pass inclusive"
+
+    def test_on_boundary_exclusive(self):
+        for boundary in (1, 10):
+            input_obj = ScorerInput(output=boundary)
+            result = numeric_range(input_obj, min=1, max=10, inclusive=False)
+            assert result.score == 0.0, f"boundary {boundary} should fail exclusive"
+
+    def test_out_of_range_below(self):
+        input_obj = ScorerInput(output=0)
+        result = numeric_range(input_obj, min=1, max=10)
+        assert result.score == 0.0
+        assert result.label == "out_of_range"
+
+    def test_out_of_range_above(self):
+        input_obj = ScorerInput(output=11)
+        result = numeric_range(input_obj, min=1, max=10)
+        assert result.score == 0.0
+
+    def test_one_sided_min_only(self):
+        input_obj = ScorerInput(output=100)
+        result = numeric_range(input_obj, min=50)
+        assert result.score == 1.0
+
+    def test_one_sided_max_only(self):
+        input_obj = ScorerInput(output=0.4)
+        result = numeric_range(input_obj, max=0.5)
+        assert result.score == 1.0
+
+    def test_numeric_string_accepted(self):
+        input_obj = ScorerInput(output="3.14")
+        result = numeric_range(input_obj, min=0, max=5)
+        assert result.score == 1.0
+
+    def test_non_numeric_is_parse_error(self):
+        input_obj = ScorerInput(output="not a number")
+        result = numeric_range(input_obj, min=0, max=10)
+        assert result.score == 0.0
+        assert result.label == "parse_error"
+
+    def test_missing_bounds_is_config_error(self):
+        input_obj = ScorerInput(output=1)
+        result = numeric_range(input_obj)
+        assert result.label == "config_error"
 
 
 class TestTraceAssertions:
