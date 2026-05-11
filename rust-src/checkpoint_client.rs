@@ -49,6 +49,19 @@ impl From<CheckpointResult> for PyCheckpointResult {
     }
 }
 
+impl PyCheckpointClient {
+    async fn connected_client(
+        client_arc: Arc<Mutex<Option<WorkerCoordinatorClient>>>,
+    ) -> PyResult<WorkerCoordinatorClient> {
+        let guard = client_arc.lock().await;
+        guard.as_ref().cloned().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "Checkpoint client not connected. Call connect() first.",
+            )
+        })
+    }
+}
+
 #[pymethods]
 impl PyCheckpointClient {
     /// Create a new checkpoint client
@@ -121,12 +134,7 @@ impl PyCheckpointClient {
         let client_arc = self.client.clone();
 
         future_into_py(py, async move {
-            let mut guard = client_arc.lock().await;
-            let client = guard.as_mut().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Checkpoint client not connected. Call connect() first.",
-                )
-            })?;
+            let mut client = PyCheckpointClient::connected_client(client_arc).await?;
 
             let result = client
                 .checkpoint(
@@ -180,12 +188,7 @@ impl PyCheckpointClient {
         let client_arc = self.client.clone();
 
         future_into_py(py, async move {
-            let mut guard = client_arc.lock().await;
-            let client = guard.as_mut().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Checkpoint client not connected. Call connect() first.",
-                )
-            })?;
+            let mut client = PyCheckpointClient::connected_client(client_arc).await?;
 
             let result = client
                 .checkpoint(
@@ -239,12 +242,7 @@ impl PyCheckpointClient {
         let client_arc = self.client.clone();
 
         future_into_py(py, async move {
-            let mut guard = client_arc.lock().await;
-            let client = guard.as_mut().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Checkpoint client not connected. Call connect() first.",
-                )
-            })?;
+            let mut client = PyCheckpointClient::connected_client(client_arc).await?;
 
             let result = client
                 .checkpoint(
@@ -295,12 +293,7 @@ impl PyCheckpointClient {
         let client_arc = self.client.clone();
 
         future_into_py(py, async move {
-            let mut guard = client_arc.lock().await;
-            let client = guard.as_mut().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "Checkpoint client not connected. Call connect() first.",
-                )
-            })?;
+            let mut client = PyCheckpointClient::connected_client(client_arc).await?;
 
             let result = client
                 .get_memoized_step(tenant_id, run_id, step_key)
