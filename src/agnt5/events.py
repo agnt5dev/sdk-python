@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,6 +39,15 @@ from edwh_uuid7 import uuid7
 from agnt5._serialization import serialize
 
 logger = logging.getLogger(__name__)
+
+# When AGNT5_SDK_FIRE_AND_FORGET=1, non-terminal checkpoint events (run.started,
+# function.started, function.completed) are queued instead of awaiting a
+# synchronous gRPC RPC. Terminal events (run.completed/failed/cancelled,
+# workflow.completed/failed/paused) still await — the Rust pre-flush before
+# a terminal event drains the journal queue first, so ordering is preserved.
+_FIRE_AND_FORGET_NONTERMINAL = os.environ.get("AGNT5_SDK_FIRE_AND_FORGET", "").lower() in (
+    "1", "true", "yes",
+)
 
 
 # =============================================================================
@@ -93,6 +103,25 @@ def is_checkpoint_event(event_type: str) -> bool:
         True if the event is a checkpoint event, False if it's SSE-only
     """
     return not is_sse_only_event(event_type)
+
+
+# Terminal events make the gateway return to the caller; they MUST be durable
+# before the worker returns to processing more work. Non-terminal checkpoints
+# (*.started, function.completed, etc.) can be queued — the Rust side's
+# pre-flush logic before a terminal event ensures ordering.
+_TERMINAL_EVENT_TYPES = frozenset({
+    "run.completed",
+    "run.failed",
+    "run.cancelled",
+    "workflow.completed",
+    "workflow.failed",
+    "workflow.paused",
+})
+
+
+def is_terminal_event(event_type: str) -> bool:
+    """True only for events the gateway tail-stream waits for."""
+    return event_type in _TERMINAL_EVENT_TYPES
 
 
 # =============================================================================
@@ -675,18 +704,44 @@ class EventEmitter:
             if event.parent_correlation_id:
                 merged_metadata["parent_correlation_id"] = event.parent_correlation_id
 
-            try:
-                await self._worker.emit_event_async(
-                    run_id=self._run_id,
-                    event_type=event.event_type,
-                    event_data=json_bytes,
-                    sequence_number=self._sequence,
-                    metadata=merged_metadata,
-                    source_timestamp_ns=event.timestamp_ns,
-                    timeout_ms=5000,
-                )
-            except Exception as e:
-                logger.error("[EventEmitter.emit_async] Failed to emit checkpoint: %s", e)
+            # Fire-and-forget for non-terminal checkpoints when enabled.
+            # Terminal events still await — the Rust side pre-flushes
+            # the journal queue before sending the terminal RPC, so
+            # ordering of started → completed is preserved.
+            if _FIRE_AND_FORGET_NONTERMINAL and not is_terminal_event(event.event_type):
+                try:
+                    self._worker.queue_event(
+                        invocation_id=self._run_id,
+                        event_type=event.event_type,
+                        event_data=json_bytes,
+                        content_index=0,
+                        sequence=self._sequence,
+                        metadata=merged_metadata,
+                        source_timestamp_ns=event.timestamp_ns,
+                        is_streaming=False,
+                        correlation_id=event.correlation_id,
+                        parent_correlation_id=event.parent_correlation_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[EventEmitter.emit_async] Failed to queue non-terminal checkpoint: %s",
+                        e,
+                    )
+            else:
+                try:
+                    await self._worker.emit_event_async(
+                        run_id=self._run_id,
+                        event_type=event.event_type,
+                        event_data=json_bytes,
+                        sequence_number=self._sequence,
+                        metadata=merged_metadata,
+                        source_timestamp_ns=event.timestamp_ns,
+                        timeout_ms=5000,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[EventEmitter.emit_async] Failed to emit checkpoint: %s", e
+                    )
         else:
             content_index = getattr(event, "index", 0)
             try:
@@ -718,8 +773,45 @@ class EventEmitter:
 
         Reduces gRPC overhead by batching non-terminal events together.
         Terminal events (.completed, .failed) should still use emit_async() for sync ack.
+
+        When AGNT5_SDK_FIRE_AND_FORGET=1 AND all events in the batch are
+        non-terminal, route them through queue_event so the batch is queued
+        and drained by the flush task instead of blocking on an RPC.
         """
         if not events or self._worker is None:
+            return
+
+        # Fire-and-forget path — queue each event, no await.
+        if _FIRE_AND_FORGET_NONTERMINAL and all(
+            not is_terminal_event(e.event_type) for e in events
+        ):
+            for event in events:
+                event_data = event.to_dict()
+                merged_metadata = dict(self._base_metadata)
+                if event.metadata:
+                    merged_metadata.update(event.metadata)
+                if event.correlation_id:
+                    merged_metadata["correlation_id"] = event.correlation_id
+                if event.parent_correlation_id:
+                    merged_metadata["parent_correlation_id"] = event.parent_correlation_id
+                self._sequence += 1
+                try:
+                    self._worker.queue_event(
+                        invocation_id=self._run_id,
+                        event_type=event.event_type,
+                        event_data=serialize(event_data),
+                        content_index=0,
+                        sequence=self._sequence,
+                        metadata=merged_metadata,
+                        source_timestamp_ns=event.timestamp_ns,
+                        is_streaming=False,
+                        correlation_id=event.correlation_id,
+                        parent_correlation_id=event.parent_correlation_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[EventEmitter.emit_batch_async] Failed to queue event: %s", e
+                    )
             return
 
         batch_tuples = []
