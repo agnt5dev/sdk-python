@@ -217,10 +217,8 @@ class Worker(ExecutorMixin):
 
             if auto_register_paths:
                 source_paths = auto_register_paths
-                logger.info(f"Auto-registration with explicit paths: {source_paths}")
             else:
                 source_paths = self._discover_source_paths(pyproject_path)
-                logger.info(f"Auto-registration with discovered paths: {source_paths}")
 
             self._auto_discover_components(source_paths)
         else:
@@ -360,10 +358,8 @@ class Worker(ExecutorMixin):
                 source_paths.append(python_source)
 
         if not source_paths:
-            logger.info("No source paths in pyproject.toml, defaulting to 'src/'")
             source_paths = ["src"]
 
-        logger.info(f"Discovered source paths from pyproject.toml: {source_paths}")
         return source_paths
 
     def _auto_discover_components(self, source_paths: list[str]) -> None:
@@ -374,10 +370,6 @@ class Worker(ExecutorMixin):
         """
         import importlib.util
         import sys
-
-        logger.info(f"Auto-discovering components in paths: {source_paths}")
-
-        total_modules = 0
 
         for source_path in source_paths:
             path = Path(source_path)
@@ -405,7 +397,6 @@ class Worker(ExecutorMixin):
                             sys.modules[module_name] = module
                             spec.loader.exec_module(module)
                             logger.debug(f"Auto-imported: {module_name}")
-                            total_modules += 1
                 except Exception as e:
                     logger.warning(f"Failed to import {module_name}: {e}")
                     _sentry.capture_exception(
@@ -422,8 +413,6 @@ class Worker(ExecutorMixin):
                         },
                         level="warning",
                     )
-
-        logger.info(f"Auto-imported {total_modules} modules")
 
         # Collect components from registries
         from ..agent import AgentRegistry
