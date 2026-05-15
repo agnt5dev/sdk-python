@@ -17,6 +17,14 @@ from ..scorer import ScorerRegistry, register_builtin_scorer_handlers
 
 # from ..workflow import WorkflowRegistry  # COMMENTED OUT - functions only for now
 from ._executors import ExecutorMixin
+from ._prompt_executor import (
+    PROMPT_EXECUTOR_COMPONENT_NAME,
+    PROMPT_EXECUTOR_INPUT_SCHEMA,
+    PROMPT_EXECUTOR_METADATA,
+    PROMPT_EXECUTOR_OUTPUT_SCHEMA,
+    is_prompt_executor_component,
+    prompt_executor_config,
+)
 
 logger = setup_module_logger(__name__)
 
@@ -229,6 +237,7 @@ class Worker(ExecutorMixin):
             resolved_agents = []
             for a in raw_agents:
                 from ..chat import ChatBot
+
                 if isinstance(a, ChatBot):
                     self._chatbots[a.name] = a
                     resolved_agents.append(a.agent)
@@ -493,54 +502,76 @@ class Worker(ExecutorMixin):
 
             config_dict = {}
             if config.retries:
-                config_dict.update({
-                    "max_attempts": str(config.retries.max_attempts),
-                    "initial_interval_ms": str(config.retries.initial_interval_ms),
-                    "max_interval_ms": str(config.retries.max_interval_ms),
-                })
+                config_dict.update(
+                    {
+                        "max_attempts": str(config.retries.max_attempts),
+                        "initial_interval_ms": str(config.retries.initial_interval_ms),
+                        "max_interval_ms": str(config.retries.max_interval_ms),
+                    }
+                )
             if config.backoff:
-                config_dict.update({
-                    "backoff_type": config.backoff.type.value,
-                    "backoff_multiplier": str(config.backoff.multiplier),
-                })
+                config_dict.update(
+                    {
+                        "backoff_type": config.backoff.type.value,
+                        "backoff_multiplier": str(config.backoff.multiplier),
+                    }
+                )
 
-            components.append(self._create_component_info(
-                name=config.name,
-                component_type="function",
-                metadata=config.metadata,
-                config=config_dict,
-                input_schema=config.input_schema,
-                output_schema=config.output_schema,
-            ))
+            components.append(
+                self._create_component_info(
+                    name=config.name,
+                    component_type="function",
+                    metadata=config.metadata,
+                    config=config_dict,
+                    input_schema=config.input_schema,
+                    output_schema=config.output_schema,
+                )
+            )
+
+        if not FunctionRegistry.get(PROMPT_EXECUTOR_COMPONENT_NAME):
+            components.append(
+                self._create_component_info(
+                    name=PROMPT_EXECUTOR_COMPONENT_NAME,
+                    component_type="function",
+                    metadata=PROMPT_EXECUTOR_METADATA,
+                    config={"builtin": "true"},
+                    input_schema=PROMPT_EXECUTOR_INPUT_SCHEMA,
+                    output_schema=PROMPT_EXECUTOR_OUTPUT_SCHEMA,
+                )
+            )
 
         # Entity API removed in 0.4.0 - entities list is always empty
 
         from ..workflow import WorkflowRegistry
+
         # Process workflows — iterate registry directly,
         # so @workflow(name="custom") works correctly.
         for config in WorkflowRegistry.all().values():
 
-            components.append(self._create_component_info(
-                name=config.name,
-                component_type="workflow",
-                metadata=config.metadata,
-                config={},
-                input_schema=config.input_schema,
-                output_schema=config.output_schema,
-                triggers=config.triggers,
-            ))
+            components.append(
+                self._create_component_info(
+                    name=config.name,
+                    component_type="workflow",
+                    metadata=config.metadata,
+                    config={},
+                    input_schema=config.input_schema,
+                    output_schema=config.output_schema,
+                    triggers=config.triggers,
+                )
+            )
 
         # Process agents
-        from ..agent import AgentRegistry
         for agent in self._explicit_components["agents"]:
             # Build agent definition with tool schemas
             tool_schemas = []
             for tool_name, tool in agent.tools.items():
-                tool_schemas.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                })
+                tool_schemas.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema,
+                    }
+                )
 
             definition = {
                 "instructions": agent.instructions,
@@ -550,30 +581,33 @@ class Worker(ExecutorMixin):
                 "handoffs": [h.agent.name for h in agent.handoffs] if agent.handoffs else [],
             }
 
-            components.append(self._create_component_info(
-                name=agent.name,
-                component_type="agent",
-                metadata={},
-                config={
-                    "model": agent.model,
-                    "max_iterations": str(agent.max_iterations),
-                },
-                definition=definition,
-            ))
+            components.append(
+                self._create_component_info(
+                    name=agent.name,
+                    component_type="agent",
+                    metadata={},
+                    config={
+                        "model": agent.model,
+                        "max_iterations": str(agent.max_iterations),
+                    },
+                    definition=definition,
+                )
+            )
 
         # Process tools
-        from ..tool import ToolRegistry
         for tool in self._explicit_components["tools"]:
-            components.append(self._create_component_info(
-                name=tool.name,
-                component_type="tool",
-                metadata={},
-                config={
-                    "confirmation": str(tool.confirmation),
-                },
-                input_schema=tool.input_schema,
-                output_schema=tool.output_schema,
-            ))
+            components.append(
+                self._create_component_info(
+                    name=tool.name,
+                    component_type="tool",
+                    metadata={},
+                    config={
+                        "confirmation": str(tool.confirmation),
+                    },
+                    input_schema=tool.input_schema,
+                    output_schema=tool.output_schema,
+                )
+            )
 
         # Process scorers
         for scorer_handler in self._explicit_components.get("scorers", []):
@@ -583,14 +617,16 @@ class Worker(ExecutorMixin):
                 logger.warning(f"Scorer '{scorer_name}' not found in ScorerRegistry")
                 continue
 
-            components.append(self._create_component_info(
-                name=config.name,
-                component_type="scorer",
-                metadata={},
-                config={},
-                input_schema=None,  # Scorers use standardized ScorerRequest
-                output_schema=None,  # Scorers use standardized ScorerResult
-            ))
+            components.append(
+                self._create_component_info(
+                    name=config.name,
+                    component_type="scorer",
+                    metadata={},
+                    config={},
+                    input_schema=None,  # Scorers use standardized ScorerRequest
+                    output_schema=None,  # Scorers use standardized ScorerResult
+                )
+            )
 
         return components
 
@@ -599,6 +635,7 @@ class Worker(ExecutorMixin):
 
         Handles function, entity, and workflow components.
         """
+
         def handle_message(request: Any) -> Any:
             """Handle incoming execution requests - returns coroutine for Rust to await."""
             component_name = request.component_name
@@ -615,15 +652,24 @@ class Worker(ExecutorMixin):
                 function_config = FunctionRegistry.get(component_name)
                 if function_config:
                     return self._execute_function(function_config, input_data, request)
+                if is_prompt_executor_component(component_name):
+                    return self._execute_function(
+                        prompt_executor_config(component_name),
+                        input_data,
+                        request,
+                    )
 
             # Entities - removed in 0.4.0
             elif component_type == "entity":
-                error_msg = f"Entity API was removed in 0.4.0. Entity '{component_name}' not supported."
+                error_msg = (
+                    f"Entity API was removed in 0.4.0. Entity '{component_name}' not supported."
+                )
                 logger.error(error_msg)
 
             # Workflows
             elif component_type == "workflow":
                 from ..workflow import WorkflowRegistry
+
                 workflow_config = WorkflowRegistry.get(component_name)
                 if workflow_config:
                     return self._execute_workflow(workflow_config, input_data, request)
@@ -631,6 +677,7 @@ class Worker(ExecutorMixin):
             # Tools
             elif component_type == "tool":
                 from ..tool import ToolRegistry
+
                 tool = ToolRegistry.get(component_name)
                 if tool:
                     return self._execute_tool(tool, input_data, request)
@@ -644,6 +691,7 @@ class Worker(ExecutorMixin):
                         return self._execute_chat_webhook(chatbot, input_data, request)
 
                 from ..agent import AgentRegistry
+
                 agent = AgentRegistry.get(component_name)
                 if agent:
                     return self._execute_agent(agent, input_data, request)
@@ -668,6 +716,7 @@ class Worker(ExecutorMixin):
     def _is_chat_webhook(self, input_data: bytes) -> bool:
         """Check if input_data is a chat webhook envelope."""
         import json
+
         try:
             data = json.loads(input_data)
             return isinstance(data, dict) and data.get("_chat_webhook") is True
@@ -694,9 +743,7 @@ class Worker(ExecutorMixin):
                 headers = envelope.get("headers", {})
                 body = envelope.get("body", "").encode("utf-8")
 
-                logger.info(
-                    f"Chat webhook received: platform={platform}, bot={chatbot.name}"
-                )
+                logger.info(f"Chat webhook received: platform={platform}, bot={chatbot.name}")
 
                 result = await chatbot.handle_webhook(platform, headers, body)
 
