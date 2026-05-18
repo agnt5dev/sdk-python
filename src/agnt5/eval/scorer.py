@@ -18,6 +18,7 @@ _custom_scorer_registry: Dict[str, ScorerFunc] = {}
 def scorer(
     name: Optional[str] = None,
     description: str = "",
+    scope: str = "item",
 ) -> Callable[[F], F]:
     """Decorator to create a custom scorer.
 
@@ -40,6 +41,7 @@ def scorer(
     Args:
         name: Scorer name (defaults to function name)
         description: Human-readable description
+        scope: Evaluation scope. Defaults to item.
 
     Returns:
         Decorated function registered as a scorer
@@ -56,6 +58,7 @@ def scorer(
         # Add metadata attributes
         wrapper._scorer_name = scorer_name  # type: ignore
         wrapper._scorer_description = scorer_description  # type: ignore
+        wrapper._scorer_scope = scope  # type: ignore
         wrapper._is_scorer = True  # type: ignore
 
         # Register in global registry
@@ -121,4 +124,5 @@ def get_scorer_info(fn: Callable) -> Optional[Dict[str, str]]:
     return {
         "name": getattr(fn, "_scorer_name", fn.__name__),
         "description": getattr(fn, "_scorer_description", ""),
+        "scope": getattr(fn, "_scorer_scope", "item"),
     }

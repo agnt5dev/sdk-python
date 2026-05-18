@@ -45,6 +45,7 @@ class ScorerConfig:
         name: Unique scorer name
         handler: The scorer function
         description: Human-readable description
+        scope: Evaluation scope: item, run, trace, span, session, or fleet_run
         is_async: Whether the handler is async
         input_schema: JSON schema for config (optional)
     """
@@ -52,6 +53,7 @@ class ScorerConfig:
     name: str
     handler: ScorerHandler
     description: str = ""
+    scope: str = "item"
     is_async: bool = False
     input_schema: Optional[Dict[str, Any]] = None
 
@@ -189,6 +191,7 @@ def register_builtin_scorer_handlers() -> None:
             name="llm_judge",
             handler=_llm_judge_handler,
             description="LLM-as-judge scorer for semantic evaluation",
+            scope="item",
             is_async=True,
         )
 
@@ -198,6 +201,7 @@ def scorer(
     *,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    scope: str = "item",
 ) -> Callable[..., Any]:
     """Decorator to register a function as an AGNT5 scorer.
 
@@ -207,6 +211,7 @@ def scorer(
     Args:
         name: Custom scorer name (default: function's __name__)
         description: Human-readable description (default: function's docstring)
+        scope: Evaluation scope. Defaults to item.
 
     Example:
         @scorer
@@ -248,6 +253,7 @@ def scorer(
             name=scorer_name,
             handler=handler_func,
             description=scorer_description.strip() if scorer_description else "",
+            scope=scope,
             is_async=True,  # Always async after wrapping
         )
 
@@ -255,6 +261,7 @@ def scorer(
 
         # Add metadata to the function
         handler_func._scorer_name = scorer_name  # type: ignore
+        handler_func._scorer_scope = scope  # type: ignore
         handler_func._scorer_config = config  # type: ignore
         handler_func._is_scorer = True  # type: ignore
 

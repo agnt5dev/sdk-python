@@ -621,7 +621,7 @@ class Worker(ExecutorMixin):
                 self._create_component_info(
                     name=config.name,
                     component_type="scorer",
-                    metadata={},
+                    metadata={"scope": config.scope},
                     config={},
                     input_schema=None,  # Scorers use standardized ScorerRequest
                     output_schema=None,  # Scorers use standardized ScorerResult

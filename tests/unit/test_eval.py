@@ -698,7 +698,7 @@ class TestCustomScorers:
     def test_get_scorer_info(self):
         """Test get_scorer_info function."""
 
-        @scorer(name="info_test", description="A test scorer")
+        @scorer(name="info_test", description="A test scorer", scope="run")
         def test_fn(ctx: EvalContext) -> ScorerResultPy:
             return ScorerResultPy(score=1.0, passed=True)
 
@@ -706,6 +706,7 @@ class TestCustomScorers:
         assert info is not None
         assert info["name"] == "info_test"
         assert info["description"] == "A test scorer"
+        assert info["scope"] == "run"
 
     def test_get_scorer_info_non_scorer(self):
         """Test get_scorer_info with non-scorer function."""
@@ -1106,7 +1107,22 @@ class TestScorerComponentType:
         config = ScorerRegistry.get("registry_test_scorer_unique")
         assert config is not None
         assert config.name == "registry_test_scorer_unique"
+        assert config.scope == "item"
         assert config.handler is not None
+
+    def test_scorer_registry_scope(self):
+        """Test scorer scope metadata."""
+        from agnt5.scorer import ScorerRegistry, scorer as scorer_dec
+        from agnt5.eval.types import ScorerRequest, ScorerResult as ScorerResultType
+
+        @scorer_dec(name="registry_test_run_scorer_unique", scope="run")
+        def test_scorer_fn(request: ScorerRequest) -> ScorerResultType:
+            return ScorerResultType(score=1.0, passed=True)
+
+        config = ScorerRegistry.get("registry_test_run_scorer_unique")
+        assert config is not None
+        assert config.scope == "run"
+        assert getattr(test_scorer_fn, "_scorer_scope") == "run"
 
     def test_scorer_registry_all(self):
         """Test ScorerRegistry.all() returns all registered scorers."""
