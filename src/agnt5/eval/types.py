@@ -7,6 +7,21 @@ from typing import Any, Dict, List, Optional
 
 
 @dataclass
+class ToolCall:
+    """Tool call extracted from journal events or normalized session payloads."""
+
+    name: str
+    arguments: Optional[Any] = None
+    call_id: Optional[str] = None
+    span_id: Optional[str] = None
+    timestamp_ns: Optional[int] = None
+    started_at: Optional[int] = None
+    ended_at: Optional[int] = None
+    status: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TraceEvent:
     """Event from execution trace (for glassbox testing).
 
@@ -103,6 +118,18 @@ class EvalContext:
             return []
         return [e for e in self.events if e.name == step_name]
 
+    def get_tool_calls(self) -> List[ToolCall]:
+        """Extract typed tool calls from available journal events."""
+        return extract_tool_calls(self.events or [])
+
+    def get_tool_call_names(self) -> List[str]:
+        """Return tool names in observed call order."""
+        return tool_call_names(self.get_tool_calls())
+
+    def tool_trajectory_matches(self, expected: List[str], mode: str = "exact") -> bool:
+        """Compare observed tool-call order to an expected trajectory."""
+        return tool_trajectory_matches(self.get_tool_call_names(), expected, mode=mode)
+
 
 @dataclass
 class ScorerRequest:
@@ -157,6 +184,258 @@ class ScorerRequest:
         """
         lm_calls = self.get_trace_events("lm.call.completed")
         return sum(e.data.get("total_tokens", 0) for e in lm_calls)
+
+    def get_tool_calls(self) -> List[ToolCall]:
+        """Extract typed tool calls from request journal events."""
+        return extract_tool_calls(self.trace or [])
+
+    def get_tool_call_names(self) -> List[str]:
+        """Return tool names in observed call order."""
+        return tool_call_names(self.get_tool_calls())
+
+    def tool_trajectory_matches(self, expected: List[str], mode: str = "exact") -> bool:
+        """Compare observed tool-call order to an expected trajectory."""
+        return tool_trajectory_matches(self.get_tool_call_names(), expected, mode=mode)
+
+
+def extract_tool_calls(events: List[TraceEvent]) -> List[ToolCall]:
+    """Extract tool calls from normalized session data and legacy journal events."""
+    calls: List[ToolCall] = []
+    by_key: Dict[str, int] = {}
+
+    def add(call: Optional[ToolCall], fallback_key: str) -> None:
+        if call is None or not call.name:
+            return
+        key = call.call_id or call.span_id or fallback_key
+        if key in by_key:
+            calls[by_key[key]] = _merge_tool_calls(calls[by_key[key]], call)
+            return
+        by_key[key] = len(calls)
+        calls.append(call)
+
+    for event in events:
+        data = event.data if isinstance(event.data, dict) else {}
+        for index, payload in enumerate(_iter_tool_call_payloads(data)):
+            add(_tool_call_from_mapping(payload, event, index), f"{event.event_id}:payload:{index}")
+        if "tool" in event.event_type:
+            add(_tool_call_from_event(event), event.event_id)
+    return calls
+
+
+def tool_call_names(calls: List[ToolCall]) -> List[str]:
+    """Return non-empty tool-call names in call order."""
+    return [call.name for call in calls if call.name]
+
+
+def tool_trajectory_exact(actual: List[str], expected: List[str]) -> bool:
+    """Return true when the observed trajectory exactly matches expected."""
+    return actual == expected
+
+
+def tool_trajectory_in_order(actual: List[str], expected: List[str]) -> bool:
+    """Return true when expected appears as an ordered subsequence."""
+    if not expected:
+        return True
+    index = 0
+    for name in actual:
+        if name == expected[index]:
+            index += 1
+            if index == len(expected):
+                return True
+    return False
+
+
+def tool_trajectory_any_order(actual: List[str], expected: List[str]) -> bool:
+    """Return true when actual contains the expected names with matching counts."""
+    remaining: Dict[str, int] = {}
+    for name in actual:
+        remaining[name] = remaining.get(name, 0) + 1
+    for name in expected:
+        count = remaining.get(name, 0)
+        if count <= 0:
+            return False
+        remaining[name] = count - 1
+    return True
+
+
+def tool_trajectory_matches(actual: List[str], expected: List[str], mode: str = "exact") -> bool:
+    """Compare a tool trajectory using exact, in_order, or any_order semantics."""
+    if mode == "exact":
+        return tool_trajectory_exact(actual, expected)
+    if mode == "in_order":
+        return tool_trajectory_in_order(actual, expected)
+    if mode == "any_order":
+        return tool_trajectory_any_order(actual, expected)
+    raise ValueError("mode must be one of: exact, in_order, any_order")
+
+
+def _iter_tool_call_payloads(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+
+    def extend_from(value: Any) -> None:
+        if isinstance(value, list):
+            payloads.extend(item for item in value if isinstance(item, dict))
+
+    extend_from(data.get("tool_calls"))
+    extend_from(data.get("toolCalls"))
+    for key in ("normalized_session", "session", "trace_session", "journal_session"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            extend_from(nested.get("tool_calls"))
+            extend_from(nested.get("toolCalls"))
+    for key in ("response", "output", "message"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            extend_from(nested.get("tool_calls"))
+            extend_from(nested.get("toolCalls"))
+    choices = data.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                extend_from(message.get("tool_calls"))
+                extend_from(message.get("toolCalls"))
+    return payloads
+
+
+def _tool_call_from_event(event: TraceEvent) -> Optional[ToolCall]:
+    data = event.data if isinstance(event.data, dict) else {}
+    return _tool_call_from_mapping(data, event, 0)
+
+
+def _tool_call_from_mapping(
+    payload: Dict[str, Any],
+    event: TraceEvent,
+    index: int,
+) -> Optional[ToolCall]:
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    name = _string_or_none(
+        _first_present(
+            payload.get("name"),
+            payload.get("tool_name"),
+            function.get("name"),
+            event.name if "tool" in event.event_type else None,
+        )
+    )
+    if not name:
+        return None
+    call_id = _string_or_none(
+        _first_present(
+            payload.get("call_id"),
+            payload.get("tool_call_id"),
+            payload.get("id"),
+            event.correlation_id if "tool" in event.event_type else None,
+        )
+    )
+    arguments = _first_present(
+        payload.get("arguments"), payload.get("args"), function.get("arguments")
+    )
+    return ToolCall(
+        name=name,
+        arguments=_decode_arguments(arguments),
+        call_id=call_id,
+        span_id=_string_or_none(payload.get("span_id")) or event.correlation_id,
+        timestamp_ns=_int_or_none(payload.get("timestamp_ns")) or event.timestamp_ns,
+        started_at=_int_or_none(payload.get("started_at")),
+        ended_at=_int_or_none(payload.get("ended_at")),
+        status=_string_or_none(payload.get("status")) or _status_from_event_type(event.event_type),
+        metadata=_tool_call_metadata(payload, event, index),
+    )
+
+
+def _tool_call_metadata(payload: Dict[str, Any], event: TraceEvent, index: int) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "source_event_id": event.event_id,
+        "source_event_type": event.event_type,
+        "source_index": index,
+    }
+    for key in (
+        "arguments_ref",
+        "args_ref",
+        "arguments_hash",
+        "args_hash",
+        "result_ref",
+        "result_hash",
+        "output_ref",
+        "output_hash",
+        "duration_ms",
+        "error_code",
+        "error_message_sanitized",
+    ):
+        if payload.get(key) is not None:
+            metadata[key] = payload[key]
+    attributes = payload.get("attributes_safe")
+    if isinstance(attributes, dict):
+        metadata["attributes_safe"] = attributes
+    return metadata
+
+
+def _merge_tool_calls(existing: ToolCall, incoming: ToolCall) -> ToolCall:
+    metadata = dict(existing.metadata)
+    metadata.update(incoming.metadata)
+    return ToolCall(
+        name=incoming.name or existing.name,
+        arguments=incoming.arguments if incoming.arguments is not None else existing.arguments,
+        call_id=incoming.call_id or existing.call_id,
+        span_id=incoming.span_id or existing.span_id,
+        timestamp_ns=existing.timestamp_ns or incoming.timestamp_ns,
+        started_at=existing.started_at or incoming.started_at,
+        ended_at=incoming.ended_at or existing.ended_at,
+        status=incoming.status or existing.status,
+        metadata=metadata,
+    )
+
+
+def _decode_arguments(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        import json
+
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _string_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _status_from_event_type(event_type: str) -> Optional[str]:
+    if event_type.endswith(".started"):
+        return "started"
+    if event_type.endswith(".completed"):
+        return "completed"
+    if event_type.endswith(".failed"):
+        return "failed"
+    return None
 
 
 @dataclass

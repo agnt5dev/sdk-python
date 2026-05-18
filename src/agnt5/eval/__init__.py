@@ -104,7 +104,18 @@ from .scorer import (
     list_custom_scorers,
     scorer,
 )
-from .types import EvalContext, ScorerRequest, TraceEvent
+from .types import (
+    EvalContext,
+    ScorerRequest,
+    ToolCall,
+    TraceEvent,
+    extract_tool_calls,
+    tool_call_names,
+    tool_trajectory_any_order,
+    tool_trajectory_exact,
+    tool_trajectory_in_order,
+    tool_trajectory_matches,
+)
 from .types import ScorerResult as ScorerResultPy
 
 ScorerInput = _eval.ScorerInput
@@ -157,6 +168,13 @@ __all__ = [
     "ScorerResultPy",
     "EvalContext",
     "TraceEvent",
+    "ToolCall",
+    "extract_tool_calls",
+    "tool_call_names",
+    "tool_trajectory_exact",
+    "tool_trajectory_in_order",
+    "tool_trajectory_any_order",
+    "tool_trajectory_matches",
     # Custom scorer utilities (legacy API)
     "scorer",
     "get_custom_scorer",

@@ -876,6 +876,164 @@ class TestEvalContext:
         total = ctx.get_total_tokens()
         assert total == 800
 
+    def test_get_tool_calls_empty(self):
+        """Tool-call helpers tolerate missing events."""
+        ctx = EvalContext(input="test", output="result")
+
+        assert ctx.get_tool_calls() == []
+        assert ctx.get_tool_call_names() == []
+        assert ctx.tool_trajectory_matches([], mode="exact") is True
+
+    def test_get_tool_calls_from_normalized_session(self):
+        """Tool calls are extracted from normalized session payloads."""
+        from agnt5.eval.types import TraceEvent
+
+        events = [
+            TraceEvent(
+                event_type="session.normalized",
+                event_id="evt-1",
+                correlation_id="span-root",
+                timestamp_ns=1000,
+                data={
+                    "normalized_session": {
+                        "tool_calls": [
+                            {
+                                "call_id": "call-1",
+                                "span_id": "span-1",
+                                "name": "search",
+                                "started_at": 10,
+                                "ended_at": 12,
+                                "arguments_ref": "s3://args.json",
+                                "arguments_hash": "hash-args",
+                                "status": "completed",
+                                "attributes_safe": {"source": "normalized"},
+                            },
+                            {
+                                "call_id": "call-2",
+                                "span_id": "span-2",
+                                "name": "lookup",
+                                "started_at": 13,
+                                "ended_at": 14,
+                            },
+                            {"call_id": "malformed"},
+                        ]
+                    }
+                },
+            )
+        ]
+
+        ctx = EvalContext(input="test", output="result", events=events)
+        calls = ctx.get_tool_calls()
+
+        assert ctx.get_tool_call_names() == ["search", "lookup"]
+        assert len(calls) == 2
+        assert calls[0].call_id == "call-1"
+        assert calls[0].span_id == "span-1"
+        assert calls[0].arguments is None
+        assert calls[0].metadata["arguments_ref"] == "s3://args.json"
+        assert calls[0].metadata["attributes_safe"] == {"source": "normalized"}
+        assert calls[1].started_at == 13
+
+    def test_get_tool_calls_from_legacy_and_lm_events(self):
+        """Tool calls are extracted from tool events and LM tool-call payloads."""
+        from agnt5.eval.types import TraceEvent
+
+        events = [
+            TraceEvent(
+                event_type="tool.call.started",
+                event_id="evt-1",
+                correlation_id="span-tool",
+                timestamp_ns=1000,
+                data={
+                    "tool_name": "search",
+                    "tool_call_id": "call-1",
+                    "arguments": {"query": "weather"},
+                },
+            ),
+            TraceEvent(
+                event_type="tool.call.completed",
+                event_id="evt-2",
+                correlation_id="span-tool",
+                timestamp_ns=2000,
+                data={"tool_name": "search", "tool_call_id": "call-1", "duration_ms": 5},
+            ),
+            TraceEvent(
+                event_type="lm.call.completed",
+                event_id="evt-3",
+                correlation_id="span-lm",
+                timestamp_ns=3000,
+                data={
+                    "tool_calls": [
+                        {
+                            "id": "call-2",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"id": 42}',
+                            },
+                        }
+                    ]
+                },
+            ),
+            TraceEvent(
+                event_type="tool.call.completed",
+                event_id="evt-4",
+                correlation_id="span-bad",
+                timestamp_ns=4000,
+                data={"duration_ms": 1},
+            ),
+        ]
+
+        ctx = EvalContext(input="test", output="result", events=events)
+        calls = ctx.get_tool_calls()
+
+        assert ctx.get_tool_call_names() == ["search", "lookup"]
+        assert len(calls) == 2
+        assert calls[0].call_id == "call-1"
+        assert calls[0].arguments == {"query": "weather"}
+        assert calls[0].status == "completed"
+        assert calls[0].metadata["duration_ms"] == 5
+        assert calls[1].call_id == "call-2"
+        assert calls[1].arguments == {"id": 42}
+
+    def test_tool_trajectory_helpers(self):
+        """Trajectory helpers support exact, in-order, and any-order matching."""
+        from agnt5.eval.types import (
+            tool_trajectory_any_order,
+            tool_trajectory_exact,
+            tool_trajectory_in_order,
+            tool_trajectory_matches,
+        )
+
+        actual = ["search", "lookup", "summarize", "search"]
+
+        assert tool_trajectory_exact(actual, actual) is True
+        assert tool_trajectory_exact(actual, ["search", "lookup"]) is False
+        assert tool_trajectory_in_order(actual, ["search", "summarize"]) is True
+        assert tool_trajectory_in_order(actual, ["summarize", "lookup"]) is False
+        assert tool_trajectory_any_order(actual, ["lookup", "search", "search"]) is True
+        assert tool_trajectory_any_order(actual, ["lookup", "lookup"]) is False
+        assert tool_trajectory_matches(actual, ["summarize", "search"], mode="in_order") is True
+
+    def test_scorer_request_tool_call_helpers(self):
+        """ScorerRequest exposes the same tool-call helpers as EvalContext."""
+        from agnt5.eval.types import ScorerRequest, TraceEvent
+
+        request = ScorerRequest(
+            output="result",
+            trace=[
+                TraceEvent(
+                    event_type="tool.call.completed",
+                    event_id="evt-1",
+                    correlation_id="span-tool",
+                    timestamp_ns=1000,
+                    data={"tool_name": "search", "tool_call_id": "call-1"},
+                )
+            ],
+        )
+
+        assert request.get_tool_call_names() == ["search"]
+        assert request.tool_trajectory_matches(["search"], mode="exact") is True
+
 
 class TestLlmJudgeHelpers:
     """Test LLM Judge helper functions."""
