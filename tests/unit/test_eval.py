@@ -1101,6 +1101,121 @@ class TestLLMJudge:
         assert faithfulness_spec["name"] == "faithfulness"
         assert faithfulness_spec["config"]["context_fields"] == ["input.context"]
 
+    def test_custom_judge_prompt_template_to_scorer_spec(self):
+        """Test custom judge prompt template scorer specs."""
+        from agnt5.eval import LLMJudge
+
+        judge = LLMJudge(
+            prompt_template="Label {{output.answer}} against {{expected.answer}}",
+            choice_scores={"correct": 1.0, "incorrect": 0.0},
+            model="openai/gpt-test",
+        )
+        spec = judge.to_scorer_spec()
+
+        assert spec["name"] == "llm_judge"
+        assert (
+            spec["config"]["prompt_template"]
+            == "Label {{output.answer}} against {{expected.answer}}"
+        )
+        assert spec["config"]["choice_scores"] == {"correct": 1.0, "incorrect": 0.0}
+        assert spec["config"]["model"] == "gpt-test"
+
+    def test_custom_judge_prompt_template_and_choice_scores(self, monkeypatch):
+        """Custom judge templates render fields and map labels to scores."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
+
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"label":"correct","explanation":"matches"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+
+        result = asyncio.run(
+            llm_judge(
+                output={"answer": "4"},
+                expected={"answer": "4"},
+                input_data={"question": "2+2?"},
+                config=LLMJudgeConfig(
+                    criteria="",
+                    model="openai/gpt-test",
+                    prompt_template=(
+                        "Question: {{input.question}}\n"
+                        "Answer: {{output.answer}}\n"
+                        "Reference: {{expected.answer}}"
+                    ),
+                    choice_scores={"correct": 1.0, "incorrect": 0.0},
+                ),
+            )
+        )
+
+        assert result.score == 1.0
+        assert result.passed is True
+        assert result.label == "correct"
+        assert result.metadata["selected_label"] == "correct"
+        assert "Question: 2+2?" in captured["messages"][1]["content"]
+        assert (
+            "Choose exactly one label from: correct, incorrect"
+            in captured["messages"][1]["content"]
+        )
+
+    def test_custom_judge_invalid_label_fails_with_clear_label(self, monkeypatch):
+        """Custom judge labels must be one of the configured choices."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
+
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+
+        async def fake_generate(**kwargs):
+            class Response:
+                text = '{"label":"maybe","explanation":"uncertain"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+
+        result = asyncio.run(
+            llm_judge(
+                output="4",
+                config=LLMJudgeConfig(
+                    criteria="",
+                    model="openai/gpt-test",
+                    prompt_template="Score {{output}}",
+                    choice_scores={"correct": 1.0, "incorrect": 0.0},
+                ),
+            )
+        )
+
+        assert result.passed is False
+        assert result.label == "invalid_label"
+        assert result.metadata["invalid_label"] == "maybe"
+        assert result.metadata["allowed_labels"] == ["correct", "incorrect"]
+
+    def test_custom_judge_missing_template_variable_reports_config_error(self):
+        """Missing custom judge template variables fail before model calls."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
+
+        result = asyncio.run(
+            llm_judge(
+                output={"answer": "4"},
+                config=LLMJudgeConfig(
+                    criteria="",
+                    model="openai/gpt-test",
+                    prompt_template="Score {{output.missing}}",
+                    choice_scores={"correct": 1.0, "incorrect": 0.0},
+                ),
+            )
+        )
+
+        assert result.passed is False
+        assert result.label == "config_error"
+        assert "output.missing" in (result.explanation or "")
+
     def test_faithfulness_builtin_handler_binds_context_fields(self, monkeypatch):
         """Smoke-test the managed faithfulness scorer with a fake judge model."""
         from agnt5.eval.types import ScorerRequest

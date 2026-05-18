@@ -45,10 +45,13 @@ class LLMJudge:
         >>> print(f"Passed: {result.passed}")
     """
 
-    criteria: str
+    criteria: str = ""
     model: str = "openai/gpt-4o-mini"
     include_input: bool = False
     temperature: float = 0.0
+    prompt_template: Optional[str] = None
+    choice_scores: Optional[Dict[str, float]] = None
+    system_prompt: Optional[str] = None
 
     def to_scorer_spec(self) -> Dict[str, Any]:
         """Serialize to platform scorer spec format.
@@ -63,16 +66,21 @@ class LLMJudge:
             provider = "openai"
             model_name = self.model
 
-        return {
-            "name": "llm_judge",
-            "config": {
-                "provider": provider,
-                "model": model_name,
-                "criteria": self.criteria,
-                "include_input": self.include_input,
-                "temperature": self.temperature,
-            },
+        config: Dict[str, Any] = {
+            "provider": provider,
+            "model": model_name,
+            "include_input": self.include_input,
+            "temperature": self.temperature,
         }
+        if self.criteria:
+            config["criteria"] = self.criteria
+        if self.prompt_template:
+            config["prompt_template"] = self.prompt_template
+        if self.choice_scores:
+            config["choice_scores"] = self.choice_scores
+        if self.system_prompt:
+            config["system_prompt"] = self.system_prompt
+        return {"name": "llm_judge", "config": config}
 
 
 @dataclass
@@ -155,6 +163,8 @@ class LLMJudgeConfig:
     system_prompt: Optional[str] = None
     temperature: float = 0.0
     include_input: bool = False
+    prompt_template: Optional[str] = None
+    choice_scores: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -216,25 +226,20 @@ async def llm_judge(
     """
     system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
 
-    # Build user prompt
-    user_content = f"## Evaluation Criteria\n{config.criteria}\n\n"
-
-    if config.include_input and input_data is not None:
-        input_str = _format_value(input_data)
-        user_content += f"## Input\n{input_str}\n\n"
-
-    if context_data is not None:
-        context_str = _format_value(context_data)
-        user_content += f"## Context\n{context_str}\n\n"
-
-    output_str = _format_value(output)
-    user_content += f"## Output to Evaluate\n{output_str}\n\n"
-
-    if expected is not None:
-        expected_str = _format_value(expected)
-        user_content += f"## Expected Output (Reference)\n{expected_str}\n\n"
-
-    user_content += "Please evaluate the output and respond with a JSON object."
+    user_content, render_error = _build_judge_prompt(
+        output=output,
+        config=config,
+        expected=expected,
+        input_data=input_data,
+        context_data=context_data,
+    )
+    if render_error:
+        return LLMJudgeResult(
+            score=0.0,
+            passed=False,
+            explanation=render_error,
+            label="config_error",
+        )
 
     try:
         generate = _get_generate()
@@ -247,7 +252,8 @@ async def llm_judge(
             temperature=config.temperature,
         )
 
-        return _parse_llm_response(response.text)
+        result = _parse_llm_response(response.text)
+        return _apply_choice_scores(result, config.choice_scores)
 
     except Exception as e:
         return LLMJudgeResult(
@@ -256,6 +262,131 @@ async def llm_judge(
             explanation=f"LLM call failed: {str(e)}",
             metadata={"error": str(e)},
         )
+
+
+def _build_judge_prompt(
+    *,
+    output: Any,
+    config: LLMJudgeConfig,
+    expected: Optional[Any],
+    input_data: Optional[Any],
+    context_data: Optional[Any],
+) -> tuple[str, Optional[str]]:
+    if config.prompt_template:
+        rendered, error = _render_prompt_template(
+            config.prompt_template,
+            {
+                "input": input_data,
+                "output": output,
+                "expected": expected,
+                "context": context_data,
+            },
+        )
+        if error:
+            return "", error
+        user_content = rendered.rstrip() + "\n\n"
+    else:
+        if not config.criteria:
+            return "", "llm_judge requires criteria or prompt_template"
+        user_content = f"## Evaluation Criteria\n{config.criteria}\n\n"
+
+        if config.include_input and input_data is not None:
+            input_str = _format_value(input_data)
+            user_content += f"## Input\n{input_str}\n\n"
+
+        if context_data is not None:
+            context_str = _format_value(context_data)
+            user_content += f"## Context\n{context_str}\n\n"
+
+        output_str = _format_value(output)
+        user_content += f"## Output to Evaluate\n{output_str}\n\n"
+
+        if expected is not None:
+            expected_str = _format_value(expected)
+            user_content += f"## Expected Output (Reference)\n{expected_str}\n\n"
+
+    if config.choice_scores:
+        labels = ", ".join(sorted(config.choice_scores))
+        user_content += (
+            "Choose exactly one label from: "
+            f"{labels}. Return that label in the JSON `label` field. "
+            "The platform will map labels to scores.\n\n"
+        )
+    user_content += "Please evaluate the output and respond with a JSON object."
+    return user_content, None
+
+
+def _render_prompt_template(template: str, values: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    def replace(match: re.Match[str]) -> str:
+        selector = match.group(1).strip()
+        try:
+            return _format_value(_selector_value(values, selector))
+        except KeyError as exc:
+            raise ValueError(str(exc)) from None
+
+    try:
+        return re.sub(r"{{\s*([^{}]+?)\s*}}", replace, template), None
+    except ValueError as exc:
+        return "", f"prompt_template variable not found: {exc}"
+
+
+def _selector_value(values: Dict[str, Any], selector: str) -> Any:
+    root, sep, rest = selector.partition(".")
+    if root not in values:
+        raise KeyError(selector)
+    value = values[root]
+    if sep == "":
+        return value
+    for part in rest.split("."):
+        if part == "":
+            raise KeyError(selector)
+        if isinstance(value, dict):
+            if part not in value:
+                raise KeyError(selector)
+            value = value[part]
+            continue
+        if isinstance(value, list):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                raise KeyError(selector) from None
+            continue
+        raise KeyError(selector)
+    return value
+
+
+def _apply_choice_scores(
+    result: LLMJudgeResult,
+    choice_scores: Optional[Dict[str, float]],
+) -> LLMJudgeResult:
+    if not choice_scores or result.label in {"parse_error", "config_error"}:
+        return result
+    labels = sorted(choice_scores)
+    if not result.label or result.label not in choice_scores:
+        metadata = dict(result.metadata or {})
+        metadata["allowed_labels"] = labels
+        if result.label:
+            metadata["invalid_label"] = result.label
+        return LLMJudgeResult(
+            score=0.0,
+            passed=False,
+            label="invalid_label",
+            explanation=(
+                f"Judge returned label {result.label!r}; expected one of: " f"{', '.join(labels)}"
+            ),
+            metadata=metadata,
+        )
+    score = max(0.0, min(1.0, float(choice_scores[result.label])))
+    metadata = dict(result.metadata or {})
+    metadata["choice_scores"] = choice_scores
+    metadata["selected_label"] = result.label
+    return LLMJudgeResult(
+        score=score,
+        passed=score >= 0.7,
+        explanation=result.explanation,
+        label=result.label,
+        metadata=metadata,
+    )
 
 
 def _format_value(value: Any) -> str:

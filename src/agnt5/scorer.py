@@ -175,6 +175,20 @@ def _judge_include_input(config: Dict[str, Any], default: bool = False) -> bool:
     return bool(value)
 
 
+def _judge_choice_scores(config: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    raw = config.get("choice_scores")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    scores: Dict[str, float] = {}
+    for label, score in raw.items():
+        if not isinstance(label, str) or not isinstance(score, (int, float)):
+            return None
+        scores[label] = float(score)
+    return scores
+
+
 def _selector_value(request: Any, selector: str) -> Any:
     root, sep, rest = selector.strip().partition(".")
     if sep == "" or not rest:
@@ -270,8 +284,11 @@ def register_builtin_scorer_handlers() -> None:
             llm_config = LLMJudgeConfig(
                 criteria=config.get("criteria", ""),
                 model=f"{provider}/{model}",
+                prompt_template=config.get("prompt_template"),
+                system_prompt=config.get("system_prompt"),
                 temperature=config.get("temperature", 0.0),
                 include_input=config.get("include_input", False),
+                choice_scores=_judge_choice_scores(config),
             )
 
             result = await llm_judge(
