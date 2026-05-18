@@ -1087,19 +1087,124 @@ class TestLLMJudge:
 
     def test_managed_judge_presets_to_scorer_spec(self):
         """Test named judge preset scorer specs."""
-        from agnt5.eval import Correctness, Faithfulness
+        from agnt5.eval import (
+            EVALUATOR_PRESET_VERSION,
+            Coherence,
+            Conciseness,
+            Correctness,
+            Faithfulness,
+            GoalSuccess,
+            Harmfulness,
+            Helpfulness,
+            InstructionFollowing,
+            Refusal,
+            ResponseRelevance,
+            Stereotyping,
+        )
 
-        correctness = Correctness(answer_field="output.answer")
-        faithfulness = Faithfulness(context_fields=["input.context"], answer_field="output.answer")
+        presets = [
+            (Correctness(answer_field="output.answer"), "correctness", "correctness"),
+            (
+                Faithfulness(context_fields=["input.context"], answer_field="output.answer"),
+                "faithfulness",
+                "faithfulness",
+            ),
+            (Helpfulness(), "helpfulness", "llm_judge"),
+            (Coherence(), "coherence", "llm_judge"),
+            (Conciseness(), "conciseness", "llm_judge"),
+            (ResponseRelevance(), "response_relevance", "llm_judge"),
+            (InstructionFollowing(), "instruction_following", "llm_judge"),
+            (
+                GoalSuccess(
+                    session_fields=["session.goal"],
+                    journal_event_fields=["journal.events"],
+                ),
+                "goal_success",
+                "llm_judge",
+            ),
+            (Refusal(), "refusal", "llm_judge"),
+            (Harmfulness(), "harmfulness", "llm_judge"),
+            (Stereotyping(), "stereotyping", "llm_judge"),
+        ]
 
-        correctness_spec = correctness.to_scorer_spec()
-        faithfulness_spec = faithfulness.to_scorer_spec()
+        for preset, preset_name, scorer_name in presets:
+            spec = preset.to_scorer_spec()
 
-        assert correctness_spec["name"] == "correctness"
-        assert correctness_spec["config"]["provider"] == "openai"
+            assert spec["name"] == scorer_name
+            assert spec["config"]["provider"] == "openai"
+            assert spec["config"]["model"] == "gpt-4o-mini"
+            assert spec["config"]["preset_name"] == preset_name
+            assert spec["config"]["preset_version"] == EVALUATOR_PRESET_VERSION
+            assert spec["config"]["prompt_version"] == f"agnt5.evaluator.{preset_name}.prompt.v1"
+            assert spec["config"]["rubric_version"] == f"agnt5.evaluator.{preset_name}.rubric.v1"
+            assert spec["config"]["output_schema"]["required"] == [
+                "score",
+                "passed",
+                "label",
+                "explanation",
+            ]
+
+        correctness_spec = presets[0][0].to_scorer_spec()
+        faithfulness_spec = presets[1][0].to_scorer_spec()
+        goal_success_spec = presets[7][0].to_scorer_spec()
+
         assert correctness_spec["config"]["answer_field"] == "output.answer"
-        assert faithfulness_spec["name"] == "faithfulness"
+        assert "criteria" not in correctness_spec["config"]
         assert faithfulness_spec["config"]["context_fields"] == ["input.context"]
+        assert goal_success_spec["config"]["journal_event_fields"] == ["journal.events"]
+        assert goal_success_spec["config"]["session_fields"] == ["session.goal"]
+
+    def test_evaluator_preset_parse_result(self):
+        """Named presets parse stable judge result fields."""
+        from agnt5.eval import Helpfulness
+
+        result = Helpfulness().parse_result(
+            '{"label":"partial","explanation":"useful but incomplete","metadata":{"notes":1}}'
+        )
+
+        assert result.score == 0.5
+        assert result.passed is False
+        assert result.label == "partial"
+        assert result.explanation == "useful but incomplete"
+        assert result.metadata["notes"] == 1
+        assert result.metadata["preset_name"] == "helpfulness"
+        assert result.metadata["preset_version"] == "agnt5.evaluator_preset.v1"
+
+    def test_evaluator_preset_evaluate_returns_stable_fields(self, monkeypatch):
+        """Named presets run through llm_judge and return normalized fields."""
+        from agnt5.eval import Correctness
+
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"label":"pass","explanation":"matches reference","metadata":{"source":"fake"}}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+
+        result = asyncio.run(
+            Correctness().evaluate(
+                output="4",
+                expected="4",
+                input_data={"question": "2+2?"},
+            )
+        )
+
+        assert result.score == 1.0
+        assert result.passed is True
+        assert result.label == "pass"
+        assert result.explanation == "matches reference"
+        assert result.metadata["source"] == "fake"
+        assert result.metadata["preset_name"] == "correctness"
+        assert (
+            "Choose exactly one label from: fail, partial, pass"
+            in captured["messages"][1]["content"]
+        )
 
     def test_custom_judge_prompt_template_to_scorer_spec(self):
         """Test custom judge prompt template scorer specs."""

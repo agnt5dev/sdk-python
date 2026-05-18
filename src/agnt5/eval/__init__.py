@@ -71,6 +71,42 @@ from __future__ import annotations
 # Import from Rust core bindings
 from .._core import eval as _eval
 
+# LLM-as-judge
+from .llm_judge import (
+    EVALUATOR_OUTPUT_SCHEMA,
+    EVALUATOR_PRESET_VERSION,
+    EVALUATOR_SYSTEM_PROMPT,
+    Coherence,
+    Conciseness,
+    Correctness,
+    EvaluatorPreset,
+    Faithfulness,
+    GoalSuccess,
+    Harmfulness,
+    Helpfulness,
+    InstructionFollowing,
+    LLMJudge,
+    LLMJudgeConfig,
+    LLMJudgeResult,
+    Refusal,
+    ResponseRelevance,
+    Stereotyping,
+    evaluate_with_criteria,
+    llm_judge,
+)
+
+# Import Python types and utilities
+from .scorer import (
+    clear_custom_scorers,
+    get_custom_scorer,
+    get_scorer_info,
+    is_scorer,
+    list_custom_scorers,
+    scorer,
+)
+from .types import EvalContext, ScorerRequest, TraceEvent
+from .types import ScorerResult as ScorerResultPy
+
 ScorerInput = _eval.ScorerInput
 ScorerResult = _eval.ScorerResult
 TraceAssertion = _eval.TraceAssertion
@@ -82,28 +118,6 @@ numeric_range = _eval.numeric_range
 regex_match = _eval.regex_match
 levenshtein = _eval.levenshtein
 trace_scorer = _eval.trace_scorer
-
-# Import Python types and utilities
-from .scorer import (
-    clear_custom_scorers,
-    get_custom_scorer,
-    get_scorer_info,
-    is_scorer,
-    list_custom_scorers,
-    scorer,
-)
-from .types import EvalContext, ScorerRequest, ScorerResult as ScorerResultPy, TraceEvent
-
-# LLM-as-judge
-from .llm_judge import (
-    Correctness,
-    Faithfulness,
-    LLMJudge,
-    LLMJudgeConfig,
-    LLMJudgeResult,
-    evaluate_with_criteria,
-    llm_judge,
-)
 
 __all__ = [
     # Rust core scorers (for ScorerInput-based API)
@@ -119,8 +133,21 @@ __all__ = [
     "trace_scorer",
     # LLM-as-judge
     "LLMJudge",
+    "EvaluatorPreset",
+    "EVALUATOR_PRESET_VERSION",
+    "EVALUATOR_OUTPUT_SCHEMA",
+    "EVALUATOR_SYSTEM_PROMPT",
     "Correctness",
     "Faithfulness",
+    "Helpfulness",
+    "Coherence",
+    "Conciseness",
+    "ResponseRelevance",
+    "InstructionFollowing",
+    "GoalSuccess",
+    "Refusal",
+    "Harmfulness",
+    "Stereotyping",
     "llm_judge",
     "evaluate_with_criteria",
     "LLMJudgeConfig",
