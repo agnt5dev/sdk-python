@@ -8,11 +8,13 @@ Tests cover:
 - LLM Judge (Python wrapper)
 """
 
+import asyncio
+import importlib
+
 import pytest
 
 from agnt5.eval import (
     ScorerInput,
-    ScorerResult,
     TraceAssertion,
     contains,
     exact_match,
@@ -198,7 +200,7 @@ class TestJsonValid:
 
     def test_json_valid_array(self):
         """Test json_valid with JSON array string."""
-        input_obj = ScorerInput(output='[1, 2, 3]')
+        input_obj = ScorerInput(output="[1, 2, 3]")
         result = json_valid(input_obj)
 
         assert result.score == 1.0
@@ -1083,6 +1085,80 @@ class TestLLMJudge:
         assert spec["config"]["include_input"] is True
         assert spec["config"]["temperature"] == 0.2
 
+    def test_managed_judge_presets_to_scorer_spec(self):
+        """Test named judge preset scorer specs."""
+        from agnt5.eval import Correctness, Faithfulness
+
+        correctness = Correctness(answer_field="output.answer")
+        faithfulness = Faithfulness(context_fields=["input.context"], answer_field="output.answer")
+
+        correctness_spec = correctness.to_scorer_spec()
+        faithfulness_spec = faithfulness.to_scorer_spec()
+
+        assert correctness_spec["name"] == "correctness"
+        assert correctness_spec["config"]["provider"] == "openai"
+        assert correctness_spec["config"]["answer_field"] == "output.answer"
+        assert faithfulness_spec["name"] == "faithfulness"
+        assert faithfulness_spec["config"]["context_fields"] == ["input.context"]
+
+    def test_faithfulness_builtin_handler_binds_context_fields(self, monkeypatch):
+        """Smoke-test the managed faithfulness scorer with a fake judge model."""
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"score":0.91,"passed":true,"explanation":"grounded","label":"pass"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            output={"answer": "Paris is the capital of France."},
+            input={"context": "France's capital city is Paris."},
+            config={
+                "context_fields": ["input.context"],
+                "answer_field": "output.answer",
+                "model": "gpt-test",
+            },
+        )
+        result = asyncio.run(scorer_mod.run_scorer("faithfulness", request))
+
+        assert result.passed is True
+        assert result.explanation == "grounded"
+        assert result.metadata["judge_preset"] == "faithfulness"
+        assert result.metadata["context_fields"] == ["input.context"]
+        assert "## Context" in captured["messages"][1]["content"]
+
+    def test_faithfulness_builtin_handler_reports_missing_context_field(self):
+        """Missing configured context fields fail before calling a judge model."""
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            output={"answer": "Paris"},
+            input={"other": "context"},
+            config={"context_fields": ["input.context"]},
+        )
+        result = asyncio.run(scorer_mod.run_scorer("faithfulness", request))
+
+        assert result.passed is False
+        assert result.label == "config_error"
+        assert "input.context" in (result.explanation or "")
+
 
 class TestScorerComponentType:
     """Test scorer as a component type."""
@@ -1096,8 +1172,10 @@ class TestScorerComponentType:
 
     def test_scorer_registry_get(self):
         """Test ScorerRegistry.get() method."""
-        from agnt5.scorer import ScorerRegistry, scorer as scorer_dec
-        from agnt5.eval.types import ScorerRequest, ScorerResult as ScorerResultType
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import ScorerRegistry
+        from agnt5.scorer import scorer as scorer_dec
 
         # Note: we need to use a unique name because the registry might not be cleared
         @scorer_dec(name="registry_test_scorer_unique")
@@ -1112,8 +1190,10 @@ class TestScorerComponentType:
 
     def test_scorer_registry_scope(self):
         """Test scorer scope metadata."""
-        from agnt5.scorer import ScorerRegistry, scorer as scorer_dec
-        from agnt5.eval.types import ScorerRequest, ScorerResult as ScorerResultType
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import ScorerRegistry
+        from agnt5.scorer import scorer as scorer_dec
 
         @scorer_dec(name="registry_test_run_scorer_unique", scope="run")
         def test_scorer_fn(request: ScorerRequest) -> ScorerResultType:
@@ -1126,8 +1206,10 @@ class TestScorerComponentType:
 
     def test_scorer_registry_all(self):
         """Test ScorerRegistry.all() returns all registered scorers."""
-        from agnt5.scorer import ScorerRegistry, scorer as scorer_dec
-        from agnt5.eval.types import ScorerRequest, ScorerResult as ScorerResultType
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import ScorerRegistry
+        from agnt5.scorer import scorer as scorer_dec
 
         @scorer_dec(name="all_test_scorer_unique_1")
         def scorer_fn_1(request: ScorerRequest) -> ScorerResultType:
@@ -1272,12 +1354,8 @@ class TestEvalResponse:
         from agnt5.responses import EvalResponse, ScorerResultSummary
 
         scores = [
-            ScorerResultSummary(
-                scorer="exact_match", score=1.0, passed=True
-            ),
-            ScorerResultSummary(
-                scorer="format_check", score=0.8, passed=True
-            ),
+            ScorerResultSummary(scorer="exact_match", score=1.0, passed=True),
+            ScorerResultSummary(scorer="format_check", score=0.8, passed=True),
         ]
 
         response = EvalResponse(

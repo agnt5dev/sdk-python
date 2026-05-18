@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 if TYPE_CHECKING:
-    from .batch import BatchItemInput
+    from .batch import BatchItemInput, BatchResult, BatchStatusResult, CancelBatchResult
     from .batch_eval import BatchEvalItem, BatchEvalResult
-    from .eval import LLMJudge
+    from .eval import Correctness, Faithfulness, LLMJudge
 from urllib.parse import urljoin
 
 import httpx
@@ -17,7 +17,6 @@ from .responses import (
     EvalResponse,
     EventsResponse,
     RunResponse,
-    RunStatus,
     StatusResponse,
     SubmitResponse,
     parse_eval_response,
@@ -631,7 +630,9 @@ class Client:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         expected: Optional[Any] = None,
-        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        scorers: Optional[
+            List[Union[str, "LLMJudge", "Correctness", "Faithfulness", Dict[str, Any]]]
+        ] = None,
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -1188,7 +1189,9 @@ class Client:
         self,
         component: str,
         items: List[Union[Dict[str, Any], "BatchEvalItem"]],
-        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        scorers: Optional[
+            List[Union[str, "LLMJudge", "Correctness", "Faithfulness", Dict[str, Any]]]
+        ] = None,
         expected: Optional[List[Any]] = None,
         component_type: str = "function",
         max_concurrency: int = 10,
@@ -2241,7 +2244,9 @@ class AsyncClient:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         expected: Optional[Any] = None,
-        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        scorers: Optional[
+            List[Union[str, "LLMJudge", "Correctness", "Faithfulness", Dict[str, Any]]]
+        ] = None,
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -2485,7 +2490,9 @@ class AsyncClient:
         self,
         component: str,
         items: List[Union[Dict[str, Any], "BatchEvalItem"]],
-        scorers: Optional[List[Union[str, "LLMJudge"]]] = None,
+        scorers: Optional[
+            List[Union[str, "LLMJudge", "Correctness", "Faithfulness", Dict[str, Any]]]
+        ] = None,
         expected: Optional[List[Any]] = None,
         component_type: str = "function",
         max_concurrency: int = 10,

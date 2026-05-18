@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -75,6 +75,62 @@ class LLMJudge:
         }
 
 
+@dataclass
+class Correctness:
+    """Managed correctness judge preset for client.eval() scorers."""
+
+    model: str = "openai/gpt-4o-mini"
+    include_input: bool = True
+    temperature: float = 0.0
+    answer_field: Optional[str] = None
+    reference_field: Optional[str] = None
+
+    def to_scorer_spec(self) -> Dict[str, Any]:
+        provider, model_name = _split_provider_model(self.model)
+        config: Dict[str, Any] = {
+            "provider": provider,
+            "model": model_name,
+            "include_input": self.include_input,
+            "temperature": self.temperature,
+        }
+        if self.answer_field:
+            config["answer_field"] = self.answer_field
+        if self.reference_field:
+            config["reference_field"] = self.reference_field
+        return {"name": "correctness", "config": config}
+
+
+@dataclass
+class Faithfulness:
+    """Managed faithfulness judge preset with configured context fields."""
+
+    context_fields: List[str] = field(default_factory=list)
+    model: str = "openai/gpt-4o-mini"
+    include_input: bool = False
+    temperature: float = 0.0
+    answer_field: Optional[str] = None
+
+    def to_scorer_spec(self) -> Dict[str, Any]:
+        provider, model_name = _split_provider_model(self.model)
+        config: Dict[str, Any] = {
+            "provider": provider,
+            "model": model_name,
+            "context_fields": self.context_fields,
+            "include_input": self.include_input,
+            "temperature": self.temperature,
+        }
+        if self.answer_field:
+            config["answer_field"] = self.answer_field
+        return {"name": "faithfulness", "config": config}
+
+
+def _split_provider_model(value: str) -> tuple[str, str]:
+    if "/" in value:
+        provider, model_name = value.split("/", 1)
+        return provider, model_name
+    return "openai", value
+
+
 # Import here to avoid circular import at module level
 def _get_generate():
     from ..lm import generate
@@ -136,6 +192,7 @@ async def llm_judge(
     *,
     expected: Optional[Any] = None,
     input_data: Optional[Any] = None,
+    context_data: Optional[Any] = None,
 ) -> LLMJudgeResult:
     """Evaluate output using an LLM as judge.
 
@@ -144,6 +201,7 @@ async def llm_judge(
         config: LLMJudgeConfig with criteria and settings
         expected: Expected output for comparison (optional)
         input_data: Original input for context (optional)
+        context_data: Retrieved or otherwise supplied context for faithfulness-style judging
 
     Returns:
         LLMJudgeResult with score, passed status, and explanation
@@ -164,6 +222,10 @@ async def llm_judge(
     if config.include_input and input_data is not None:
         input_str = _format_value(input_data)
         user_content += f"## Input\n{input_str}\n\n"
+
+    if context_data is not None:
+        context_str = _format_value(context_data)
+        user_content += f"## Context\n{context_str}\n\n"
 
     output_str = _format_value(output)
     user_content += f"## Output to Evaluate\n{output_str}\n\n"
@@ -225,7 +287,9 @@ def _parse_llm_response(content: str) -> LLMJudgeResult:
 
         # Strip fields already promoted to top-level attributes so
         # metadata only carries extra/custom keys from the LLM response.
-        extra = {k: v for k, v in data.items() if k not in ("score", "passed", "explanation", "label")}
+        extra = {
+            k: v for k, v in data.items() if k not in ("score", "passed", "explanation", "label")
+        }
 
         return LLMJudgeResult(
             score=score,

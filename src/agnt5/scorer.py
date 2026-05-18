@@ -22,11 +22,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from .context import Context
-from .eval.types import ScorerRequest, ScorerResult, TraceEvent
+from .eval.types import ScorerRequest, ScorerResult
 
 T = TypeVar("T")
 
@@ -142,6 +142,108 @@ class ScorerRegistry:
 
 _builtin_handlers_registered = False
 
+CORRECTNESS_JUDGE_CRITERIA = (
+    "Evaluate whether the output correctly answers the input and matches the expected "
+    "output. Score 1.0 for fully correct answers, 0.5 for partially correct answers, "
+    "and 0.0 for incorrect or unsupported answers."
+)
+
+FAITHFULNESS_JUDGE_CRITERIA = (
+    "Evaluate whether the output is faithful to the provided context. Penalize claims "
+    "that are unsupported, contradicted by context, or omit critical context needed for "
+    "the answer."
+)
+
+
+def _judge_model(config: Dict[str, Any]) -> str:
+    provider = str(config.get("provider") or "openai")
+    model = str(config.get("model") or "gpt-4o-mini")
+    if "/" in model and "provider" not in config:
+        return model
+    return f"{provider}/{model}"
+
+
+def _judge_temperature(config: Dict[str, Any]) -> float:
+    value = config.get("temperature", 0.0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _judge_include_input(config: Dict[str, Any], default: bool = False) -> bool:
+    value = config.get("include_input")
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _selector_value(request: Any, selector: str) -> Any:
+    root, sep, rest = selector.strip().partition(".")
+    if sep == "" or not rest:
+        raise KeyError(selector)
+    roots = {
+        "input": request.input,
+        "output": request.output,
+        "expected": request.expected,
+    }
+    if root not in roots:
+        raise KeyError(selector)
+    value = roots[root]
+    for part in rest.split("."):
+        if isinstance(value, dict):
+            if part not in value:
+                raise KeyError(selector)
+            value = value[part]
+            continue
+        if isinstance(value, list):
+            try:
+                value = value[int(part)]
+            except (ValueError, IndexError):
+                raise KeyError(selector) from None
+            continue
+        raise KeyError(selector)
+    return value
+
+
+def _optional_selector_value(request: Any, config: Dict[str, Any], key: str, fallback: Any) -> Any:
+    selector = config.get(key)
+    if not selector:
+        return fallback
+    if not isinstance(selector, str):
+        raise KeyError(key)
+    return _selector_value(request, selector)
+
+
+def _faithfulness_context_fields(config: Dict[str, Any]) -> List[str]:
+    fields: List[str] = []
+    context_field = config.get("context_field")
+    if isinstance(context_field, str) and context_field.strip():
+        fields.append(context_field.strip())
+    context_fields = config.get("context_fields")
+    if isinstance(context_fields, list):
+        fields.extend(
+            field.strip() for field in context_fields if isinstance(field, str) and field.strip()
+        )
+    return fields
+
+
+def _config_error(message: str) -> "ScorerResult":
+    from .eval.types import ScorerResult
+
+    return ScorerResult(score=0.0, passed=False, label="config_error", explanation=message)
+
+
+def _judge_result_to_scorer_result(result: Any, metadata: Dict[str, Any]) -> Any:
+    from .eval.types import ScorerResult
+
+    merged_metadata = dict(result.metadata or {})
+    merged_metadata.update(metadata)
+    return ScorerResult(
+        score=result.score,
+        passed=result.passed,
+        label=result.label,
+        explanation=result.explanation,
+        metadata=merged_metadata,
+    )
+
 
 def register_builtin_scorer_handlers() -> None:
     """Register Python handlers for built-in scorers that need Python execution.
@@ -177,6 +279,7 @@ def register_builtin_scorer_handlers() -> None:
                 config=llm_config,
                 expected=request.expected,
                 input_data=request.input,
+                context_data=config.get("context_data") or config.get("context"),
             )
 
             return ScorerResult(
@@ -191,6 +294,88 @@ def register_builtin_scorer_handlers() -> None:
             name="llm_judge",
             handler=_llm_judge_handler,
             description="LLM-as-judge scorer for semantic evaluation",
+            scope="item",
+            is_async=True,
+        )
+
+    if "correctness" not in _SCORER_REGISTRY:
+
+        async def _correctness_handler(ctx: "ScorerContext", request: Any) -> Any:
+            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+
+            config = request.config or {}
+            try:
+                output = _optional_selector_value(request, config, "answer_field", request.output)
+                expected = _optional_selector_value(
+                    request, config, "reference_field", request.expected
+                )
+            except KeyError as e:
+                return _config_error(f"correctness field selector not found: {e.args[0]}")
+            if expected is None:
+                return _config_error(
+                    "correctness requires expected output or config.reference_field"
+                )
+
+            result = await llm_judge(
+                output=output,
+                config=LLMJudgeConfig(
+                    criteria=CORRECTNESS_JUDGE_CRITERIA,
+                    model=_judge_model(config),
+                    temperature=_judge_temperature(config),
+                    include_input=_judge_include_input(config, True),
+                ),
+                expected=expected,
+                input_data=request.input,
+            )
+            return _judge_result_to_scorer_result(result, {"judge_preset": "correctness"})
+
+        _SCORER_REGISTRY["correctness"] = ScorerConfig(
+            name="correctness",
+            handler=_correctness_handler,
+            description="Managed LLM judge preset for answer correctness",
+            scope="item",
+            is_async=True,
+        )
+
+    if "faithfulness" not in _SCORER_REGISTRY:
+
+        async def _faithfulness_handler(ctx: "ScorerContext", request: Any) -> Any:
+            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+
+            config = request.config or {}
+            fields = _faithfulness_context_fields(config)
+            if not fields:
+                return _config_error(
+                    "faithfulness requires config.context_fields or config.context_field"
+                )
+            context_values: Dict[str, Any] = {}
+            try:
+                output = _optional_selector_value(request, config, "answer_field", request.output)
+                for field in fields:
+                    context_values[field] = _selector_value(request, field)
+            except KeyError as e:
+                return _config_error(f"faithfulness field selector not found: {e.args[0]}")
+
+            result = await llm_judge(
+                output=output,
+                config=LLMJudgeConfig(
+                    criteria=FAITHFULNESS_JUDGE_CRITERIA,
+                    model=_judge_model(config),
+                    temperature=_judge_temperature(config),
+                    include_input=_judge_include_input(config, False),
+                ),
+                input_data=request.input,
+                context_data=context_values,
+            )
+            return _judge_result_to_scorer_result(
+                result,
+                {"judge_preset": "faithfulness", "context_fields": fields},
+            )
+
+        _SCORER_REGISTRY["faithfulness"] = ScorerConfig(
+            name="faithfulness",
+            handler=_faithfulness_handler,
+            description="Managed LLM judge preset for faithfulness to configured context",
             scope="item",
             is_async=True,
         )
@@ -227,11 +412,6 @@ def scorer(
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         scorer_name = name or func.__name__
         scorer_description = description or func.__doc__ or ""
-
-        # Check if function signature includes context
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        needs_context = bool(params) and params[0].name == "ctx"
 
         # Determine if async
         is_async = inspect.iscoroutinefunction(func)

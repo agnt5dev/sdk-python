@@ -96,6 +96,8 @@ from .types import EvalContext, ScorerRequest, ScorerResult as ScorerResultPy, T
 
 # LLM-as-judge
 from .llm_judge import (
+    Correctness,
+    Faithfulness,
     LLMJudge,
     LLMJudgeConfig,
     LLMJudgeResult,
@@ -117,6 +119,8 @@ __all__ = [
     "trace_scorer",
     # LLM-as-judge
     "LLMJudge",
+    "Correctness",
+    "Faithfulness",
     "llm_judge",
     "evaluate_with_criteria",
     "LLMJudgeConfig",
