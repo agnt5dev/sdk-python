@@ -94,6 +94,21 @@ from .llm_judge import (
     evaluate_with_criteria,
     llm_judge,
 )
+from .local import (
+    LOCAL_CACHE_SCHEMA,
+    LOCAL_CI_SUMMARY_SCHEMA,
+    LOCAL_EXPERIMENT_SCHEMA,
+    LocalEvalReport,
+    LocalExperiment,
+    LocalFileResultStore,
+    LocalResultCache,
+    build_local_ci_payload,
+    load_local_experiment,
+    run_local_experiment,
+    save_local_experiment,
+    stable_fingerprint,
+    upload_local_ci_summary,
+)
 
 # Import Python types and utilities
 from .scorer import (
@@ -163,6 +178,20 @@ __all__ = [
     "evaluate_with_criteria",
     "LLMJudgeConfig",
     "LLMJudgeResult",
+    # Local eval files/cache/reports
+    "LOCAL_EXPERIMENT_SCHEMA",
+    "LOCAL_CACHE_SCHEMA",
+    "LOCAL_CI_SUMMARY_SCHEMA",
+    "LocalExperiment",
+    "LocalFileResultStore",
+    "LocalResultCache",
+    "LocalEvalReport",
+    "save_local_experiment",
+    "load_local_experiment",
+    "run_local_experiment",
+    "build_local_ci_payload",
+    "upload_local_ci_summary",
+    "stable_fingerprint",
     # Python types for scorer component
     "ScorerRequest",
     "ScorerResultPy",
