@@ -245,6 +245,131 @@ def _config_error(message: str) -> "ScorerResult":
     return ScorerResult(score=0.0, passed=False, label="config_error", explanation=message)
 
 
+def _bound_field_value(value: Any, selector: str, root: str) -> Any:
+    selector = selector.strip()
+    prefix = f"{root}."
+    if selector == root:
+        return value
+    if selector.startswith(prefix):
+        selector = selector[len(prefix) :]
+    if not selector:
+        return value
+    current = value
+    for part in selector.split("."):
+        if not part:
+            raise KeyError(selector)
+        if isinstance(current, dict):
+            if part not in current:
+                raise KeyError(selector)
+            current = current[part]
+            continue
+        if isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                raise KeyError(selector) from None
+            continue
+        raise KeyError(selector)
+    return current
+
+
+def _value_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _value_type_matches(value: Any, expected_type: str) -> bool:
+    expected_type = expected_type.strip().lower()
+    return (
+        (expected_type == "null" and value is None)
+        or (expected_type in {"boolean", "bool"} and isinstance(value, bool))
+        or (
+            expected_type == "number"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        )
+        or (expected_type == "string" and isinstance(value, str))
+        or (expected_type == "array" and isinstance(value, list))
+        or (expected_type == "object" and isinstance(value, dict))
+    )
+
+
+def _bind_request_field(
+    config: Dict[str, Any],
+    root: str,
+    field_key: str,
+    type_key: str,
+    value: Any,
+    metadata: Dict[str, Any],
+) -> Any:
+    selected = value
+    selector = config.get(field_key)
+    if isinstance(selector, str) and selector.strip():
+        try:
+            selected = _bound_field_value(value, selector, root)
+        except KeyError:
+            raise KeyError(f"{field_key} {selector!r} was not found") from None
+        metadata[field_key] = selector.strip()
+    expected_type = config.get(type_key)
+    if isinstance(expected_type, str) and expected_type.strip():
+        if not _value_type_matches(selected, expected_type):
+            actual = _value_type_name(selected)
+            raise TypeError(f"{field_key} selected {actual}; expected {expected_type}")
+        metadata[type_key] = expected_type.strip()
+    return selected
+
+
+def _has_field_binding(config: Dict[str, Any], field_key: str, type_key: str) -> bool:
+    return config.get(field_key) is not None or config.get(type_key) is not None
+
+
+def _apply_scorer_field_bindings(request: ScorerRequest) -> tuple[ScorerRequest, Dict[str, Any]]:
+    config = request.config or {}
+    metadata: Dict[str, Any] = {}
+    output = _bind_request_field(
+        config, "output", "output_field", "output_type", request.output, metadata
+    )
+    expected = (
+        _bind_request_field(
+            config,
+            "expected",
+            "expected_field",
+            "expected_type",
+            request.expected,
+            metadata,
+        )
+        if request.expected is not None
+        or _has_field_binding(config, "expected_field", "expected_type")
+        else request.expected
+    )
+    input_value = (
+        _bind_request_field(config, "input", "input_field", "input_type", request.input, metadata)
+        if request.input is not None or _has_field_binding(config, "input_field", "input_type")
+        else request.input
+    )
+    return (
+        ScorerRequest(
+            output=output,
+            expected=expected,
+            input=input_value,
+            trace=request.trace,
+            config=request.config,
+        ),
+        metadata,
+    )
+
+
 def _judge_result_to_scorer_result(result: Any, metadata: Dict[str, Any]) -> Any:
     from .eval.types import ScorerResult
 
@@ -488,9 +613,13 @@ async def run_scorer(
     Raises:
         ValueError: If scorer is not found
     """
-    config = ScorerRegistry.get(scorer_name)
-    if config is None:
+    scorer_config = ScorerRegistry.get(scorer_name)
+    if scorer_config is None:
         raise ValueError(f"Scorer not found: {scorer_name}")
+    try:
+        request, binding_metadata = _apply_scorer_field_bindings(request)
+    except (KeyError, TypeError) as e:
+        return _config_error(f"{scorer_name} field binding error: {e}")
 
     # Create default context if not provided
     if ctx is None:
@@ -503,14 +632,18 @@ async def run_scorer(
         )
 
     # Call the scorer
-    sig = inspect.signature(config.handler)
+    sig = inspect.signature(scorer_config.handler)
     params = list(sig.parameters.values())
     needs_context = bool(params) and params[0].name == "ctx"
 
     if needs_context:
-        result = await config.handler(ctx, request)
+        result = await scorer_config.handler(ctx, request)
     else:
-        result = await config.handler(request)
+        result = await scorer_config.handler(request)
+
+    if binding_metadata:
+        result.metadata = dict(result.metadata or {})
+        result.metadata.update(binding_metadata)
 
     return result
 

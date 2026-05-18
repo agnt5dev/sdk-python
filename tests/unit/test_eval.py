@@ -1338,6 +1338,87 @@ class TestScorerComponentType:
         assert "all_test_scorer_unique_1" in all_scorers
         assert "all_test_scorer_unique_2" in all_scorers
 
+    def test_run_scorer_binds_structured_fields(self):
+        """run_scorer should pass only the configured structured fields to handlers."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import run_scorer
+        from agnt5.scorer import scorer as scorer_dec
+
+        captured = {}
+
+        @scorer_dec(name="field_binding_capture_unique")
+        def capture_fields(request: ScorerRequest) -> ScorerResultType:
+            captured["output"] = request.output
+            captured["expected"] = request.expected
+            captured["input"] = request.input
+            return ScorerResultType(score=1.0, passed=True, metadata={"handler": "capture"})
+
+        request = ScorerRequest(
+            output={"final_output": {"answer": "Paris"}, "path_length": 3},
+            expected={"answer": "Paris"},
+            input={"question": "capital?"},
+            config={
+                "output_field": "final_output.answer",
+                "expected_field": "answer",
+                "input_field": "question",
+                "output_type": "string",
+            },
+        )
+
+        result = asyncio.run(run_scorer("field_binding_capture_unique", request))
+
+        assert captured == {"output": "Paris", "expected": "Paris", "input": "capital?"}
+        assert result.passed is True
+        assert result.metadata["handler"] == "capture"
+        assert result.metadata["output_field"] == "final_output.answer"
+        assert result.metadata["expected_field"] == "answer"
+        assert result.metadata["input_field"] == "question"
+
+    def test_run_scorer_reports_missing_field_binding(self):
+        """Missing field bindings should fail with scorer and field diagnostics."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import run_scorer
+        from agnt5.scorer import scorer as scorer_dec
+
+        @scorer_dec(name="field_binding_missing_unique")
+        def should_not_run(request: ScorerRequest) -> ScorerResultType:
+            return ScorerResultType(score=1.0, passed=True)
+
+        request = ScorerRequest(
+            output={"other": "Paris"},
+            expected="Paris",
+            config={"output_field": "final_output.answer"},
+        )
+        result = asyncio.run(run_scorer("field_binding_missing_unique", request))
+
+        assert result.passed is False
+        assert result.label == "config_error"
+        assert "field_binding_missing_unique" in (result.explanation or "")
+        assert "final_output.answer" in (result.explanation or "")
+
+    def test_run_scorer_reports_wrong_field_binding_type(self):
+        """Type assertions should fail before the scorer handler runs."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import run_scorer
+        from agnt5.scorer import scorer as scorer_dec
+
+        @scorer_dec(name="field_binding_wrong_type_unique")
+        def should_not_run(request: ScorerRequest) -> ScorerResultType:
+            return ScorerResultType(score=1.0, passed=True)
+
+        request = ScorerRequest(
+            output={"tool_calls": {"name": "search"}},
+            config={"output_field": "tool_calls", "output_type": "array"},
+        )
+        result = asyncio.run(run_scorer("field_binding_wrong_type_unique", request))
+
+        assert result.passed is False
+        assert result.label == "config_error"
+        assert "expected array" in (result.explanation or "")
+
 
 class TestScorerRequest:
     """Test ScorerRequest dataclass."""
