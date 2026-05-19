@@ -124,6 +124,49 @@ def is_terminal_event(event_type: str) -> bool:
     return event_type in _TERMINAL_EVENT_TYPES
 
 
+def guardrail_subject_metadata(
+    event_type: str,
+    event_data: dict[str, Any],
+    run_id: str,
+) -> dict[str, str]:
+    """Return guardrail subject metadata for completion events.
+
+    Runtime remains the enforcement boundary. These SDK-side tags make the
+    subject being completed explicit before the event is sent to the journal.
+    """
+    if event_type == "run.completed":
+        return {
+            "guardrail_subject_type": "final_output",
+            "guardrail_subject_id": run_id,
+        }
+    if event_type == "agent.completed":
+        subject_id = (
+            str(event_data.get("correlation_id") or "")
+            or str(event_data.get("event_id") or "")
+            or run_id
+        )
+        return {
+            "guardrail_subject_type": "agent_output",
+            "guardrail_subject_id": subject_id,
+        }
+    if event_type == "workflow.step.completed":
+        output_data = event_data.get("output_data")
+        step_name = ""
+        if isinstance(output_data, dict):
+            step_name = str(output_data.get("step_name") or "")
+        subject_id = (
+            step_name
+            or str(event_data.get("name") or "")
+            or str(event_data.get("correlation_id") or "")
+            or run_id
+        )
+        return {
+            "guardrail_subject_type": "workflow_step",
+            "guardrail_subject_id": subject_id,
+        }
+    return {}
+
+
 # =============================================================================
 # Type Aliases
 # =============================================================================
@@ -654,6 +697,10 @@ class EventEmitter:
         is extracted from the Event object.
         """
         event_data = event.to_dict()
+        envelope_metadata = dict(event.metadata) if event.metadata else {}
+        envelope_metadata.update(
+            guardrail_subject_metadata(event.event_type, event_data, self._run_id)
+        )
 
         # Extract content_index from event if available (e.g., Delta.index)
         content_index = getattr(event, "index", 0)
@@ -663,7 +710,7 @@ class EventEmitter:
             data=event_data,
             source_timestamp_ns=event.timestamp_ns,
             content_index=content_index,
-            metadata=dict(event.metadata) if event.metadata else None,
+            metadata=envelope_metadata or None,
         )
 
         self._queue_event(envelope, event.correlation_id, event.parent_correlation_id)
@@ -690,12 +737,15 @@ class EventEmitter:
             )
 
         # Single-pass metadata merge
+        event_data = event.to_dict()
         merged_metadata = {**self._base_metadata}
         if event.metadata:
             merged_metadata.update(event.metadata)
+        merged_metadata.update(
+            guardrail_subject_metadata(event.event_type, event_data, self._run_id)
+        )
 
         self._sequence += 1
-        event_data = event.to_dict()
         json_bytes = serialize(event_data)
 
         if is_checkpoint_event(event.event_type):
@@ -790,6 +840,9 @@ class EventEmitter:
                 merged_metadata = dict(self._base_metadata)
                 if event.metadata:
                     merged_metadata.update(event.metadata)
+                merged_metadata.update(
+                    guardrail_subject_metadata(event.event_type, event_data, self._run_id)
+                )
                 if event.correlation_id:
                     merged_metadata["correlation_id"] = event.correlation_id
                 if event.parent_correlation_id:
@@ -820,6 +873,9 @@ class EventEmitter:
             merged_metadata = dict(self._base_metadata)
             if event.metadata:
                 merged_metadata.update(event.metadata)
+            merged_metadata.update(
+                guardrail_subject_metadata(event.event_type, event_data, self._run_id)
+            )
             if event.correlation_id:
                 merged_metadata["correlation_id"] = event.correlation_id
             if event.parent_correlation_id:
