@@ -55,6 +55,7 @@ class ScorerConfig:
     description: str = ""
     scope: str = "item"
     is_async: bool = False
+    depends_on: Optional[List[str]] = None
     input_schema: Optional[Dict[str, Any]] = None
 
 
@@ -75,6 +76,7 @@ class ScorerContext(Context):
         is_streaming: bool = False,
         worker: Optional[Any] = None,
         trace_metadata: Optional[dict[str, str]] = None,
+        peer_scores: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(
             run_id,
@@ -86,10 +88,23 @@ class ScorerContext(Context):
             worker=worker,
             trace_metadata=trace_metadata,
         )
+        self._peer_scores = list(peer_scores or [])
 
     def log(self, message: str, **extra: Any) -> None:
         """Log with structured data: ctx.log("msg", key=value)"""
         self._logger.info(message, extra=extra)
+
+    def peer_scores(self, scorer: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return scores already produced by earlier scorers for this item."""
+        if scorer is None:
+            return list(self._peer_scores)
+        return [
+            score
+            for score in self._peer_scores
+            if score.get("scorer") == scorer
+            or score.get("scorer_name") == scorer
+            or score.get("name") == scorer
+        ]
 
 
 class ScorerRegistry:
@@ -365,6 +380,7 @@ def _apply_scorer_field_bindings(request: ScorerRequest) -> tuple[ScorerRequest,
             input=input_value,
             trace=request.trace,
             config=request.config,
+            peer_scores=request.peer_scores,
         ),
         metadata,
     )
@@ -529,6 +545,7 @@ def scorer(
     name: Optional[str] = None,
     description: Optional[str] = None,
     scope: str = "item",
+    depends_on: Optional[List[str]] = None,
 ) -> Callable[..., Any]:
     """Decorator to register a function as an AGNT5 scorer.
 
@@ -539,6 +556,7 @@ def scorer(
         name: Custom scorer name (default: function's __name__)
         description: Human-readable description (default: function's docstring)
         scope: Evaluation scope. Defaults to item.
+        depends_on: Scorer names that should run before this scorer.
 
     Example:
         @scorer
@@ -577,6 +595,7 @@ def scorer(
             description=scorer_description.strip() if scorer_description else "",
             scope=scope,
             is_async=True,  # Always async after wrapping
+            depends_on=list(depends_on or []),
         )
 
         ScorerRegistry.register(config)
@@ -584,6 +603,7 @@ def scorer(
         # Add metadata to the function
         handler_func._scorer_name = scorer_name  # type: ignore
         handler_func._scorer_scope = scope  # type: ignore
+        handler_func._scorer_depends_on = list(depends_on or [])  # type: ignore
         handler_func._scorer_config = config  # type: ignore
         handler_func._is_scorer = True  # type: ignore
 
@@ -629,6 +649,7 @@ async def run_scorer(
             run_id=str(uuid.uuid4()),
             correlation_id=str(uuid.uuid4()),
             parent_correlation_id="",
+            peer_scores=request.peer_scores,
         )
 
     # Call the scorer

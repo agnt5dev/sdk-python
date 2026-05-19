@@ -1022,6 +1022,7 @@ class ExecutorMixin:
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
                 trace_metadata=getattr(req, "metadata", None),
+                peer_scores=input_dict.get("peer_scores"),
             )
 
         async def execute(ctx: ScorerContext, input_dict: dict, req: Any):
@@ -1035,6 +1036,7 @@ class ExecutorMixin:
                 input=input_dict.get("input"),
                 trace=input_dict.get("trace"),
                 config=input_dict.get("config"),
+                peer_scores=input_dict.get("peer_scores"),
             )
 
             # Emit run.started

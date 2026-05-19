@@ -1582,6 +1582,22 @@ class TestScorerComponentType:
         assert config.scope == "run"
         assert getattr(test_scorer_fn, "_scorer_scope") == "run"
 
+    def test_scorer_registry_dependency_metadata(self):
+        """Decorator stores dependencies for meta-evaluators."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import ScorerRegistry
+        from agnt5.scorer import scorer as scorer_dec
+
+        @scorer_dec(name="registry_test_meta_unique", depends_on=["primary_quality"])
+        def test_scorer_fn(request: ScorerRequest) -> ScorerResultType:
+            return ScorerResultType(score=1.0, passed=True)
+
+        config = ScorerRegistry.get("registry_test_meta_unique")
+        assert config is not None
+        assert config.depends_on == ["primary_quality"]
+        assert getattr(test_scorer_fn, "_scorer_depends_on") == ["primary_quality"]
+
     def test_scorer_registry_all(self):
         """Test ScorerRegistry.all() returns all registered scorers."""
         from agnt5.eval.types import ScorerRequest
@@ -1615,12 +1631,14 @@ class TestScorerComponentType:
             captured["output"] = request.output
             captured["expected"] = request.expected
             captured["input"] = request.input
+            captured["peer_scores"] = request.peer_scores
             return ScorerResultType(score=1.0, passed=True, metadata={"handler": "capture"})
 
         request = ScorerRequest(
             output={"final_output": {"answer": "Paris"}, "path_length": 3},
             expected={"answer": "Paris"},
             input={"question": "capital?"},
+            peer_scores=[{"scorer": "primary_quality", "score": 1.0}],
             config={
                 "output_field": "final_output.answer",
                 "expected_field": "answer",
@@ -1631,7 +1649,12 @@ class TestScorerComponentType:
 
         result = asyncio.run(run_scorer("field_binding_capture_unique", request))
 
-        assert captured == {"output": "Paris", "expected": "Paris", "input": "capital?"}
+        assert captured == {
+            "output": "Paris",
+            "expected": "Paris",
+            "input": "capital?",
+            "peer_scores": [{"scorer": "primary_quality", "score": 1.0}],
+        }
         assert result.passed is True
         assert result.metadata["handler"] == "capture"
         assert result.metadata["output_field"] == "final_output.answer"
@@ -1681,6 +1704,36 @@ class TestScorerComponentType:
         assert result.passed is False
         assert result.label == "config_error"
         assert "expected array" in (result.explanation or "")
+
+    def test_scorer_context_peer_scores_available_to_meta_evaluator(self):
+        """run_scorer passes prior item scores to context helpers."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import run_scorer
+        from agnt5.scorer import scorer as scorer_dec
+
+        captured = {}
+
+        @scorer_dec(name="peer_score_meta_unique", depends_on=["quality"])
+        def meta_score(ctx, request: ScorerRequest) -> ScorerResultType:
+            captured["all"] = ctx.peer_scores()
+            captured["quality"] = ctx.peer_scores("quality")
+            captured["request"] = request.peer_scores
+            return ScorerResultType(score=1.0, passed=True)
+
+        request = ScorerRequest(
+            output="ok",
+            peer_scores=[
+                {"scorer": "quality", "score": 0.75, "label": "pass"},
+                {"name": "format", "score": 1.0, "label": "pass"},
+            ],
+        )
+        result = asyncio.run(run_scorer("peer_score_meta_unique", request))
+
+        assert result.passed is True
+        assert captured["all"] == request.peer_scores
+        assert captured["quality"] == [{"scorer": "quality", "score": 0.75, "label": "pass"}]
+        assert captured["request"] == request.peer_scores
 
 
 class TestScorerRequest:

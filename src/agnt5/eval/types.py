@@ -141,6 +141,7 @@ class ScorerRequest:
         input: Original input to the component (optional, for context)
         trace: Execution trace events (optional, for glassbox testing)
         config: Scorer-specific configuration (optional)
+        peer_scores: Scores already produced for this item by earlier scorers
     """
 
     output: Any
@@ -148,6 +149,7 @@ class ScorerRequest:
     input: Optional[Any] = None
     trace: Optional[List[TraceEvent]] = None
     config: Optional[Dict[str, Any]] = None
+    peer_scores: Optional[List[Dict[str, Any]]] = None
 
     def get_config(self, key: str, default: Any = None) -> Any:
         """Get a config value with default.
