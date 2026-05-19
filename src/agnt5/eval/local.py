@@ -15,6 +15,7 @@ from ..responses import ScorerResultSummary
 LOCAL_EXPERIMENT_SCHEMA = "agnt5.local_experiment.v1"
 LOCAL_CACHE_SCHEMA = "agnt5.local_result_cache.v1"
 LOCAL_CI_SUMMARY_SCHEMA = "agnt5.local_ci_summary.v1"
+_CACHE_MISS = object()
 
 ScorerSpec = Union[str, Dict[str, Any]]
 TaskFunction = Callable[[Dict[str, Any]], Any]
@@ -115,10 +116,12 @@ class LocalResultCache:
     def __init__(self, store: LocalResultStore) -> None:
         self.store = store
 
-    def load(self, case_key: str, fingerprint: str) -> Optional[Any]:
+    def load(self, case_key: str, fingerprint: str) -> Any:
         payload = self.store.load(case_key)
         if not payload or payload.get("fingerprint") != fingerprint:
-            return None
+            return _CACHE_MISS
+        if "output" not in payload:
+            return _CACHE_MISS
         return payload.get("output")
 
     def save(self, case_key: str, fingerprint: str, output: Any) -> None:
@@ -278,15 +281,17 @@ def run_local_experiment(
         item_started = time.time()
         error: Optional[str] = None
         output: Any = None
+        cache_hit = False
         if cache is not None:
             cached = cache.load(case_key, fingerprint)
-            if cached is not None:
+            if cached is not _CACHE_MISS:
                 output = cached
                 cache_hits += 1
+                cache_hit = True
             else:
                 cache_misses += 1
         try:
-            if output is None:
+            if not cache_hit:
                 output = task(case.input)
                 if cache is not None:
                     cache.save(case_key, fingerprint, output)

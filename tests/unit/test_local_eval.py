@@ -69,6 +69,29 @@ def test_run_local_experiment_reuses_cached_task_outputs(tmp_path):
     assert second.results[0].scores[0].scorer == "exact_match"
 
 
+def test_run_local_experiment_reuses_cached_none_output(tmp_path):
+    calls = {"count": 0}
+    experiment = LocalExperiment(
+        name="cache-none-smoke",
+        cases=[BatchEvalItem(input={"value": "ignored"}, expected=None, item_id="none-case")],
+        scorers=["exact_match"],
+    )
+    store = LocalFileResultStore(tmp_path / "cache")
+
+    def task(input_data):
+        calls["count"] += 1
+        return None
+
+    first = run_local_experiment(experiment, task, result_store=store, task_version="v1")
+    second = run_local_experiment(experiment, task, result_store=store, task_version="v1")
+
+    assert calls["count"] == 1
+    assert first.cache_misses == 1
+    assert second.cache_hits == 1
+    assert second.cache_misses == 0
+    assert second.results[0].output is None
+
+
 def test_custom_result_store_protocol_is_supported():
     class MemoryStore:
         def __init__(self):
