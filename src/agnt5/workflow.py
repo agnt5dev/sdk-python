@@ -616,6 +616,7 @@ class WorkflowContext(Context):
                 parent_correlation_id=step_correlation_id,
                 runtime_context=self._runtime_context,
                 worker=self._worker,
+                trace_metadata=self._trace_metadata,
                 memo_namespace=step_memo_namespace,
             )
 
