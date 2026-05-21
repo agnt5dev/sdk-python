@@ -15,6 +15,7 @@ import asyncio
 import pytest
 
 from agnt5 import (
+    AgentContext,
     FunctionContext,
     FunctionRegistry,
     WorkflowContext,
@@ -23,6 +24,7 @@ from agnt5 import (
     function,
     workflow,
 )
+from agnt5.lm import GenerateResponse, Message
 from agnt5.workflow import WorkflowEntity
 from agnt5._state_adapter import with_state_context as with_entity_context
 
@@ -550,6 +552,114 @@ async def test_workflow_type_safe_task_call():
     async def run_test():
         result = await type_safe_workflow()
         assert result == [3, 6, 9]
+
+    await run_test()
+
+
+@pytest.mark.asyncio
+async def test_workflow_step_function_propagates_trace_metadata_to_agent_memoization():
+    """Stepped @function contexts must keep routing metadata for nested agent caches."""
+    trace_metadata = {
+        "project_id": "project-503",
+        "tenant_id": "tenant-503",
+        "deployment_id": "deployment-503",
+    }
+
+    class RecordingCheckpointClient:
+        def __init__(self) -> None:
+            self.completed: list[dict] = []
+
+        async def step_completed(
+            self,
+            tenant_id,
+            run_id,
+            step_key,
+            step_name,
+            step_type,
+            output_payload,
+        ):
+            self.completed.append(
+                {
+                    "tenant_id": tenant_id,
+                    "run_id": run_id,
+                    "step_key": step_key,
+                    "step_name": step_name,
+                    "step_type": step_type,
+                    "output_payload": output_payload,
+                }
+            )
+
+    checkpoint_client = RecordingCheckpointClient()
+    seen: dict[str, object] = {}
+
+    @function
+    async def conduct_research(ctx: FunctionContext) -> str:
+        seen["function_trace_metadata"] = ctx._trace_metadata
+
+        agent_ctx = AgentContext(
+            run_id=ctx.run_id,
+            agent_name="ResearchAgent",
+            parent_context=ctx,
+            runtime_context=getattr(ctx, "_runtime_context", None),
+            trace_metadata=getattr(ctx, "_trace_metadata", None),
+        )
+        seen["agent_trace_metadata"] = agent_ctx._trace_metadata
+
+        assert agent_ctx._memo is not None
+        agent_ctx._memo._checkpoint_client = checkpoint_client
+        agent_ctx._memo._connected = True
+
+        lm_key, lm_hash = agent_ctx._memo.lm_call_key(
+            "mock",
+            [Message.user("topic")],
+            {},
+        )
+        tool_key, tool_hash = agent_ctx._memo.tool_call_key(
+            "wikipedia_search_tool",
+            {"query": "topic"},
+        )
+
+        await agent_ctx._memo.cache_lm_result(
+            lm_key,
+            lm_hash,
+            GenerateResponse(text="research draft"),
+        )
+        await agent_ctx._memo.cache_tool_result(
+            tool_key,
+            tool_hash,
+            {"result": "source"},
+        )
+
+        seen["memo_keys"] = [lm_key, tool_key]
+        return "done"
+
+    @workflow
+    async def research_workflow(ctx: WorkflowContext) -> str:
+        return await ctx.step(conduct_research)
+
+    @with_entity_context
+    async def run_test():
+        workflow_entity = WorkflowEntity(run_id="run-503")
+        ctx = WorkflowContext(
+            workflow_entity=workflow_entity,
+            run_id="run-503",
+            trace_metadata=trace_metadata,
+        )
+
+        result = await research_workflow(ctx)
+
+        assert result == "done"
+        assert seen["function_trace_metadata"] == trace_metadata
+        assert seen["agent_trace_metadata"] == trace_metadata
+        assert seen["memo_keys"] == [
+            "step.conduct_research_0.0.agent.ResearchAgent.0.lm.0",
+            "step.conduct_research_0.0.agent.ResearchAgent.0.tool.wikipedia_search_tool.0",
+        ]
+        assert [call["tenant_id"] for call in checkpoint_client.completed] == [
+            "project-503",
+            "project-503",
+        ]
+        assert [call["step_type"] for call in checkpoint_client.completed] == ["llm", "tool"]
 
     await run_test()
 
