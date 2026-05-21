@@ -29,6 +29,18 @@ from ._prompt_executor import (
 logger = setup_module_logger(__name__)
 
 
+def _is_system_component(component: Any) -> bool:
+    """Return True for platform-injected components hidden from user summaries."""
+    metadata = getattr(component, "metadata", {}) or {}
+    config = getattr(component, "config", {}) or {}
+
+    return (
+        metadata.get("source") == "agnt5_builtin"
+        or bool(metadata.get("agnt5_builtin"))
+        or config.get("builtin") == "true"
+    )
+
+
 class Worker(ExecutorMixin):
     """AGNT5 Worker for registering and executing the components.
 
@@ -766,9 +778,11 @@ class Worker(ExecutorMixin):
         """Print startup banner with component tree and dashboard link."""
         import os
 
+        visible_components = [comp for comp in components if not _is_system_component(comp)]
+
         # Group components by type
         by_type: dict[str, list[str]] = {}
-        for comp in components:
+        for comp in visible_components:
             comp_type = comp.component_type
             if comp_type not in by_type:
                 by_type[comp_type] = []
