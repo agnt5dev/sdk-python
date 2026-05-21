@@ -609,12 +609,14 @@ class WorkflowContext(Context):
             # Use step_correlation_id as parent so function events are nested under the step
             # The correlation_id uniquely identifies this function execution
             func_correlation_id = generate_cid()
+            step_memo_namespace = self.allocate_memo_child_scope("step", step_name)
             func_ctx = FunctionContext(
                 run_id=self.run_id,  # Pure run ID - correlation_id handles unique identification
                 correlation_id=func_correlation_id,
                 parent_correlation_id=step_correlation_id,
                 runtime_context=self._runtime_context,
                 worker=self._worker,
+                memo_namespace=step_memo_namespace,
             )
 
             # Emit function.started event
@@ -638,25 +640,31 @@ class WorkflowContext(Context):
             self.emit(func_started)
             func_start_time = time.time_ns()
 
+            context_token = set_current_context(func_ctx)
             try:
-                # Execute function with arguments
-                # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
-                if len(args) == 0 and "input" in kwargs:
-                    # Legacy pattern - single input parameter
-                    input_data = kwargs.pop("input")  # Remove from kwargs
-                    handler_result = func_config.handler(func_ctx, input_data, **kwargs)
-                else:
-                    # Type-safe pattern - pass all args/kwargs
-                    handler_result = func_config.handler(func_ctx, *args, **kwargs)
+                try:
+                    # Execute function with arguments
+                    # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
+                    if len(args) == 0 and "input" in kwargs:
+                        # Legacy pattern - single input parameter
+                        input_data = kwargs.pop("input")  # Remove from kwargs
+                        handler_result = func_config.handler(func_ctx, input_data, **kwargs)
+                    else:
+                        # Type-safe pattern - pass all args/kwargs
+                        handler_result = func_config.handler(func_ctx, *args, **kwargs)
 
-                # Check if result is an async generator (streaming function or agent)
-                # If so, consume it while forwarding events via delta queue
-                if inspect.isasyncgen(handler_result):
-                    result = await self._consume_streaming_result(handler_result, step_name)
-                elif inspect.iscoroutine(handler_result):
-                    result = await handler_result
-                else:
-                    result = handler_result
+                    # Check if result is an async generator (streaming function or agent)
+                    # If so, consume it while forwarding events via delta queue
+                    if inspect.isasyncgen(handler_result):
+                        result = await self._consume_streaming_result(handler_result, step_name)
+                    elif inspect.iscoroutine(handler_result):
+                        result = await handler_result
+                    else:
+                        result = handler_result
+                finally:
+                    from .context import _current_context
+
+                    _current_context.reset(context_token)
 
                 # Add output data to span
                 try:
@@ -1212,23 +1220,24 @@ class WorkflowContext(Context):
         start_time = time.time()
         try:
             # Execute and checkpoint
-            if inspect.isasyncgen(func_or_awaitable):
-                # Direct async generator - consume while forwarding events
-                result = await self._consume_streaming_result(func_or_awaitable, name)
-            elif inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
-                result = await func_or_awaitable
-            elif callable(func_or_awaitable):
-                # Call with args/kwargs if provided
-                call_result = func_or_awaitable(*args, **kwargs)
-                if inspect.isasyncgen(call_result):
-                    # Callable returned async generator - consume while forwarding events
-                    result = await self._consume_streaming_result(call_result, name)
-                elif inspect.iscoroutine(call_result) or inspect.isawaitable(call_result):
-                    result = await call_result
+            with self.memo_child_scope("step", step_key):
+                if inspect.isasyncgen(func_or_awaitable):
+                    # Direct async generator - consume while forwarding events
+                    result = await self._consume_streaming_result(func_or_awaitable, name)
+                elif inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
+                    result = await func_or_awaitable
+                elif callable(func_or_awaitable):
+                    # Call with args/kwargs if provided
+                    call_result = func_or_awaitable(*args, **kwargs)
+                    if inspect.isasyncgen(call_result):
+                        # Callable returned async generator - consume while forwarding events
+                        result = await self._consume_streaming_result(call_result, name)
+                    elif inspect.iscoroutine(call_result) or inspect.isawaitable(call_result):
+                        result = await call_result
+                    else:
+                        result = call_result
                 else:
-                    result = call_result
-            else:
-                raise ValueError(f"step() second argument must be awaitable or callable, got {type(func_or_awaitable)}")
+                    raise ValueError(f"step() second argument must be awaitable or callable, got {type(func_or_awaitable)}")
 
             latency_ms = int((time.time() - start_time) * 1000)
 

@@ -9,9 +9,8 @@ Tests cover:
 
 import pytest
 from agnt5.agent import AgentContext
-from agnt5.workflow import WorkflowEntity, WorkflowContext
 from agnt5.lm import Message
-from agnt5._state_adapter import StateAdapter as EntityStateAdapter
+from agnt5.workflow import WorkflowContext, WorkflowEntity
 
 
 @pytest.mark.asyncio
@@ -39,6 +38,61 @@ async def test_agent_storage_mode_workflow():
 
     assert agent_ctx._storage_mode == "workflow"
     assert agent_ctx._workflow_entity is workflow_entity
+
+
+def test_direct_workflow_agents_get_distinct_memo_namespaces():
+    """Direct agent calls in one workflow run must not share lm.0/tool.0 keys."""
+    workflow_entity = WorkflowEntity(run_id="wf-123")
+    wf_ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="wf-123")
+
+    planner_ctx = AgentContext(
+        run_id=wf_ctx.run_id,
+        agent_name="planner",
+        parent_context=wf_ctx,
+    )
+    investigator_ctx = AgentContext(
+        run_id=wf_ctx.run_id,
+        agent_name="investigator",
+        parent_context=wf_ctx,
+    )
+    planner_again_ctx = AgentContext(
+        run_id=wf_ctx.run_id,
+        agent_name="planner",
+        parent_context=wf_ctx,
+    )
+
+    assert planner_ctx._memo is not None
+    assert investigator_ctx._memo is not None
+    assert planner_again_ctx._memo is not None
+
+    planner_key, _ = planner_ctx._memo.lm_call_key("mock", [Message.user("plan")], {})
+    investigator_key, _ = investigator_ctx._memo.lm_call_key(
+        "mock", [Message.user("investigate")], {}
+    )
+    planner_again_key, _ = planner_again_ctx._memo.lm_call_key(
+        "mock", [Message.user("plan again")], {}
+    )
+
+    assert planner_key == "agent.planner.0.lm.0"
+    assert investigator_key == "agent.investigator.0.lm.0"
+    assert planner_again_key == "agent.planner.1.lm.0"
+
+
+def test_agent_memo_namespace_can_nest_under_workflow_step_scope():
+    """Agents inside ctx.step awaitables inherit the active step memo scope."""
+    workflow_entity = WorkflowEntity(run_id="wf-123")
+    wf_ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="wf-123")
+
+    with wf_ctx.memo_child_scope("step", "collect"):
+        agent_ctx = AgentContext(
+            run_id=wf_ctx.run_id,
+            agent_name="investigator",
+            parent_context=wf_ctx,
+        )
+        assert agent_ctx._memo is not None
+        step_key, _ = agent_ctx._memo.lm_call_key("mock", [Message.user("look")], {})
+
+    assert step_key == "step.collect.0.agent.investigator.0.lm.0"
 
 
 @pytest.mark.asyncio

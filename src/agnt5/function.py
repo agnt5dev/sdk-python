@@ -37,6 +37,7 @@ class FunctionContext(Context):
         is_streaming: bool = False,
         worker: Optional[Any] = None,
         trace_metadata: Optional[dict[str, str]] = None,
+        memo_namespace: Optional[str] = None,
     ) -> None:
         super().__init__(
             run_id,
@@ -47,6 +48,7 @@ class FunctionContext(Context):
             is_streaming=is_streaming,
             worker=worker,
             trace_metadata=trace_metadata,
+            memo_namespace=memo_namespace,
         )
         self._retry_policy = retry_policy
 

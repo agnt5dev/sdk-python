@@ -157,6 +157,14 @@ class MemoizationManager:
         content = json.dumps(data, sort_keys=True, default=str)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
+    def _scoped_step_key(self, local_step_key: str) -> str:
+        """Prefix a local memo key with the active execution namespace."""
+        if hasattr(self._ctx, "current_memo_namespace"):
+            namespace = self._ctx.current_memo_namespace()
+        else:
+            namespace = getattr(self._ctx, "_memo_namespace", "")
+        return f"{namespace}.{local_step_key}" if namespace else local_step_key
+
     def lm_call_key(
         self,
         model: str,
@@ -176,7 +184,7 @@ class MemoizationManager:
             - step_key: Sequence-based key for journal lookup (e.g., "lm.0")
             - content_hash: Hash of inputs for replay validation
         """
-        step_key = f"lm.{self._lm_sequence}"
+        step_key = self._scoped_step_key(f"lm.{self._lm_sequence}")
         self._lm_sequence += 1
 
         # Build hashable representation of messages
@@ -219,7 +227,7 @@ class MemoizationManager:
             - content_hash: Hash of inputs for replay validation
         """
         seq = self._tool_sequences.get(tool_name, 0)
-        step_key = f"tool.{tool_name}.{seq}"
+        step_key = self._scoped_step_key(f"tool.{tool_name}.{seq}")
         self._tool_sequences[tool_name] = seq + 1
 
         content_hash = self._content_hash({
@@ -266,8 +274,9 @@ class MemoizationManager:
                     logger.warning(
                         f"Content mismatch on replay for {step_key}: "
                         f"stored={stored_hash}, current={content_hash}. "
-                        "Inputs may have changed between runs."
+                        "Inputs may have changed between runs; ignoring cached output."
                     )
+                    return None
 
                 # Return cached output
                 output_data = cached_data.get("output_data")
@@ -371,8 +380,9 @@ class MemoizationManager:
                     logger.warning(
                         f"Content mismatch on replay for {step_key}: "
                         f"stored={stored_hash}, current={content_hash}. "
-                        "Inputs may have changed between runs."
+                        "Inputs may have changed between runs; ignoring cached output."
                     )
+                    return False, None
 
                 # Return cached output
                 output_data = cached_data.get("output_data")

@@ -94,6 +94,10 @@ class AgentContext(Context):
         if not parent_correlation_id:
             parent_correlation_id = getattr(parent_context, '_correlation_id', '') if parent_context else ''
 
+        memo_namespace = None
+        if parent_context and hasattr(parent_context, "allocate_memo_child_scope"):
+            memo_namespace = parent_context.allocate_memo_child_scope("agent", agent_name)
+
         # Initialize parent Context with memoization enabled by default for agents
         # This ensures LLM and tool calls are automatically journaled for replay
         super().__init__(
@@ -107,6 +111,7 @@ class AgentContext(Context):
             enable_memoization=True,  # Agents get memoization by default
             worker=worker,
             trace_metadata=trace_metadata,
+            memo_namespace=memo_namespace,
         )
 
         self._agent_name = agent_name

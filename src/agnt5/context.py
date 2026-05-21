@@ -24,6 +24,20 @@ if TYPE_CHECKING:
 _current_context: contextvars.ContextVar[Optional["Context"]] = contextvars.ContextVar(
     "_current_context", default=None
 )
+_current_memo_namespace: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_current_memo_namespace", default=None
+)
+
+
+def _memo_namespace_part(value: str) -> str:
+    """Return a compact, stable namespace segment for memo step keys."""
+    safe = []
+    for char in str(value):
+        if char.isalnum() or char in ("_", "-"):
+            safe.append(char)
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_")[:80] or "scope"
 
 
 class _CorrelationFilter(logging.Filter):
@@ -60,6 +74,7 @@ class Context:
         is_streaming: bool = False,
         worker: Optional[Any] = None,
         trace_metadata: Optional[dict[str, str]] = None,
+        memo_namespace: Optional[str] = None,
     ) -> None:
         self._run_id = run_id
         self._attempt = attempt
@@ -73,6 +88,8 @@ class Context:
         self._correlation_id: str = correlation_id
         self._parent_correlation_id: str = parent_correlation_id
         self._component_name: Optional[str] = None
+        self._memo_namespace = memo_namespace or ""
+        self._memo_child_sequences: dict[str, int] = {}
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
@@ -218,6 +235,44 @@ class Context:
             yield
         finally:
             self._parent_correlation_id = old_parent
+
+    def current_memo_namespace(self) -> str:
+        """Return the active memo namespace for this task."""
+        override = _current_memo_namespace.get()
+        if override and (
+            not self._memo_namespace
+            or override == self._memo_namespace
+            or override.startswith(f"{self._memo_namespace}.")
+        ):
+            return override
+        return self._memo_namespace or override or ""
+
+    def allocate_memo_child_scope(self, kind: str, name: str) -> str:
+        """
+        Allocate a deterministic child namespace below the current memo scope.
+
+        The sequence number keeps repeated sibling calls from sharing keys
+        while remaining stable for a replay that follows the same execution
+        order.
+        """
+        base = self.current_memo_namespace()
+        kind_part = _memo_namespace_part(kind)
+        name_part = _memo_namespace_part(name)
+        counter_key = f"{base}\0{kind_part}\0{name_part}"
+        seq = self._memo_child_sequences.get(counter_key, 0)
+        self._memo_child_sequences[counter_key] = seq + 1
+        child = f"{kind_part}.{name_part}.{seq}"
+        return f"{base}.{child}" if base else child
+
+    @contextmanager
+    def memo_child_scope(self, kind: str, name: str) -> Generator[str, None, None]:
+        """Temporarily set a deterministic child memo namespace for this task."""
+        namespace = self.allocate_memo_child_scope(kind, name)
+        token = _current_memo_namespace.set(namespace)
+        try:
+            yield namespace
+        finally:
+            _current_memo_namespace.reset(token)
 
     def get_event_context(self) -> dict[str, str]:
         """Get correlation_id and parent_correlation_id for event hierarchy."""
