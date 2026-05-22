@@ -855,8 +855,14 @@ class Agent:
                             yield item
                             sequence = seq
 
-                    # Add assistant response to messages
-                    messages.append(Message.assistant(response_text))
+                    # Add assistant response to messages. Preserve tool_calls so
+                    # the next iteration's request includes the prior turn's
+                    # tool_use block — required by OpenAI/Anthropic protocol so
+                    # tool result messages can be linked back via tool_call_id.
+                    messages.append(Message.assistant(
+                        response_text,
+                        tool_calls=response_tool_calls if response_tool_calls else None,
+                    ))
 
                     # Server-side built-in tools (Responses API) execute on the
                     # provider; their results are already baked into the assistant
@@ -1024,6 +1030,7 @@ class Agent:
 
                                 tool_results.append({
                                     "tool": tool_name,
+                                    "tool_call_id": tool_call_id,
                                     "result": result_text,
                                     "error": None,
                                 })
@@ -1083,6 +1090,7 @@ class Agent:
                                 self.logger.error(f"Tool execution error: {e}")
                                 tool_results.append({
                                     "tool": tool_name,
+                                    "tool_call_id": tool_call_id,
                                     "result": None,
                                     "error": str(e),
                                 })
@@ -1101,16 +1109,20 @@ class Agent:
                                 yield tool_failed_event
                                 sequence += 1
 
-                        # Add tool results to conversation
-                        results_text = "\n".join([
-                            f"Tool: {tr['tool']}\nResult: {tr['result']}"
-                            if tr["error"] is None
-                            else f"Tool: {tr['tool']}\nError: {tr['error']}"
-                            for tr in tool_results
-                        ])
-                        messages.append(Message.user(
-                            f"Tool results:\n{results_text}\n\nPlease provide your final answer based on these results."
-                        ))
+                        # Append one tool message per result, keyed by
+                        # tool_call_id so OpenAI/Anthropic can map each result
+                        # back to the assistant message's tool_use block.
+                        # The Rust LM client (openai_common.rs:179) routes
+                        # messages with tool_call_id to role="tool".
+                        for tr in tool_results:
+                            tool_content = (
+                                tr["result"] if tr["error"] is None
+                                else f"Error: {tr['error']}"
+                            )
+                            messages.append(Message.tool_result(
+                                tool_call_id=tr.get("tool_call_id") or "",
+                                content=tool_content or "",
+                            ))
 
                         # Reset parent before emitting iteration.completed
                         context.restore_parent(original_iteration_parent)

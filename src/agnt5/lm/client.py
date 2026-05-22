@@ -319,11 +319,23 @@ class LMClient(LanguageModel):
         timestamp_ns: int,
         correlation_id: str,
     ) -> None:
-        # Serialize messages for event
-        messages = [
-            {"role": m.role.value, "content": m.content}
-            for m in request.messages
-        ]
+        # Serialize messages for event. Include tool_calls and tool_call_id so
+        # the trace shows the OpenAI/Anthropic protocol shape the Rust LM
+        # client actually sends — tool result messages render as role:"tool"
+        # with tool_call_id, and assistant turns that requested tools include
+        # the tool_calls block. The Rust ApiMessage builder in
+        # sdk-core/src/lm/openai_common.rs:179 routes by presence of
+        # tool_call_id; mirror that here for display fidelity.
+        def _serialize_msg(m):
+            role = "tool" if m.tool_call_id else m.role.value
+            out: Dict[str, Any] = {"role": role, "content": m.content}
+            if m.tool_call_id:
+                out["tool_call_id"] = m.tool_call_id
+            if m.tool_calls:
+                out["tool_calls"] = m.tool_calls
+            return out
+
+        messages = [_serialize_msg(m) for m in request.messages]
         started_event = LMStarted(
             name=model,
             correlation_id=correlation_id,
