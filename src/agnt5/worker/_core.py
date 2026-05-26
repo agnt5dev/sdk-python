@@ -87,6 +87,7 @@ class Worker(ExecutorMixin):
         auto_register: bool = False,
         auto_register_paths: list[str] | None = None,
         pyproject_path: str | None = None,
+        max_concurrency: int | None = None,
     ):
         """Initialize a new Worker with explicit or automatic component registration.
 
@@ -116,6 +117,10 @@ class Worker(ExecutorMixin):
             auto_register: Enable automatic component discovery (default: False)
             auto_register_paths: Explicit source paths to scan (overrides pyproject.toml discovery)
             pyproject_path: Path to pyproject.toml (default: current directory)
+            max_concurrency: Max in-flight invocations this worker serves. Sets the
+                local pool size and the coordinator's per-priority headroom denominator.
+                Defaults to the AGNT5_MAX_CONCURRENCY env var, then 100. Raise it for
+                async/IO-bound LLM workflows; lower it for CPU-bound work.
         """
         self.service_name = service_name
         self.service_version = service_version
@@ -181,6 +186,7 @@ class Worker(ExecutorMixin):
             service_name=service_name,
             service_version=service_version,
             service_type=runtime,
+            max_concurrency=max_concurrency,
         )
         self._rust_worker = self._PyWorker(self._rust_config)
 

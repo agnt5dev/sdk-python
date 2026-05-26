@@ -40,27 +40,41 @@ pub struct PyWorkerConfig {
     pub service_name: String,
     pub service_version: String,
     pub service_type: String,
+    pub max_concurrency: Option<u32>,
 }
 
 #[pymethods]
 impl PyWorkerConfig {
     #[new]
-    pub fn new(service_name: String, service_version: String, service_type: String) -> Self {
+    #[pyo3(signature = (service_name, service_version, service_type, max_concurrency=None))]
+    pub fn new(
+        service_name: String,
+        service_version: String,
+        service_type: String,
+        max_concurrency: Option<u32>,
+    ) -> Self {
         Self {
             service_name,
             service_version,
             service_type,
+            max_concurrency,
         }
     }
 }
 
 impl From<PyWorkerConfig> for WorkerConfig {
     fn from(config: PyWorkerConfig) -> Self {
-        WorkerConfig::new(
+        let mut wc = WorkerConfig::new(
             config.service_name,
             config.service_version,
             config.service_type,
-        )
+        );
+        // An explicit value from Python wins over the env-var seed applied
+        // in `WorkerConfig::new`.
+        if config.max_concurrency.is_some() {
+            wc.max_concurrency = config.max_concurrency;
+        }
+        wc
     }
 }
 
