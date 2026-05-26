@@ -857,6 +857,9 @@ class Worker(ExecutorMixin):
 
             await self._rust_worker.run()
 
+        except asyncio.CancelledError:
+            pass
+
         except Exception as e:
             logger.error(
                 f"Worker failed to start or encountered critical error: {e}",
