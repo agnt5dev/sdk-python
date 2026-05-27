@@ -627,7 +627,9 @@ class Worker(ExecutorMixin):
                 )
             )
 
-        # Process scorers
+        registered_scorer_names: set[str] = set()
+
+        # Process explicit/custom scorers
         for scorer_handler in self._explicit_components.get("scorers", []):
             scorer_name = getattr(scorer_handler, "_scorer_name", scorer_handler.__name__)
             config = ScorerRegistry.get(scorer_name)
@@ -639,12 +641,41 @@ class Worker(ExecutorMixin):
                 self._create_component_info(
                     name=config.name,
                     component_type="scorer",
-                    metadata={"scope": config.scope},
+                    metadata={
+                        "scope": config.scope,
+                        "description": config.description,
+                    },
                     config={},
                     input_schema=None,  # Scorers use standardized ScorerRequest
                     output_schema=None,  # Scorers use standardized ScorerResult
                 )
             )
+            registered_scorer_names.add(config.name)
+
+        # These managed scorer presets are implemented in Python and must be
+        # routable as worker scorer components. Deterministic built-ins stay on
+        # the Rust/control-plane paths.
+        for scorer_name in ("llm_judge", "correctness", "faithfulness"):
+            if scorer_name in registered_scorer_names:
+                continue
+            config = ScorerRegistry.get(scorer_name)
+            if not config:
+                continue
+            components.append(
+                self._create_component_info(
+                    name=config.name,
+                    component_type="scorer",
+                    metadata={
+                        "scope": config.scope,
+                        "description": config.description,
+                        "source": "agnt5_builtin",
+                    },
+                    config={"builtin": "true"},
+                    input_schema=None,
+                    output_schema=None,
+                )
+            )
+            registered_scorer_names.add(config.name)
 
         return components
 

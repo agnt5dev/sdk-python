@@ -1428,6 +1428,39 @@ class TestLLMJudge:
             in captured["messages"][1]["content"]
         )
 
+    def test_custom_judge_prompt_template_without_output_appends_output(self, monkeypatch):
+        """Criteria-like templates still include the target output."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
+
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"label":"actionable","explanation":"has recommendation"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+
+        result = asyncio.run(
+            llm_judge(
+                output="Recommendation: buy below $100.",
+                config=LLMJudgeConfig(
+                    criteria="",
+                    model="openai/gpt-test",
+                    prompt_template="Judge whether the report is actionable.",
+                    choice_scores={"actionable": 1.0, "not actionable": 0.0},
+                ),
+            )
+        )
+
+        assert result.score == 1.0
+        assert "Judge whether the report is actionable." in captured["messages"][1]["content"]
+        assert "## Output to Evaluate\nRecommendation: buy below $100." in captured["messages"][1]["content"]
+
     def test_custom_judge_invalid_label_fails_with_clear_label(self, monkeypatch):
         """Custom judge labels must be one of the configured choices."""
         from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
@@ -1458,6 +1491,36 @@ class TestLLMJudge:
         assert result.label == "invalid_label"
         assert result.metadata["invalid_label"] == "maybe"
         assert result.metadata["allowed_labels"] == ["correct", "incorrect"]
+
+    def test_custom_judge_choice_scores_infer_missing_label_from_score(self, monkeypatch):
+        """Choice scores tolerate a missing label when the score maps uniquely."""
+        from agnt5.eval.llm_judge import LLMJudgeConfig, llm_judge
+
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+
+        async def fake_generate(**kwargs):
+            class Response:
+                text = '{"score":0,"explanation":"no recommendation"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+
+        result = asyncio.run(
+            llm_judge(
+                output="Analysis without recommendation.",
+                config=LLMJudgeConfig(
+                    criteria="Actionability",
+                    model="openai/gpt-test",
+                    choice_scores={"actionable": 1.0, "not actionable": 0.0},
+                ),
+            )
+        )
+
+        assert result.score == 0.0
+        assert result.passed is False
+        assert result.label == "not actionable"
+        assert result.metadata["selected_label"] == "not actionable"
 
     def test_custom_judge_missing_template_variable_reports_config_error(self):
         """Missing custom judge template variables fail before model calls."""
@@ -1516,6 +1579,40 @@ class TestLLMJudge:
         assert result.metadata["judge_preset"] == "faithfulness"
         assert result.metadata["context_fields"] == ["input.context"]
         assert "## Context" in captured["messages"][1]["content"]
+
+    def test_correctness_builtin_handler_allows_reference_free_judging(self, monkeypatch):
+        """Correctness can judge output against input without expected output."""
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"score":0,"passed":false,"explanation":"not supported","label":"fail"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            input={"question": "What did TSLA report last quarter?"},
+            output={"answer": "TSLA reported fictional numbers."},
+            config={"answer_field": "output.answer", "model": "gpt-test"},
+        )
+        result = asyncio.run(scorer_mod.run_scorer("correctness", request))
+
+        assert result.passed is False
+        assert result.label == "fail"
+        assert result.metadata["judge_preset"] == "correctness"
+        assert "## Input" in captured["messages"][1]["content"]
+        assert "## Expected Output (Reference)" not in captured["messages"][1]["content"]
 
     def test_faithfulness_builtin_handler_reports_missing_context_field(self):
         """Missing configured context fields fail before calling a judge model."""
@@ -1704,6 +1801,29 @@ class TestScorerComponentType:
         assert result.passed is False
         assert result.label == "config_error"
         assert "expected array" in (result.explanation or "")
+
+    def test_run_scorer_ignores_llm_judge_output_mode_as_field_binding_type(self):
+        """UI judge output modes should not be interpreted as target output type assertions."""
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import run_scorer
+        from agnt5.scorer import scorer as scorer_dec
+
+        captured = {}
+
+        @scorer_dec(name="field_binding_output_mode_unique")
+        def capture_fields(request: ScorerRequest) -> ScorerResultType:
+            captured["output"] = request.output
+            return ScorerResultType(score=1.0, passed=True)
+
+        request = ScorerRequest(
+            output="A text report, not a numeric score.",
+            config={"output_type": "score"},
+        )
+        result = asyncio.run(run_scorer("field_binding_output_mode_unique", request))
+
+        assert result.passed is True
+        assert captured["output"] == "A text report, not a numeric score."
 
     def test_scorer_context_peer_scores_available_to_meta_evaluator(self):
         """run_scorer passes prior item scores to context helpers."""

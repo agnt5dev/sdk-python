@@ -442,6 +442,10 @@ class LLMJudgeConfig:
     include_input: bool = False
     prompt_template: Optional[str] = None
     choice_scores: Optional[Dict[str, float]] = None
+    use_cot: bool = False
+    output_schema: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+    tags: Optional[List[str]] = None
 
 
 @dataclass
@@ -557,11 +561,16 @@ def _build_judge_prompt(
                 "output": output,
                 "expected": expected,
                 "context": context_data,
+                "metadata": config.metadata,
+                "tags": config.tags,
             },
         )
         if error:
             return "", error
         user_content = rendered.rstrip() + "\n\n"
+        if not _template_references_selector(config.prompt_template, "output"):
+            output_str = _format_value(output)
+            user_content += f"## Output to Evaluate\n{output_str}\n\n"
     else:
         if not config.criteria:
             return "", "llm_judge requires criteria or prompt_template"
@@ -589,8 +598,28 @@ def _build_judge_prompt(
             f"{labels}. Return that label in the JSON `label` field. "
             "The platform will map labels to scores.\n\n"
         )
+    if config.use_cot:
+        user_content += (
+            "Reason through the rubric before deciding, but do not include hidden chain-of-thought. "
+            "Put only a concise rationale in the JSON `explanation` field.\n\n"
+        )
+    if config.output_schema:
+        user_content += (
+            "Return a JSON object matching this requested output shape:\n"
+            f"{_format_value(config.output_schema)}\n"
+            "For experiment scoring, the JSON should include `score` (0.0 to 1.0), "
+            "`label`, and `explanation` fields.\n\n"
+        )
     user_content += "Please evaluate the output and respond with a JSON object."
     return user_content, None
+
+
+def _template_references_selector(template: str, root: str) -> bool:
+    for match in re.finditer(r"\{\{\s*([^}]+?)\s*\}\}", template):
+        selector = match.group(1).strip()
+        if selector == root or selector.startswith(f"{root}."):
+            return True
+    return False
 
 
 def _render_prompt_template(template: str, values: Dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -639,7 +668,10 @@ def _apply_choice_scores(
     if not choice_scores or result.label in {"parse_error", "config_error"}:
         return result
     labels = sorted(choice_scores)
-    if not result.label or result.label not in choice_scores:
+    label = result.label
+    if not label:
+        label = _label_for_choice_score(result.score, choice_scores)
+    if not label or label not in choice_scores:
         metadata = dict(result.metadata or {})
         metadata["allowed_labels"] = labels
         if result.label:
@@ -653,17 +685,28 @@ def _apply_choice_scores(
             ),
             metadata=metadata,
         )
-    score = max(0.0, min(1.0, float(choice_scores[result.label])))
+    score = max(0.0, min(1.0, float(choice_scores[label])))
     metadata = dict(result.metadata or {})
     metadata["choice_scores"] = choice_scores
-    metadata["selected_label"] = result.label
+    metadata["selected_label"] = label
     return LLMJudgeResult(
         score=score,
         passed=score >= 0.7,
         explanation=result.explanation,
-        label=result.label,
+        label=label,
         metadata=metadata,
     )
+
+
+def _label_for_choice_score(score: float, choice_scores: Dict[str, float]) -> Optional[str]:
+    matches = [
+        label
+        for label, choice_score in choice_scores.items()
+        if abs(float(choice_score) - float(score)) < 1e-9
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 def _format_value(value: Any) -> str:

@@ -320,6 +320,15 @@ def _value_type_matches(value: Any, expected_type: str) -> bool:
     )
 
 
+def _field_binding_expected_type(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    expected_type = value.strip().lower()
+    if expected_type in {"score", "classification", "json"}:
+        return None
+    return expected_type if expected_type else None
+
+
 def _bind_request_field(
     config: Dict[str, Any],
     root: str,
@@ -336,12 +345,12 @@ def _bind_request_field(
         except KeyError:
             raise KeyError(f"{field_key} {selector!r} was not found") from None
         metadata[field_key] = selector.strip()
-    expected_type = config.get(type_key)
-    if isinstance(expected_type, str) and expected_type.strip():
+    expected_type = _field_binding_expected_type(config.get(type_key))
+    if expected_type:
         if not _value_type_matches(selected, expected_type):
             actual = _value_type_name(selected)
             raise TypeError(f"{field_key} selected {actual}; expected {expected_type}")
-        metadata[type_key] = expected_type.strip()
+        metadata[type_key] = expected_type
     return selected
 
 
@@ -430,6 +439,12 @@ def register_builtin_scorer_handlers() -> None:
                 temperature=config.get("temperature", 0.0),
                 include_input=config.get("include_input", False),
                 choice_scores=_judge_choice_scores(config),
+                use_cot=bool(config.get("use_cot", False)),
+                output_schema=config.get("output_schema")
+                if isinstance(config.get("output_schema"), dict)
+                else None,
+                metadata=config.get("metadata") if isinstance(config.get("metadata"), dict) else None,
+                tags=config.get("tags") if isinstance(config.get("tags"), list) else None,
             )
 
             result = await llm_judge(
@@ -469,11 +484,6 @@ def register_builtin_scorer_handlers() -> None:
                 )
             except KeyError as e:
                 return _config_error(f"correctness field selector not found: {e.args[0]}")
-            if expected is None:
-                return _config_error(
-                    "correctness requires expected output or config.reference_field"
-                )
-
             result = await llm_judge(
                 output=output,
                 config=LLMJudgeConfig(
