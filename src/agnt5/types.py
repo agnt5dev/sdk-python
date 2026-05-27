@@ -88,6 +88,55 @@ def event(
     )
 
 
+def webhook(
+    source: str,
+    *,
+    event: str,
+    trigger_id: str = "",
+    filter_expression: str = "",
+    input_mapping: str = "",
+    batch_window_ms: int = 0,
+    delay_expression: str = "",
+) -> TriggerSpec:
+    """Declare a webhook-event trigger for a workflow.
+
+    Webhook deliveries arriving at
+    ``POST /v1/webhooks/{source}/{integration_id}`` are dispatched as
+    events with name ``{source}.{event}``. The runtime gateway emits
+    that exact event name in ``run.queued.metadata.event_type``, so
+    declaring ``webhook("sentry", event="issue.created")`` subscribes
+    the workflow to ``sentry.issue.created``.
+
+    Args:
+        source: Webhook source. One of ``standard``, ``sentry``,
+            ``stripe``, ``github``, ``slack`` (lowercased).
+        event: Event identifier within the source. For Sentry use
+            ``"<resource>.<action>"`` (e.g. ``"issue.created"``); for
+            GitHub use ``"<event>.<action>"`` (e.g.
+            ``"issues.opened"``); for Stripe use the body ``type``
+            (e.g. ``"payment_intent.succeeded"``); for Slack use the
+            event-callback type (e.g. ``"app_mention"``); for Standard
+            Webhooks publishers, use the ``webhook-event`` header
+            value.
+    """
+
+    src = source.strip().lower()
+    evt = event.strip()
+    if not src:
+        raise ValueError("webhook source is required")
+    if not evt:
+        raise ValueError("webhook event is required")
+    return TriggerSpec(
+        trigger_id=trigger_id,
+        trigger_type="event",
+        event_name=f"{src}.{evt}",
+        filter_expression=filter_expression,
+        input_mapping=input_mapping,
+        batch_window_ms=batch_window_ms,
+        delay_expression=delay_expression,
+    )
+
+
 @dataclass
 class FunctionConfig:
     """Configuration for a function handler."""

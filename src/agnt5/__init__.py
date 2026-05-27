@@ -125,7 +125,15 @@ from .lm import (
     LMFailed,
     LMStarted,
 )
-from .types import BackoffPolicy, BackoffType, RetryPolicy, TriggerSpec, WorkflowConfig, event
+from .types import (
+    BackoffPolicy,
+    BackoffType,
+    RetryPolicy,
+    TriggerSpec,
+    WorkflowConfig,
+    event,
+    webhook,
+)
 from .version import _get_version
 from .worker import Worker
 from ._telemetry import get_logger, set_log_level
