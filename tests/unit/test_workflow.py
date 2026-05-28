@@ -11,6 +11,7 @@ Tests cover:
 """
 
 import asyncio
+from unittest.mock import Mock
 
 import pytest
 
@@ -24,6 +25,7 @@ from agnt5 import (
     function,
     workflow,
 )
+from agnt5.exceptions import WaitingForUserInputException
 from agnt5.lm import GenerateResponse, Message
 from agnt5.workflow import WorkflowEntity
 from agnt5._state_adapter import with_state_context as with_entity_context
@@ -147,6 +149,40 @@ async def test_workflow_execution_auto_context():
         assert result == "done"
 
     await run_test()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_user_logs_question_once_on_initial_pause():
+    """Initial HITL pause logs the question exactly once."""
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    question = "Review this plan"
+    ctx._logger.info = Mock()
+
+    with pytest.raises(WaitingForUserInputException):
+        await ctx.wait_for_user(question)
+
+    pause_logs = [
+        call.args[0]
+        for call in ctx._logger.info.call_args_list
+        if "Pausing workflow for user input" in call.args[0]
+    ]
+    assert pause_logs == [f"⏸️  Pausing workflow for user input: {question}"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_user_replay_does_not_emit_pause_logs():
+    """Cached HITL responses return during replay without normal pause output."""
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = "approve"
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+    ctx._logger.info = Mock()
+
+    response = await ctx.wait_for_user("Review this plan")
+
+    assert response == "approve"
+    ctx._logger.info.assert_not_called()
 
 
 @pytest.mark.asyncio

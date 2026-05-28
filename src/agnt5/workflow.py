@@ -1548,7 +1548,7 @@ class WorkflowContext(Context):
         # NOT: workflow.step.started -> workflow.resumed -> workflow.step.completed
         if self._workflow_entity.has_completed_step(response_key):
             response = self._workflow_entity.get_completed_step(response_key)
-            self._logger.info(f"🔄 Replaying user response from checkpoint (pause {pause_index})")
+            self._logger.debug(f"Replaying user response from checkpoint (pause {pause_index})")
 
             # Use the ORIGINAL step correlation ID from the pause, not a new one
             # This ensures step.started and step.completed have matching correlation IDs

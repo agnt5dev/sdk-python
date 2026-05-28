@@ -1542,13 +1542,13 @@ class ExecutorMixin:
             # Return None - the event queue handles delivery
             return None
 
-        except WaitingForUserInputException as e:
+        except WaitingForUserInputException:
             # Workflow paused for user input.
             # The workflow.paused event was already emitted via ctx.emit()
             # and flows through WriteCheckpoint to the Engine, which writes
             # run.paused. The coordinator's journal consumer watches for
             # run.paused and decrements active_invocations.
-            logger.info(f"Workflow paused waiting for user input: {e.question}")
+            logger.info("Workflow paused waiting for user input")
             return None
 
         except Exception as e:
