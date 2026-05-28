@@ -5,10 +5,21 @@ The SDK executes functions once and reports results; the platform orchestrates r
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
-from agnt5 import BackoffPolicy, BackoffType, FunctionContext, FunctionRegistry, RetryPolicy, function
+from agnt5 import (
+    BackoffPolicy,
+    BackoffType,
+    FunctionContext,
+    FunctionRegistry,
+    RetryPolicy,
+    function,
+)
+from agnt5._serialization import deserialize, serialize
+from agnt5.agent import AgentContext
+from agnt5.worker._executors import ExecutorMixin
 
 # Test constants
 MAX_TEST_RETRIES = 3
@@ -72,8 +83,70 @@ class TestFunctionDecorator:
         assert config.retries.max_attempts == 5
         assert config.retries.initial_interval_ms == 500
 
+    @pytest.mark.asyncio
+    async def test_executor_sets_function_span_as_child_context_parent(self) -> None:
+        captured: dict[str, str] = {}
+
+        class FakeRustWorker:
+            def __init__(self) -> None:
+                self.batches = []
+                self.events = []
+
+            async def emit_event_batch_async(self, batch_tuples):
+                self.batches.append(batch_tuples)
+
+            async def emit_event_async(
+                self,
+                run_id,
+                event_type,
+                event_data,
+                sequence_number,
+                metadata,
+                source_timestamp_ns,
+                timeout_ms,
+            ):
+                self.events.append((event_type, event_data, metadata))
+
+        class FakeExecutor(ExecutorMixin):
+            def __init__(self) -> None:
+                self._rust_worker = FakeRustWorker()
+
+        @function(name="parented_function")
+        async def parented_function(ctx: FunctionContext) -> str:
+            child = AgentContext(run_id=ctx.run_id, agent_name="child", parent_context=ctx)
+            captured["function_context_id"] = ctx.correlation_id
+            captured["child_parent_id"] = child.parent_correlation_id
+            return "ok"
+
+        executor = FakeExecutor()
+        request = SimpleNamespace(
+            invocation_id="12345678-1234-5678-1234-567812345678",
+            input_data=serialize({}),
+            attempt=0,
+            runtime_context=None,
+            metadata={},
+        )
+
+        await executor._execute_function(FunctionRegistry.get("parented_function"), b"{}", request)
+
+        started_batch = executor._rust_worker.batches[0]
+        run_started = next(item for item in started_batch if item[1] == "run.started")
+        function_started = next(item for item in started_batch if item[1] == "function.started")
+        run_started_data = deserialize(run_started[2])
+        function_started_data = deserialize(function_started[2])
+        run_correlation_id = run_started_data["correlation_id"]
+        function_correlation_id = function_started_data["correlation_id"]
+        run_completed = next(item for item in executor._rust_worker.events if item[0] == "run.completed")
+
+        assert run_started_data["parent_correlation_id"] == ""
+        assert run_completed[2].get("parent_correlation_id") is None
+        assert function_started_data["parent_correlation_id"] == run_correlation_id
+        assert captured["function_context_id"] == function_correlation_id
+        assert captured["child_parent_id"] == function_correlation_id
+
     def test_function_with_retry_policy_int(self) -> None:
         """Test simplified retry configuration with just max attempts."""
+
         @function(retries=5)
         async def my_func(ctx: FunctionContext) -> str:
             return "test"
@@ -85,6 +158,7 @@ class TestFunctionDecorator:
 
     def test_function_with_retry_policy_dict(self) -> None:
         """Test retry configuration with dict."""
+
         @function(retries={"max_attempts": 5, "initial_interval_ms": 1000})
         async def my_func(ctx: FunctionContext) -> str:
             return "test"
@@ -110,6 +184,7 @@ class TestFunctionDecorator:
 
     def test_function_with_backoff_policy_string(self) -> None:
         """Test simplified backoff configuration with string."""
+
         @function(backoff="exponential")
         async def my_func(ctx: FunctionContext) -> str:
             return "test"
@@ -121,6 +196,7 @@ class TestFunctionDecorator:
 
     def test_function_with_backoff_policy_dict(self) -> None:
         """Test backoff configuration with dict."""
+
         @function(backoff={"type": "linear", "multiplier": 2.0})
         async def my_func(ctx: FunctionContext) -> str:
             return "test"
@@ -133,6 +209,7 @@ class TestFunctionDecorator:
 
     def test_function_without_context_parameter(self) -> None:
         """Test that functions can omit the context parameter."""
+
         @function
         async def add(a: int, b: int) -> int:
             return a + b
@@ -164,13 +241,16 @@ class TestFunctionExecution:
         async def add(ctx: FunctionContext, a: int, b: int) -> int:
             return a + b
 
-        ctx = FunctionContext(run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123")
+        ctx = FunctionContext(
+            run_id="test-123", correlation_id="corr-123", parent_correlation_id="parent-123"
+        )
         result = await add(ctx, 3, 5)
         assert result == 8
 
     @pytest.mark.asyncio
     async def test_basic_execution_without_context(self) -> None:
         """Test functions without context parameter."""
+
         @function
         async def add(a: int, b: int) -> int:
             return a + b
@@ -182,6 +262,7 @@ class TestFunctionExecution:
     @pytest.mark.asyncio
     async def test_function_without_context_requires_no_context_arg(self) -> None:
         """Functions without ctx parameter should not accept context as first arg."""
+
         @function
         async def multiply(x: int, y: int) -> int:
             return x * y
@@ -193,6 +274,7 @@ class TestFunctionExecution:
     @pytest.mark.asyncio
     async def test_function_with_context_requires_context_arg(self) -> None:
         """Functions with ctx parameter must receive context."""
+
         @function
         async def greet(ctx: FunctionContext, name: str) -> str:
             ctx.logger.info(f"Greeting {name}")
@@ -213,7 +295,9 @@ class TestFunctionExecution:
         async def get_run_id(ctx: FunctionContext) -> str:
             return ctx.run_id
 
-        ctx = FunctionContext(run_id="test-456", correlation_id="corr-456", parent_correlation_id="parent-456")
+        ctx = FunctionContext(
+            run_id="test-456", correlation_id="corr-456", parent_correlation_id="parent-456"
+        )
         result = await get_run_id(ctx)
         assert result == "test-456"
 
@@ -292,6 +376,7 @@ class TestFunctionExecution_PlatformRetry:
     @pytest.mark.asyncio
     async def test_retry_config_flows_to_registry(self) -> None:
         """Test that retry config is captured and available for platform."""
+
         @function(retries={"max_attempts": 5, "initial_interval_ms": 1000})
         async def configured_func(ctx: FunctionContext) -> str:
             return "done"
@@ -441,6 +526,7 @@ class TestFunctionRegistry:
 
         # Trying to register another function with same name should fail
         with pytest.raises(ValueError, match="name collision"):
+
             @function
             async def my_function(ctx: FunctionContext) -> str:  # noqa: F811
                 return "second"
@@ -455,6 +541,7 @@ class TestFunctionRegistry:
 
         # Using same custom name should fail
         with pytest.raises(ValueError, match="name collision"):
+
             @function(name="duplicate_name")
             async def func2(ctx: FunctionContext) -> str:
                 return "second"
@@ -504,10 +591,7 @@ class TestPydanticIntegration:
 
         @function
         async def create_greeting(ctx: FunctionContext, name: str) -> UserOutput:
-            return UserOutput(
-                greeting=f"Hello, {name}!",
-                user_id=f"user_{name.lower()}"
-            )
+            return UserOutput(greeting=f"Hello, {name}!", user_id=f"user_{name.lower()}")
 
         # Check output schema was extracted
         config = FunctionRegistry.get("create_greeting")
@@ -525,6 +609,7 @@ class TestSchemaExtraction:
 
     def test_basic_type_hints_extracted(self) -> None:
         """Test that basic Python type hints are extracted."""
+
         @function
         async def typed_function(ctx: FunctionContext, name: str, age: int, active: bool) -> dict:
             return {"name": name, "age": age, "active": active}
@@ -546,8 +631,11 @@ class TestSchemaExtraction:
 
     def test_optional_parameters_not_required(self) -> None:
         """Test that parameters with defaults are not in required list."""
+
         @function
-        async def with_defaults(ctx: FunctionContext, required: str, optional: str = "default") -> str:
+        async def with_defaults(
+            ctx: FunctionContext, required: str, optional: str = "default"
+        ) -> str:
             return f"{required}-{optional}"
 
         config = FunctionRegistry.get("with_defaults")
@@ -561,6 +649,7 @@ class TestSchemaExtraction:
 
     def test_return_type_extracted(self) -> None:
         """Test that return type hints are extracted."""
+
         @function
         async def returns_dict(ctx: FunctionContext, x: int) -> dict:
             return {"value": x}

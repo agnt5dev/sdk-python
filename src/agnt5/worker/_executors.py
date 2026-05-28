@@ -168,7 +168,7 @@ class ExecutorMixin:
             return FunctionContext(
                 run_id=req.invocation_id,  # Use actual invocation_id for event routing
                 correlation_id=correlation_id,
-                parent_correlation_id=generate_cid(),
+                parent_correlation_id="",
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 retry_policy=config.retries,
@@ -186,6 +186,7 @@ class ExecutorMixin:
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
+            run_parent_correlation_id = ctx.parent_correlation_id
             start_time_ns = time.time_ns()
             fn_correlation_id = generate_cid()
 
@@ -193,7 +194,7 @@ class ExecutorMixin:
             run_started_event = Started(
                 name=config.name,
                 correlation_id=run_correlation_id,
-                parent_correlation_id=ctx.parent_correlation_id,
+                parent_correlation_id=run_parent_correlation_id,
                 component_type=ComponentType.RUN,
                 input_data=input_dict,
                 attempt=ctx.attempt,
@@ -207,6 +208,8 @@ class ExecutorMixin:
                 attempt=ctx.attempt,
             )
             await ctx.emit_batch_async([run_started_event, fn_started_event])
+            ctx.correlation_id = fn_correlation_id
+            ctx.parent_correlation_id = run_correlation_id
 
             trace_id = _trace_id_from_request(req)
             logger.info(
@@ -258,7 +261,7 @@ class ExecutorMixin:
                 run_failed_event = Failed(
                     name=config.name,
                     correlation_id=run_correlation_id,
-                    parent_correlation_id=ctx.parent_correlation_id,
+                    parent_correlation_id=run_parent_correlation_id,
                     component_type=ComponentType.RUN,
                     error_code=error_code,
                     error_message=error_msg,
@@ -291,7 +294,7 @@ class ExecutorMixin:
             run_completed_event = Completed(
                 name=config.name,
                 correlation_id=run_correlation_id,
-                parent_correlation_id=ctx.parent_correlation_id,
+                parent_correlation_id=run_parent_correlation_id,
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
