@@ -194,6 +194,13 @@ class Worker(ExecutorMixin):
         # Populated when ChatBot instances are passed in the agents list
         self._chatbots: dict[str, Any] = {}
 
+        # In-flight invocation tasks keyed by run_id, for cooperative
+        # cancellation. Populated/cleared by the tracked-invocation wrapper on
+        # the event loop thread; read on the same thread via _on_cancel's
+        # call_soon_threadsafe callback.
+        self._inflight: dict[str, asyncio.Task] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         # Create entity state adapter with canonical project identity. The Rust
         # state path still uses the legacy `tenant_id` field name internally.
         from .._core import EntityStateManager as RustEntityStateManager
@@ -685,8 +692,8 @@ class Worker(ExecutorMixin):
         Handles function, entity, and workflow components.
         """
 
-        def handle_message(request: Any) -> Any:
-            """Handle incoming execution requests - returns coroutine for Rust to await."""
+        def resolve_coro(request: Any) -> Any:
+            """Resolve the handler coroutine for a request (no task tracking)."""
             component_name = request.component_name
             component_type = request.component_type
             input_data = request.input_data
@@ -760,7 +767,54 @@ class Worker(ExecutorMixin):
 
             return error_response()
 
+        def handle_message(request: Any) -> Any:
+            """Handle incoming execution requests - returns coroutine for Rust to await.
+
+            Wraps the resolved handler coroutine so the running asyncio.Task
+            registers itself by run_id, enabling cooperative cancellation
+            (a CancelExecution → task.cancel() → CancelledError in the handler).
+            """
+            return self._track_invocation(
+                request.invocation_id, resolve_coro(request)
+            )
+
         return handle_message
+
+    def _track_invocation(self, invocation_id: str, coro: Any) -> Any:
+        """Wrap a handler coroutine so its task self-registers by run_id."""
+        run_id = invocation_id.split(":", 1)[0]
+
+        async def _tracked():
+            task = asyncio.current_task()
+            if task is not None:
+                self._inflight[run_id] = task
+            try:
+                return await coro
+            finally:
+                self._inflight.pop(run_id, None)
+
+        return _tracked()
+
+    def _on_cancel(self, run_id: str) -> None:
+        """Cancel the in-flight invocation for run_id (called from Rust).
+
+        Invoked on a non-loop thread holding the GIL, so schedule the actual
+        cancel onto the event loop thread where the task lives.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+
+        def _do_cancel() -> None:
+            task = self._inflight.get(run_id)
+            if task is not None and not task.done():
+                task.cancel()
+
+        try:
+            loop.call_soon_threadsafe(_do_cancel)
+        except RuntimeError:
+            # Loop already closed — nothing to cancel.
+            pass
 
     def _is_chat_webhook(self, input_data: bytes) -> bool:
         """Check if input_data is a chat webhook envelope."""
@@ -887,9 +941,13 @@ class Worker(ExecutorMixin):
                 self._rust_worker.set_entity_state_manager(self._entity_state_adapter._rust_core)
 
             loop = asyncio.get_running_loop()
+            self._loop = loop
             self._rust_worker.set_event_loop(loop)
             handler = self._create_message_handler()
             self._rust_worker.set_message_handler(handler)
+            # Cooperative cancellation: Rust calls this with a run_id when a
+            # CancelExecution arrives, and we cancel the matching asyncio.Task.
+            self._rust_worker.set_cancel_handler(self._on_cancel)
             self._rust_worker.initialize()
 
             await self._rust_worker.run()

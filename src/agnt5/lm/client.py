@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
+
+import httpx
 
 from .._ids import generate_cid
 from ..context import get_current_context
@@ -76,6 +79,9 @@ class LMClient(LanguageModel):
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         """Generate completion from LLM."""
+        if request.prompt_ref is not None:
+            return await self._run_managed_prompt(request)
+
         current_ctx = get_current_context()
         step_key = None
         content_hash = None
@@ -132,6 +138,70 @@ class LMClient(LanguageModel):
             if current_ctx:
                 self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
             raise
+
+    async def _run_managed_prompt(self, request: GenerateRequest) -> GenerateResponse:
+        prompt_ref = request.prompt_ref
+        assert prompt_ref is not None
+        project_id = (
+            prompt_ref.project_id
+            or os.environ.get("AGNT5_PROJECT_ID")
+            or os.environ.get("AGNT5_PROJECT_REF")
+        )
+        if not project_id:
+            raise ValueError(
+                "Managed prompts require a project context. Set project_id on the call "
+                "or AGNT5_PROJECT_ID in the environment."
+            )
+
+        platform_url = (
+            prompt_ref.platform_url
+            or os.environ.get("AGNT5_PLATFORM_URL")
+            or os.environ.get("AGNT5_CONTROL_PLANE_URL")
+            or "https://api.agnt5.com"
+        ).rstrip("/")
+        body: Dict[str, Any] = {"variables": prompt_ref.variables}
+        if prompt_ref.version:
+            body["version_id"] = prompt_ref.version
+        environment_id = prompt_ref.environment_id or os.environ.get("AGNT5_ENVIRONMENT_ID")
+        environment_ref = (
+            prompt_ref.environment_ref
+            or os.environ.get("AGNT5_ENVIRONMENT")
+            or os.environ.get("AGNT5_ENVIRONMENT_REF")
+        )
+        if environment_id:
+            body["environment_id"] = environment_id
+        elif environment_ref:
+            body["environment_ref"] = environment_ref
+        if request.config.temperature is not None:
+            body["temperature"] = request.config.temperature
+        if request.config.max_tokens is not None:
+            body["max_tokens"] = request.config.max_tokens
+
+        headers = {"Content-Type": "application/json"}
+        api_key = prompt_ref.api_key or os.environ.get("AGNT5_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["X-API-KEY"] = api_key
+
+        url = f"{platform_url}/api/v1/projects/{project_id}/prompts/{prompt_ref.id}/run"
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        data = payload.get("data", payload)
+        usage = None
+        if data.get("total_tokens") is not None:
+            usage = TokenUsage(
+                prompt_tokens=int(data.get("prompt_tokens", 0)),
+                completion_tokens=int(data.get("completion_tokens", 0)),
+                total_tokens=int(data.get("total_tokens", 0)),
+            )
+        return GenerateResponse(
+            text=data.get("content", ""),
+            usage=usage,
+            finish_reason=data.get("finish_reason"),
+        )
 
     async def stream(self, request: GenerateRequest) -> AsyncGenerator[Event, None]:
         """Stream completion from LLM as Event objects."""
@@ -243,6 +313,16 @@ class LMClient(LanguageModel):
             kwargs["top_p"] = request.config.top_p
         if request.response_schema is not None:
             kwargs["response_schema_kw"] = request.response_schema
+        if request.prompt_ref is not None:
+            kwargs["prompt_ref"] = json.dumps({
+                "id": request.prompt_ref.id,
+                "project_id": request.prompt_ref.project_id,
+                "version": request.prompt_ref.version,
+                "environment_id": request.prompt_ref.environment_id,
+                "environment_ref": request.prompt_ref.environment_ref,
+                "platform_url": request.prompt_ref.platform_url,
+                "variables": request.prompt_ref.variables,
+            })
 
         # Responses API parameters
         if request.config.built_in_tools:

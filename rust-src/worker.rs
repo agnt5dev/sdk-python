@@ -83,6 +83,9 @@ pub struct PyWorker {
     config: PyWorkerConfig,
     worker: Arc<Mutex<Option<Worker>>>,
     message_handler: Arc<Mutex<Option<Py<PyAny>>>>,
+    /// Python callback invoked with a run_id when a CancelExecution arrives,
+    /// so the Python layer can cancel the matching asyncio.Task.
+    cancel_handler: Arc<Mutex<Option<Py<PyAny>>>>,
     components: Arc<Mutex<Vec<ComponentInfo>>>,
     service_metadata: Arc<Mutex<HashMap<String, String>>>,
     // TaskLocals stores reference to Python event loop for concurrent async execution
@@ -102,6 +105,7 @@ impl PyWorker {
             config,
             worker: Arc::new(Mutex::new(None)),
             message_handler: Arc::new(Mutex::new(None)),
+            cancel_handler: Arc::new(Mutex::new(None)),
             components: Arc::new(Mutex::new(Vec::new())),
             service_metadata: Arc::new(Mutex::new(HashMap::new())),
             event_loop_locals: Arc::new(Mutex::new(None)),
@@ -151,6 +155,21 @@ impl PyWorker {
         *handler_guard = Some(handler);
 
         log::debug!("Message handler set successfully");
+        Ok(())
+    }
+
+    /// Set the cancel handler callback. Invoked with a run_id (str) when a
+    /// CancelExecution arrives so the Python layer can cancel the matching
+    /// in-flight asyncio.Task.
+    fn set_cancel_handler(&self, handler: Py<PyAny>) -> PyResult<()> {
+        let mut guard = self.cancel_handler.lock().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to lock cancel handler: {}",
+                e
+            ))
+        })?;
+        *guard = Some(handler);
+        log::debug!("Cancel handler set successfully");
         Ok(())
     }
 
@@ -626,6 +645,7 @@ impl PyWorker {
 
         let worker_arc = self.worker.clone();
         let handler_arc = self.message_handler.clone();
+        let cancel_handler_arc = self.cancel_handler.clone();
         let event_loop_locals_arc = self.event_loop_locals.clone();
         let entity_state_manager_arc = self.entity_state_manager.clone();
         let service_name = self.config.service_name.clone();
@@ -645,6 +665,26 @@ impl PyWorker {
                     })?
                     .clone()
             };
+
+            // Register the cooperative cancel hook: when a CancelExecution
+            // arrives, sdk-core calls this with the run_id, and we forward it
+            // to the Python cancel handler (which cancels the asyncio.Task).
+            {
+                let cancel_handler_for_hook = cancel_handler_arc.clone();
+                worker.set_cancel_hook(move |run_id: String| {
+                    let guard = match cancel_handler_for_hook.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    if let Some(cb) = guard.as_ref() {
+                        Python::attach(|py| {
+                            if let Err(e) = cb.call1(py, (run_id.clone(),)) {
+                                log::warn!("Cancel handler call failed for {}: {}", run_id, e);
+                            }
+                        });
+                    }
+                });
+            }
 
             // Create message handler that calls Python callback
             // Now uses `Fn + Clone` to support concurrent execution
@@ -1247,6 +1287,16 @@ impl PyWorker {
             Some(runtime_message::MessageData::CancelExecution(_)) => {
                 log::debug!(
                     "Ignoring CancelExecution message (type: {})",
+                    runtime_message.message_type as i32
+                );
+                Ok(None)
+            }
+            Some(runtime_message::MessageData::CoordinatorDraining(_)) => {
+                // CoordinatorDraining is handled by the SDK core dispatch loop
+                // before messages are queued to the Python handler. Keep this
+                // arm for exhaustiveness if a future path routes it here.
+                log::debug!(
+                    "Ignoring CoordinatorDraining message (type: {})",
                     runtime_message.message_type as i32
                 );
                 Ok(None)

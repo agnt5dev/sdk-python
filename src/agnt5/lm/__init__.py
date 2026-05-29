@@ -12,7 +12,8 @@ Usage:
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from dataclasses import replace
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from .._schema_utils import detect_format_type
 from ..events import Event
@@ -36,6 +37,7 @@ from .types import (
     MessageRole,
     Modality,
     ModelConfig,
+    PromptRef,
     ReasoningEffort,
     TokenUsage,
     ToolChoice,
@@ -89,6 +91,7 @@ __all__ = [
     "Modality",
     "ModelConfig",
     "ReasoningEffort",
+    "PromptRef",
     "TokenUsage",
     "ToolChoice",
     "ToolDefinition",
@@ -150,9 +153,57 @@ def _build_messages(
     return result
 
 
+def _coerce_prompt_ref(
+    value: Optional[Union[PromptRef, Dict[str, Any], str]],
+    *,
+    variables: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
+    environment: Optional[str] = None,
+    environment_id: Optional[str] = None,
+    version: Optional[str] = None,
+    platform_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Optional[PromptRef]:
+    if value is None:
+        return None
+    if isinstance(value, PromptRef):
+        ref = value
+    elif isinstance(value, str):
+        ref = PromptRef(id=value)
+    else:
+        ref = PromptRef(
+            id=value["id"],
+            project_id=value.get("project_id"),
+            version=value.get("version"),
+            environment_id=value.get("environment_id"),
+            environment_ref=value.get("environment_ref") or value.get("environment"),
+            platform_url=value.get("platform_url"),
+            api_key=value.get("api_key"),
+            variables=value.get("variables") or {},
+        )
+    return replace(
+        ref,
+        project_id=project_id or ref.project_id,
+        version=version or ref.version,
+        environment_id=environment_id or ref.environment_id,
+        environment_ref=environment or ref.environment_ref,
+        platform_url=platform_url or ref.platform_url,
+        api_key=api_key or ref.api_key,
+        variables=variables if variables is not None else ref.variables,
+    )
+
+
 async def generate(
     model: str,
     prompt: Optional[str] = None,
+    prompt_ref: Optional[Union[PromptRef, Dict[str, Any], str]] = None,
+    variables: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
+    environment: Optional[str] = None,
+    environment_id: Optional[str] = None,
+    prompt_version: Optional[str] = None,
+    platform_url: Optional[str] = None,
+    api_key: Optional[str] = None,
     messages: Optional[List[Dict[str, str]]] = None,
     system_prompt: Optional[str] = None,
     temperature: Optional[float] = None,
@@ -188,7 +239,9 @@ async def generate(
     """
     provider, model_name = _parse_model(model)
     model = f"{provider}/{model_name}"
-    message_objects = _build_messages(prompt, messages)
+    if prompt_ref is not None and (prompt is not None or messages is not None):
+        raise ValueError("Provide either 'prompt_ref' or prompt/messages, not both")
+    message_objects = [] if prompt_ref is not None else _build_messages(prompt, messages)
 
     response_schema_json = None
     if response_format is not None:
@@ -210,6 +263,16 @@ async def generate(
 
     request = GenerateRequest(
         model=model,
+        prompt_ref=_coerce_prompt_ref(
+            prompt_ref,
+            variables=variables,
+            project_id=project_id,
+            environment=environment,
+            environment_id=environment_id,
+            version=prompt_version,
+            platform_url=platform_url,
+            api_key=api_key,
+        ),
         messages=message_objects,
         system_prompt=system_prompt,
         config=config,

@@ -237,6 +237,19 @@ class ExecutorMixin:
                 if inspect.isasyncgen(result):
                     return await self._handle_streaming_function(ctx, result)
 
+            except asyncio.CancelledError:
+                # Cooperative cancellation (CancelExecution → task.cancel()).
+                # The user's finally/async-with cleanup has already run as the
+                # CancelledError propagated up. The gateway authored
+                # run.cancelled as the terminal event, so do NOT emit
+                # run.failed — stop cleanly with no response.
+                duration_ms = (time.time_ns() - start_time_ns) // 1_000_000
+                logger.info(
+                    f"run.cancelled | run_id={req.invocation_id} component={config.name} "
+                    f"type=function trace_id={trace_id} duration_ms={duration_ms}"
+                )
+                return None
+
             except Exception as e:
                 # Calculate function duration even on failure
                 end_time_ns = time.time_ns()
