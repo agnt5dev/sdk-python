@@ -903,10 +903,12 @@ class Worker(ExecutorMixin):
                     prefix = "└──" if is_last else "├──"
                     print(f"    {prefix} {name}")
 
-        # Dashboard link
-        dashboard_url = os.getenv("AGNT5_DASHBOARD_URL", "http://localhost:34181")
+        # Dashboard link. `agnt5 dev` injects this only when it can resolve a
+        # project-specific Studio URL.
+        dashboard_url = os.getenv("AGNT5_DASHBOARD_URL", "").strip()
         print("  " + "─" * 40)
-        print(f"  Dashboard: {dashboard_url}")
+        if dashboard_url:
+            print(f"  Dashboard: {dashboard_url}")
         print()
 
     async def run(self) -> None:
