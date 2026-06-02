@@ -7,11 +7,20 @@ Verifies that:
 - Mixed built-in + user tool calls in one turn route correctly.
 """
 
+import logging
+
 import pytest
 
 from agnt5 import Agent, Context, tool
 from agnt5.agent import AgentRegistry
-from agnt5.lm import BuiltInTool, GenerateRequest, GenerateResponse, LanguageModel, TokenUsage
+from agnt5.lm import (
+    BuiltInTool,
+    GenerateRequest,
+    GenerateResponse,
+    LanguageModel,
+    MessageRole,
+    TokenUsage,
+)
 from agnt5.lm.events import (
     LMCompleted,
     LMContentBlockCompleted,
@@ -79,12 +88,58 @@ async def test_built_in_tools_forwarded_to_request_config():
         built_in_tools=[BuiltInTool.WEB_SEARCH],
     )
 
-    result = await agent.run_sync("Why is the sky blue?")
+    result = await agent.run("Why is the sky blue?")
 
     assert mock_lm.requests, "agent should have made at least one LM request"
     sent = mock_lm.requests[0].config.built_in_tools
     assert sent == [BuiltInTool.WEB_SEARCH]
     assert "sky is blue" in result.output
+
+
+@pytest.mark.asyncio
+async def test_built_in_tool_configuration_and_usage_are_logged(caplog):
+    """Agent logs configured built-ins and provider-side usage."""
+    caplog.set_level(logging.INFO, logger="agnt5.agent.logged_builtin")
+    mock_lm = MockLanguageModel(
+        responses=["Final answer based on search results."],
+        tool_calls=[
+            [{"id": "ws_1", "name": "web_search_preview", "arguments": "{}"}],
+        ],
+    )
+
+    agent = Agent(
+        name="logged_builtin",
+        model=mock_lm,
+        instructions="Use web search.",
+        built_in_tools=[BuiltInTool.WEB_SEARCH],
+    )
+
+    await agent.run("Look something up.")
+
+    assert "Built-in tools enabled: ['web_search_preview']" in caplog.text
+    assert "Built-in tools used by model: ['web_search_preview']" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_built_in_tool_without_surfaced_call_is_logged(caplog):
+    """Agent logs when configured built-ins have no surfaced provider call."""
+    caplog.set_level(logging.INFO, logger="agnt5.agent.logged_builtin_unused")
+    mock_lm = MockLanguageModel(
+        responses=["Final answer without search."],
+        tool_calls=[None],
+    )
+
+    agent = Agent(
+        name="logged_builtin_unused",
+        model=mock_lm,
+        instructions="Use web search when helpful.",
+        built_in_tools=[BuiltInTool.WEB_SEARCH],
+    )
+
+    await agent.run("Answer directly.")
+
+    assert "Built-in tools enabled: ['web_search_preview']" in caplog.text
+    assert "no provider-side tool calls were surfaced this iteration" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -104,7 +159,7 @@ async def test_server_side_built_in_call_is_not_dispatched_locally():
         built_in_tools=[BuiltInTool.WEB_SEARCH],
     )
 
-    result = await agent.run_sync("Look something up.")
+    result = await agent.run("Look something up.")
 
     # Single LM turn — agent does NOT loop again because no user tool needs dispatch.
     assert mock_lm.call_count == 1
@@ -149,7 +204,7 @@ async def test_mixed_built_in_and_user_tool_calls_in_one_turn():
         built_in_tools=[BuiltInTool.WEB_SEARCH],
     )
 
-    result = await agent.run_sync("Search and save a note.")
+    result = await agent.run("Search and save a note.")
 
     # Loop ran twice: turn 1 (mixed calls), turn 2 (final answer).
     assert mock_lm.call_count == 2
@@ -160,6 +215,14 @@ async def test_mixed_built_in_and_user_tool_calls_in_one_turn():
     built_in_entries = [tc for tc in result.tool_calls if tc.get("built_in")]
     assert len(built_in_entries) == 1
     assert built_in_entries[0]["name"] == "web_search_preview"
+
+    second_request_assistant = [
+        msg for msg in mock_lm.requests[1].messages
+        if msg.role == MessageRole.ASSISTANT and msg.content == "I'll search and save."
+    ][0]
+    assert second_request_assistant.tool_calls == [
+        {"id": "save_1", "name": "save_note", "arguments": '{"text": "hello"}'},
+    ]
     assert "Done" in result.output
 
 
@@ -182,7 +245,7 @@ async def test_anthropic_style_tool_use_name_is_recognized_as_built_in():
         built_in_tools=[BuiltInTool.WEB_SEARCH],
     )
 
-    result = await agent.run_sync("Look something up.")
+    result = await agent.run("Look something up.")
 
     assert mock_lm.call_count == 1
     assert len(result.tool_calls) == 1
@@ -209,7 +272,7 @@ async def test_web_fetch_built_in_recognized_as_server_side():
         built_in_tools=[BuiltInTool.WEB_FETCH],
     )
 
-    result = await agent.run_sync("Read https://example.com")
+    result = await agent.run("Read https://example.com")
 
     assert mock_lm.call_count == 1
     assert len(result.tool_calls) == 1
@@ -239,7 +302,7 @@ async def test_no_built_in_tools_means_no_config_change():
         tools=[echo],
     )
 
-    await agent.run_sync("hi")
+    await agent.run("hi")
 
     assert mock_lm.requests
     assert mock_lm.requests[0].config.built_in_tools == []

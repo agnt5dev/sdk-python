@@ -628,6 +628,8 @@ class Agent:
             - run(): Consumes events and extracts final result
         """
         self.logger.debug(f"_run_core entered for agent '{self.name}', tools={list(self.tools.keys())}")
+        if self._built_in_tools:
+            self.logger.info(f"Built-in tools enabled: {[t.value for t in self._built_in_tools]}")
         sequence = sequence_start
 
         # Create or adapt context
@@ -855,21 +857,33 @@ class Agent:
                             yield item
                             sequence = seq
 
-                    # Add assistant response to messages. Preserve tool_calls so
-                    # the next iteration's request includes the prior turn's
-                    # tool_use block — required by OpenAI/Anthropic protocol so
-                    # tool result messages can be linked back via tool_call_id.
-                    messages.append(Message.assistant(
-                        response_text,
-                        tool_calls=response_tool_calls if response_tool_calls else None,
-                    ))
-
                     # Server-side built-in tools (Responses API) execute on the
                     # provider; their results are already baked into the assistant
                     # message. Record them in the trace and exclude from local
                     # dispatch so the rest of the loop only handles user tools.
-                    if response_tool_calls and self._built_in_tools:
+                    built_in_names = set()
+                    if self._built_in_tools:
                         built_in_names = built_in_tool_names(self._built_in_tools)
+                        if response_tool_calls:
+                            used = [
+                                tool_call["name"]
+                                for tool_call in response_tool_calls
+                                if tool_call.get("name") in built_in_names
+                            ]
+                            if used:
+                                self.logger.info(f"Built-in tools used by model: {used}")
+                            else:
+                                self.logger.info(
+                                    f"Built-in tools configured {[t.value for t in self._built_in_tools]} "
+                                    "but model answered without triggering them"
+                                )
+                        else:
+                            self.logger.info(
+                                f"Built-in tools configured {[t.value for t in self._built_in_tools]} "
+                                "but no provider-side tool calls were surfaced this iteration"
+                            )
+
+                    if response_tool_calls and self._built_in_tools:
                         partitioned_user_calls: List[Dict[str, Any]] = []
                         for built_in_idx, tool_call in enumerate(response_tool_calls):
                             if tool_call.get("name") not in built_in_names:
@@ -919,6 +933,14 @@ class Agent:
                             sequence += 1
 
                         response_tool_calls = partitioned_user_calls
+
+                    # Add assistant response to messages. Preserve only user
+                    # tool calls so the next iteration's request includes the
+                    # tool_use blocks that require local tool_result messages.
+                    messages.append(Message.assistant(
+                        response_text,
+                        tool_calls=response_tool_calls if response_tool_calls else None,
+                    ))
 
                     # Check if LLM wants to use tools
                     self.logger.debug(f"response_tool_calls count={len(response_tool_calls) if response_tool_calls else 0}")
