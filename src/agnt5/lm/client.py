@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 import time
-import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -15,6 +13,7 @@ import httpx
 from .._ids import generate_cid
 from ..context import get_current_context
 from ..events import Event
+from ..prompt_manifest import resolve_prompt_ref_from_manifest
 from .base import LanguageModel
 from .events import (
     LMCompleted,
@@ -71,7 +70,7 @@ class LMClient(LanguageModel):
 
     def _prepare_model_name(self, model: str) -> str:
         """Add provider prefix if needed."""
-        if '/' in model:
+        if "/" in model:
             return model
         if self._provider:
             return f"{self._provider}/{model}"
@@ -87,7 +86,7 @@ class LMClient(LanguageModel):
         content_hash = None
 
         # Check memoization cache
-        if current_ctx and hasattr(current_ctx, '_memo') and current_ctx._memo:
+        if current_ctx and hasattr(current_ctx, "_memo") and current_ctx._memo:
             memo = current_ctx._memo
             step_key, content_hash = memo.lm_call_key(
                 model=request.model,
@@ -95,7 +94,7 @@ class LMClient(LanguageModel):
                 config={
                     "temperature": request.config.temperature,
                     "max_tokens": request.config.max_tokens,
-                }
+                },
             )
             cached = await memo.get_cached_lm_result(step_key, content_hash)
             if cached:
@@ -107,7 +106,11 @@ class LMClient(LanguageModel):
         kwargs = self._build_kwargs(request, model)
 
         # Pass runtime_context for trace linking
-        if current_ctx and hasattr(current_ctx, '_runtime_context') and current_ctx._runtime_context:
+        if (
+            current_ctx
+            and hasattr(current_ctx, "_runtime_context")
+            and current_ctx._runtime_context
+        ):
             kwargs["runtime_context"] = current_ctx._runtime_context
 
         start_time_ns = time.time_ns()
@@ -124,7 +127,9 @@ class LMClient(LanguageModel):
             latency_ms = (end_time_ns - start_time_ns) // 1_000_000
 
             if current_ctx:
-                self._emit_completed(current_ctx, model, response, latency_ms, end_time_ns, correlation_id)
+                self._emit_completed(
+                    current_ctx, model, response, latency_ms, end_time_ns, correlation_id
+                )
 
             # Cache result
             if current_ctx and current_ctx._memo and step_key and content_hash:
@@ -140,6 +145,10 @@ class LMClient(LanguageModel):
             raise
 
     async def _run_managed_prompt(self, request: GenerateRequest) -> GenerateResponse:
+        manifest_request = resolve_prompt_ref_from_manifest(request)
+        if manifest_request is not None:
+            return await self.generate(manifest_request)
+
         prompt_ref = request.prompt_ref
         assert prompt_ref is not None
         project_id = (
@@ -162,16 +171,6 @@ class LMClient(LanguageModel):
         body: Dict[str, Any] = {"variables": prompt_ref.variables}
         if prompt_ref.version:
             body["version_id"] = prompt_ref.version
-        environment_id = prompt_ref.environment_id or os.environ.get("AGNT5_ENVIRONMENT_ID")
-        environment_ref = (
-            prompt_ref.environment_ref
-            or os.environ.get("AGNT5_ENVIRONMENT")
-            or os.environ.get("AGNT5_ENVIRONMENT_REF")
-        )
-        if environment_id:
-            body["environment_id"] = environment_id
-        elif environment_ref:
-            body["environment_ref"] = environment_ref
         if request.config.temperature is not None:
             body["temperature"] = request.config.temperature
         if request.config.max_tokens is not None:
@@ -278,7 +277,9 @@ class LMClient(LanguageModel):
                     )
 
                     if current_ctx:
-                        self._emit_completed(current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id)
+                        self._emit_completed(
+                            current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id
+                        )
 
         except Exception as e:
             if current_ctx:
@@ -314,15 +315,17 @@ class LMClient(LanguageModel):
         if request.response_schema is not None:
             kwargs["response_schema_kw"] = request.response_schema
         if request.prompt_ref is not None:
-            kwargs["prompt_ref"] = json.dumps({
-                "id": request.prompt_ref.id,
-                "project_id": request.prompt_ref.project_id,
-                "version": request.prompt_ref.version,
-                "environment_id": request.prompt_ref.environment_id,
-                "environment_ref": request.prompt_ref.environment_ref,
-                "platform_url": request.prompt_ref.platform_url,
-                "variables": request.prompt_ref.variables,
-            })
+            kwargs["prompt_ref"] = json.dumps(
+                {
+                    "id": request.prompt_ref.id,
+                    "project_id": request.prompt_ref.project_id,
+                    "version": request.prompt_ref.version,
+                    "environment_id": request.prompt_ref.environment_id,
+                    "environment_ref": request.prompt_ref.environment_ref,
+                    "platform_url": request.prompt_ref.platform_url,
+                    "variables": request.prompt_ref.variables,
+                }
+            )
 
         # Responses API parameters
         if request.config.built_in_tools:
@@ -375,11 +378,11 @@ class LMClient(LanguageModel):
             )
 
         tool_calls = None
-        if hasattr(rust_response, 'tool_calls') and rust_response.tool_calls:
+        if hasattr(rust_response, "tool_calls") and rust_response.tool_calls:
             tool_calls = rust_response.tool_calls
 
         response_id = None
-        if hasattr(rust_response, 'id') and rust_response.id:
+        if hasattr(rust_response, "id") and rust_response.id:
             response_id = rust_response.id
 
         return GenerateResponse(
@@ -443,12 +446,12 @@ class LMClient(LanguageModel):
         correlation_id: str,
     ) -> None:
         # Handle both GenerateResponse and streaming chunk
-        if hasattr(response, 'text'):
+        if hasattr(response, "text"):
             output_text = response.text
         else:
-            output_text = getattr(response, 'content', str(response))
+            output_text = getattr(response, "content", str(response))
 
-        usage = getattr(response, 'usage', None)
+        usage = getattr(response, "usage", None)
         completed_event = LMCompleted(
             name=model,
             correlation_id=correlation_id,
@@ -458,10 +461,10 @@ class LMClient(LanguageModel):
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
             total_tokens=usage.total_tokens if usage else 0,
-            finish_reason=getattr(response, 'finish_reason', None),
+            finish_reason=getattr(response, "finish_reason", None),
             output_data={
                 "output": output_text,
-                "tool_calls": getattr(response, 'tool_calls', None),
+                "tool_calls": getattr(response, "tool_calls", None),
             },
             duration_ms=latency_ms,
             metadata={

@@ -42,11 +42,7 @@ def mock_rust_generate():
     """Mock successful Rust generate response."""
     mock_response = MagicMock()
     mock_response.content = "This is a test response."
-    mock_response.usage = MagicMock(
-        prompt_tokens=10,
-        completion_tokens=20,
-        total_tokens=30
-    )
+    mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
     mock_response.object = None
     mock_response.tool_calls = None
     return mock_response
@@ -54,8 +50,17 @@ def mock_rust_generate():
 
 class MockChunk:
     """Mock Rust StreamChunk with proper structure."""
-    def __init__(self, chunk_type, text="", block_type=None, index=0,
-                 model="mock", finish_reason=None, usage=None):
+
+    def __init__(
+        self,
+        chunk_type,
+        text="",
+        block_type=None,
+        index=0,
+        model="mock",
+        finish_reason=None,
+        usage=None,
+    ):
         self.chunk_type = chunk_type
         self.text = text
         self.block_type = block_type
@@ -67,6 +72,7 @@ class MockChunk:
 
 class MockAsyncStreamIterator:
     """Mock async iterator for stream_iter that yields chunks."""
+
     def __init__(self, chunks):
         self.chunks = chunks
         self.index = 0
@@ -120,15 +126,13 @@ def mock_rust_stream_chunks():
 @pytest.mark.asyncio
 async def test_generate_simple_prompt(mock_rust_generate):
     """Test basic text generation with a simple prompt."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
         response = await lm.generate(
-            model="openai/gpt-4o-mini",
-            prompt="What is love?",
-            temperature=0.7
+            model="openai/gpt-4o-mini", prompt="What is love?", temperature=0.7
         )
 
         assert isinstance(response, GenerateResponse)
@@ -140,7 +144,7 @@ async def test_generate_simple_prompt(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_generate_with_messages(mock_rust_generate):
     """Test generation with multi-turn conversation messages."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -152,9 +156,7 @@ async def test_generate_with_messages(mock_rust_generate):
         ]
 
         response = await lm.generate(
-            model="anthropic/claude-3-5-haiku-20241022",
-            messages=messages,
-            temperature=0.5
+            model="anthropic/claude-3-5-haiku-20241022", messages=messages, temperature=0.5
         )
 
         assert isinstance(response, GenerateResponse)
@@ -169,7 +171,7 @@ async def test_generate_with_messages(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_generate_with_system_prompt(mock_rust_generate):
     """Test generation with system prompt."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -178,7 +180,7 @@ async def test_generate_with_system_prompt(mock_rust_generate):
             model="openai/gpt-4o",
             prompt="Write a haiku",
             system_prompt="You are a poetic AI assistant.",
-            max_tokens=100
+            max_tokens=100,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -187,6 +189,52 @@ async def test_generate_with_system_prompt(mock_rust_generate):
         call_kwargs = mock_instance.generate.call_args.kwargs
         assert call_kwargs["system_prompt"] == "You are a poetic AI assistant."
         assert call_kwargs["max_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_prompt_ref_uses_git_manifest_in_production(
+    tmp_path, monkeypatch, mock_rust_generate
+):
+    """Production prompt refs resolve from the bundled git manifest."""
+    manifest = {
+        "schema_version": "agnt5.prompts.v1",
+        "prompts": [
+            {
+                "id": "support_reply",
+                "version": "3",
+                "model": "openai/gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "Be concise."},
+                    {"role": "user", "content": "Reply to {{customer.name}} about {{topic}}."},
+                ],
+                "parameters": {"temperature": 0.2, "max_tokens": 60},
+            }
+        ],
+    }
+    (tmp_path / "prompts.lock").write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGNT5_ENVIRONMENT", "production")
+
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        response = await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt_ref="support_reply",
+            variables={"customer": {"name": "Ada"}, "topic": "shipping"},
+        )
+
+        assert isinstance(response, GenerateResponse)
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["model"] == "openai/gpt-4o-mini"
+        assert call_kwargs["temperature"] == 0.2
+        assert call_kwargs["max_tokens"] == 60
+        assert call_kwargs["prompt"] == [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Reply to Ada about shipping."},
+        ]
 
 
 @pytest.mark.asyncio
@@ -202,15 +250,12 @@ async def test_generate_all_providers(mock_rust_generate):
     ]
 
     for provider, model in providers_and_models:
-        with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
             mock_instance = MagicMock()
             mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
             mock_rust_class.return_value = mock_instance
 
-            response = await lm.generate(
-                model=model,
-                prompt="Test prompt"
-            )
+            response = await lm.generate(model=model, prompt="Test prompt")
 
             assert isinstance(response, GenerateResponse)
 
@@ -225,17 +270,14 @@ async def test_stream_simple(mock_rust_stream_chunks):
     """Test basic streaming generation returns Event objects."""
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         # stream_iter returns an async iterator, not a coroutine
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
 
         events = []
-        async for event in lm.stream(
-            model="openai/gpt-4o-mini",
-            prompt="Write a story"
-        ):
+        async for event in lm.stream(model="openai/gpt-4o-mini", prompt="Write a story"):
             events.append(event)
 
         # Should have start, delta(s), stop, and completed events
@@ -261,7 +303,7 @@ async def test_stream_with_messages(mock_rust_stream_chunks):
     """Test streaming with conversation messages returns Event objects."""
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         # stream_iter returns an async iterator, not a coroutine
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
@@ -273,9 +315,7 @@ async def test_stream_with_messages(mock_rust_stream_chunks):
 
         events = []
         async for event in lm.stream(
-            model="groq/llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.9
+            model="groq/llama-3.3-70b-versatile", messages=messages, temperature=0.9
         ):
             events.append(event)
 
@@ -295,6 +335,7 @@ async def test_stream_with_messages(mock_rust_stream_chunks):
 @dataclass
 class Person:
     """Test dataclass for structured output."""
+
     name: str
     age: int
     email: str
@@ -310,7 +351,7 @@ async def test_generate_structured_output_dataclass():
     mock_response.tool_calls = None
     mock_response.object = {"name": "Alice", "age": 30, "email": "alice@example.com"}
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_response)
         mock_rust_class.return_value = mock_instance
@@ -318,7 +359,7 @@ async def test_generate_structured_output_dataclass():
         response = await lm.generate(
             model="openai/gpt-4o",
             prompt="Extract person info from: Alice, 30, alice@example.com",
-            response_format=Person
+            response_format=Person,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -350,11 +391,8 @@ async def test_generate_structured_output_dict_schema():
     """Test structured output with raw JSON schema dict."""
     schema = {
         "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-            "rating": {"type": "number"}
-        },
-        "required": ["title", "rating"]
+        "properties": {"title": {"type": "string"}, "rating": {"type": "number"}},
+        "required": ["title", "rating"],
     }
 
     # Mock response with structured output
@@ -364,15 +402,13 @@ async def test_generate_structured_output_dict_schema():
     mock_response.tool_calls = None
     mock_response.object = {"title": "Great Movie", "rating": 9.5}
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_response)
         mock_rust_class.return_value = mock_instance
 
         response = await lm.generate(
-            model="openai/gpt-4o",
-            prompt="Rate this movie: Inception",
-            response_format=schema
+            model="openai/gpt-4o", prompt="Rate this movie: Inception", response_format=schema
         )
 
         assert response.structured_output is not None
@@ -388,7 +424,7 @@ async def test_generate_structured_output_dict_schema():
 @pytest.mark.asyncio
 async def test_generate_with_all_config_options(mock_rust_generate):
     """Test generation with all configuration options."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -426,7 +462,7 @@ async def test_generate_both_prompt_and_messages():
         await lm.generate(
             model="openai/gpt-4o-mini",
             prompt="Test",
-            messages=[{"role": "user", "content": "Test"}]
+            messages=[{"role": "user", "content": "Test"}],
         )
 
 
@@ -436,7 +472,7 @@ async def test_generate_missing_provider_prefix():
     with pytest.raises(ValueError, match="Model must include provider prefix"):
         await lm.generate(
             model="gpt-4o-mini",  # Missing openai/ prefix
-            prompt="Test"
+            prompt="Test",
         )
 
 
@@ -492,7 +528,7 @@ async def test_stream_unsupported_provider_prefix():
 @pytest.mark.asyncio
 async def test_message_role_conversion(mock_rust_generate):
     """Test that message roles are properly converted."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -504,10 +540,7 @@ async def test_message_role_conversion(mock_rust_generate):
             {"role": "user", "content": "How are you?"},
         ]
 
-        await lm.generate(
-            model="openai/gpt-4o-mini",
-            messages=messages
-        )
+        await lm.generate(model="openai/gpt-4o-mini", messages=messages)
 
         call_kwargs = mock_instance.generate.call_args.kwargs
         prompt = call_kwargs["prompt"]
@@ -528,15 +561,12 @@ async def test_message_role_conversion(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_provider_auto_detection_openai(mock_rust_generate):
     """Test provider auto-detection for OpenAI."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
-        await lm.generate(
-            model="openai/gpt-4o-mini",
-            prompt="Test"
-        )
+        await lm.generate(model="openai/gpt-4o-mini", prompt="Test")
 
         # Verify generate was called (provider detection successful)
         mock_instance.generate.assert_called_once()
@@ -545,15 +575,12 @@ async def test_provider_auto_detection_openai(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_provider_auto_detection_anthropic(mock_rust_generate):
     """Test provider auto-detection for Anthropic."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
-        await lm.generate(
-            model="anthropic/claude-3-5-haiku-20241022",
-            prompt="Test"
-        )
+        await lm.generate(model="anthropic/claude-3-5-haiku-20241022", prompt="Test")
 
         mock_instance.generate.assert_called_once()
 
@@ -566,15 +593,12 @@ async def test_provider_auto_detection_anthropic(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_token_usage_in_response(mock_rust_generate):
     """Test that token usage is properly returned."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
-        response = await lm.generate(
-            model="openai/gpt-4o-mini",
-            prompt="Test"
-        )
+        response = await lm.generate(model="openai/gpt-4o-mini", prompt="Test")
 
         assert response.usage is not None
         assert isinstance(response.usage, TokenUsage)
@@ -613,7 +637,7 @@ async def test_generate_with_built_in_tools(mock_rust_generate):
     """Test generation with OpenAI built-in tools."""
     from agnt5.lm import BuiltInTool
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -621,7 +645,7 @@ async def test_generate_with_built_in_tools(mock_rust_generate):
         response = await lm.generate(
             model="openai/gpt-4o",
             prompt="Search for the latest AI news",
-            built_in_tools=[BuiltInTool.WEB_SEARCH, BuiltInTool.FILE_SEARCH]
+            built_in_tools=[BuiltInTool.WEB_SEARCH, BuiltInTool.FILE_SEARCH],
         )
 
         assert isinstance(response, GenerateResponse)
@@ -639,7 +663,7 @@ async def test_generate_with_code_interpreter(mock_rust_generate):
     """Test generation with code interpreter built-in tool."""
     from agnt5.lm import BuiltInTool
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -647,7 +671,7 @@ async def test_generate_with_code_interpreter(mock_rust_generate):
         response = await lm.generate(
             model="openai/gpt-4o-mini",
             prompt="Calculate the fibonacci sequence",
-            built_in_tools=[BuiltInTool.CODE_INTERPRETER]
+            built_in_tools=[BuiltInTool.CODE_INTERPRETER],
         )
 
         assert isinstance(response, GenerateResponse)
@@ -663,7 +687,7 @@ async def test_generate_with_reasoning_effort(mock_rust_generate):
     """Test generation with reasoning effort for o-series models."""
     from agnt5.lm import ReasoningEffort
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -671,7 +695,7 @@ async def test_generate_with_reasoning_effort(mock_rust_generate):
         response = await lm.generate(
             model="openai/o1",
             prompt="Solve this complex problem",
-            reasoning_effort=ReasoningEffort.HIGH
+            reasoning_effort=ReasoningEffort.HIGH,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -685,7 +709,7 @@ async def test_generate_with_minimal_reasoning(mock_rust_generate):
     """Test generation with minimal reasoning effort."""
     from agnt5.lm import ReasoningEffort
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -693,7 +717,7 @@ async def test_generate_with_minimal_reasoning(mock_rust_generate):
         response = await lm.generate(
             model="openai/o1-mini",
             prompt="Quick question",
-            reasoning_effort=ReasoningEffort.MINIMAL
+            reasoning_effort=ReasoningEffort.MINIMAL,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -707,7 +731,7 @@ async def test_generate_with_modalities(mock_rust_generate):
     """Test generation with modalities (text, audio, image)."""
     from agnt5.lm import Modality
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -715,7 +739,7 @@ async def test_generate_with_modalities(mock_rust_generate):
         response = await lm.generate(
             model="openai/gpt-4o",
             prompt="Describe this image",
-            modalities=[Modality.TEXT, Modality.AUDIO]
+            modalities=[Modality.TEXT, Modality.AUDIO],
         )
 
         assert isinstance(response, GenerateResponse)
@@ -730,15 +754,13 @@ async def test_generate_with_modalities(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_generate_with_store_enabled(mock_rust_generate):
     """Test generation with server-side state storage enabled."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
         response = await lm.generate(
-            model="openai/gpt-4o-mini",
-            prompt="Remember this conversation",
-            store=True
+            model="openai/gpt-4o-mini", prompt="Remember this conversation", store=True
         )
 
         assert isinstance(response, GenerateResponse)
@@ -750,7 +772,7 @@ async def test_generate_with_store_enabled(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_generate_with_previous_response_id(mock_rust_generate):
     """Test generation continuing from previous response."""
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -759,7 +781,7 @@ async def test_generate_with_previous_response_id(mock_rust_generate):
             model="openai/gpt-4o-mini",
             prompt="Continue from where we left off",
             previous_response_id="resp_abc123",
-            store=True
+            store=True,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -774,7 +796,7 @@ async def test_generate_with_all_responses_api_features(mock_rust_generate):
     """Test generation with all Responses API features combined."""
     from agnt5.lm import BuiltInTool, ReasoningEffort, Modality
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -787,7 +809,7 @@ async def test_generate_with_all_responses_api_features(mock_rust_generate):
             built_in_tools=[BuiltInTool.WEB_SEARCH, BuiltInTool.CODE_INTERPRETER],
             reasoning_effort=ReasoningEffort.HIGH,
             modalities=[Modality.TEXT],
-            store=True
+            store=True,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -810,7 +832,7 @@ async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
     from agnt5.lm import BuiltInTool
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
@@ -819,7 +841,7 @@ async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
         async for event in lm.stream(
             model="openai/gpt-4o",
             prompt="Search and summarize AI news",
-            built_in_tools=[BuiltInTool.WEB_SEARCH]
+            built_in_tools=[BuiltInTool.WEB_SEARCH],
         ):
             events.append(event)
 
@@ -839,7 +861,7 @@ async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
     from agnt5.lm import ReasoningEffort
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
@@ -848,7 +870,7 @@ async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
         async for event in lm.stream(
             model="openai/o1-mini",
             prompt="Solve step by step",
-            reasoning_effort=ReasoningEffort.MEDIUM
+            reasoning_effort=ReasoningEffort.MEDIUM,
         ):
             events.append(event)
 
@@ -865,7 +887,7 @@ async def test_stream_with_modalities(mock_rust_stream_chunks):
     from agnt5.lm import Modality
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
@@ -874,7 +896,7 @@ async def test_stream_with_modalities(mock_rust_stream_chunks):
         async for event in lm.stream(
             model="openai/gpt-4o",
             prompt="Describe this scene",
-            modalities=[Modality.TEXT, Modality.AUDIO]
+            modalities=[Modality.TEXT, Modality.AUDIO],
         ):
             events.append(event)
 
@@ -893,7 +915,7 @@ async def test_stream_with_store_and_previous_response(mock_rust_stream_chunks):
     """Test streaming with server-side state and continuation."""
     from agnt5.events import Event
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.stream_iter = MagicMock(return_value=mock_rust_stream_chunks)
         mock_rust_class.return_value = mock_instance
@@ -903,7 +925,7 @@ async def test_stream_with_store_and_previous_response(mock_rust_stream_chunks):
             model="openai/gpt-4o-mini",
             prompt="Continue our conversation",
             store=True,
-            previous_response_id="resp_abc123"
+            previous_response_id="resp_abc123",
         ):
             events.append(event)
 
@@ -934,9 +956,7 @@ async def test_live_openai_generate():
         pytest.skip("OPENAI_API_KEY not set")
 
     response = await lm.generate(
-        model="openai/gpt-4o-mini",
-        prompt="Say 'Hello world' and nothing else.",
-        max_tokens=10
+        model="openai/gpt-4o-mini", prompt="Say 'Hello world' and nothing else.", max_tokens=10
     )
 
     assert isinstance(response, GenerateResponse)
@@ -959,9 +979,7 @@ async def test_live_openai_stream():
 
     chunks = []
     async for chunk in lm.stream(
-        model="openai/gpt-4o-mini",
-        prompt="Count to 3 slowly",
-        max_tokens=20
+        model="openai/gpt-4o-mini", prompt="Count to 3 slowly", max_tokens=20
     ):
         chunks.append(chunk)
 
@@ -992,7 +1010,7 @@ async def test_live_responses_api_basic():
         model="openai/gpt-4o-mini",
         prompt="Say 'Hello from Responses API' and nothing else.",
         max_tokens=20,
-        temperature=0.5
+        temperature=0.5,
     )
 
     assert isinstance(response, GenerateResponse)
@@ -1025,7 +1043,7 @@ async def test_live_responses_api_with_web_search():
             prompt="What are the latest AI news headlines? Just give me 2 headlines.",
             built_in_tools=[BuiltInTool.WEB_SEARCH],
             max_tokens=200,
-            temperature=0.5
+            temperature=0.5,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -1059,7 +1077,7 @@ async def test_live_responses_api_with_reasoning_effort():
             model="openai/o1-mini",
             prompt="What is 15 * 23?",
             reasoning_effort=ReasoningEffort.MINIMAL,
-            max_tokens=100
+            max_tokens=100,
         )
 
         assert isinstance(response, GenerateResponse)
@@ -1093,7 +1111,7 @@ async def test_live_responses_api_with_modalities():
         prompt="Describe the color blue in one sentence.",
         modalities=[Modality.TEXT],
         max_tokens=50,
-        temperature=0.5
+        temperature=0.5,
     )
 
     assert isinstance(response, GenerateResponse)
@@ -1124,7 +1142,7 @@ async def test_live_responses_api_with_store():
         prompt="My favorite color is purple. Remember this.",
         store=True,
         max_tokens=50,
-        temperature=0.5
+        temperature=0.5,
     )
 
     assert isinstance(response1, GenerateResponse)
@@ -1160,7 +1178,7 @@ async def test_live_responses_api_comprehensive():
         temperature=0.7,
         max_tokens=100,
         modalities=[Modality.TEXT],
-        store=True
+        store=True,
     )
 
     assert isinstance(response, GenerateResponse)
@@ -1192,7 +1210,7 @@ async def test_live_responses_api_conversation_continuation():
         model="openai/gpt-4o-mini",
         prompt="My favorite animal is a penguin. Please remember this.",
         store=True,
-        max_tokens=50
+        max_tokens=50,
     )
 
     assert isinstance(response1, GenerateResponse)
@@ -1209,7 +1227,7 @@ async def test_live_responses_api_conversation_continuation():
             prompt="What is my favorite animal?",
             previous_response_id=response1.response_id,
             store=True,
-            max_tokens=50
+            max_tokens=50,
         )
 
         assert isinstance(response2, GenerateResponse)
@@ -1247,7 +1265,7 @@ async def test_live_stream_with_built_in_tools():
             model="openai/gpt-4o-mini",
             prompt="What's trending in AI today? Give me 2 headlines.",
             built_in_tools=[BuiltInTool.WEB_SEARCH],
-            max_tokens=200
+            max_tokens=200,
         ):
             chunks.append(chunk)
             print(chunk, end="", flush=True)
@@ -1281,7 +1299,7 @@ async def test_live_stream_with_modalities():
         prompt="Describe a sunset in vivid detail, one sentence.",
         modalities=[Modality.TEXT],
         max_tokens=100,
-        temperature=0.7
+        temperature=0.7,
     ):
         chunks.append(chunk)
         print(chunk, end="", flush=True)
@@ -1322,29 +1340,29 @@ async def test_generate_with_tools_request_agnt5_183(mock_rust_generate):
         description="Get the current weather for a location",
         parameters={
             "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City name"}
-            },
-            "required": ["location"]
-        }
+            "properties": {"location": {"type": "string", "description": "City name"}},
+            "required": ["location"],
+        },
     )
 
     request = GenerateRequest(
         model="openai/gpt-4o-mini",
         messages=[Message(role=MessageRole.USER, content="What's the weather in Paris?")],
         tools=[weather_tool],  # Tools are on request, NOT request.config
-        config=GenerationConfig(temperature=0.7, max_tokens=100)
+        config=GenerationConfig(temperature=0.7, max_tokens=100),
     )
 
     # Verify the structure: tools should be on request, not on config
-    assert hasattr(request, 'tools'), "GenerateRequest must have 'tools' attribute"
-    assert not hasattr(request.config, 'tools'), "GenerationConfig should NOT have 'tools' attribute"
+    assert hasattr(request, "tools"), "GenerateRequest must have 'tools' attribute"
+    assert not hasattr(request.config, "tools"), (
+        "GenerationConfig should NOT have 'tools' attribute"
+    )
     assert len(request.tools) == 1
     assert request.tools[0].name == "get_weather"
 
     # Now test that generate() doesn't crash when tools are present
     # This exercises the tools_count calculation
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
@@ -1376,11 +1394,7 @@ async def test_generate_without_tools_request():
     # Mock response
     mock_response = MagicMock()
     mock_response.content = "Response without tools"
-    mock_response.usage = MagicMock(
-        prompt_tokens=5,
-        completion_tokens=10,
-        total_tokens=15
-    )
+    mock_response.usage = MagicMock(prompt_tokens=5, completion_tokens=10, total_tokens=15)
     mock_response.object = None
     mock_response.tool_calls = None
 
@@ -1388,13 +1402,13 @@ async def test_generate_without_tools_request():
         model="openai/gpt-4o-mini",
         messages=[Message(role=MessageRole.USER, content="Hello")],
         tools=[],  # Empty tools list
-        config=GenerationConfig(temperature=0.5)
+        config=GenerationConfig(temperature=0.5),
     )
 
     # tools should be empty list, not None
     assert request.tools == []
 
-    with patch('agnt5.lm.client.RustLanguageModel') as mock_rust_class:
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
         mock_instance.generate = AsyncMock(return_value=mock_response)
         mock_rust_class.return_value = mock_instance
