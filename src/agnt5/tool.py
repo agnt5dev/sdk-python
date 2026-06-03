@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_
 from docstring_parser import parse as parse_docstring
 
 from ._serialization import serialize_to_str
-from ._telemetry import setup_module_logger
+from ._telemetry import setup_module_logger, truncate_span_attribute_value
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
 
@@ -43,9 +43,10 @@ def _serialize_for_span(value: Any) -> str:
 
     # Use centralized serialization that handles Pydantic models, dataclasses, etc.
     try:
-        return serialize_to_str(value)
+        serialized = serialize_to_str(value)
     except (TypeError, ValueError):
-        return repr(value)
+        serialized = repr(value)
+    return truncate_span_attribute_value(serialized)
 
 
 def _python_type_to_json_schema(py_type: Any) -> Dict[str, Any]:

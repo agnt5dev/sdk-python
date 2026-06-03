@@ -23,6 +23,29 @@ use std::collections::HashMap;
 // Global unified journal event queue for cross-thread access
 // This replaces the separate span and log export queues
 static JOURNAL_QUEUE: OnceLock<JournalEventQueue> = OnceLock::new();
+static SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES: OnceLock<usize> = OnceLock::new();
+
+const DEFAULT_SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES: usize = 8192;
+
+fn span_payload_attribute_max_bytes() -> usize {
+    *SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES.get_or_init(|| {
+        std::env::var("AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES)
+    })
+}
+
+fn span_payload_preview(data: &[u8]) -> (String, bool) {
+    let max_bytes = span_payload_attribute_max_bytes();
+    if data.len() <= max_bytes {
+        return (String::from_utf8_lossy(data).to_string(), false);
+    }
+
+    let mut preview = String::from_utf8_lossy(&data[..max_bytes]).to_string();
+    preview.push_str(&format!("...[truncated, original_bytes={}]", data.len()));
+    (preview, true)
+}
 
 /// Set the global journal event queue (called from Worker initialization)
 pub fn set_journal_queue(queue: JournalEventQueue) {
@@ -855,10 +878,20 @@ impl PyWorker {
                     component_type_str,
                 );
 
-                // Add input.data attribute before moving span into context
+                // Add bounded input preview before moving span into context.
+                let (input_preview, input_truncated) =
+                    span_payload_preview(&invoke_request.input_data);
                 otel_span.set_attribute(opentelemetry::KeyValue::new(
                     "input.data",
-                    String::from_utf8_lossy(&invoke_request.input_data).to_string(),
+                    input_preview,
+                ));
+                otel_span.set_attribute(opentelemetry::KeyValue::new(
+                    "input.size_bytes",
+                    invoke_request.input_data.len() as i64,
+                ));
+                otel_span.set_attribute(opentelemetry::KeyValue::new(
+                    "input.truncated",
+                    input_truncated,
                 ));
 
                 // Add is_streaming attribute for journal exporter filtering
@@ -987,6 +1020,28 @@ impl PyWorker {
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
+                        struct ContextVarResetGuard<'py> {
+                            var: Option<Bound<'py, PyAny>>,
+                            token: Option<Bound<'py, PyAny>>,
+                        }
+
+                        impl<'py> Drop for ContextVarResetGuard<'py> {
+                            fn drop(&mut self) {
+                                if let (Some(var), Some(token)) =
+                                    (self.var.take(), self.token.take())
+                                {
+                                    if let Err(e) = var.call_method1("reset", (token,)) {
+                                        log::warn!("Failed to reset _trace_metadata contextvar: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut trace_metadata_guard = ContextVarResetGuard {
+                            var: None,
+                            token: None,
+                        };
+
                         // CRITICAL: Update Python's _trace_metadata contextvar with the current span context
                         // Inside this instrumented async block, the python_component_execution span is active.
                         // We need to inject its traceparent into Python's context so LLM spans become children
@@ -1015,8 +1070,14 @@ impl PyWorker {
                             // Update Python's _trace_metadata contextvar with the execution span's traceparent
                             if let Ok(worker_module) = py.import("agnt5.worker") {
                                 if let Ok(trace_metadata_var) = worker_module.getattr("_trace_metadata") {
-                                    if let Err(e) = trace_metadata_var.call_method1("set", (updated_metadata,)) {
-                                        log::warn!("Failed to update _trace_metadata with execution span: {}", e);
+                                    match trace_metadata_var.call_method1("set", (updated_metadata,)) {
+                                        Ok(token) => {
+                                            trace_metadata_guard.var = Some(trace_metadata_var);
+                                            trace_metadata_guard.token = Some(token);
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to update _trace_metadata with execution span: {}", e);
+                                        }
                                     }
                                 }
                             }
@@ -1146,9 +1207,19 @@ impl PyWorker {
                                     "component.execution_ms",
                                     execution_duration_ms,
                                 ));
+                                let (output_preview, output_truncated) =
+                                    span_payload_preview(&py_response.output_data);
                                 span.set_attribute(opentelemetry::KeyValue::new(
                                     "output.data",
-                                    String::from_utf8_lossy(&py_response.output_data).to_string(),
+                                    output_preview,
+                                ));
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "output.size_bytes",
+                                    py_response.output_data.len() as i64,
+                                ));
+                                span.set_attribute(opentelemetry::KeyValue::new(
+                                    "output.truncated",
+                                    output_truncated,
                                 ));
 
                                 if py_response.success {

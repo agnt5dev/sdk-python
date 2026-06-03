@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import weakref
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -12,7 +13,7 @@ from typing import (
     Optional,
 )
 
-from ._telemetry import ContextLogger
+from ._telemetry import ContextLogger, get_execution_logger
 from .events import Event, EventEmitter, EventEnvelope
 
 if TYPE_CHECKING:
@@ -101,13 +102,17 @@ class Context:
         else:
             self._memo = None
 
-        base_logger = logging.getLogger(f"agnt5.{run_id}")
-        from ._telemetry import setup_context_logger
-
-        setup_context_logger(base_logger, context=self)
+        base_logger = get_execution_logger()
+        logger_extra: dict[str, Any] = {
+            "run_id": run_id,
+            "_agnt5_context_ref": weakref.ref(self),
+        }
         if runtime_context:
-            base_logger.addFilter(_CorrelationFilter(runtime_context))
-        self._logger = ContextLogger(base_logger)
+            if runtime_context.trace_id:
+                logger_extra["trace_id"] = runtime_context.trace_id
+            if runtime_context.span_id:
+                logger_extra["span_id"] = runtime_context.span_id
+        self._logger = ContextLogger(base_logger, logger_extra)
 
     @property
     def run_id(self) -> str:

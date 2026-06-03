@@ -15,10 +15,10 @@ from ._ids import generate_cid
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from ._serialization import serialize_to_str
 from ._state_adapter import StateInterface, _get_state_adapter
+from ._telemetry import setup_module_logger, truncate_span_attribute_value
 from .context import Context, set_current_context
 from .function import FunctionContext
 from .types import HandlerFunc, TriggerSpec, WorkflowConfig
-from ._telemetry import setup_module_logger
 
 logger = setup_module_logger(__name__)
 
@@ -591,7 +591,11 @@ class WorkflowContext(Context):
         from .tracing import create_span
 
         # Serialize input data for span attributes
-        input_repr = serialize_to_str({"args": args, "kwargs": kwargs}) if args or kwargs else "{}"
+        input_repr = (
+            truncate_span_attribute_value(serialize_to_str({"args": args, "kwargs": kwargs}))
+            if args or kwargs
+            else "{}"
+        )
 
         # Create span for task execution (contextvar handles parent-child linking)
         with create_span(
@@ -669,11 +673,11 @@ class WorkflowContext(Context):
 
                 # Add output data to span
                 try:
-                    output_repr = serialize_to_str(result)
+                    output_repr = truncate_span_attribute_value(serialize_to_str(result))
                     span.set_attribute("output.data", output_repr)
                 except (TypeError, ValueError):
                     # If result is not JSON serializable, use repr
-                    span.set_attribute("output.data", repr(result))
+                    span.set_attribute("output.data", truncate_span_attribute_value(repr(result)))
 
                 # Record step completion in WorkflowEntity
                 self._workflow_entity.record_step_completion(

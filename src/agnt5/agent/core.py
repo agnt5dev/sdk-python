@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 from .. import lm
 from .._ids import generate_cid
 from .._serialization import serialize_to_str
-from .._telemetry import setup_module_logger
+from .._telemetry import setup_module_logger, truncate_span_attribute_value
 from ..callbacks import (
     AfterAgentCallback,
     AfterModelCallback,
@@ -76,6 +76,11 @@ def _serialize_tool_result(result: Any) -> str:
 
     # Use centralized serialization that handles Pydantic models, dataclasses, etc.
     return serialize_to_str(result)
+
+
+def _serialize_span_data(value: Any) -> str:
+    """Serialize and bound data stored as OpenTelemetry span attributes."""
+    return truncate_span_attribute_value(_serialize_tool_result(value))
 
 
 @dataclass
@@ -782,7 +787,7 @@ class Agent:
                     "agent.name": self.name,
                     "agent.model": self.model_name,
                     "agent.max_iterations": str(self.max_iterations),
-                    "input.data": _serialize_tool_result({"message": user_message}),
+                    "input.data": _serialize_span_data({"message": user_message}),
                 },
             ) as span:
                 all_tool_calls: List[Dict[str, Any]] = []
@@ -1029,7 +1034,7 @@ class Agent:
                                         sequence += 1
 
                                         # Add output data to span for trace visibility
-                                        span.set_attribute("output.data", _serialize_tool_result(result["output"]))
+                                        span.set_attribute("output.data", _serialize_span_data(result["output"]))
 
                                         agent_result = AgentResult(
                                             output=result["output"],
@@ -1200,7 +1205,7 @@ class Agent:
                             ))
 
                         # Add output data to span for trace visibility
-                        span.set_attribute("output.data", _serialize_tool_result(response_text))
+                        span.set_attribute("output.data", _serialize_span_data(response_text))
 
                         agent_result = AgentResult(
                             output=response_text,
@@ -1244,7 +1249,7 @@ class Agent:
                     ))
 
                 # Add output data to span for trace visibility
-                span.set_attribute("output.data", _serialize_tool_result(final_output))
+                span.set_attribute("output.data", _serialize_span_data(final_output))
 
                 agent_result = AgentResult(
                     output=final_output,
@@ -1704,7 +1709,7 @@ class Agent:
                         "agent.name": self.name,
                         "agent.model": self.model_name,  # Use model_name (always a string)
                         "agent.max_iterations": str(self.max_iterations),
-                        "input.data": _serialize_tool_result({"message": user_message}),
+                        "input.data": _serialize_span_data({"message": user_message}),
                     },
                 ) as span:
                     all_tool_calls: List[Dict[str, Any]] = []
@@ -1872,7 +1877,7 @@ class Agent:
                                             if isinstance(context, AgentContext):
                                                 await context.save_conversation_history(messages)
                                             # Add output data to span for trace visibility
-                                            span.set_attribute("output.data", _serialize_tool_result(result["output"]))
+                                            span.set_attribute("output.data", _serialize_span_data(result["output"]))
                                             # Emit tool call completed event for handoff
                                             if context:
                                                 tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
@@ -2050,7 +2055,7 @@ class Agent:
                                 ))
 
                             # Add output data to span for trace visibility
-                            span.set_attribute("output.data", _serialize_tool_result(response.text))
+                            span.set_attribute("output.data", _serialize_span_data(response.text))
 
                             return AgentResult(
                                 output=response.text,
@@ -2083,7 +2088,7 @@ class Agent:
                         ))
 
                     # Add output data to span for trace visibility
-                    span.set_attribute("output.data", _serialize_tool_result(final_output))
+                    span.set_attribute("output.data", _serialize_span_data(final_output))
 
                     return AgentResult(
                         output=final_output,

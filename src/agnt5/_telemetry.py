@@ -3,11 +3,14 @@
 import json
 import logging
 import warnings
+import weakref
 from typing import Any, Dict, MutableMapping, Optional, Union
 
 # Module-level default log level (set via set_log_level())
 _default_log_level: Optional[int] = None
 _telemetry_initialized = False
+_EXECUTION_LOGGER_NAME = "agnt5.execution"
+_DEFAULT_SPAN_ATTRIBUTE_VALUE_MAX_CHARS = 8192
 
 # Standard logging kwargs that should NOT be treated as custom attributes
 _STANDARD_LOGGING_KWARGS = frozenset({
@@ -65,9 +68,14 @@ class OpenTelemetryHandler(logging.Handler):
 
     def __init__(self, level: int = logging.NOTSET, context: Any = None):
         super().__init__(level)
-        # Direct context reference — bypasses contextvars which don't propagate
-        # across run_in_executor thread boundaries reliably.
-        self._ctx_ref = context
+        # Keep only a weak reference. Execution contexts are short-lived and
+        # handlers can live on registered loggers for the process lifetime.
+        self._ctx_ref = None
+        if context is not None:
+            try:
+                self._ctx_ref = weakref.ref(context)
+            except TypeError:
+                self._ctx_ref = None
         try:
             from ._core import log_from_python
             self._log_from_python = log_from_python
@@ -119,11 +127,20 @@ class OpenTelemetryHandler(logging.Handler):
 
             # Also emit as event for SSE streaming (if we have an active context)
             try:
-                from .events import EventEnvelope
                 import time
 
-                # Use direct reference first (works across threads), fall back to contextvar
-                ctx = self._ctx_ref
+                from .events import EventEnvelope
+
+                # Prefer context bound to the log record. This preserves SSE
+                # emission for ctx.logger calls from executor threads without
+                # making the handler retain the per-run context.
+                ctx = self._ctx_ref() if self._ctx_ref is not None else None
+                if ctx is None:
+                    record_ctx_ref = getattr(record, '_agnt5_context_ref', None)
+                    if isinstance(record_ctx_ref, weakref.ReferenceType):
+                        ctx = record_ctx_ref()
+                    else:
+                        ctx = record_ctx_ref
                 if ctx is None:
                     from .context import get_current_context
                     ctx = get_current_context()
@@ -252,6 +269,38 @@ def set_log_level(level: Union[int, str]) -> None:
         _default_log_level = level
 
 
+def _span_attribute_value_max_chars() -> int:
+    """Resolve max chars retained for large string span attributes."""
+    import os
+
+    raw = os.environ.get("AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_CHARS")
+    if raw is None:
+        return _DEFAULT_SPAN_ATTRIBUTE_VALUE_MAX_CHARS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_SPAN_ATTRIBUTE_VALUE_MAX_CHARS
+
+
+def truncate_span_attribute_value(value: str) -> str:
+    """Bound large span attribute values while preserving size visibility."""
+    max_chars = _span_attribute_value_max_chars()
+    if len(value) <= max_chars:
+        return value
+    return f"{value[:max_chars]}...[truncated, original_chars={len(value)}]"
+
+
+def _effective_context_log_level(log_level: Optional[int] = None) -> int:
+    """Resolve the console log level for AGNT5 context/module loggers."""
+    if log_level is not None:
+        return log_level
+    if _default_log_level is not None:
+        return _default_log_level
+    if _is_debug_enabled():
+        return logging.DEBUG
+    return logging.INFO
+
+
 def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None, context: Any = None) -> None:
     """Configure a Context logger with OpenTelemetry and console handlers.
 
@@ -262,15 +311,7 @@ def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None
     """
     logger.handlers.clear()
 
-    # Priority: explicit log_level > user-configured default > AGNT5_DEBUG > INFO
-    if log_level is not None:
-        effective_level = log_level
-    elif _default_log_level is not None:
-        effective_level = _default_log_level
-    elif _is_debug_enabled():
-        effective_level = logging.DEBUG
-    else:
-        effective_level = logging.INFO
+    effective_level = _effective_context_log_level(log_level)
 
     # OpenTelemetry handler (forwards to Rust + SSE streaming)
     otel_handler = OpenTelemetryHandler(context=context)
@@ -286,6 +327,42 @@ def setup_context_logger(logger: logging.Logger, log_level: Optional[int] = None
 
     logger.setLevel(logging.DEBUG)  # Let handlers filter
     logger.propagate = False
+
+
+def get_execution_logger(log_level: Optional[int] = None) -> logging.Logger:
+    """Return the shared logger used by per-run ContextLogger adapters.
+
+    The logger name is stable so the logging registry does not grow with run
+    IDs. Per-run fields are attached by ContextLogger.extra on each record.
+    """
+    logger = logging.getLogger(_EXECUTION_LOGGER_NAME)
+    effective_level = _effective_context_log_level(log_level)
+
+    otel_handler = None
+    console_handler = None
+    for handler in logger.handlers:
+        if getattr(handler, "_agnt5_execution_otel", False):
+            otel_handler = handler
+        elif getattr(handler, "_agnt5_execution_console", False):
+            console_handler = handler
+
+    if otel_handler is None:
+        otel_handler = OpenTelemetryHandler()
+        otel_handler.setLevel(logging.DEBUG)
+        otel_handler.setFormatter(logging.Formatter('%(message)s'))
+        otel_handler._agnt5_execution_otel = True
+        logger.addHandler(otel_handler)
+
+    if console_handler is None:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+        console_handler._agnt5_execution_console = True
+        logger.addHandler(console_handler)
+
+    console_handler.setLevel(effective_level)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    return logger
 
 
 def setup_module_logger(module_name: str, log_level: Optional[int] = None) -> logging.Logger:

@@ -43,6 +43,30 @@ def _truncate_input(input_dict: dict, max_len: int = 200) -> str:
     return s
 
 
+def _set_current_span_from_runtime_context(runtime_context: Any) -> Any | None:
+    """Set the Python tracing contextvar from a runtime context, returning its token."""
+    if runtime_context is None:
+        return None
+    trace_id = getattr(runtime_context, "trace_id", None)
+    span_id = getattr(runtime_context, "span_id", None)
+    if not trace_id or not span_id:
+        return None
+
+    from ..tracing import SpanInfo, _current_span
+
+    return _current_span.set(SpanInfo(trace_id=trace_id, span_id=span_id))
+
+
+def _reset_current_span_token(token: Any | None) -> None:
+    """Reset a token returned by _set_current_span_from_runtime_context."""
+    if token is None:
+        return
+
+    from ..tracing import _current_span
+
+    _current_span.reset(token)
+
+
 def _resolve_session_user_ids(request: Any, input_dict: dict) -> tuple[str, str | None]:
     """Resolve durable execution scope IDs from request metadata, payload, then run ID."""
     session_id = (
@@ -80,13 +104,22 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Common execution wrapper for all component types."""
         from .._core import PyExecuteComponentResponse
+        from .._state_adapter import _entity_state_adapter_ctx
         from ..context import _current_context, get_current_context, set_current_context
 
         token = None
+        span_token = None
+        state_adapter_token = None
         try:
             input_dict = deserialize(request.input_data) if request.input_data else {}
             ctx = context_factory(input_dict, request)
             token = set_current_context(ctx)
+            span_token = _set_current_span_from_runtime_context(
+                getattr(request, "runtime_context", None)
+            )
+            state_adapter_token = _entity_state_adapter_ctx.set(
+                getattr(self, "_entity_state_adapter", None)
+            )
 
             return await executor(ctx, input_dict, request)
 
@@ -124,6 +157,9 @@ class ExecutorMixin:
             return create_failed_response(request, e, PyExecuteComponentResponse)
 
         finally:
+            _reset_current_span_token(span_token)
+            if state_adapter_token is not None:
+                _entity_state_adapter_ctx.reset(state_adapter_token)
             if token is not None:
                 _current_context.reset(token)
 
@@ -156,7 +192,6 @@ class ExecutorMixin:
         """Execute a function handler."""
         from ..events import Completed, ComponentType, Started
         from ..function import FunctionContext
-        from ..tracing import SpanInfo, _current_span
 
         logger.debug(
             f"[_execute_function] Starting execution for component={config.name}, "
@@ -177,13 +212,6 @@ class ExecutorMixin:
             )
 
         async def execute(ctx: FunctionContext, input_dict: dict, req: Any):
-            # Set up trace parent-child linking
-            if req.runtime_context:
-                trace_id = req.runtime_context.trace_id
-                span_id = req.runtime_context.span_id
-                if trace_id and span_id:
-                    _current_span.set(SpanInfo(trace_id=trace_id, span_id=span_id))
-
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
             run_parent_correlation_id = ctx.parent_correlation_id
@@ -552,10 +580,7 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Execute an entity method with lifecycle events."""
         from ..context import Context
-        from .._state_adapter import _entity_state_adapter_ctx
         from ..events import Completed, ComponentType, Failed, Started
-
-        _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         logger.debug(
             f"[_execute_entity] Starting execution for entity={entity_type.name}, "
@@ -731,10 +756,7 @@ class ExecutorMixin:
         """Execute an agent with session support."""
         from ..agent import AgentContext
         from ..agent.events import AgentCompleted, AgentFailed, AgentStarted
-        from .._state_adapter import _entity_state_adapter_ctx
         from ..events import Completed, ComponentType, Event, Failed, Started
-
-        _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         logger.debug(
             f"[_execute_agent] Starting execution for agent={agent.name}, "
@@ -1019,9 +1041,9 @@ class ExecutorMixin:
         Scorers receive a ScorerRequest and return a ScorerResult.
         They are stateless evaluation functions.
         """
+        from ..eval.types import ScorerRequest, ScorerResult
         from ..events import Completed, ComponentType, Failed, Started
         from ..scorer import ScorerContext
-        from ..eval.types import ScorerRequest, ScorerResult
 
         logger.debug(
             f"[_execute_scorer] Starting execution for scorer={config.name}, "
@@ -1224,20 +1246,21 @@ class ExecutorMixin:
         import json
         import time as _time
         import traceback as _traceback
+
         from .._core import PyExecuteComponentResponse
-        from ..context import set_current_context
         from .._state_adapter import _entity_state_adapter_ctx, _get_state_adapter
+        from ..context import set_current_context
         from ..events import Completed, ComponentType, Failed, Started
         from ..exceptions import WaitingForUserInputException
-        from ..tracing import SpanInfo, _current_span
         from ..workflow import WorkflowContext, WorkflowEntity, WorkflowState
 
         # Set entity state adapter in context so workflows can use Entities
-        _entity_state_adapter_ctx.set(self._entity_state_adapter)
+        state_adapter_token = _entity_state_adapter_ctx.set(self._entity_state_adapter)
 
         # Variables that need to be accessible in exception handlers
         ctx = None
         token = None
+        span_token = None
         session_id = None
         workflow_start_time = _time.time()
         start_time_ns = time.time_ns()
@@ -1396,10 +1419,7 @@ class ExecutorMixin:
 
             # Set up trace parent-child linking
             if request.runtime_context:
-                trace_id = request.runtime_context.trace_id
-                span_id = request.runtime_context.span_id
-                if trace_id and span_id:
-                    _current_span.set(SpanInfo(trace_id=trace_id, span_id=span_id))
+                span_token = _set_current_span_from_runtime_context(request.runtime_context)
 
             # Emit run.started and workflow.started events only for fresh executions.
             # For resumed workflows (HITL), the platform emits run.resumed instead,
@@ -1616,6 +1636,9 @@ class ExecutorMixin:
             )
 
         finally:
+            _reset_current_span_token(span_token)
+            if state_adapter_token is not None:
+                _entity_state_adapter_ctx.reset(state_adapter_token)
             if token is not None:
                 from ..context import _current_context
                 _current_context.reset(token)
