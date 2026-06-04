@@ -81,7 +81,7 @@ from .responses import (
     SubmitLinks,
     SubmitResponse,
 )
-from .context import Context
+from .context import Context, LLMRuntimeOptions, RuntimeContext
 
 # Entity API was removed in v0.4.0
 # Use State API (ctx.state) and Memory API (ctx.memory) instead
@@ -124,6 +124,7 @@ from .lm import (
     LMContentBlockStarted,
     LMFailed,
     LMStarted,
+    Prompt as LMPrompt,
 )
 from .types import (
     BackoffPolicy,
@@ -241,6 +242,8 @@ __all__ = [
     "SlackConfig",
     # Core components
     "Context",
+    "LLMRuntimeOptions",
+    "RuntimeContext",
     "FunctionContext",
     "Worker",
     "function",
@@ -321,6 +324,7 @@ __all__ = [
     "LMContentBlockStarted",
     "LMFailed",
     "LMStarted",
+    "LMPrompt",
     # Base events
     "ApprovalRequested",
     "ApprovalResolved",

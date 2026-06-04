@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from .._schema_utils import detect_format_type
+from ..context import get_current_context
 from ..events import Event
 from .base import LanguageModel
 from .client import LMClient
@@ -37,6 +38,7 @@ from .types import (
     MessageRole,
     Modality,
     ModelConfig,
+    Prompt,
     PromptRef,
     ReasoningEffort,
     TokenUsage,
@@ -90,6 +92,7 @@ __all__ = [
     "MessageRole",
     "Modality",
     "ModelConfig",
+    "Prompt",
     "ReasoningEffort",
     "PromptRef",
     "TokenUsage",
@@ -154,7 +157,7 @@ def _build_messages(
 
 
 def _coerce_prompt_ref(
-    value: Optional[Union[PromptRef, Dict[str, Any], str]],
+    value: Optional[Union[Prompt, Dict[str, Any], str]],
     *,
     variables: Optional[Dict[str, Any]] = None,
     project_id: Optional[str] = None,
@@ -163,15 +166,15 @@ def _coerce_prompt_ref(
     version: Optional[str] = None,
     platform_url: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> Optional[PromptRef]:
+) -> Optional[Prompt]:
     if value is None:
         return None
-    if isinstance(value, PromptRef):
+    if isinstance(value, Prompt):
         ref = value
     elif isinstance(value, str):
-        ref = PromptRef(id=value)
+        ref = Prompt(id=value)
     else:
-        ref = PromptRef(
+        ref = Prompt(
             id=value["id"],
             project_id=value.get("project_id"),
             version=value.get("version"),
@@ -180,6 +183,10 @@ def _coerce_prompt_ref(
             platform_url=value.get("platform_url"),
             api_key=value.get("api_key"),
             variables=value.get("variables") or {},
+            model=value.get("model"),
+            temperature=value.get("temperature"),
+            max_tokens=value.get("max_tokens") or value.get("max_output_tokens"),
+            top_p=value.get("top_p"),
         )
     return replace(
         ref,
@@ -193,10 +200,23 @@ def _coerce_prompt_ref(
     )
 
 
+def _runtime_llm_options(prompt_id: Optional[str] = None) -> Any:
+    current_ctx = get_current_context()
+    runtime = getattr(current_ctx, "runtime", None)
+    if prompt_id:
+        prompt_options = getattr(runtime, "prompts", {}).get(prompt_id) if runtime else None
+        if prompt_options is not None and getattr(prompt_options, "has_values", lambda: False)():
+            return prompt_options
+    llm_options = getattr(runtime, "llm", None)
+    if llm_options is not None and getattr(llm_options, "has_values", lambda: False)():
+        return llm_options
+    return None
+
+
 async def generate(
     model: str,
-    prompt: Optional[str] = None,
-    prompt_ref: Optional[Union[PromptRef, Dict[str, Any], str]] = None,
+    prompt: Optional[Union[str, Prompt, Dict[str, Any]]] = None,
+    prompt_ref: Optional[Union[Prompt, Dict[str, Any], str]] = None,
     variables: Optional[Dict[str, Any]] = None,
     project_id: Optional[str] = None,
     environment: Optional[str] = None,
@@ -237,11 +257,59 @@ async def generate(
     Returns:
         GenerateResponse with text, usage, and optional structured output
     """
-    provider, model_name = _parse_model(model)
-    model = f"{provider}/{model_name}"
-    if prompt_ref is not None and (prompt is not None or messages is not None):
+    prompt_input = prompt
+    if isinstance(prompt_input, (Prompt, dict)):
+        if prompt_ref is not None:
+            raise ValueError("Provide either 'prompt' or 'prompt_ref', not both")
+        prompt_ref = prompt_input
+        prompt_input = None
+    if prompt_ref is not None and (prompt_input is not None or messages is not None):
         raise ValueError("Provide either 'prompt_ref' or prompt/messages, not both")
-    message_objects = [] if prompt_ref is not None else _build_messages(prompt, messages)
+    message_objects = [] if prompt_ref is not None else _build_messages(prompt_input, messages)
+    prompt_obj = _coerce_prompt_ref(
+        prompt_ref,
+        variables=variables,
+        project_id=project_id,
+        environment=environment,
+        environment_id=environment_id,
+        version=prompt_version,
+        platform_url=platform_url,
+        api_key=api_key,
+    )
+    runtime_llm = _runtime_llm_options(prompt_obj.id if prompt_obj is not None else None)
+    if runtime_llm is not None:
+        if prompt_obj is not None:
+            prompt_obj = replace(
+                prompt_obj,
+                model=runtime_llm.model or prompt_obj.model,
+                temperature=(
+                    runtime_llm.temperature
+                    if runtime_llm.temperature is not None
+                    else prompt_obj.temperature
+                ),
+                max_tokens=(
+                    runtime_llm.max_tokens
+                    if runtime_llm.max_tokens is not None
+                    else prompt_obj.max_tokens
+                ),
+                top_p=runtime_llm.top_p if runtime_llm.top_p is not None else prompt_obj.top_p,
+            )
+        if runtime_llm.temperature is not None:
+            temperature = runtime_llm.temperature
+        if runtime_llm.max_tokens is not None:
+            max_tokens = runtime_llm.max_tokens
+        if runtime_llm.top_p is not None:
+            top_p = runtime_llm.top_p
+
+    effective_model = (
+        runtime_llm.model
+        if runtime_llm is not None and runtime_llm.model
+        else prompt_obj.model
+        if prompt_obj and prompt_obj.model
+        else model
+    )
+    provider, model_name = _parse_model(effective_model)
+    model = f"{provider}/{model_name}"
 
     response_schema_json = None
     if response_format is not None:
@@ -263,16 +331,7 @@ async def generate(
 
     request = GenerateRequest(
         model=model,
-        prompt_ref=_coerce_prompt_ref(
-            prompt_ref,
-            variables=variables,
-            project_id=project_id,
-            environment=environment,
-            environment_id=environment_id,
-            version=prompt_version,
-            platform_url=platform_url,
-            api_key=api_key,
-        ),
+        prompt_ref=prompt_obj,
         messages=message_objects,
         system_prompt=system_prompt,
         config=config,

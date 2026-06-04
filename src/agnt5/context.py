@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import weakref
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -57,6 +59,113 @@ class _CorrelationFilter(logging.Filter):
         return True
 
 
+@dataclass
+class LLMRuntimeOptions:
+    """Request-scoped LLM execution overrides supplied by the runtime."""
+
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+
+    def has_values(self) -> bool:
+        return any(
+            value is not None
+            for value in (self.model, self.temperature, self.max_tokens, self.top_p)
+        )
+
+
+@dataclass
+class RuntimeContext:
+    """Runtime-provided execution options available to user code."""
+
+    llm: LLMRuntimeOptions = field(default_factory=LLMRuntimeOptions)
+    prompts: dict[str, LLMRuntimeOptions] = field(default_factory=dict)
+
+
+def _parse_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _llm_options_from_mapping(data: dict[str, Any]) -> LLMRuntimeOptions:
+    return LLMRuntimeOptions(
+        model=str(data["model"]).strip() if data.get("model") else None,
+        temperature=_parse_float(data.get("temperature")),
+        max_tokens=_parse_int(
+            data.get("max_tokens")
+            if data.get("max_tokens") is not None
+            else data.get("max_output_tokens")
+        ),
+        top_p=_parse_float(data.get("top_p")),
+    )
+
+
+def runtime_context_from_metadata(metadata: Optional[dict[str, Any]]) -> RuntimeContext:
+    """Build public runtime options from dispatch metadata."""
+    runtime = RuntimeContext()
+    if not metadata:
+        return runtime
+
+    llm_data: dict[str, Any] = {}
+    raw_llm = metadata.get("agnt5.llm")
+    if isinstance(raw_llm, str) and raw_llm.strip():
+        try:
+            parsed = json.loads(raw_llm)
+            if isinstance(parsed, dict):
+                llm_data.update(parsed)
+        except json.JSONDecodeError:
+            pass
+    elif isinstance(raw_llm, dict):
+        llm_data.update(raw_llm)
+
+    flat_keys = {
+        "model": "agnt5.llm.model",
+        "temperature": "agnt5.llm.temperature",
+        "max_tokens": "agnt5.llm.max_tokens",
+        "max_output_tokens": "agnt5.llm.max_output_tokens",
+        "top_p": "agnt5.llm.top_p",
+    }
+    for target, key in flat_keys.items():
+        if key in metadata:
+            llm_data[target] = metadata[key]
+
+    runtime.llm = _llm_options_from_mapping(llm_data)
+
+    raw_prompts = metadata.get("agnt5.prompts")
+    prompts_data: dict[str, Any] = {}
+    if isinstance(raw_prompts, str) and raw_prompts.strip():
+        try:
+            parsed = json.loads(raw_prompts)
+            if isinstance(parsed, dict):
+                prompts_data.update(parsed)
+        except json.JSONDecodeError:
+            pass
+    elif isinstance(raw_prompts, dict):
+        prompts_data.update(raw_prompts)
+
+    for prompt_id, prompt_data in prompts_data.items():
+        if not isinstance(prompt_data, dict):
+            continue
+        llm_override = prompt_data.get("llm", prompt_data)
+        if isinstance(llm_override, dict):
+            runtime.prompts[str(prompt_id)] = _llm_options_from_mapping(llm_override)
+    return runtime
+
+
 class Context:
     """Base context providing logging, event emission, and execution metadata.
 
@@ -84,6 +193,7 @@ class Context:
         self._is_streaming = is_streaming
         self._worker = worker
         self._trace_metadata = trace_metadata
+        self.runtime = runtime_context_from_metadata(trace_metadata)
 
         # Correlation tracking for event hierarchy (required, never null)
         self._correlation_id: str = correlation_id

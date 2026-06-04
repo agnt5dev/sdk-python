@@ -220,8 +220,8 @@ class GenerateResponse:
 
 
 @dataclass
-class PromptRef:
-    """Reference to a managed AGNT5 prompt version or environment-bound release."""
+class Prompt:
+    """Managed AGNT5 prompt version or environment-bound prompt."""
 
     id: str
     project_id: Optional[str] = None
@@ -231,6 +231,13 @@ class PromptRef:
     platform_url: Optional[str] = None
     api_key: Optional[str] = None
     variables: Dict[str, Any] = field(default_factory=dict)
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+
+
+PromptRef = Prompt
 
 
 @dataclass
@@ -238,7 +245,7 @@ class GenerateRequest:
     """Request for LLM generation."""
 
     model: str
-    prompt_ref: Optional[PromptRef] = None
+    prompt_ref: Optional[Prompt] = None
     messages: List[Message] = field(default_factory=list)
     system_prompt: Optional[str] = None
     tools: List[ToolDefinition] = field(default_factory=list)
