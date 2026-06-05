@@ -13,7 +13,7 @@ import httpx
 from .._ids import generate_cid
 from ..context import get_current_context
 from ..events import Event
-from ..prompt_manifest import resolve_prompt_ref_from_manifest
+from ..prompt_manifest import resolve_prompt_from_manifest
 from .base import LanguageModel
 from .events import (
     LMCompleted,
@@ -145,7 +145,7 @@ class LMClient(LanguageModel):
             raise
 
     async def _run_managed_prompt(self, request: GenerateRequest) -> GenerateResponse:
-        manifest_request = resolve_prompt_ref_from_manifest(request)
+        manifest_request = resolve_prompt_from_manifest(request)
         if manifest_request is not None:
             return await self.generate(manifest_request)
 
@@ -171,6 +171,8 @@ class LMClient(LanguageModel):
         body: Dict[str, Any] = {"variables": prompt_ref.variables}
         if prompt_ref.version:
             body["version_id"] = prompt_ref.version
+        if prompt_ref.model:
+            body["model"] = prompt_ref.model
         if request.config.temperature is not None:
             body["temperature"] = request.config.temperature
         if request.config.max_tokens is not None:

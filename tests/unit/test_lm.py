@@ -24,12 +24,15 @@ from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agnt5 import lm
+from agnt5.context import Context, LLMRuntimeOptions, set_current_context
 from agnt5.lm import (
     GenerateResponse,
-    TokenUsage,
     Message,
     MessageRole,
+    Prompt,
+    TokenUsage,
 )
+from agnt5.prompt_manifest import PromptManifestError
 
 
 # ============================================================================
@@ -192,26 +195,36 @@ async def test_generate_with_system_prompt(mock_rust_generate):
 
 
 @pytest.mark.asyncio
-async def test_prompt_ref_uses_git_manifest_in_production(
+async def test_prompt_uses_git_manifest_in_production(
     tmp_path, monkeypatch, mock_rust_generate
 ):
-    """Production prompt refs resolve from the bundled git manifest."""
-    manifest = {
-        "schema_version": "agnt5.prompts.v1",
-        "prompts": [
-            {
-                "id": "support_reply",
-                "version": "3",
-                "model": "openai/gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": "Be concise."},
-                    {"role": "user", "content": "Reply to {{customer.name}} about {{topic}}."},
-                ],
-                "parameters": {"temperature": 0.2, "max_tokens": 60},
-            }
-        ],
-    }
-    (tmp_path / "prompts.lock").write_text(json.dumps(manifest), encoding="utf-8")
+    """Production prompts resolve from the bundled git manifest."""
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    (prompts_dir / "support_reply.mdx").write_text(
+        """---
+id: support_reply
+version: 3
+version_id: version-3
+model: openai/gpt-4o-mini
+temperature: 0.2
+max_tokens: 60
+variables:
+  - customer.name
+  - topic
+response_format: text
+---
+
+<System>
+Be concise.
+</System>
+
+<User>
+Reply to {{customer.name}} about {{topic}}.
+</User>
+""",
+        encoding="utf-8",
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGNT5_ENVIRONMENT", "production")
 
@@ -222,19 +235,264 @@ async def test_prompt_ref_uses_git_manifest_in_production(
 
         response = await lm.generate(
             model="openai/gpt-4o-mini",
-            prompt_ref="support_reply",
-            variables={"customer": {"name": "Ada"}, "topic": "shipping"},
+            prompt=Prompt(
+                id="support_reply",
+                model="openai/gpt-4o",
+                temperature=0.6,
+                max_tokens=33,
+                top_p=0.5,
+                variables={"customer": {"name": "Ada"}, "topic": "shipping"},
+            ),
         )
 
         assert isinstance(response, GenerateResponse)
         call_kwargs = mock_instance.generate.call_args.kwargs
-        assert call_kwargs["model"] == "openai/gpt-4o-mini"
-        assert call_kwargs["temperature"] == 0.2
-        assert call_kwargs["max_tokens"] == 60
+        assert call_kwargs["model"] == "openai/gpt-4o"
+        assert call_kwargs["temperature"] == 0.6
+        assert call_kwargs["max_tokens"] == 33
+        assert call_kwargs["top_p"] == 0.5
         assert call_kwargs["prompt"] == [
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "Reply to Ada about shipping."},
         ]
+
+
+@pytest.mark.asyncio
+async def test_prompt_model_override_selects_provider(
+    tmp_path, monkeypatch, mock_rust_generate
+):
+    """Prompt model overrides choose the provider client used for execution."""
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    (prompts_dir / "support_reply.mdx").write_text(
+        """---
+id: support_reply
+model: openai/gpt-4o-mini
+---
+
+<User>
+Reply about {{topic}}.
+</User>
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGNT5_ENVIRONMENT", "production")
+
+    with (
+        patch("agnt5.lm.client.RustLanguageModelConfig") as mock_config_class,
+        patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class,
+    ):
+        mock_config = MagicMock()
+        mock_config_class.return_value = mock_config
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+        mock_rust_class.return_value = mock_instance
+
+        await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt=Prompt(
+                id="support_reply",
+                model="anthropic/claude-3-5-haiku-20241022",
+                variables={"topic": "shipping"},
+            ),
+        )
+
+        mock_config_class.assert_called_once_with(
+            default_model=None,
+            default_provider="anthropic",
+        )
+        assert mock_rust_class.call_args.kwargs["config"] is mock_config
+        call_kwargs = mock_instance.generate.call_args.kwargs
+        assert call_kwargs["model"] == "anthropic/claude-3-5-haiku-20241022"
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_llm_override_from_metadata(
+    tmp_path, monkeypatch, mock_rust_generate
+):
+    """Runtime metadata can override prompt model and generation params."""
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    (prompts_dir / "support_reply.mdx").write_text(
+        """---
+id: support_reply
+model: openai/gpt-4o-mini
+temperature: 0.1
+max_tokens: 20
+---
+
+<User>
+Reply about {{topic}}.
+</User>
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGNT5_ENVIRONMENT", "production")
+
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="cid-1",
+        parent_correlation_id="",
+        trace_metadata={
+            "agnt5.llm": json.dumps(
+                {
+                    "model": "anthropic/claude-3-5-haiku-20241022",
+                    "temperature": 0.7,
+                    "max_tokens": 88,
+                    "top_p": 0.6,
+                }
+            )
+        },
+    )
+    token = set_current_context(ctx)
+    try:
+        with (
+            patch("agnt5.lm.client.RustLanguageModelConfig") as mock_config_class,
+            patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class,
+        ):
+            mock_config_class.return_value = MagicMock()
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+            mock_rust_class.return_value = mock_instance
+
+            await lm.generate(
+                model="openai/gpt-4o-mini",
+                prompt=Prompt(id="support_reply", variables={"topic": "shipping"}),
+            )
+
+            mock_config_class.assert_called_once_with(
+                default_model=None,
+                default_provider="anthropic",
+            )
+            call_kwargs = mock_instance.generate.call_args.kwargs
+            assert call_kwargs["model"] == "anthropic/claude-3-5-haiku-20241022"
+            assert call_kwargs["temperature"] == 0.7
+            assert call_kwargs["max_tokens"] == 88
+            assert call_kwargs["top_p"] == 0.6
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_llm_override_can_be_set_in_code(mock_rust_generate):
+    """User code can set request-scoped LLM overrides on ctx.runtime.llm."""
+    ctx = Context(run_id="run-1", correlation_id="cid-1", parent_correlation_id="")
+    ctx.runtime.llm = LLMRuntimeOptions(
+        model="groq/llama-3.3-70b-versatile",
+        temperature=0.4,
+        max_tokens=55,
+    )
+    token = set_current_context(ctx)
+    try:
+        with (
+            patch("agnt5.lm.client.RustLanguageModelConfig") as mock_config_class,
+            patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class,
+        ):
+            mock_config_class.return_value = MagicMock()
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+            mock_rust_class.return_value = mock_instance
+
+            await lm.generate(model="openai/gpt-4o-mini", prompt="Hello")
+
+            mock_config_class.assert_called_once_with(
+                default_model=None,
+                default_provider="groq",
+            )
+            call_kwargs = mock_instance.generate.call_args.kwargs
+            assert call_kwargs["model"] == "groq/llama-3.3-70b-versatile"
+            assert call_kwargs["temperature"] == 0.4
+            assert call_kwargs["max_tokens"] == 55
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_prompt_specific_llm_overrides(
+    tmp_path, monkeypatch, mock_rust_generate
+):
+    """Prompt-specific runtime overrides apply by prompt id with global fallback."""
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    for prompt_id in ("classify", "draft", "review"):
+        (prompts_dir / f"{prompt_id}.mdx").write_text(
+            f"""---
+id: {prompt_id}
+model: openai/gpt-4o-mini
+temperature: 0.1
+---
+
+<User>
+Run {prompt_id}.
+</User>
+""",
+            encoding="utf-8",
+        )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGNT5_ENVIRONMENT", "production")
+
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="cid-1",
+        parent_correlation_id="",
+        trace_metadata={
+            "agnt5.llm": json.dumps(
+                {"model": "openai/gpt-4o-mini", "temperature": 0.2}
+            ),
+            "agnt5.prompts": json.dumps(
+                {
+                    "draft": {
+                        "llm": {
+                            "model": "anthropic/claude-3-5-haiku-20241022",
+                            "temperature": 0.7,
+                        }
+                    },
+                    "review": {
+                        "model": "openai/gpt-4o",
+                        "temperature": 0.3,
+                    },
+                }
+            ),
+        },
+    )
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
+            mock_rust_class.return_value = mock_instance
+
+            for prompt_id in ("classify", "draft", "review"):
+                await lm.generate(
+                    model="openai/gpt-4o-mini",
+                    prompt=Prompt(id=prompt_id),
+                )
+
+            calls = [call.kwargs for call in mock_instance.generate.call_args_list]
+            assert [call["model"] for call in calls] == [
+                "openai/gpt-4o-mini",
+                "anthropic/claude-3-5-haiku-20241022",
+                "openai/gpt-4o",
+            ]
+            assert [call["temperature"] for call in calls] == [0.2, 0.7, 0.3]
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_prompt_override_rejects_json_files(tmp_path, monkeypatch):
+    """Prompt override files must be Markdown or MDX."""
+    prompt_file = tmp_path / "support_reply.json"
+    prompt_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("AGNT5_PROMPT_OVERRIDE", str(prompt_file))
+
+    with pytest.raises(PromptManifestError, match=r"\.md or \.mdx"):
+        await lm.generate(
+            model="openai/gpt-4o-mini",
+            prompt=Prompt(id="support_reply"),
+        )
 
 
 @pytest.mark.asyncio
