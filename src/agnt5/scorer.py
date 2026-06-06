@@ -35,6 +35,20 @@ ScorerHandler = Callable[..., ScorerResult]
 
 # Global scorer registry
 _SCORER_REGISTRY: Dict[str, "ScorerConfig"] = {}
+_BUILTIN_JUDGE_SCORER_REGISTRY: Dict[str, "ScorerConfig"] = {}
+BUILTIN_DETERMINISTIC_SCORER_NAMES = (
+    "exact_match",
+    "contains",
+    "regex_match",
+    "json_valid",
+    "json_schema",
+    "numeric_range",
+    "levenshtein",
+)
+BUILTIN_JUDGE_SCORER_NAMES = ("llm_judge", "correctness", "faithfulness")
+RESERVED_BUILTIN_SCORER_NAMES = (
+    BUILTIN_DETERMINISTIC_SCORER_NAMES + BUILTIN_JUDGE_SCORER_NAMES
+)
 
 
 @dataclass
@@ -108,7 +122,7 @@ class ScorerContext(Context):
 
 
 class ScorerRegistry:
-    """Registry for scorer handlers."""
+    """Registry for user-defined custom scorer handlers."""
 
     @staticmethod
     def register(config: ScorerConfig) -> None:
@@ -120,6 +134,12 @@ class ScorerRegistry:
         Raises:
             ValueError: If a scorer with the same name is already registered
         """
+        if config.name in RESERVED_BUILTIN_SCORER_NAMES:
+            raise ValueError(
+                f"Scorer name collision: '{config.name}' is an AGNT5 built-in scorer. "
+                "Built-in scorers are not user components; use a different custom scorer name."
+            )
+
         if config.name in _SCORER_REGISTRY:
             existing_config = _SCORER_REGISTRY[config.name]
             existing_module = existing_config.handler.__module__
@@ -156,6 +176,18 @@ class ScorerRegistry:
 
 
 _builtin_handlers_registered = False
+
+
+def get_builtin_judge_scorer_config(name: str) -> Optional[ScorerConfig]:
+    """Get an AGNT5-owned built-in judge scorer by name."""
+    register_builtin_scorer_handlers()
+    return _BUILTIN_JUDGE_SCORER_REGISTRY.get(name)
+
+
+def all_builtin_judge_scorers() -> Dict[str, ScorerConfig]:
+    """Get all AGNT5-owned built-in judge scorers."""
+    register_builtin_scorer_handlers()
+    return _BUILTIN_JUDGE_SCORER_REGISTRY.copy()
 
 CORRECTNESS_JUDGE_CRITERIA = (
     "Evaluate whether the output correctly answers the input and matches the expected "
@@ -410,18 +442,17 @@ def _judge_result_to_scorer_result(result: Any, metadata: Dict[str, Any]) -> Any
 
 
 def register_builtin_scorer_handlers() -> None:
-    """Register Python handlers for built-in scorers that need Python execution.
+    """Register AGNT5-owned built-in judge scorers.
 
-    Built-in scorers like llm_judge fall through the Rust fast path and need
-    a Python handler in the ScorerRegistry. This is called once during worker startup.
+    These are not custom scorer components and do not live in ScorerRegistry.
+    Worker dispatch resolves them before custom scorer lookup.
     """
     global _builtin_handlers_registered
     if _builtin_handlers_registered:
         return
     _builtin_handlers_registered = True
 
-    # Register llm_judge handler
-    if "llm_judge" not in _SCORER_REGISTRY:
+    if "llm_judge" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
 
         async def _llm_judge_handler(ctx: "ScorerContext", request: Any) -> Any:
             from .eval.llm_judge import LLMJudgeConfig, llm_judge
@@ -463,7 +494,7 @@ def register_builtin_scorer_handlers() -> None:
                 metadata=result.metadata,
             )
 
-        _SCORER_REGISTRY["llm_judge"] = ScorerConfig(
+        _BUILTIN_JUDGE_SCORER_REGISTRY["llm_judge"] = ScorerConfig(
             name="llm_judge",
             handler=_llm_judge_handler,
             description="LLM-as-judge scorer for semantic evaluation",
@@ -471,7 +502,7 @@ def register_builtin_scorer_handlers() -> None:
             is_async=True,
         )
 
-    if "correctness" not in _SCORER_REGISTRY:
+    if "correctness" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
 
         async def _correctness_handler(ctx: "ScorerContext", request: Any) -> Any:
             from .eval.llm_judge import LLMJudgeConfig, llm_judge
@@ -497,7 +528,7 @@ def register_builtin_scorer_handlers() -> None:
             )
             return _judge_result_to_scorer_result(result, {"judge_preset": "correctness"})
 
-        _SCORER_REGISTRY["correctness"] = ScorerConfig(
+        _BUILTIN_JUDGE_SCORER_REGISTRY["correctness"] = ScorerConfig(
             name="correctness",
             handler=_correctness_handler,
             description="Managed LLM judge preset for answer correctness",
@@ -505,7 +536,7 @@ def register_builtin_scorer_handlers() -> None:
             is_async=True,
         )
 
-    if "faithfulness" not in _SCORER_REGISTRY:
+    if "faithfulness" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
 
         async def _faithfulness_handler(ctx: "ScorerContext", request: Any) -> Any:
             from .eval.llm_judge import LLMJudgeConfig, llm_judge
@@ -540,7 +571,7 @@ def register_builtin_scorer_handlers() -> None:
                 {"judge_preset": "faithfulness", "context_fields": fields},
             )
 
-        _SCORER_REGISTRY["faithfulness"] = ScorerConfig(
+        _BUILTIN_JUDGE_SCORER_REGISTRY["faithfulness"] = ScorerConfig(
             name="faithfulness",
             handler=_faithfulness_handler,
             description="Managed LLM judge preset for faithfulness to configured context",
@@ -643,7 +674,9 @@ async def run_scorer(
     Raises:
         ValueError: If scorer is not found
     """
-    scorer_config = ScorerRegistry.get(scorer_name)
+    scorer_config = get_builtin_judge_scorer_config(scorer_name) or ScorerRegistry.get(
+        scorer_name
+    )
     if scorer_config is None:
         raise ValueError(f"Scorer not found: {scorer_name}")
     try:
