@@ -13,7 +13,12 @@ from .. import _sentry
 from .._serialization import serialize_to_str
 from .._telemetry import ensure_root_otel_handler, init_sdk_telemetry, setup_module_logger
 from ..function import FunctionRegistry
-from ..scorer import ScorerRegistry, register_builtin_scorer_handlers
+from ..scorer import (
+    ScorerRegistry,
+    all_builtin_judge_scorers,
+    get_builtin_judge_scorer_config,
+    register_builtin_scorer_handlers,
+)
 
 # from ..workflow import WorkflowRegistry  # COMMENTED OUT - functions only for now
 from ._executors import ExecutorMixin
@@ -659,14 +664,10 @@ class Worker(ExecutorMixin):
             )
             registered_scorer_names.add(config.name)
 
-        # These managed scorer presets are implemented in Python and must be
-        # routable as worker scorer components. Deterministic built-ins stay on
-        # the Rust/control-plane paths.
-        for scorer_name in ("llm_judge", "correctness", "faithfulness"):
+        # These AGNT5-owned judge built-ins are routable scorer names, but they
+        # are not user custom scorer registrations.
+        for scorer_name, config in all_builtin_judge_scorers().items():
             if scorer_name in registered_scorer_names:
-                continue
-            config = ScorerRegistry.get(scorer_name)
-            if not config:
                 continue
             components.append(
                 self._create_component_info(
@@ -754,7 +755,9 @@ class Worker(ExecutorMixin):
 
             # Scorers
             elif component_type == "scorer":
-                scorer_config = ScorerRegistry.get(component_name)
+                scorer_config = get_builtin_judge_scorer_config(
+                    component_name
+                ) or ScorerRegistry.get(component_name)
                 if scorer_config:
                     return self._execute_scorer(scorer_config, input_data, request)
 

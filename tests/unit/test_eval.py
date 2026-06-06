@@ -1634,6 +1634,40 @@ class TestLLMJudge:
         assert result.label == "config_error"
         assert "input.context" in (result.explanation or "")
 
+    def test_builtin_judge_scorers_are_not_custom_registry_entries(self):
+        """Built-in judges are AGNT5-owned and separate from custom scorers."""
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._BUILTIN_JUDGE_SCORER_REGISTRY.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        assert scorer_mod.ScorerRegistry.get("llm_judge") is None
+        assert scorer_mod.ScorerRegistry.get("correctness") is None
+        assert scorer_mod.ScorerRegistry.get("faithfulness") is None
+        assert scorer_mod.get_builtin_judge_scorer_config("llm_judge") is not None
+        assert scorer_mod.get_builtin_judge_scorer_config("correctness") is not None
+        assert scorer_mod.get_builtin_judge_scorer_config("faithfulness") is not None
+
+    def test_custom_scorer_cannot_use_builtin_names(self):
+        """Only custom scorers may use component registration, and built-in names are reserved."""
+        import pytest
+        from agnt5.eval.types import ScorerRequest
+        from agnt5.eval.types import ScorerResult as ScorerResultType
+        from agnt5.scorer import scorer as scorer_dec
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="exact_match")
+            def deterministic_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="llm_judge")
+            def judge_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
 
 class TestScorerComponentType:
     """Test scorer as a component type."""

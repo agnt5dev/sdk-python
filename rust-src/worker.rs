@@ -2,8 +2,8 @@ use crate::entity_state::EntityStateManager;
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::journal_queue::JournalEventQueue;
 use agnt5_sdk_core::pb::{
-    runtime_message, ComponentInfo, ComponentType, DispatchComponentResponse, RuntimeMessage,
-    ServiceMessage,
+    dispatch_component_response, runtime_message, ComponentInfo, ComponentType,
+    DispatchComponentRequest, DispatchComponentResponse, RuntimeMessage, ServiceMessage,
 };
 use agnt5_sdk_core::worker::{Worker, WorkerConfig};
 use anyhow;
@@ -45,6 +45,42 @@ fn span_payload_preview(data: &[u8]) -> (String, bool) {
     let mut preview = String::from_utf8_lossy(&data[..max_bytes]).to_string();
     preview.push_str(&format!("...[truncated, original_bytes={}]", data.len()));
     (preview, true)
+}
+
+fn sdk_core_builtin_scorer_response(
+    worker_id: String,
+    request: &DispatchComponentRequest,
+) -> Option<ServiceMessage> {
+    if request.component_type != ComponentType::Scorer as i32 {
+        return None;
+    }
+
+    let result = agnt5_sdk_core::eval::builtin_scorer::execute(
+        &request.component_name,
+        &request.input_data,
+    )?;
+    let output_data = serde_json::to_vec(&result).unwrap_or_default();
+    let response = DispatchComponentResponse {
+        invocation_id: request.invocation_id.clone(),
+        success: true,
+        result: Some(dispatch_component_response::Result::OutputData(output_data)),
+        error_message: String::new(),
+        metadata: request.metadata.clone(),
+        event_type: "run.completed".to_string(),
+        content_index: 0,
+        sequence: 0,
+        attempt: 0,
+        source_timestamp_ns: 0,
+        lease_id: request.lease_id.clone(),
+    };
+
+    Some(ServiceMessage {
+        worker_id,
+        metadata: HashMap::new(),
+        message_type: Some(
+            agnt5_sdk_core::pb::service_message::MessageType::FunctionResponse(response),
+        ),
+    })
 }
 
 /// Set the global journal event queue (called from Worker initialization)
@@ -793,6 +829,18 @@ impl PyWorker {
         // Handle the message based on type
         match runtime_message.message_data {
             Some(runtime_message::MessageData::DispatchComponent(invoke_request)) => {
+                if let Some(response) = sdk_core_builtin_scorer_response(
+                    runtime_message.worker_id.clone(),
+                    &invoke_request,
+                ) {
+                    tracing::debug!(
+                        component.name = %invoke_request.component_name,
+                        invocation.id = %invoke_request.invocation_id,
+                        "Handled built-in scorer in SDK core"
+                    );
+                    return Ok(Some(response));
+                }
+
                 // Create tracing span with invocation_id that will be inherited by all logs
                 let invocation_span = tracing::info_span!(
                     "execute_component",
@@ -881,10 +929,7 @@ impl PyWorker {
                 // Add bounded input preview before moving span into context.
                 let (input_preview, input_truncated) =
                     span_payload_preview(&invoke_request.input_data);
-                otel_span.set_attribute(opentelemetry::KeyValue::new(
-                    "input.data",
-                    input_preview,
-                ));
+                otel_span.set_attribute(opentelemetry::KeyValue::new("input.data", input_preview));
                 otel_span.set_attribute(opentelemetry::KeyValue::new(
                     "input.size_bytes",
                     invoke_request.input_data.len() as i64,
