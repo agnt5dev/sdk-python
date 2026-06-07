@@ -297,35 +297,10 @@ class MemoryMetadata:
 
 
 class SemanticMemory:
-    """Vector-backed semantic memory for user/tenant knowledge.
+    """Removed built-in semantic memory wrapper.
 
-    Provides semantic search capabilities over stored memories using
-    vector embeddings. Memories are automatically embedded and indexed
-    for fast similarity search.
-
-    Requires:
-    - OPENAI_API_KEY for embeddings
-    - One of: QDRANT_URL, PINECONE_API_KEY+PINECONE_HOST, or POSTGRES_URL for vector storage
-
-    Example:
-        ```python
-        from agnt5 import SemanticMemory, MemoryScope
-
-        # Create memory scoped to a user
-        memory = SemanticMemory(MemoryScope.USER, "user-123")
-
-        # Store some memories
-        await memory.store("User prefers dark mode")
-        await memory.store("User's favorite color is blue")
-
-        # Search for relevant memories
-        results = await memory.search("color preferences")
-        for result in results:
-            print(f"{result.content} (score: {result.score:.2f})")
-
-        # Delete a memory
-        await memory.forget(results[0].id)
-        ```
+    Use ``ctx.memory.semantic`` with a ``SemanticMemoryProvider`` backed by
+    your own storage/client implementation.
     """
 
     def __init__(self, scope: str, scope_id: str) -> None:
@@ -347,30 +322,12 @@ class SemanticMemory:
         self._inner = None  # Lazy initialization
 
     async def _get_inner(self):
-        """Get or create the underlying Rust SemanticMemory instance."""
-        if self._inner is None:
-            try:
-                from ._core import PySemanticMemory, PyMemoryScope
-            except ImportError as e:
-                raise ImportError(
-                    "SemanticMemory requires the agnt5 Rust extension. "
-                    f"Import error: {e}"
-                ) from e
-
-            # Map scope string to PyMemoryScope
-            scope_map = {
-                MemoryScope.USER: PyMemoryScope.user(),
-                MemoryScope.TENANT: PyMemoryScope.tenant(),
-                MemoryScope.AGENT: PyMemoryScope.agent(),
-                MemoryScope.SESSION: PyMemoryScope.session(),
-                MemoryScope.GLOBAL: PyMemoryScope.global_(),
-            }
-            py_scope = scope_map.get(self.scope)
-            if py_scope is None:
-                py_scope = PyMemoryScope.from_str(self.scope)
-
-            self._inner = await PySemanticMemory.from_env(py_scope, self.scope_id)
-        return self._inner
+        """Return the removed built-in semantic memory implementation."""
+        raise RuntimeError(
+            "Built-in vector-backed SemanticMemory has been removed. "
+            "Use ctx.memory.semantic with a SemanticMemoryProvider backed by "
+            "your own vector database client."
+        )
 
     async def store(self, content: str, metadata: Optional[MemoryMetadata] = None) -> str:
         """Store content in semantic memory.
@@ -385,7 +342,7 @@ class SemanticMemory:
             The unique ID of the stored memory
 
         Raises:
-            RuntimeError: If embedder or vector database is not configured
+            RuntimeError: Always raised because the built-in implementation was removed
         """
         inner = await self._get_inner()
         if metadata is not None:
@@ -416,7 +373,7 @@ class SemanticMemory:
             List of unique IDs for all stored memories
 
         Raises:
-            RuntimeError: If embedder or vector database is not configured
+            RuntimeError: Always raised because the built-in implementation was removed
             ValueError: If metadata length doesn't match contents length
 
         Example:
@@ -464,7 +421,7 @@ class SemanticMemory:
             List of MemoryResult objects, ranked by similarity score (highest first)
 
         Raises:
-            RuntimeError: If embedder or vector database is not configured
+            RuntimeError: Always raised because the built-in implementation was removed
         """
         inner = await self._get_inner()
         if min_score is not None:
@@ -492,7 +449,7 @@ class SemanticMemory:
             True if the memory was deleted, False if it wasn't found
 
         Raises:
-            RuntimeError: If vector database is not configured
+            RuntimeError: Always raised because the built-in implementation was removed
         """
         inner = await self._get_inner()
         return await inner.forget(memory_id)
@@ -507,7 +464,7 @@ class SemanticMemory:
             MemoryResult if found, None otherwise
 
         Raises:
-            RuntimeError: If vector database is not configured
+            RuntimeError: Always raised because the built-in implementation was removed
         """
         inner = await self._get_inner()
         result = await inner.get(memory_id)
