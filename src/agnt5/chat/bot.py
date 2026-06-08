@@ -98,19 +98,20 @@ class ChatBot:
         platform: str,
         headers: dict[str, str],
         body: bytes,
+        bot_token: str | None = None,
     ) -> dict[str, Any] | None:
-        """Process an incoming webhook from a chat platform.
+        """Process an inbound chat event (ADR-009).
 
-        This method is called by the worker's message handler when a webhook
-        dispatch arrives. It:
+        The gateway has already verified the signature, so this method:
 
-        1. Verifies the webhook signature (Rust core)
-        2. Parses the payload into a normalized ChatEvent (Rust core)
-        3. Routes to the appropriate handler (or default agent handler)
-        4. Sends the response back via platform API
+        1. Parses the payload into a normalized ChatEvent (Rust core)
+        2. Routes to the appropriate handler (or default agent handler)
+        3. Sends the response back via platform API, using ``bot_token`` from
+           the gateway envelope (or the configured token as a fallback)
 
-        Returns a dict with the url_verification challenge if applicable,
-        or None for normal event processing.
+        ``headers`` is retained for handler context. Returns a dict with the
+        url_verification challenge if one slips through (the gateway normally
+        answers it), or None for normal event processing.
         """
         config = self._adapters.get(platform)
         if config is None:
@@ -118,17 +119,10 @@ class ChatBot:
 
         platform_obj = _chat.Platform.from_str(platform)
 
-        # Verify webhook signature
-        signing_secret = self._get_signing_secret(config)
-        if signing_secret:
-            valid = _chat.verify_webhook(platform_obj, signing_secret, headers, body)
-            if not valid:
-                raise ValueError("Invalid webhook signature")
-
-        # Parse event
+        # Signature verified at the gateway (ADR-009 D5) — no SDK re-verify.
         event = _chat.parse_event(platform_obj, body)
 
-        # Handle URL verification challenge (Slack sends this during setup)
+        # url_verification is answered at the gateway; keep a defensive echo.
         if event.event_type == "url_verification":
             return {"challenge": event.challenge}
 
@@ -140,7 +134,7 @@ class ChatBot:
             return None
 
         # Send response back to the platform
-        await self._send_response(config, event, response_text)
+        await self._send_response(config, event, response_text, bot_token)
         return None
 
     async def handle_webhook_streaming(
@@ -148,11 +142,11 @@ class ChatBot:
         platform: str,
         headers: dict[str, str],
         body: bytes,
+        bot_token: str | None = None,
     ) -> dict[str, Any] | None:
-        """Process a webhook with streaming agent response (post-then-edit).
-
-        Same as handle_webhook but uses the StreamingMessageBuffer for
-        progressive message updates during agent execution.
+        """Process an inbound chat event with a streaming agent response
+        (post-then-edit). Same as ``handle_webhook`` but uses the
+        StreamingMessageBuffer for progressive message updates.
         """
         config = self._adapters.get(platform)
         if config is None:
@@ -160,13 +154,7 @@ class ChatBot:
 
         platform_obj = _chat.Platform.from_str(platform)
 
-        # Verify + parse
-        signing_secret = self._get_signing_secret(config)
-        if signing_secret:
-            valid = _chat.verify_webhook(platform_obj, signing_secret, headers, body)
-            if not valid:
-                raise ValueError("Invalid webhook signature")
-
+        # Signature verified at the gateway (ADR-009 D5) — no SDK re-verify.
         event = _chat.parse_event(platform_obj, body)
 
         if event.event_type == "url_verification":
@@ -176,14 +164,17 @@ class ChatBot:
         if msg is None:
             return None
 
+        # Reply with the gateway-provided token, falling back to config.
+        assert isinstance(config, SlackConfig)
+        token = bot_token or config.bot_token
+
         # Determine thread context
         # Use existing thread_id, or start a new thread from the message ts
         thread_ts = msg.thread_id or msg.id
 
         # Post initial "thinking" message
-        assert isinstance(config, SlackConfig)
         initial_req = _chat.slack_post_message(
-            config.bot_token, msg.channel_id, "Thinking...", thread_ts,
+            token, msg.channel_id, "Thinking...", thread_ts,
         )
         initial_resp = await self._execute_request(initial_req)
         resp_data = initial_resp.json()
@@ -194,17 +185,17 @@ class ChatBot:
 
         async for event_obj in self._agent.run_stream(msg.content):
             # Check for output delta events
-            token = getattr(event_obj, "delta", None)
-            if token is None:
+            delta = getattr(event_obj, "delta", None)
+            if delta is None:
                 continue
 
-            buffer.push(token)
+            buffer.push(delta)
 
             if buffer.should_flush():
                 content = buffer.flush()
                 if content is not None:
                     update_req = _chat.slack_update_message(
-                        config.bot_token, msg.channel_id, message_ts, content,
+                        token, msg.channel_id, message_ts, content,
                     )
                     await self._execute_request(update_req)
 
@@ -212,7 +203,7 @@ class ChatBot:
         final_content = buffer.finalize()
         if final_content:
             final_req = _chat.slack_update_message(
-                config.bot_token, msg.channel_id, message_ts, final_content,
+                token, msg.channel_id, message_ts, final_content,
             )
             await self._execute_request(final_req)
 
@@ -252,8 +243,10 @@ class ChatBot:
         config: PlatformConfig,
         event: Any,
         text: str,
+        bot_token: str | None = None,
     ) -> None:
-        """Send a response message back to the platform."""
+        """Send a response message back to the platform, preferring the
+        gateway-provided ``bot_token`` over the configured one."""
         if isinstance(config, SlackConfig):
             msg = event.message
             thread_ts = None
@@ -261,7 +254,7 @@ class ChatBot:
                 thread_ts = msg.thread_id or msg.id
 
             req = _chat.slack_post_message(
-                config.bot_token,
+                bot_token or config.bot_token,
                 event.channel_id,
                 text,
                 thread_ts,
@@ -297,10 +290,3 @@ class ChatBot:
         CHAT_SESSION_NS = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
         key = f"{platform}:{channel_id}:{thread_id}"
         return str(uuid.uuid5(CHAT_SESSION_NS, key))
-
-    def _get_signing_secret(self, config: PlatformConfig) -> str | None:
-        """Extract the signing secret from a platform config."""
-        if isinstance(config, SlackConfig):
-            return config.signing_secret
-        # TODO: Discord public_key, Teams app_password, Telegram webhook_secret
-        return None
