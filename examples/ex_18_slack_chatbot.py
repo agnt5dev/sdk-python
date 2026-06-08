@@ -15,7 +15,7 @@ Setup:
 1. Create a Slack app at https://api.slack.com/apps
 2. Enable Events API, subscribe to: app_mention, message.im
 3. Add bot scopes: chat:write, app_mentions:read, im:history
-4. Set the webhook URL to: https://<gateway>/v1/chat/webhooks/slack/<bot-name>
+4. Set the Request URL to: https://<gateway>/v1/events/slack/<integration-token>
 5. Set environment variables:
    - SLACK_BOT_TOKEN: xoxb-... token from OAuth & Permissions
    - SLACK_SIGNING_SECRET: from Basic Information > App Credentials

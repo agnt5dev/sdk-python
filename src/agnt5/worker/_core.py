@@ -741,11 +741,13 @@ class Worker(ExecutorMixin):
 
             # Agents
             elif component_type == "agent":
-                # Check if this is a chat webhook dispatch
-                if self._chatbots and self._is_chat_webhook(input_data):
-                    chatbot = self._chatbots.get(component_name)
-                    if chatbot:
-                        return self._execute_chat_webhook(chatbot, input_data, request)
+                # Inbound chat-provider event (ADR-009): route to the ChatBot
+                # when the target is one AND the input is the unified inbound
+                # event envelope. A chatbot's agent also serves direct calls,
+                # so we discriminate by envelope shape, not by identity alone.
+                chatbot = self._chatbots.get(component_name) if self._chatbots else None
+                if chatbot is not None and self._is_inbound_event(input_data):
+                    return self._execute_chat_webhook(chatbot, input_data, request)
 
                 from ..agent import AgentRegistry
 
@@ -819,24 +821,29 @@ class Worker(ExecutorMixin):
             # Loop already closed — nothing to cancel.
             pass
 
-    def _is_chat_webhook(self, input_data: bytes) -> bool:
-        """Check if input_data is a chat webhook envelope."""
+    def _is_inbound_event(self, input_data: bytes) -> bool:
+        """True if input_data is the unified inbound-event envelope (ADR-009).
+
+        Identified by shape — a `source` plus a string `body` — not a magic
+        flag, and distinct from a normal agent input. Lets a chatbot's agent
+        still serve direct (non-event) invocations.
+        """
         import json
 
         try:
             data = json.loads(input_data)
-            return isinstance(data, dict) and data.get("_chat_webhook") is True
         except (json.JSONDecodeError, UnicodeDecodeError):
             return False
+        return isinstance(data, dict) and "source" in data and "body" in data
 
     def _execute_chat_webhook(self, chatbot: Any, input_data: bytes, request: Any) -> Any:
-        """Execute a chat webhook via the ChatBot wrapper.
+        """Execute an inbound chat-provider event via the ChatBot wrapper.
 
-        The Gateway wraps webhook payloads in an envelope:
-        { "_chat_webhook": true, "platform": "slack", "headers": {...}, "body": "..." }
-
-        The ChatBot handles verification, parsing, agent execution, and
-        sending the response back to the platform.
+        The gateway delivers the unified envelope (ADR-009 D4):
+        { "source": "slack", "event_type": "...", "headers": {...},
+          "body": "...", "bot_token": "xoxb-..." }
+        The gateway has already verified the signature (D5), so the SDK does
+        not re-verify; the bot_token is used to reply.
         """
         import json
 
@@ -845,13 +852,14 @@ class Worker(ExecutorMixin):
 
             try:
                 envelope = json.loads(input_data)
-                platform = envelope["platform"]
+                source = envelope["source"]
                 headers = envelope.get("headers", {})
                 body = envelope.get("body", "").encode("utf-8")
+                bot_token = envelope.get("bot_token")
 
-                logger.info(f"Chat webhook received: platform={platform}, bot={chatbot.name}")
+                logger.info(f"Inbound chat event: source={source}, bot={chatbot.name}")
 
-                result = await chatbot.handle_webhook(platform, headers, body)
+                result = await chatbot.handle_webhook(source, headers, body, bot_token)
 
                 # If the handler returns a challenge response, send it back
                 output = json.dumps(result) if result else "{}"
@@ -860,7 +868,7 @@ class Worker(ExecutorMixin):
                     output=output.encode("utf-8"),
                 )
             except Exception as e:
-                logger.error(f"Chat webhook execution failed: {e}", exc_info=True)
+                logger.error(f"Chat event execution failed: {e}", exc_info=True)
                 return PyExecuteComponentResponse(
                     invocation_id=request.invocation_id,
                     error=str(e),
