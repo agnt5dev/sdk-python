@@ -99,6 +99,28 @@ async def test_prompt_executor_passes_json_schema_response_format() -> None:
     assert calls[0]["response_format"] == response_schema
 
 
+@pytest.mark.asyncio
+async def test_prompt_executor_omits_top_p_for_anthropic_when_temperature_is_set() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_generate(**kwargs: Any) -> FakeLMResponse:
+        calls.append(kwargs)
+        return FakeLMResponse("ok")
+
+    payload = prompt_payload(
+        prompt={
+            "model": "claude-sonnet-4-6",
+            "parameters": {"temperature": 0.7, "top_p": 1},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+    )
+
+    assert await execute_prompt_worker_input(payload, generate_fn=fake_generate) == "ok"
+    assert calls[0]["model"] == "anthropic/claude-sonnet-4-6"
+    assert calls[0]["temperature"] == 0.7
+    assert calls[0]["top_p"] is None
+
+
 @pytest.mark.parametrize(
     ("model", "expected"),
     [

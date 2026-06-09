@@ -92,6 +92,10 @@ async def execute_prompt_worker_input(
     messages = _render_messages(prompt.get("messages"), variables)
     model = _normalize_model(prompt.get("model"))
     parameters = prompt.get("parameters") or {}
+    temperature = _optional_float(parameters.get("temperature"))
+    top_p = _optional_float(parameters.get("top_p"))
+    if _is_direct_anthropic_model(model) and temperature is not None and top_p is not None:
+        top_p = None
     response_format = _response_format(prompt)
 
     if generate_fn is None:
@@ -102,9 +106,9 @@ async def execute_prompt_worker_input(
     response = await generate_fn(
         model=model,
         messages=messages,
-        temperature=_optional_float(parameters.get("temperature")),
+        temperature=temperature,
         max_tokens=_optional_int(parameters.get("max_tokens")),
-        top_p=_optional_float(parameters.get("top_p")),
+        top_p=top_p,
         response_format=response_format,
     )
 
@@ -147,6 +151,14 @@ def _resolve_variables(payload: dict[str, Any]) -> dict[str, Any]:
         return input_value
 
     return {"input": input_value}
+
+
+def _is_direct_anthropic_model(model: str) -> bool:
+    normalized = model.strip().lower()
+    provider, separator, _ = normalized.partition("/")
+    if separator:
+        return provider == "anthropic"
+    return normalized.startswith("claude-")
 
 
 def _render_messages(messages: Any, variables: dict[str, Any]) -> list[dict[str, str]]:
