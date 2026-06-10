@@ -51,17 +51,21 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
     {
         "anthropic",
         "azure",
+        "baseten",
         "bedrock",
         "deepseek",
+        "fireworks",
         "gemini",
         "google",
         "groq",
         "hf",
         "huggingface",
+        "lepton",
         "mistral",
         "ollama",
         "openai",
         "openrouter",
+        "together",
         "xai",
     }
 )

@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use agnt5_sdk_core::error::{Result as SdkResult, SdkError};
 use agnt5_sdk_core::lm::{
-    AnthropicProvider, AzureOpenAiProvider, BedrockProvider, BuiltInTool, ContentBlockType,
-    DeepSeekProvider, GenerateRequest, GenerateResponse, GenerationConfig, GoogleProvider,
-    GroqProvider, HuggingFaceProvider, JsonSchemaFormat, LanguageModel, Message, MessageRole,
-    MistralProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider, ResponseFormat,
-    StreamChunk, StreamHandle, StreamRequest, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
-    XaiProvider,
+    AnthropicProvider, AzureOpenAiProvider, BasetenProvider, BedrockProvider, BuiltInTool,
+    ContentBlockType, DeepSeekProvider, FireworksProvider, GenerateRequest, GenerateResponse,
+    GenerationConfig, GoogleProvider, GroqProvider, HuggingFaceProvider, JsonSchemaFormat,
+    LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, OllamaProvider,
+    OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest,
+    TogetherProvider, TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
 use opentelemetry::Context as OtelContext;
@@ -77,12 +77,16 @@ enum ProviderKind {
     Azure(AzureOpenAiProvider),
     Bedrock(BedrockProvider),
     Anthropic(AnthropicProvider),
+    Baseten(BasetenProvider),
     DeepSeek(DeepSeekProvider),
+    Fireworks(FireworksProvider),
     Google(GoogleProvider),
     Groq(GroqProvider),
+    Lepton(LeptonProvider),
     Mistral(MistralProvider),
     Ollama(OllamaProvider),
     OpenRouter(OpenRouterProvider),
+    Together(TogetherProvider),
     Xai(XaiProvider),
     HuggingFace(HuggingFaceProvider),
 }
@@ -94,12 +98,16 @@ impl ProviderKind {
             ProviderKind::Azure(provider) => provider.generate(request).await,
             ProviderKind::Bedrock(provider) => provider.generate(request).await,
             ProviderKind::Anthropic(provider) => provider.generate(request).await,
+            ProviderKind::Baseten(provider) => provider.generate(request).await,
             ProviderKind::DeepSeek(provider) => provider.generate(request).await,
+            ProviderKind::Fireworks(provider) => provider.generate(request).await,
             ProviderKind::Google(provider) => provider.generate(request).await,
             ProviderKind::Groq(provider) => provider.generate(request).await,
+            ProviderKind::Lepton(provider) => provider.generate(request).await,
             ProviderKind::Mistral(provider) => provider.generate(request).await,
             ProviderKind::Ollama(provider) => provider.generate(request).await,
             ProviderKind::OpenRouter(provider) => provider.generate(request).await,
+            ProviderKind::Together(provider) => provider.generate(request).await,
             ProviderKind::Xai(provider) => provider.generate(request).await,
             ProviderKind::HuggingFace(provider) => provider.generate(request).await,
         }
@@ -111,12 +119,16 @@ impl ProviderKind {
             ProviderKind::Azure(provider) => provider.stream(request).await,
             ProviderKind::Bedrock(provider) => provider.stream(request).await,
             ProviderKind::Anthropic(provider) => provider.stream(request).await,
+            ProviderKind::Baseten(provider) => provider.stream(request).await,
             ProviderKind::DeepSeek(provider) => provider.stream(request).await,
+            ProviderKind::Fireworks(provider) => provider.stream(request).await,
             ProviderKind::Google(provider) => provider.stream(request).await,
             ProviderKind::Groq(provider) => provider.stream(request).await,
+            ProviderKind::Lepton(provider) => provider.stream(request).await,
             ProviderKind::Mistral(provider) => provider.stream(request).await,
             ProviderKind::Ollama(provider) => provider.stream(request).await,
             ProviderKind::OpenRouter(provider) => provider.stream(request).await,
+            ProviderKind::Together(provider) => provider.stream(request).await,
             ProviderKind::Xai(provider) => provider.stream(request).await,
             ProviderKind::HuggingFace(provider) => provider.stream(request).await,
         }
@@ -553,14 +565,25 @@ impl PyLanguageModel {
         if env::var("ANTHROPIC_API_KEY").is_ok() {
             providers.push("anthropic".to_string());
         }
+        if env::var("BASETEN_API_KEY").is_ok() {
+            providers.push("baseten".to_string());
+        }
         if env::var("DEEPSEEK_API_KEY").is_ok() {
             providers.push("deepseek".to_string());
+        }
+        if env::var("FIREWORKS_API_KEY").is_ok() {
+            providers.push("fireworks".to_string());
         }
         if env::var("GOOGLE_API_KEY").is_ok() || env::var("GEMINI_API_KEY").is_ok() {
             providers.push("google".to_string());
         }
         if env::var("GROQ_API_KEY").is_ok() {
             providers.push("groq".to_string());
+        }
+        if (env::var("LEPTON_API_KEY").is_ok() || env::var("LEPTON_API_TOKEN").is_ok())
+            && (env::var("LEPTON_BASE_URL").is_ok() || env::var("LEPTON_API_BASE").is_ok())
+        {
+            providers.push("lepton".to_string());
         }
         if env::var("MISTRAL_API_KEY").is_ok() {
             providers.push("mistral".to_string());
@@ -571,6 +594,9 @@ impl PyLanguageModel {
         }
         if env::var("OPENROUTER_API_KEY").is_ok() {
             providers.push("openrouter".to_string());
+        }
+        if env::var("TOGETHER_API_KEY").is_ok() {
+            providers.push("together".to_string());
         }
         if env::var("XAI_API_KEY").is_ok() {
             providers.push("xai".to_string());
@@ -662,12 +688,16 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
         "azure" => Ok(ProviderKind::Azure(AzureOpenAiProvider::from_env()?)),
         "bedrock" => Ok(ProviderKind::Bedrock(BedrockProvider::from_env()?)),
         "anthropic" => Ok(ProviderKind::Anthropic(AnthropicProvider::from_env()?)),
+        "baseten" => Ok(ProviderKind::Baseten(BasetenProvider::from_env()?)),
         "deepseek" => Ok(ProviderKind::DeepSeek(DeepSeekProvider::from_env()?)),
+        "fireworks" => Ok(ProviderKind::Fireworks(FireworksProvider::from_env()?)),
         "google" | "gemini" => Ok(ProviderKind::Google(GoogleProvider::from_env()?)),
         "groq" => Ok(ProviderKind::Groq(GroqProvider::from_env()?)),
+        "lepton" => Ok(ProviderKind::Lepton(LeptonProvider::from_env()?)),
         "mistral" => Ok(ProviderKind::Mistral(MistralProvider::from_env()?)),
         "ollama" => Ok(ProviderKind::Ollama(OllamaProvider::from_env()?)),
         "openrouter" => Ok(ProviderKind::OpenRouter(OpenRouterProvider::from_env()?)),
+        "together" => Ok(ProviderKind::Together(TogetherProvider::from_env()?)),
         "xai" => Ok(ProviderKind::Xai(XaiProvider::from_env()?)),
         "huggingface" | "hf" => Ok(ProviderKind::HuggingFace(HuggingFaceProvider::from_env()?)),
         other => Err(SdkError::Configuration {
@@ -1034,9 +1064,8 @@ fn parse_built_in_tools_json(json: Option<&str>) -> PyResult<Vec<BuiltInTool>> {
         Some(raw) if raw.trim().is_empty() => return Ok(Vec::new()),
         Some(raw) => raw,
     };
-    let names: Vec<String> = serde_json::from_str(raw).map_err(|err| {
-        PyValueError::new_err(format!("Failed to parse built_in_tools: {err}"))
-    })?;
+    let names: Vec<String> = serde_json::from_str(raw)
+        .map_err(|err| PyValueError::new_err(format!("Failed to parse built_in_tools: {err}")))?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
         match BuiltInTool::from_provider_name(&name) {
@@ -1570,4 +1599,3 @@ fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let obj = json_module.call_method1("loads", (serialized,))?;
     Ok(obj.unbind())
 }
-
