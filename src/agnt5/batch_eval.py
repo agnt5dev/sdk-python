@@ -48,6 +48,12 @@ class BatchEvalItem:
     item_id: Optional[str] = None
     index: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.input, dict):
+            raise TypeError(
+                f"BatchEvalItem.input must be a dict, got {type(self.input).__name__}"
+            )
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API requests."""
         result: Dict[str, Any] = {"input": self.input}
