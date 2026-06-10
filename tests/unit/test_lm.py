@@ -501,8 +501,12 @@ async def test_generate_all_providers(mock_rust_generate):
     providers_and_models = [
         ("openai", "openai/gpt-4o-mini"),
         ("anthropic", "anthropic/claude-3-5-haiku-20241022"),
+        ("baseten", "baseten/acme/llama-3-70b"),
+        ("fireworks", "fireworks/accounts/fireworks/models/deepseek-v3p1"),
         ("groq", "groq/llama-3.3-70b-versatile"),
+        ("lepton", "lepton/workspace/model"),
         ("openrouter", "openrouter/anthropic/claude-3.5-haiku"),
+        ("together", "together/meta-llama/Llama-4-Maverick"),
         ("azure", "azure/gpt-4o"),
         ("bedrock", "bedrock/anthropic.claude-v2"),
     ]
