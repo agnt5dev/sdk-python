@@ -88,6 +88,14 @@ def _resolve_session_user_ids(request: Any, input_dict: Any) -> tuple[str, str |
     return session_id, user_id
 
 
+def _agent_missing_message_error(input_dict: dict) -> str:
+    return (
+        f"Agent invocation requires a 'message' key in the input dict. "
+        f"Received keys: {list(input_dict.keys())}. "
+        f"Check that your dataset input matches the component's expected schema."
+    )
+
+
 class ExecutorMixin:
     """Mixin providing component execution methods for Worker.
 
@@ -812,11 +820,7 @@ class ExecutorMixin:
 
             user_message = input_dict.get("message", "")
             if not user_message:
-                raise ValueError(
-                    f"Agent invocation requires a 'message' key in the input dict. "
-                    f"Received keys: {list(input_dict.keys())}. "
-                    f"Check that your dataset input matches the component's expected schema."
-                )
+                raise ValueError(_agent_missing_message_error(input_dict))
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
