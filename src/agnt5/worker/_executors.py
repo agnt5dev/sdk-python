@@ -32,15 +32,24 @@ def _trace_id_from_request(request: Any) -> str:
     return "none"
 
 
-def _truncate_input(input_dict: dict, max_len: int = 200) -> str:
+def _truncate_input(input_dict: Any, max_len: int = 200) -> str:
     """Return a truncated string repr of input for logging."""
-    keys = list(input_dict.keys())
-    if not keys:
+    if isinstance(input_dict, dict) and not input_dict:
         return "{}"
     s = str(input_dict)
     if len(s) > max_len:
         return s[:max_len] + "..."
     return s
+
+
+def _ensure_input_dict(input_value: Any) -> dict:
+    """Validate that component input is a JSON object after deserialization."""
+    if not isinstance(input_value, dict):
+        raise ValueError(
+            f"Component input must be a JSON object, "
+            f"got {type(input_value).__name__}: {input_value!r}"
+        )
+    return input_value
 
 
 def _set_current_span_from_runtime_context(runtime_context: Any) -> Any | None:
@@ -67,15 +76,24 @@ def _reset_current_span_token(token: Any | None) -> None:
     _current_span.reset(token)
 
 
-def _resolve_session_user_ids(request: Any, input_dict: dict) -> tuple[str, str | None]:
+def _resolve_session_user_ids(request: Any, input_dict: Any) -> tuple[str, str | None]:
     """Resolve durable execution scope IDs from request metadata, payload, then run ID."""
+    payload = input_dict if isinstance(input_dict, dict) else {}
     session_id = (
         getattr(request, "session_id", None)
-        or input_dict.get("session_id")
+        or payload.get("session_id")
         or request.invocation_id
     )
-    user_id = getattr(request, "user_id", None) or input_dict.get("user_id") or None
+    user_id = getattr(request, "user_id", None) or payload.get("user_id") or None
     return session_id, user_id
+
+
+def _agent_missing_message_error(input_dict: dict) -> str:
+    return (
+        f"Agent invocation requires a 'message' key in the input dict. "
+        f"Received keys: {list(input_dict.keys())}. "
+        f"Check that your dataset input matches the component's expected schema."
+    )
 
 
 class ExecutorMixin:
@@ -112,6 +130,7 @@ class ExecutorMixin:
         state_adapter_token = None
         try:
             input_dict = deserialize(request.input_data) if request.input_data else {}
+            input_dict = _ensure_input_dict(input_dict)
             ctx = context_factory(input_dict, request)
             token = set_current_context(ctx)
             span_token = _set_current_span_from_runtime_context(
@@ -247,7 +266,11 @@ class ExecutorMixin:
 
             # Execute function with error handling for proper event emission
             try:
-                result = config.handler(ctx, **input_dict) if input_dict else config.handler(ctx)
+                result = (
+                    config.handler(ctx, **input_dict)
+                    if isinstance(input_dict, dict) and input_dict
+                    else config.handler(ctx)
+                )
 
                 # Handle coroutine with optional timeout
                 if inspect.iscoroutine(result):
@@ -481,7 +504,11 @@ class ExecutorMixin:
 
             # Execute tool with error handling for proper event emission
             try:
-                result = await tool.invoke(ctx, **input_dict)
+                result = (
+                    await tool.invoke(ctx, **input_dict)
+                    if isinstance(input_dict, dict) and input_dict
+                    else await tool.invoke(ctx)
+                )
 
             except Exception as e:
                 # Calculate tool duration even on failure
@@ -656,7 +683,11 @@ class ExecutorMixin:
                     raise ValueError(f"Entity '{entity_type.name}' has no method '{method_name}'")
 
                 method = getattr(entity_instance, method_name)
-                result = await method(**input_dict)
+                result = (
+                    await method(**input_dict)
+                    if isinstance(input_dict, dict) and input_dict
+                    else await method()
+                )
 
             except Exception as e:
                 # Calculate entity duration even on failure
@@ -789,7 +820,7 @@ class ExecutorMixin:
 
             user_message = input_dict.get("message", "")
             if not user_message:
-                raise ValueError("Agent invocation requires 'message' parameter")
+                raise ValueError(_agent_missing_message_error(input_dict))
 
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
@@ -1268,6 +1299,7 @@ class ExecutorMixin:
         try:
             # Parse input data
             input_dict = json.loads(input_data.decode("utf-8")) if input_data else {}
+            input_dict = _ensure_input_dict(input_dict)
 
             # Parse replay data from request metadata for crash recovery
             completed_steps = {}
@@ -1469,7 +1501,7 @@ class ExecutorMixin:
             # Execute workflow
             try:
                 with ctx.as_parent():
-                    if input_dict:
+                    if isinstance(input_dict, dict) and input_dict:
                         result = await config.handler(ctx, **input_dict)
                     else:
                         result = await config.handler(ctx)

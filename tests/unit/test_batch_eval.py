@@ -36,6 +36,12 @@ class TestBatchEvalItem:
         assert item.item_id == "test-1"
         assert item.index == 0
 
+    @pytest.mark.parametrize("input_value", ["Alabama", ["a", "b"], 42])
+    def test_item_rejects_non_dict_input(self, input_value):
+        """Test BatchEvalItem validates input at runtime."""
+        with pytest.raises(TypeError, match="BatchEvalItem.input must be a dict"):
+            BatchEvalItem(input=input_value)
+
     def test_to_dict_basic(self):
         """Test to_dict with only required fields."""
         item = BatchEvalItem(input={"name": "Alice"})
