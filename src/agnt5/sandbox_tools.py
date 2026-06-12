@@ -32,10 +32,16 @@ Usage:
 """
 
 import secrets
-from typing import List, Optional
+from typing import List, Optional, Protocol, runtime_checkable
 
 from .context import Context
-from .sandbox import Sandbox
+from .sandbox import (
+    ExecuteCodeResult,
+    ListFilesResult,
+    ReadFileResult,
+    Sandbox,  # noqa: F401 — re-exported for backward compatibility
+    WriteFileResult,
+)
 from .sandbox_events import (
     SandboxExecuteCompleted,
     SandboxExecuteFailed,
@@ -46,7 +52,36 @@ from .sandbox_events import (
 from .tool import Tool
 
 
-def sandbox_tools(sandbox: Optional[Sandbox] = None) -> List[Tool]:
+@runtime_checkable
+class SandboxLike(Protocol):
+    """Anything with the core sandbox surface.
+
+    Satisfied by :class:`agnt5.sandbox.Sandbox` (AGNT5 platform sandboxes)
+    and by every provider sandbox from :mod:`agnt5.sandbox_providers`
+    (E2B, Daytona, Vercel, Northflank, Together), so agents can run on any
+    of them:
+
+    ```python
+    from agnt5 import Agent, E2BSandboxProvider, sandbox_tools
+
+    provider = E2BSandboxProvider.from_env()
+    sandbox = await provider.create()
+    agent = Agent(name="coder", model="...", tools=sandbox_tools(sandbox=sandbox))
+    ```
+    """
+
+    async def execute_code(
+        self, code: str, language: str = "python", **kwargs
+    ) -> ExecuteCodeResult: ...
+
+    async def write_file(self, path: str, content: bytes, **kwargs) -> WriteFileResult: ...
+
+    async def read_file(self, path: str) -> ReadFileResult: ...
+
+    async def list_files(self, path: str, recursive: bool = False) -> ListFilesResult: ...
+
+
+def sandbox_tools(sandbox: Optional["SandboxLike"] = None) -> List[Tool]:
     """Create sandbox tools for agent use.
 
     Returns four tools that agents can invoke:
@@ -104,10 +139,10 @@ def sandbox_tools(sandbox: Optional[Sandbox] = None) -> List[Tool]:
 class _SandboxToolState:
     """Shared state for sandbox tools within a single agent run."""
 
-    def __init__(self, sandbox: Optional[Sandbox] = None):
+    def __init__(self, sandbox: Optional["SandboxLike"] = None):
         self.sandbox = sandbox
 
-    def get_sandbox(self, ctx: Context) -> Sandbox:
+    def get_sandbox(self, ctx: Context) -> "SandboxLike":
         """Get the sandbox instance, falling back to ctx.sandbox if available."""
         if self.sandbox is not None:
             return self.sandbox
