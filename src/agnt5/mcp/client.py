@@ -100,7 +100,7 @@ class MCPClient:
         headers: Optional[dict[str, str]] = None,
         api_key: Optional[str] = None,
     ) -> None:
-        """Add a Streamable HTTP MCP server (2025-03-26 spec).
+        """Add a Streamable HTTP MCP server (2025-11-25 spec).
 
         Use this for current-spec remote MCP servers like
         `https://mcp.deepwiki.com/mcp`. For older HTTP+SSE servers, use

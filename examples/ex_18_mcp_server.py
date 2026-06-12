@@ -5,11 +5,14 @@ Expose AGNT5 tools, agents, workflows, prompts, and resources as an MCP server.
 
 Run with:
     python ex_18_mcp_server.py
+    python ex_18_mcp_server.py --http
 
-Then connect from an MCP-compatible client over stdio.
+Connect from an MCP-compatible client over stdio by default, or over
+Streamable HTTP at http://127.0.0.1:34183/mcp with --http.
 """
 
 import asyncio
+import sys
 
 from agnt5 import Agent, Context, MCPServer, Prompt, Resource, tool, workflow
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, TokenUsage
@@ -88,7 +91,10 @@ async def main() -> None:
             )
         },
     )
-    await server.run_stdio()
+    if "--http" in sys.argv:
+        await server.run_http(host="127.0.0.1", port=34183, path="/mcp")
+    else:
+        await server.run_stdio()
 
 
 if __name__ == "__main__":

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from .._ids import generate_cid
 from .._serialization import serialize_to_str
@@ -28,6 +30,17 @@ class _ServerInfo:
     version: str
     instructions: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _NetworkServerHandle:
+    host: str
+    port: int
+    server: asyncio.Server
+
+    async def close(self) -> None:
+        self.server.close()
+        await self.server.wait_closed()
 
 
 class MCPServer:
@@ -79,11 +92,8 @@ class MCPServer:
         self._resources[name] = resource
 
     async def run_stdio(self) -> None:
-        """Serve MCP JSON-RPC over stdio using Content-Length framing."""
+        """Serve MCP JSON-RPC over stdio using newline-delimited JSON."""
         await asyncio.to_thread(self._serve_stdio_sync)
-
-    async def run_sse(self, host: str = "127.0.0.1", port: int = 0) -> None:
-        raise NotImplementedError("MCPServer.run_sse() is not implemented yet")
 
     async def run_http(
         self,
@@ -91,7 +101,8 @@ class MCPServer:
         port: int = 0,
         path: str = "/mcp",
     ) -> None:
-        raise NotImplementedError("MCPServer.run_http() is not implemented yet")
+        handle = await self._start_http_server(host, port, path)
+        await handle.server.serve_forever()
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         """Dispatch a JSON-RPC request. Exposed for tests and embeddings."""
@@ -129,34 +140,143 @@ class MCPServer:
 
     @staticmethod
     def _read_message(stream: Any) -> Optional[bytes]:
-        content_length: Optional[int] = None
-        while True:
-            line = stream.readline()
-            if not line:
-                return None
-            if line in (b"\r\n", b"\n"):
-                break
-            if line.lower().startswith(b"content-length:"):
-                content_length = int(line.split(b":", 1)[1].strip())
-
-        if content_length is None:
-            raise MCPServerError("Missing Content-Length header")
-        body = stream.read(content_length)
-        if not body:
+        line = stream.readline()
+        if not line:
             return None
-        return body
+        return line.rstrip(b"\r\n")
 
     @staticmethod
     def _write_message(stream: Any, payload: bytes) -> None:
-        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
-        stream.write(header)
-        stream.write(payload)
+        stream.write(payload + b"\n")
         stream.flush()
+
+    async def _start_http_server(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        path: str = "/mcp",
+    ) -> _NetworkServerHandle:
+        normalized_path = self._normalize_path(path)
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await self._handle_http_connection(reader, writer, normalized_path)
+
+        server = await asyncio.start_server(handler, host, port)
+        bound_port = server.sockets[0].getsockname()[1]
+        return _NetworkServerHandle(host=host, port=bound_port, server=server)
+
+    async def _handle_http_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        path: str,
+    ) -> None:
+        try:
+            method, target, headers, body = await self._read_http_request(reader)
+            if not self._is_allowed_origin(headers.get("origin"), headers.get("host")):
+                await self._write_http_response(writer, 403, b"forbidden origin", "text/plain")
+                return
+
+            url = urlsplit(target)
+            if url.path != path:
+                await self._write_http_response(writer, 404, b"not found", "text/plain")
+                return
+            if method == "GET":
+                await self._write_http_response(writer, 405, b"GET stream is not supported", "text/plain")
+                return
+            if method != "POST":
+                await self._write_http_response(writer, 405, b"method not allowed", "text/plain")
+                return
+
+            request = json.loads(body.decode("utf-8"))
+            if "id" not in request:
+                await self.dispatch(request)
+                await self._write_http_response(writer, 202, b"", "text/plain")
+                return
+
+            response = await self.dispatch(request)
+            await self._write_json_response(writer, 200, response)
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def _read_http_request(
+        self,
+        reader: asyncio.StreamReader,
+    ) -> tuple[str, str, dict[str, str], bytes]:
+        header_bytes = await reader.readuntil(b"\r\n\r\n")
+        header_text = header_bytes.decode("iso-8859-1")
+        lines = header_text.split("\r\n")
+        method, target, _version = lines[0].split(" ", 2)
+        headers: dict[str, str] = {}
+        for line in lines[1:]:
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+
+        content_length = int(headers.get("content-length", "0") or "0")
+        body = await reader.readexactly(content_length) if content_length else b""
+        return method.upper(), target, headers, body
+
+    async def _write_json_response(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        payload: dict[str, Any],
+    ) -> None:
+        await self._write_http_response(
+            writer,
+            status,
+            json.dumps(payload).encode("utf-8"),
+            "application/json",
+        )
+
+    async def _write_http_response(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        body: bytes,
+        content_type: str,
+    ) -> None:
+        reason = {
+            200: "OK",
+            202: "Accepted",
+            403: "Forbidden",
+            404: "Not Found",
+            405: "Method Not Allowed",
+            500: "Internal Server Error",
+        }.get(status, "OK")
+        header = (
+            f"HTTP/1.1 {status} {reason}\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(header.encode("utf-8") + body)
+        await writer.drain()
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        return path if path.startswith("/") else f"/{path}"
+
+    @staticmethod
+    def _is_allowed_origin(origin: Optional[str], host: Optional[str]) -> bool:
+        if not origin:
+            return True
+        if not host:
+            return False
+        try:
+            return urlsplit(origin).netloc == host
+        except Exception:
+            return False
 
     async def _handle_request(self, method: str, params: dict[str, Any]) -> Any:
         if method == "initialize":
             return {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-11-25",
                 "serverInfo": {
                     "name": self.info.name,
                     "version": self.info.version,
@@ -168,7 +288,7 @@ class MCPServer:
                 },
             }
 
-        if method == "initialized":
+        if method in ("notifications/initialized", "initialized"):
             return {"ok": True}
 
         if method in ("tools/list", "tools.list"):
