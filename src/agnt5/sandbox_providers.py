@@ -9,8 +9,9 @@ canonical Rust contract in ``sdk-core/src/sandbox/providers/``:
 - :class:`NorthflankSandboxProvider` — Northflank (REST + websocket exec)
 - :class:`TogetherSandboxProvider` — Together Code Interpreter (/v1/tci)
 
-Modal is not included: its API is gRPC-only and is integrated at the Rust
-core level as a follow-up.
+Modal is not included here: its API is gRPC-only and is integrated
+natively in the Rust core (``sdk-core``); a Python surface for it would
+need gRPC bindings rather than httpx.
 
 Each provider exposes the control plane (``create`` / ``connect`` /
 ``destroy`` / ``list_sandboxes``) and returns sandbox handles with the same
