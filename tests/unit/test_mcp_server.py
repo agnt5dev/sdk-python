@@ -1,5 +1,8 @@
 """Tests for the developer-facing MCPServer API."""
 
+import io
+
+import httpx
 import pytest
 
 from agnt5 import Agent, Context, MCPServer, Prompt, Resource, tool, workflow
@@ -202,3 +205,52 @@ async def test_mcp_server_prompts_and_resources():
         }
     )
     assert resource_response["result"]["contents"][0]["text"] == "# Handbook"
+
+
+def test_mcp_server_stdio_helpers_use_jsonl_framing():
+    payload = b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+    input_stream = io.BytesIO(payload + b"\r\n")
+    output_stream = io.BytesIO()
+
+    assert MCPServer._read_message(input_stream) == payload
+
+    MCPServer._write_message(output_stream, payload)
+    output = output_stream.getvalue()
+    assert output == payload + b"\n"
+    assert b"Content-Length" not in output
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_run_http_serves_json_rpc():
+    server = MCPServer(id="test-mcp", name="Test MCP", version="1.0.0")
+    handle = await server._start_http_server(host="127.0.0.1", port=0, path="/mcp")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"http://{handle.host}:{handle.port}/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["result"]["serverInfo"]["name"] == "Test MCP"
+        assert response.json()["result"]["protocolVersion"] == "2025-11-25"
+    finally:
+        await handle.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_run_http_rejects_cross_origin_requests():
+    server = MCPServer(id="test-mcp", name="Test MCP", version="1.0.0")
+    handle = await server._start_http_server(host="127.0.0.1", port=0, path="/mcp")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"http://{handle.host}:{handle.port}/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+                headers={"Origin": "https://evil.example"},
+            )
+
+        assert response.status_code == 403
+    finally:
+        await handle.close()

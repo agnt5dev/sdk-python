@@ -103,7 +103,7 @@ class SseConfig:
 
 @dataclass
 class StreamableHttpConfig:
-    """Configuration for Streamable HTTP transport (MCP 2025-03-26 spec).
+    """Configuration for Streamable HTTP transport (MCP 2025-11-25 spec).
 
     Single-endpoint POST/SSE transport replacing the older HTTP+SSE design.
     Use this for current-spec MCP servers (e.g. mcp.deepwiki.com/mcp).
@@ -172,7 +172,7 @@ class ServerConfig:
         url: str,
         headers: Optional[dict[str, str]] = None,
     ) -> "ServerConfig":
-        """Create Streamable HTTP server config (MCP 2025-03-26)."""
+        """Create Streamable HTTP server config (MCP 2025-11-25)."""
         return cls(
             transport_type=TransportType.STREAMABLE_HTTP,
             streamable_http=StreamableHttpConfig(url=url, headers=headers or {}),
