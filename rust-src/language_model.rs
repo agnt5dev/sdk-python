@@ -1593,9 +1593,45 @@ pub fn register_language_model(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
-    let json_module = py.import("json")?;
-    let serialized = serde_json::to_string(value)
-        .map_err(|err| PyValueError::new_err(format!("Failed to serialize JSON value: {err}")))?;
-    let obj = json_module.call_method1("loads", (serialized,))?;
-    Ok(obj.unbind())
+    use pyo3::conversion::IntoPyObject;
+
+    match value {
+        Value::Null => Ok(py.None()),
+        Value::Bool(value) => {
+            let py_bool = value.into_pyobject(py)?;
+            Ok(py_bool.to_owned().into_any().unbind())
+        }
+        Value::Number(value) => {
+            if let Some(int_value) = value.as_i64() {
+                let py_int = int_value.into_pyobject(py)?;
+                Ok(py_int.into_any().unbind())
+            } else if let Some(uint_value) = value.as_u64() {
+                let py_int = uint_value.into_pyobject(py)?;
+                Ok(py_int.into_any().unbind())
+            } else if let Some(float_value) = value.as_f64() {
+                let py_float = float_value.into_pyobject(py)?;
+                Ok(py_float.into_any().unbind())
+            } else {
+                Ok(py.None())
+            }
+        }
+        Value::String(value) => {
+            let py_str = value.as_str().into_pyobject(py)?;
+            Ok(py_str.into_any().unbind())
+        }
+        Value::Array(values) => {
+            let list = PyList::empty(py);
+            for item in values {
+                list.append(json_to_py(py, item)?)?;
+            }
+            Ok(list.into_any().unbind())
+        }
+        Value::Object(values) => {
+            let dict = PyDict::new(py);
+            for (key, item) in values {
+                dict.set_item(key, json_to_py(py, item)?)?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+    }
 }
