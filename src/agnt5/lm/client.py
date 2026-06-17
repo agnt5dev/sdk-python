@@ -269,6 +269,7 @@ class LMClient(LanguageModel):
                         input_tokens=usage.prompt_tokens if usage else 0,
                         output_tokens=usage.completion_tokens if usage else 0,
                         total_tokens=usage.total_tokens if usage else 0,
+                        cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
                         finish_reason=chunk.finish_reason,
                         output_data={
                             "text": chunk.text,
@@ -373,10 +374,13 @@ class LMClient(LanguageModel):
         """Convert Rust response to Python response."""
         usage = None
         if rust_response.usage:
+            ru = rust_response.usage
             usage = TokenUsage(
-                prompt_tokens=rust_response.usage.prompt_tokens,
-                completion_tokens=rust_response.usage.completion_tokens,
-                total_tokens=rust_response.usage.total_tokens,
+                prompt_tokens=ru.prompt_tokens,
+                completion_tokens=ru.completion_tokens,
+                total_tokens=ru.total_tokens,
+                cached_tokens=getattr(ru, "cached_tokens", None) or 0,
+                cache_creation_tokens=getattr(ru, "cache_creation_tokens", None) or 0,
             )
 
         tool_calls = None
@@ -463,6 +467,7 @@ class LMClient(LanguageModel):
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
             total_tokens=usage.total_tokens if usage else 0,
+            cached_tokens=getattr(usage, "cached_tokens", 0) if usage else 0,
             finish_reason=getattr(response, "finish_reason", None),
             output_data={
                 "output": output_text,
@@ -477,6 +482,7 @@ class LMClient(LanguageModel):
                 "input_tokens": str(usage.prompt_tokens if usage else 0),
                 "output_tokens": str(usage.completion_tokens if usage else 0),
                 "total_tokens": str(usage.total_tokens if usage else 0),
+                "cached_tokens": str(getattr(usage, "cached_tokens", 0) if usage else 0),
             },
         )
         ctx.emit(completed_event)

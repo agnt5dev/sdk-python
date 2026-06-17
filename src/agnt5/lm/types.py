@@ -157,6 +157,12 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    # Input tokens served from the prompt cache (cache hits). Subset of
+    # ``prompt_tokens``.
+    cached_tokens: int = 0
+    # Input tokens written to the prompt cache (cache writes). Anthropic-style
+    # providers only.
+    cache_creation_tokens: int = 0
 
 
 @dataclass
@@ -192,6 +198,8 @@ class GenerateResponse:
                 "prompt_tokens": self.usage.prompt_tokens,
                 "completion_tokens": self.usage.completion_tokens,
                 "total_tokens": self.usage.total_tokens,
+                "cached_tokens": self.usage.cached_tokens,
+                "cache_creation_tokens": self.usage.cache_creation_tokens,
             }
         if self.finish_reason:
             result["finish_reason"] = self.finish_reason

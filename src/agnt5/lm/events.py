@@ -86,6 +86,9 @@ class LMCompleted(Completed):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # Input tokens served from the prompt cache (cache hits). Subset of
+    # ``input_tokens``.
+    cached_tokens: int = 0
     finish_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
