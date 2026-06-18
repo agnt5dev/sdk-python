@@ -1514,6 +1514,20 @@ impl PyUsage {
     fn total_tokens(&self) -> Option<u32> {
         self.inner.total_tokens
     }
+
+    /// Input tokens served from the prompt cache (cache hits). Subset of
+    /// `prompt_tokens`.
+    #[getter]
+    fn cached_tokens(&self) -> Option<u32> {
+        self.inner.cached_tokens
+    }
+
+    /// Input tokens written to the prompt cache on this request (cache writes).
+    /// Anthropic-style providers only.
+    #[getter]
+    fn cache_creation_tokens(&self) -> Option<u32> {
+        self.inner.cache_creation_tokens
+    }
 }
 
 /// Extract OpenTelemetry context from Python's contextvar (legacy)

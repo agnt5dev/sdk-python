@@ -1376,6 +1376,7 @@ class Agent:
                 usage_dict = {
                     "input_tokens": getattr(response.usage, 'input_tokens', getattr(response.usage, 'prompt_tokens', 0)),
                     "output_tokens": getattr(response.usage, 'output_tokens', getattr(response.usage, 'completion_tokens', 0)),
+                    "cached_tokens": getattr(response.usage, 'cached_tokens', 0),
                 }
         else:
             # Use real streaming - properly exposes thinking blocks
@@ -1389,6 +1390,7 @@ class Agent:
                         usage_dict = {
                             "input_tokens": event.input_tokens,
                             "output_tokens": event.output_tokens,
+                            "cached_tokens": getattr(event, "cached_tokens", 0),
                         }
                     else:
                         # Forward LM events (thinking/message start/delta/stop)
@@ -1410,6 +1412,7 @@ class Agent:
                         usage_dict = {
                             "input_tokens": event.input_tokens,
                             "output_tokens": event.output_tokens,
+                            "cached_tokens": getattr(event, "cached_tokens", 0),
                         }
                     else:
                         # Forward LM events (thinking/message start/delta/stop)
