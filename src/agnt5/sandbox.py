@@ -6,7 +6,21 @@ exclusive use during a workflow execution.
 
 Example usage:
     ```python
-    from agnt5 import Sandbox, SandboxPool
+    from agnt5 import Agent, Sandbox
+
+    agent = Agent(
+        name="coder",
+        model="openai/gpt-4o-mini",
+        instructions="Use the sandbox workspace to write and run code.",
+        sandbox=Sandbox(provider="e2b"),  # or Sandbox() to auto-detect from env
+    )
+
+    result = await agent.run("Create hello.py, run it, and show the output.")
+    ```
+
+Legacy AGNT5 remote sandbox usage:
+    ```python
+    from agnt5 import SandboxPool
 
     # Claim a sandbox from a pool
     async with SandboxPool(project_id="...", pool_id="...") as pool:
@@ -183,20 +197,53 @@ class Sandbox:
     Args:
         sandbox_id: Unique identifier for this sandbox.
         http_endpoint: HTTP endpoint for the sandbox (e.g., "10.0.1.5:4001").
+        provider: Optional sandbox provider name ("e2b", "daytona", etc.).
+            When set, the provider sandbox is created lazily on first use.
+            Defaults to "auto" when no http_endpoint is provided.
         timeout: Default timeout in seconds for operations.
     """
 
     def __init__(
         self,
-        sandbox_id: str,
-        http_endpoint: str,
+        sandbox_id: Optional[str] = None,
+        http_endpoint: Optional[str] = None,
         timeout: float = 300.0,
+        *,
+        provider: Optional[str] = None,
+        auto_destroy: bool = True,
+        template: Optional[str] = None,
+        timeout_secs: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        cpu_cores: Optional[int] = None,
+        memory_mib: Optional[int] = None,
     ):
-        self.sandbox_id = sandbox_id
-        self.http_endpoint = http_endpoint
+        if http_endpoint is None and provider is None:
+            provider = "auto"
+
+        self.sandbox_id = sandbox_id or ""
+        self.http_endpoint = http_endpoint or ""
         self.timeout = timeout
+        self.provider = provider
+        self.auto_destroy = auto_destroy
+        self._provider_sandbox: Optional[Any] = None
+        self._provider_client: Optional[Any] = None
+        self._provider_options = {
+            "template": template,
+            "timeout_secs": timeout_secs,
+            "env": env,
+            "metadata": metadata,
+            "cpu_cores": cpu_cores,
+            "memory_mib": memory_mib,
+        }
+
+        if provider is not None:
+            self.base_url = ""
+            self._client: Optional[httpx.AsyncClient] = None
+            return
 
         # Ensure endpoint has protocol
+        assert http_endpoint is not None
         if not http_endpoint.startswith(("http://", "https://")):
             http_endpoint = f"http://{http_endpoint}"
 
@@ -204,14 +251,65 @@ class Sandbox:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def __aenter__(self) -> "Sandbox":
+        if self.provider is not None:
+            await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.close()
 
+    async def start(self) -> "Sandbox":
+        """Create the provider sandbox if this is provider-backed."""
+        await self._ensure_provider_sandbox()
+        return self
+
     async def close(self) -> None:
         """Close the HTTP client."""
-        await self._client.aclose()
+        if self._provider_sandbox is not None:
+            sandbox_id = getattr(self._provider_sandbox, "sandbox_id", self.sandbox_id)
+            if self.auto_destroy and self._provider_client is not None and sandbox_id:
+                destroy = getattr(self._provider_client, "destroy", None)
+                if destroy is not None:
+                    await destroy(sandbox_id)
+            aclose = getattr(self._provider_sandbox, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            provider_aclose = getattr(self._provider_client, "aclose", None)
+            if provider_aclose is not None:
+                await provider_aclose()
+            self._provider_sandbox = None
+            self._provider_client = None
+            self.sandbox_id = ""
+        if self._client is not None:
+            await self._client.aclose()
+
+    async def _ensure_provider_sandbox(self) -> Optional[Any]:
+        if self.provider is None:
+            return None
+        if self._provider_sandbox is not None:
+            return self._provider_sandbox
+
+        from .sandbox_providers import CreateSandboxOptions, load_providers_from_env
+
+        providers = load_providers_from_env()
+        provider_name = self.provider
+        if provider_name == "auto":
+            provider_name = next(iter(providers), None)
+        if not provider_name or provider_name not in providers:
+            available = ", ".join(sorted(providers)) or "none"
+            raise RuntimeError(
+                f"Sandbox provider '{self.provider}' is not configured. "
+                f"Available providers from environment: {available}."
+            )
+
+        opts = CreateSandboxOptions(
+            **{key: value for key, value in self._provider_options.items() if value is not None}
+        )
+        self._provider_client = providers[provider_name]
+        self._provider_sandbox = await self._provider_client.create(opts)
+        self.provider = provider_name
+        self.sandbox_id = getattr(self._provider_sandbox, "sandbox_id", self.sandbox_id)
+        return self._provider_sandbox
 
     # ============= Tier 1: Core Operations =============
 
@@ -235,6 +333,16 @@ class Sandbox:
         Returns:
             ExecuteCodeResult with stdout, stderr, exit_code.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            return await provider_sandbox.execute_code(
+                code,
+                language=language,
+                timeout_ms=timeout_ms,
+                env=env,
+                work_dir=work_dir,
+            )
+
         payload: Dict[str, Any] = {
             "code": code,
             "language": language,
@@ -245,6 +353,7 @@ class Sandbox:
         if work_dir:
             payload["work_dir"] = work_dir
 
+        assert self._client is not None
         resp = await self._client.post(f"{self.base_url}/execute", json=payload)
         data = resp.json()
 
@@ -276,6 +385,32 @@ class Sandbox:
         Returns:
             RunCommandResult with stdout, stderr, exit_code.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            run_command = getattr(provider_sandbox, "run_command", None)
+            if run_command is None:
+                result = await provider_sandbox.execute_code(
+                    command if not args else " ".join([command, *args]),
+                    language="bash",
+                    timeout_ms=timeout_ms,
+                    env=env,
+                    work_dir=working_dir,
+                )
+                return RunCommandResult(
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    exit_code=result.exit_code,
+                    execution_time_ms=result.execution_time_ms,
+                    error=result.error,
+                )
+            return await run_command(
+                command,
+                args=args,
+                working_dir=working_dir,
+                env=env,
+                timeout_ms=timeout_ms,
+            )
+
         payload: Dict[str, Any] = {
             "command": command,
             "timeout_ms": timeout_ms,
@@ -287,6 +422,7 @@ class Sandbox:
         if env:
             payload["env"] = env
 
+        assert self._client is not None
         resp = await self._client.post(f"{self.base_url}/command", json=payload)
         data = resp.json()
 
@@ -331,6 +467,7 @@ class Sandbox:
         if env:
             payload["env"] = env
 
+        assert self._client is not None
         async with self._client.stream(
             "POST", f"{self.base_url}/command/stream", json=payload
         ) as resp:
@@ -359,6 +496,10 @@ class Sandbox:
         Returns:
             WriteFileResult indicating success.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            return await provider_sandbox.write_file(path, content)
+
         if isinstance(content, str):
             content_str = content
             is_b64 = False
@@ -373,6 +514,7 @@ class Sandbox:
             "is_base64": is_b64,
         }
 
+        assert self._client is not None
         resp = await self._client.post(f"{self.base_url}/files", json=payload)
         data = resp.json()
 
@@ -392,6 +534,11 @@ class Sandbox:
         Returns:
             ReadFileResult with file content.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            return await provider_sandbox.read_file(path)
+
+        assert self._client is not None
         resp = await self._client.get(f"{self.base_url}/files", params={"path": path})
         data = resp.json()
 
@@ -422,6 +569,14 @@ class Sandbox:
         Returns:
             True if deletion was successful.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            delete_file = getattr(provider_sandbox, "delete_file", None)
+            if delete_file is None:
+                return False
+            return await delete_file(path, recursive=recursive)
+
+        assert self._client is not None
         resp = await self._client.delete(
             f"{self.base_url}/files",
             params={"path": path, "recursive": str(recursive).lower()},
@@ -441,6 +596,11 @@ class Sandbox:
         Returns:
             ListFilesResult with file information.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            return await provider_sandbox.list_files(path, recursive=recursive)
+
+        assert self._client is not None
         resp = await self._client.get(
             f"{self.base_url}/files/list",
             params={"path": path, "recursive": str(recursive).lower()},
@@ -475,6 +635,14 @@ class Sandbox:
         Returns:
             Preview URL string.
         """
+        provider_sandbox = await self._ensure_provider_sandbox()
+        if provider_sandbox is not None:
+            preview_url = getattr(provider_sandbox, "preview_url", None)
+            if preview_url is None:
+                return ""
+            return preview_url(port)
+
+        assert self._client is not None
         resp = await self._client.get(
             f"{self.base_url}/preview-url", params={"port": port}
         )

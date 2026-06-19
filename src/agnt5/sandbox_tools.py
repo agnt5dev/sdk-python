@@ -8,20 +8,20 @@ incrementally (write files, run code, read results).
 
 Usage:
     ```python
-    from agnt5 import Agent, sandbox_tools
+    from agnt5 import Agent, Sandbox
 
-    # With default sandbox (auto-selects backend)
     agent = Agent(
         name="coder",
         model="openai/gpt-4o-mini",
         instructions="You can write and run code to solve problems.",
-        tools=sandbox_tools(),
+        sandbox=Sandbox(),
     )
 
     result = await agent.run("Calculate the 20th fibonacci number")
 
-    # With explicit sandbox configuration
-    from agnt5 import Sandbox
+    # Advanced/manual tool composition remains available:
+    from agnt5 import sandbox_tools
+
     sandbox = Sandbox(sandbox_id="my-sandbox", http_endpoint="http://localhost:4001")
     agent = Agent(
         name="coder",

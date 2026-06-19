@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from agnt5 import Agent, tool, Context
+from agnt5 import Agent, tool, Context, Sandbox
 from agnt5.agent import AgentResult, AgentContext, AgentRegistry, Handoff, handoff
 from agnt5.events import Event
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, MessageRole, TokenUsage
@@ -102,6 +102,89 @@ class MockLanguageModel(LanguageModel):
             total_tokens=30,
             output_data={"text": response_text},
         )
+
+
+class FakeSandbox:
+    def __init__(self):
+        self.closed = False
+
+    async def execute_code(self, code, language="python", **kwargs):
+        raise AssertionError("not called")
+
+    async def write_file(self, path, content, **kwargs):
+        raise AssertionError("not called")
+
+    async def read_file(self, path):
+        raise AssertionError("not called")
+
+    async def list_files(self, path=".", recursive=False):
+        raise AssertionError("not called")
+
+    async def close(self):
+        self.closed = True
+
+
+def test_agent_with_sandbox_adds_standard_sandbox_tools():
+    mock_lm = MockLanguageModel()
+    sandbox = FakeSandbox()
+
+    agent = Agent(
+        name="coder",
+        model=mock_lm,
+        instructions="Use the sandbox.",
+        sandbox=sandbox,
+    )
+
+    assert agent.sandbox is sandbox
+    assert {
+        "sandbox_execute_code",
+        "sandbox_write_file",
+        "sandbox_read_file",
+        "sandbox_list_files",
+    }.issubset(agent.tools.keys())
+
+
+def test_sandbox_defaults_to_provider_auto():
+    sandbox = Sandbox()
+    assert sandbox.provider == "auto"
+
+
+@pytest.mark.asyncio
+async def test_agent_with_sandbox_exposes_context_and_closes_after_run():
+    sandbox = FakeSandbox()
+    observed = {}
+
+    @tool
+    async def inspect_sandbox(ctx: Context) -> dict:
+        observed["sandbox"] = getattr(ctx, "sandbox", None)
+        return {"has_sandbox": observed["sandbox"] is sandbox}
+
+    mock_lm = MockLanguageModel(
+        responses=["I will inspect the sandbox.", "Sandbox is available."],
+        tool_calls=[
+            [
+                {
+                    "name": "inspect_sandbox",
+                    "arguments": "{}",
+                }
+            ],
+            None,
+        ],
+    )
+
+    agent = Agent(
+        name="sandbox_agent",
+        model=mock_lm,
+        instructions="Use the sandbox.",
+        tools=[inspect_sandbox],
+        sandbox=sandbox,
+    )
+
+    result = await agent.run("Check the sandbox.")
+
+    assert result.output == "Sandbox is available."
+    assert observed["sandbox"] is sandbox
+    assert sandbox.closed is True
 
 
 # Test fixtures

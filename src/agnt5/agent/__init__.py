@@ -26,6 +26,7 @@ Example:
 """
 
 # Import from split modules
+from .agents_md import discover_agents_md, load_agents_md
 from .context import AgentContext
 from .core import Agent
 from .decorator import agent
@@ -42,12 +43,19 @@ from .events import (
 from .handoff import Handoff, handoff
 from .registry import AgentRegistry
 from .result import AgentResult
+from .skill_events import SkillLoaded
+from .skills import Skill
 
 __all__ = [
     # Core classes
     "Agent",
     "AgentContext",
     "AgentResult",
+    "Skill",
+    "SkillLoaded",
+    # AGENTS.md guidance
+    "discover_agents_md",
+    "load_agents_md",
     # Events
     "AgentCompleted",
     "AgentFailed",
