@@ -61,11 +61,15 @@ from .agent import (
     AgentResult,
     AgentStarted,
     Handoff,
+    Skill,
+    SkillLoaded,
     ToolCallCompleted,
     ToolCallFailed,
     ToolCallStarted,
     agent,
+    discover_agents_md,
     handoff,
+    load_agents_md,
 )
 from .chat import ChatBot, SlackConfig
 from .client import AsyncClient, Client, ReceivedEvent, RunError
@@ -296,8 +300,12 @@ __all__ = [
     "AgentRegistry",
     "AgentResult",
     "Handoff",
+    "Skill",
+    "SkillLoaded",
     "agent",
+    "discover_agents_md",
     "handoff",
+    "load_agents_md",
     "AgentCallbackContext",
     "AgentCallbacks",
     "AfterAgentCallback",

@@ -5,7 +5,8 @@ import json
 import logging
 import secrets
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple, Union
 
 from .. import lm
 from .._ids import generate_cid
@@ -44,6 +45,7 @@ from ..lm.events import (
     LMContentBlockStarted,
 )
 from ..tool import Tool, ToolRegistry
+from .agents_md import AgentsMdSource, load_agents_md, render_guidance
 from .context import AgentContext
 from .events import (
     AgentCompleted,
@@ -58,6 +60,7 @@ from .events import (
 from .handoff import Handoff
 from .registry import AgentRegistry
 from .result import AgentResult
+from .skills import Skill, make_load_skill_tool, render_catalog, resolve_skills
 
 logger = setup_module_logger(__name__)
 
@@ -132,6 +135,7 @@ class Agent:
         model: Union[str, LanguageModel],
         instructions: str,
         tools: Optional[List[Any]] = None,
+        sandbox: Optional[Any] = None,
         built_in_tools: Optional[List[BuiltInTool]] = None,
         model_config: Optional[ModelConfig] = None,
         handoffs: Optional[List[Union["Agent", Handoff]]] = None,
@@ -148,6 +152,9 @@ class Agent:
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         max_iterations: int = 10,
+        skills: Optional[Sequence[Union[str, "Skill"]]] = None,
+        skills_dir: Optional[Union[str, Path]] = None,
+        agents_md: Optional[AgentsMdSource] = None,
     ):
         """Initialize agent.
 
@@ -158,6 +165,9 @@ class Agent:
                    - LanguageModel instance (legacy, for backward compatibility)
             instructions: System prompt for the agent
             tools: List of tools, Tool instances, or Agents (used as tools)
+            sandbox: Optional sandbox workspace. When provided, standard
+                sandbox tools are added automatically and custom tools can
+                access the same workspace via ``ctx.sandbox``.
             built_in_tools: Provider-hosted tools (currently OpenAI Responses API only:
                 BuiltInTool.WEB_SEARCH, CODE_INTERPRETER, FILE_SEARCH). These run
                 server-side; results are baked into the assistant message and the
@@ -176,10 +186,19 @@ class Agent:
             max_tokens: Maximum tokens in response. Legacy parameter - prefer model_config.
             top_p: Top-p sampling. Legacy parameter - prefer model_config.
             max_iterations: Maximum reasoning iterations
+            skills: On-demand skills — names (resolved against ``skills_dir``) or
+                ``Skill`` objects. Only name+description sit in context until the
+                agent calls ``load_skill`` to load a skill's full instructions.
+            skills_dir: Directory pool that skill names resolve against. With no
+                ``skills`` selection, every skill in the pool is loaded.
+            agents_md: Always-on project/area guidance (``AGENTS.md``). A file
+                path, a directory (uses its ``AGENTS.md``), or an ordered list
+                where later entries are more specific. Injected into every prompt.
         """
         self.name = name
         self.instructions = instructions
         self.max_iterations = max_iterations
+        self.sandbox = sandbox
         self.logger = logging.getLogger(f"agnt5.agent.{name}")
         base_callbacks = callbacks or AgentCallbacks()
         self.callbacks = AgentCallbacks(
@@ -218,6 +237,24 @@ class Agent:
 
         # Initialize tools registry
         self.tools: Dict[str, Tool] = {}
+
+        if sandbox is not None:
+            from ..sandbox_tools import sandbox_tools
+
+            for item in sandbox_tools(sandbox=sandbox):
+                self.tools[item.name] = item
+
+        # Resolve on-demand skills and register the loader tool. Empty when no
+        # skills are configured, so skill-less agents are unchanged.
+        self._skills: Dict[str, Skill] = resolve_skills(skills, skills_dir)
+        self._skills_catalog: str = render_catalog(self._skills)
+        if self._skills:
+            load_tool = make_load_skill_tool(self._skills, sandbox=self.sandbox)
+            self.tools[load_tool.name] = load_tool
+
+        # Always-on project/area guidance (AGENTS.md). Empty string when unset,
+        # so guidance-less agents are unchanged.
+        self._agents_md_guidance: str = render_guidance(load_agents_md(agents_md))
 
         if tools:
             for item in tools:
@@ -405,6 +442,21 @@ class Agent:
                 rendered = rendered.replace(placeholder, str(value))
 
         return rendered
+
+    def _compose_system_prompt(self, context_vars: Optional[Dict[str, Any]] = None) -> str:
+        """Render instructions and append the on-demand skills catalog.
+
+        Single choke point for system-prompt assembly so every request path
+        carries the same context. The catalog is empty for skill-less agents,
+        leaving their prompt byte-for-byte unchanged.
+        """
+        rendered = self._render_prompt(self.instructions, context_vars)
+        blocks = [rendered]
+        if self._agents_md_guidance:
+            blocks.append(self._agents_md_guidance)
+        if self._skills_catalog:
+            blocks.append(self._skills_catalog)
+        return "\n\n".join(blocks)
 
     def _detect_memory_scope(
         self,
@@ -678,6 +730,9 @@ class Agent:
                 trace_metadata=getattr(context, '_trace_metadata', None),
             )
 
+        if self.sandbox is not None:
+            setattr(context, "sandbox", self.sandbox)
+
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
         # Use _parent_correlation_id to link agent to parent step in hierarchy
@@ -794,7 +849,7 @@ class Agent:
                 import time as _time
 
                 # Render system prompt
-                rendered_instructions = self._render_prompt(self.instructions, prompt_context)
+                rendered_instructions = self._compose_system_prompt(prompt_context)
 
                 # Reasoning loop
                 for iteration in range(self.max_iterations):
@@ -1282,6 +1337,10 @@ class Agent:
                 ))
             raise
         finally:
+            if self.sandbox is not None:
+                close = getattr(self.sandbox, "close", None)
+                if close is not None:
+                    await close()
             from ..context import _current_context
             _current_context.reset(token)
 
@@ -1641,6 +1700,9 @@ class Agent:
                 trace_metadata=getattr(context, '_trace_metadata', None),
             )
 
+        if self.sandbox is not None:
+            setattr(context, "sandbox", self.sandbox)
+
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
         # Use _parent_correlation_id to link agent to parent step in hierarchy
@@ -1722,7 +1784,7 @@ class Agent:
                     # The caller (run()) yields Event.agent_started which the worker processes
 
                     # Render system prompt with context variables
-                    rendered_instructions = self._render_prompt(self.instructions, prompt_context)
+                    rendered_instructions = self._compose_system_prompt(prompt_context)
                     if prompt_context:
                         self.logger.debug(f"Rendered system prompt with {len(prompt_context)} context variables")
 
@@ -2117,6 +2179,10 @@ class Agent:
                 raise
         finally:
             # Always reset context to prevent leakage between agent executions
+            if self.sandbox is not None:
+                close = getattr(self.sandbox, "close", None)
+                if close is not None:
+                    await close()
             from ..context import _current_context
             _current_context.reset(token)
 
@@ -2238,7 +2304,7 @@ class Agent:
 
             request = GenerateRequest(
                 model=self.model if self._language_model is None else "mock-model",
-                system_prompt=self.instructions,
+                system_prompt=self._compose_system_prompt(),
                 messages=messages,
                 tools=tool_defs if tool_defs else [],
             )
