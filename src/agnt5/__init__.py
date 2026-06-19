@@ -198,6 +198,22 @@ from .sandbox_events import (
     SandboxFileRead,
     SandboxFileWritten,
 )
+from .sandbox_providers import (
+    CreateSandboxOptions,
+    DaytonaSandbox,
+    DaytonaSandboxProvider,
+    E2BSandbox,
+    E2BSandboxProvider,
+    NorthflankSandbox,
+    NorthflankSandboxProvider,
+    SandboxInfo,
+    SandboxProviderError,
+    TogetherSandbox,
+    TogetherSandboxProvider,
+    VercelSandbox,
+    VercelSandboxProvider,
+    load_providers_from_env,
+)
 from .sandbox_tools import sandbox_tools
 
 # MCP (Model Context Protocol) components
@@ -404,6 +420,21 @@ __all__ = [
     "GitPushResult",
     "SandboxHealthResult",
     "StreamEvent",
+    # Sandbox provider integrations
+    "CreateSandboxOptions",
+    "SandboxInfo",
+    "SandboxProviderError",
+    "E2BSandboxProvider",
+    "E2BSandbox",
+    "DaytonaSandboxProvider",
+    "DaytonaSandbox",
+    "VercelSandboxProvider",
+    "VercelSandbox",
+    "NorthflankSandboxProvider",
+    "NorthflankSandbox",
+    "TogetherSandboxProvider",
+    "TogetherSandbox",
+    "load_providers_from_env",
     # MCP components
     "MCPClient",
     "MCPError",
