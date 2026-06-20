@@ -835,6 +835,29 @@ fn log_from_python(
     Ok(())
 }
 
+/// Record opt-in worker memory snapshots as OTEL gauge samples.
+#[pyfunction]
+fn record_worker_memory_metrics(
+    language: String,
+    phase: String,
+    component_name: String,
+    component_type: String,
+    snapshot: HashMap<String, u64>,
+) -> PyResult<()> {
+    for (kind, value) in snapshot {
+        let memory_kind = kind.strip_suffix("_bytes").unwrap_or(kind.as_str());
+        agnt5_sdk_core::record_worker_memory_bytes(
+            &language,
+            &phase,
+            &component_name,
+            &component_type,
+            memory_kind,
+            value,
+        );
+    }
+    Ok(())
+}
+
 /// Initialize SDK telemetry early from Python.
 ///
 /// This is used by the Python worker path so startup logs emitted before
@@ -916,6 +939,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(shutdown_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
+    m.add_function(wrap_pyfunction!(record_worker_memory_metrics, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
     Ok(())

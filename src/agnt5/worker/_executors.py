@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from .._ids import generate_cid
 from .._serialization import deserialize, serialize
 from .._telemetry import setup_module_logger
+from ._memory import record_worker_memory
 from ._utils import create_failed_response, format_error_message
 
 if TYPE_CHECKING:
@@ -140,6 +141,11 @@ class ExecutorMixin:
                 getattr(self, "_entity_state_adapter", None)
             )
 
+            record_worker_memory(
+                phase="before",
+                component_type=component_type.lower(),
+                component_name=getattr(request, "component_name", "") or "",
+            )
             return await executor(ctx, input_dict, request)
 
         except Exception as e:
@@ -176,6 +182,11 @@ class ExecutorMixin:
             return create_failed_response(request, e, PyExecuteComponentResponse)
 
         finally:
+            record_worker_memory(
+                phase="after",
+                component_type=component_type.lower(),
+                component_name=getattr(request, "component_name", "") or "",
+            )
             _reset_current_span_token(span_token)
             if state_adapter_token is not None:
                 _entity_state_adapter_ctx.reset(state_adapter_token)
