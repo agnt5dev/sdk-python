@@ -60,7 +60,6 @@ def clear_worker_env(monkeypatch):
         "AGNT5_PROJECT_ID",
         "AGNT5_DEPLOYMENT_ID",
         "AGNT5_WORKER_MODE",
-        "AGNT5_PARKED_POLL_ENABLED",
         "AGNT5_MIN_SLOTS",
         "AGNT5_MAX_SLOTS",
         "AGNT5_CLAIM_TIMEOUT_MS",
@@ -88,7 +87,6 @@ def test_worker_pull_options_configure_sdk_core_environment(fake_native_core):
     assert worker_core.os.environ["AGNT5_PROJECT_ID"] == "project-py"
     assert worker_core.os.environ["AGNT5_DEPLOYMENT_ID"] == "deployment-py"
     assert worker_core.os.environ["AGNT5_WORKER_MODE"] == "pull"
-    assert worker_core.os.environ["AGNT5_PARKED_POLL_ENABLED"] == "1"
     assert worker_core.os.environ["AGNT5_MIN_SLOTS"] == "2"
     assert worker_core.os.environ["AGNT5_MAX_SLOTS"] == "10"
     assert worker_core.os.environ["AGNT5_CLAIM_TIMEOUT_MS"] == "120000"
@@ -98,14 +96,11 @@ def test_parked_polling_implies_pull_mode(fake_native_core):
     Worker(service_name="py-worker", parked_polling=True)
 
     assert worker_core.os.environ["AGNT5_WORKER_MODE"] == "pull"
-    assert worker_core.os.environ["AGNT5_PARKED_POLL_ENABLED"] == "1"
 
 
-def test_worker_mode_pull_can_disable_parked_polling(fake_native_core):
-    Worker(service_name="py-worker", worker_mode="pull", parked_polling=False)
-
-    assert worker_core.os.environ["AGNT5_WORKER_MODE"] == "pull"
-    assert worker_core.os.environ["AGNT5_PARKED_POLL_ENABLED"] == "0"
+def test_worker_mode_pull_rejects_long_poll_disable(fake_native_core):
+    with pytest.raises(ValueError, match="pull workers always use long polling"):
+        Worker(service_name="py-worker", worker_mode="pull", parked_polling=False)
 
 
 @pytest.mark.parametrize("kwargs", [{"min_slots": 0}, {"max_slots": -1}, {"claim_timeout_ms": True}])
