@@ -6,8 +6,9 @@ Supports functions, entities, workflows, agents, and tools.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .. import _sentry
 from .._serialization import serialize_to_str
@@ -32,6 +33,45 @@ from ._prompt_executor import (
 )
 
 logger = setup_module_logger(__name__)
+
+
+def _set_positive_int_env(name: str, value: int | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    os.environ[name] = str(value)
+
+
+def _configure_worker_environment(
+    *,
+    coordinator_endpoint: str | None = None,
+    project_id: str | None = None,
+    deployment_id: str | None = None,
+    worker_mode: Literal["push", "pull"] | None = None,
+    parked_polling: bool | None = None,
+    min_slots: int | None = None,
+    max_slots: int | None = None,
+    claim_timeout_ms: int | None = None,
+) -> None:
+    if coordinator_endpoint:
+        os.environ["AGNT5_COORDINATOR_ENDPOINT"] = coordinator_endpoint
+    if project_id:
+        os.environ["AGNT5_PROJECT_ID"] = project_id
+    if deployment_id:
+        os.environ["AGNT5_DEPLOYMENT_ID"] = deployment_id
+
+    if worker_mode not in (None, "push", "pull"):
+        raise ValueError("worker_mode must be 'push' or 'pull'")
+    resolved_mode = worker_mode or ("pull" if parked_polling else None)
+    if resolved_mode:
+        os.environ["AGNT5_WORKER_MODE"] = resolved_mode
+    if resolved_mode == "pull" or parked_polling is not None:
+        os.environ["AGNT5_PARKED_POLL_ENABLED"] = "0" if parked_polling is False else "1"
+
+    _set_positive_int_env("AGNT5_MIN_SLOTS", min_slots)
+    _set_positive_int_env("AGNT5_MAX_SLOTS", max_slots)
+    _set_positive_int_env("AGNT5_CLAIM_TIMEOUT_MS", claim_timeout_ms)
 
 
 def _is_system_component(component: Any) -> bool:
@@ -93,6 +133,13 @@ class Worker(ExecutorMixin):
         auto_register_paths: list[str] | None = None,
         pyproject_path: str | None = None,
         max_concurrency: int | None = None,
+        project_id: str | None = None,
+        deployment_id: str | None = None,
+        worker_mode: Literal["push", "pull"] | None = None,
+        parked_polling: bool | None = None,
+        min_slots: int | None = None,
+        max_slots: int | None = None,
+        claim_timeout_ms: int | None = None,
     ):
         """Initialize a new Worker with explicit or automatic component registration.
 
@@ -126,6 +173,17 @@ class Worker(ExecutorMixin):
                 local pool size and the coordinator's per-priority headroom denominator.
                 Defaults to the AGNT5_MAX_CONCURRENCY env var, then 100. Raise it for
                 async/IO-bound LLM workflows; lower it for CPU-bound work.
+            project_id: Project routing key. Sets AGNT5_PROJECT_ID for parked polling
+                and defaults service metadata `project_id` when not already provided.
+            deployment_id: Deployment routing key. Sets AGNT5_DEPLOYMENT_ID for parked
+                polling and defaults service metadata `deployment_id` when not already provided.
+            worker_mode: Assignment mode. Use "pull" for worker-side polling or "push"
+                for stream dispatch. Defaults to AGNT5_WORKER_MODE, then push.
+            parked_polling: Enable parked one-job long polling for pull workers. Defaults
+                to True when worker_mode is "pull" unless explicitly set False.
+            min_slots: Minimum parked poll slots to keep open.
+            max_slots: Maximum parked poll slots.
+            claim_timeout_ms: Lease duration for claimed jobs, in milliseconds.
         """
         self.service_name = service_name
         self.service_version = service_version
@@ -138,15 +196,29 @@ class Worker(ExecutorMixin):
             ensure_root_otel_handler()
 
         # Initialize metadata with user-provided values
-        self.metadata = metadata or {}
+        self.metadata = dict(metadata or {})
+        project_id = project_id or self.metadata.get("project_id")
+        deployment_id = deployment_id or self.metadata.get("deployment_id")
+        _configure_worker_environment(
+            coordinator_endpoint=coordinator_endpoint,
+            project_id=project_id,
+            deployment_id=deployment_id,
+            worker_mode=worker_mode,
+            parked_polling=parked_polling,
+            min_slots=min_slots,
+            max_slots=max_slots,
+            claim_timeout_ms=claim_timeout_ms,
+        )
+        if project_id and "project_id" not in self.metadata:
+            self.metadata["project_id"] = project_id
+        if deployment_id and "deployment_id" not in self.metadata:
+            self.metadata["deployment_id"] = deployment_id
 
         # Auto-populate identity scopes from environment if not provided.
         # `project_id` carries the project routing key. `tenant_id` is
         # reserved for the customer sub-tenant on the dispatch path and is
         # not stamped from the worker's static config — it arrives per
         # request via dispatch metadata.
-        import os
-
         if "project_id" not in self.metadata:
             project_id = os.getenv("AGNT5_PROJECT_ID")
             if project_id:
