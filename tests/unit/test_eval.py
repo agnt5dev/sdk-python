@@ -1634,6 +1634,58 @@ class TestLLMJudge:
         assert result.label == "config_error"
         assert "input.context" in (result.explanation or "")
 
+    def test_agent_judge_builtin_handler_includes_trace_evidence(self, monkeypatch):
+        """Agent judge inspects trace-eval context, tool evidence, and peer scores."""
+        from agnt5.eval.types import ScorerRequest, TraceEvent
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"score":0.82,"passed":true,"explanation":"evidence supports it","label":"pass"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            input={"question": "Summarize refund policy"},
+            output={"answer": "Refunds are available within 30 days."},
+            trace=[
+                TraceEvent(
+                    event_type="tool.call.completed",
+                    event_id="event-1",
+                    correlation_id="corr-1",
+                    data={"tool_name": "web_search", "status": "ok"},
+                )
+            ],
+            peer_scores=[{"scorer": "step_efficiency", "score": 0.7}],
+            trace_eval_context={
+                "schema_version": "agnt5.eval.trace_eval_context.v1",
+                "features": {"tool_call_count": 1},
+            },
+            config={"model": "gpt-test", "allowed_tools": ["web_search"]},
+        )
+        result = asyncio.run(scorer_mod.run_scorer("agent_judge", request))
+
+        prompt = captured["messages"][1]["content"]
+        assert result.passed is True
+        assert result.metadata["judge_preset"] == "agent_judge"
+        assert result.metadata["agent_judge_version"] == "evidence_inspection_v1"
+        assert "trace_eval_context" in result.metadata["evidence_sources"]
+        assert "tool_calls" in result.metadata["evidence_sources"]
+        assert "peer_scores" in result.metadata["evidence_sources"]
+        assert "agent_judge_evidence" in prompt
+        assert "web_search" in prompt
+        assert "step_efficiency" in prompt
+
     def test_builtin_judge_scorers_are_not_custom_registry_entries(self):
         """Built-in judges are AGNT5-owned and separate from custom scorers."""
         scorer_mod = importlib.import_module("agnt5.scorer")
@@ -1645,13 +1697,14 @@ class TestLLMJudge:
         assert scorer_mod.ScorerRegistry.get("llm_judge") is None
         assert scorer_mod.ScorerRegistry.get("correctness") is None
         assert scorer_mod.ScorerRegistry.get("faithfulness") is None
+        assert scorer_mod.ScorerRegistry.get("agent_judge") is None
         assert scorer_mod.get_builtin_judge_scorer_config("llm_judge") is not None
         assert scorer_mod.get_builtin_judge_scorer_config("correctness") is not None
         assert scorer_mod.get_builtin_judge_scorer_config("faithfulness") is not None
+        assert scorer_mod.get_builtin_judge_scorer_config("agent_judge") is not None
 
     def test_custom_scorer_cannot_use_builtin_names(self):
         """Only custom scorers may use component registration, and built-in names are reserved."""
-        import pytest
         from agnt5.eval.types import ScorerRequest
         from agnt5.eval.types import ScorerResult as ScorerResultType
         from agnt5.scorer import scorer as scorer_dec
@@ -1664,8 +1717,32 @@ class TestLLMJudge:
 
         with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
 
+            @scorer_dec(name="step_efficiency")
+            def trace_builtin_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="plan_quality")
+            def plan_quality_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="plan_adherence")
+            def plan_adherence_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
             @scorer_dec(name="llm_judge")
             def judge_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="agent_judge")
+            def agent_judge_collision(request: ScorerRequest) -> ScorerResultType:
                 return ScorerResultType(score=1.0, passed=True)
 
 
