@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from .context import Context
@@ -44,8 +45,11 @@ BUILTIN_DETERMINISTIC_SCORER_NAMES = (
     "json_schema",
     "numeric_range",
     "levenshtein",
+    "step_efficiency",
+    "plan_quality",
+    "plan_adherence",
 )
-BUILTIN_JUDGE_SCORER_NAMES = ("llm_judge", "correctness", "faithfulness")
+BUILTIN_JUDGE_SCORER_NAMES = ("llm_judge", "correctness", "faithfulness", "agent_judge")
 RESERVED_BUILTIN_SCORER_NAMES = (
     BUILTIN_DETERMINISTIC_SCORER_NAMES + BUILTIN_JUDGE_SCORER_NAMES
 )
@@ -201,6 +205,21 @@ FAITHFULNESS_JUDGE_CRITERIA = (
     "the answer."
 )
 
+AGENT_JUDGE_DEFAULT_CRITERIA = (
+    "Investigate the provided evidence before scoring. Check factual correctness, "
+    "grounding in the trace and tool evidence, appropriate tool usage, and whether the "
+    "final output is supported by the observed execution. Penalize unsupported claims, "
+    "missing evidence, tool misuse, and reasoning that conflicts with the trace."
+)
+
+AGENT_JUDGE_SYSTEM_PROMPT = (
+    "You are an AGNT5 agent-as-a-judge evaluator. Inspect the structured evidence, "
+    "trace-eval context, tool-call trajectory, peer scores, and task input before "
+    "returning a verdict. Do not assume facts that are not present in the provided "
+    "evidence. If evidence is missing or inconclusive, lower the score and explain the "
+    "gap. Return only the requested JSON verdict."
+)
+
 
 def _judge_model(config: Dict[str, Any]) -> str:
     provider = str(config.get("provider") or "openai")
@@ -284,6 +303,92 @@ def _faithfulness_context_fields(config: Dict[str, Any]) -> List[str]:
             field.strip() for field in context_fields if isinstance(field, str) and field.strip()
         )
     return fields
+
+
+def _config_bool(config: Dict[str, Any], key: str, default: bool) -> bool:
+    value = config.get(key)
+    return value if isinstance(value, bool) else default
+
+
+def _config_string_list(config: Dict[str, Any], *keys: str) -> List[str]:
+    values: List[str] = []
+    for key in keys:
+        raw = config.get(key)
+        if isinstance(raw, str) and raw.strip():
+            values.append(raw.strip())
+        elif isinstance(raw, list):
+            values.extend(item.strip() for item in raw if isinstance(item, str) and item.strip())
+    return values
+
+
+def _to_jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _truncate_agent_judge_evidence(evidence: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+    try:
+        encoded = json.dumps(evidence, default=str, sort_keys=True)
+    except TypeError:
+        evidence = _to_jsonable(evidence)
+        encoded = json.dumps(evidence, default=str, sort_keys=True)
+    if len(encoded) <= max_chars:
+        return evidence
+    return {
+        "truncated": True,
+        "max_chars": max_chars,
+        "evidence_excerpt": encoded[:max_chars],
+    }
+
+
+def _agent_judge_evidence(request: ScorerRequest, config: Dict[str, Any]) -> tuple[Dict[str, Any], List[str]]:
+    evidence: Dict[str, Any] = {}
+
+    provided_context = (
+        config["context_data"]
+        if "context_data" in config and config["context_data"] is not None
+        else config.get("context")
+    )
+    if provided_context is not None:
+        evidence["provided_context"] = _to_jsonable(provided_context)
+
+    if _config_bool(config, "include_trace_eval_context", True):
+        trace_eval_context = (
+            request.trace_eval_context
+            if request.trace_eval_context is not None
+            else config.get("trace_eval_context")
+        )
+        if trace_eval_context is not None:
+            evidence["trace_eval_context"] = _to_jsonable(trace_eval_context)
+
+    if _config_bool(config, "include_trace", False) and request.trace:
+        evidence["trace"] = _to_jsonable(request.trace)
+
+    if _config_bool(config, "include_tool_calls", True):
+        tool_calls = request.get_tool_calls()
+        if tool_calls:
+            evidence["tool_calls"] = _to_jsonable(tool_calls)
+
+    if _config_bool(config, "include_peer_scores", True) and request.peer_scores:
+        evidence["peer_scores"] = _to_jsonable(request.peer_scores)
+
+    allowed_tools = _config_string_list(config, "allowed_tools", "tools")
+    if allowed_tools:
+        evidence["allowed_tools"] = allowed_tools
+
+    raw_max_chars = config.get("max_evidence_chars", 20000)
+    max_chars = int(raw_max_chars) if isinstance(raw_max_chars, (int, float)) else 20000
+    max_chars = max(1000, min(max_chars, 200000))
+
+    sources = sorted(evidence.keys())
+    return _truncate_agent_judge_evidence(evidence, max_chars), sources
 
 
 def _config_error(message: str) -> "ScorerResult":
@@ -422,6 +527,7 @@ def _apply_scorer_field_bindings(request: ScorerRequest) -> tuple[ScorerRequest,
             trace=request.trace,
             config=request.config,
             peer_scores=request.peer_scores,
+            trace_eval_context=request.trace_eval_context,
         ),
         metadata,
     )
@@ -575,6 +681,58 @@ def register_builtin_scorer_handlers() -> None:
             name="faithfulness",
             handler=_faithfulness_handler,
             description="Managed LLM judge preset for faithfulness to configured context",
+            scope="item",
+            is_async=True,
+        )
+
+    if "agent_judge" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
+
+        async def _agent_judge_handler(ctx: "ScorerContext", request: Any) -> Any:
+            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+
+            config = request.config or {}
+            evidence, evidence_sources = _agent_judge_evidence(request, config)
+            criteria = config.get("criteria")
+            if not isinstance(criteria, str) or not criteria.strip():
+                criteria = AGENT_JUDGE_DEFAULT_CRITERIA
+
+            result = await llm_judge(
+                output=request.output,
+                config=LLMJudgeConfig(
+                    criteria=criteria,
+                    model=_judge_model(config),
+                    prompt_template=config.get("prompt_template"),
+                    system_prompt=config.get("system_prompt") or AGENT_JUDGE_SYSTEM_PROMPT,
+                    temperature=_judge_temperature(config),
+                    include_input=_judge_include_input(config, True),
+                    choice_scores=_judge_choice_scores(config),
+                    use_cot=bool(config.get("use_cot", False)),
+                    output_schema=config.get("output_schema")
+                    if isinstance(config.get("output_schema"), dict)
+                    else None,
+                    metadata=config.get("metadata")
+                    if isinstance(config.get("metadata"), dict)
+                    else None,
+                    tags=config.get("tags") if isinstance(config.get("tags"), list) else None,
+                ),
+                expected=request.expected,
+                input_data=request.input,
+                context_data={"agent_judge_evidence": evidence},
+            )
+            return _judge_result_to_scorer_result(
+                result,
+                {
+                    "judge_preset": "agent_judge",
+                    "judge_mode": "evidence_inspection",
+                    "agent_judge_version": "evidence_inspection_v1",
+                    "evidence_sources": evidence_sources,
+                },
+            )
+
+        _BUILTIN_JUDGE_SCORER_REGISTRY["agent_judge"] = ScorerConfig(
+            name="agent_judge",
+            handler=_agent_judge_handler,
+            description="Managed agent-as-a-judge scorer over trace and tool evidence",
             scope="item",
             is_async=True,
         )

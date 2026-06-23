@@ -1117,6 +1117,7 @@ class ExecutorMixin:
                 trace=input_dict.get("trace"),
                 config=input_dict.get("config"),
                 peer_scores=input_dict.get("peer_scores"),
+                trace_eval_context=input_dict.get("trace_eval_context"),
             )
 
             # Emit run.started
