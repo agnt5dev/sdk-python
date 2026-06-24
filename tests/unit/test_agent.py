@@ -9,14 +9,19 @@ Tests cover:
 - Handoff mechanisms
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from agnt5 import Agent, tool, Context, Sandbox
-from agnt5.agent import AgentResult, AgentContext, AgentRegistry, Handoff, handoff
-from agnt5.events import Event
-from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, MessageRole, TokenUsage
-from agnt5.lm.events import LMContentBlockStarted, LMContentBlockDelta, LMContentBlockCompleted, LMCompleted
+import pytest
+
+from agnt5 import Agent, Context, Sandbox, tool
+from agnt5.agent import AgentContext, AgentRegistry, AgentResult, Handoff, handoff
+from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, TokenUsage
+from agnt5.lm.events import (
+    LMCompleted,
+    LMContentBlockCompleted,
+    LMContentBlockDelta,
+    LMContentBlockStarted,
+)
 from agnt5.tool import ToolRegistry
 
 
@@ -295,6 +300,50 @@ def test_agent_configuration(mock_lm):
     assert agent.max_iterations == 20
 
 
+def test_agent_omits_implicit_temperature_for_openai_reasoning_models():
+    """OpenAI reasoning models should not inherit Agent's legacy temperature default."""
+    agent = Agent(
+        name="reasoning_agent",
+        model="openai/gpt-5-mini",
+        instructions="Test",
+    )
+    request = GenerateRequest(model=agent.model)
+
+    agent._apply_generation_config(request)
+
+    assert agent.temperature == 0.7
+    assert request.config.temperature is None
+
+
+def test_agent_preserves_explicit_temperature_for_openai_reasoning_models():
+    """Explicit temperatures stay configured so the provider layer can warn/drop them."""
+    agent = Agent(
+        name="reasoning_agent",
+        model="openai/gpt-5-mini",
+        instructions="Test",
+        temperature=0.2,
+    )
+    request = GenerateRequest(model=agent.model)
+
+    agent._apply_generation_config(request)
+
+    assert request.config.temperature == 0.2
+
+
+def test_agent_preserves_legacy_temperature_default_for_non_reasoning_models():
+    """Non-reasoning models keep the old implicit Agent temperature default."""
+    agent = Agent(
+        name="chat_agent",
+        model="openai/gpt-4o-mini",
+        instructions="Test",
+    )
+    request = GenerateRequest(model=agent.model)
+
+    agent._apply_generation_config(request)
+
+    assert request.config.temperature == 0.7
+
+
 # Test Agent Execution (with new string-based model API)
 
 
@@ -410,7 +459,7 @@ async def test_agent_run_with_agent_context(mock_lm):
 
         # Second message (should have conversation history)
         ctx2 = AgentContext(run_id="session-1", agent_name="ctx_agent")
-        result2 = await agent.run("Do you remember?", context=ctx2)
+        await agent.run("Do you remember?", context=ctx2)
 
         # Check that conversation history was loaded
         history = await ctx2.get_conversation_history()

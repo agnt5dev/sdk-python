@@ -64,6 +64,28 @@ from .skills import Skill, make_load_skill_tool, render_catalog, resolve_skills
 
 logger = setup_module_logger(__name__)
 
+class _DefaultTemperature(float):
+    pass
+
+
+_DEFAULT_AGENT_TEMPERATURE = _DefaultTemperature(0.7)
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    if not model.startswith("openai/"):
+        return False
+
+    model_name = model.split("/", 1)[1]
+    return (
+        model_name.startswith("gpt-5")
+        or model_name == "o1"
+        or model_name.startswith("o1-")
+        or model_name == "o3"
+        or model_name.startswith("o3-")
+        or model_name == "o4"
+        or model_name.startswith("o4-")
+    )
+
 
 def _serialize_tool_result(result: Any) -> str:
     """Serialize a tool result to JSON string, handling Pydantic models and other complex types.
@@ -148,7 +170,7 @@ class Agent:
         after_tool_callback: Optional[AfterToolCallback] = None,
         # Legacy parameters (kept for backward compatibility)
         model_name: Optional[str] = None,
-        temperature: float = 0.7,
+        temperature: Optional[float] = _DEFAULT_AGENT_TEMPERATURE,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         max_iterations: int = 10,
@@ -227,7 +249,8 @@ class Agent:
 
         # Model configuration (legacy params take precedence for backward compat)
         self.model_config = model_config
-        self.temperature = temperature
+        self._temperature_explicit = temperature is not _DEFAULT_AGENT_TEMPERATURE
+        self.temperature = None if temperature is None else float(temperature)
         self.max_tokens = max_tokens
         self.top_p = top_p
         self._built_in_tools: List[BuiltInTool] = list(built_in_tools or [])
@@ -328,6 +351,37 @@ class Agent:
             # if context:
             #     usage = getattr(response, 'usage', None)
             #     context.emit(AgentLLMCost(...))
+
+    def _temperature_for_request(self) -> Optional[float]:
+        if self._temperature_explicit:
+            return self.temperature
+        if _is_openai_reasoning_model(self.model):
+            return None
+        return self.temperature
+
+    def _apply_generation_config(
+        self,
+        request: GenerateRequest,
+        *,
+        include_built_in_tools: bool = False,
+    ) -> None:
+        temperature = self._temperature_for_request()
+        if temperature is not None:
+            request.config.temperature = temperature
+        if self.max_tokens is not None:
+            request.config.max_tokens = self.max_tokens
+        if self.top_p is not None:
+            request.config.top_p = self.top_p
+        if include_built_in_tools and self._built_in_tools:
+            request.config.built_in_tools = list(self._built_in_tools)
+
+    def _model_config_snapshot(self) -> Dict[str, Any]:
+        return {
+            "model": self.model,
+            "temperature": self._temperature_for_request(),
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+        }
 
     def to_tool(self) -> Tool:
         """Convert this agent to a tool that can be used by other agents.
@@ -887,13 +941,7 @@ class Agent:
                         messages=messages,
                         tools=tool_defs if tool_defs else [],
                     )
-                    request.config.temperature = self.temperature
-                    if self.max_tokens:
-                        request.config.max_tokens = self.max_tokens
-                    if self.top_p:
-                        request.config.top_p = self.top_p
-                    if self._built_in_tools:
-                        request.config.built_in_tools = list(self._built_in_tools)
+                    self._apply_generation_config(request, include_built_in_tools=True)
 
                     # Stream LLM call and yield events
                     response_text = ""
@@ -1159,12 +1207,7 @@ class Agent:
                                             "tool_call_index": response_tool_calls.index(tool_call),
                                         },
                                         "all_tool_calls": all_tool_calls,
-                                        "model_config": {
-                                            "model": self.model,
-                                            "temperature": self.temperature,
-                                            "max_tokens": self.max_tokens,
-                                            "top_p": self.top_p,
-                                        },
+                                        "model_config": self._model_config_snapshot(),
                                     },
                                 ) from e
 
@@ -1837,11 +1880,7 @@ class Agent:
                                 messages=messages,
                                 tools=tool_defs if tool_defs else [],
                             )
-                            request.config.temperature = self.temperature
-                            if self.max_tokens:
-                                request.config.max_tokens = self.max_tokens
-                            if self.top_p:
-                                request.config.top_p = self.top_p
+                            self._apply_generation_config(request)
                             response = await self._language_model.generate(request)
 
                             # Track cost for this LLM call
@@ -1854,11 +1893,7 @@ class Agent:
                                 messages=messages,
                                 tools=tool_defs if tool_defs else [],
                             )
-                            request.config.temperature = self.temperature
-                            if self.max_tokens:
-                                request.config.max_tokens = self.max_tokens
-                            if self.top_p:
-                                request.config.top_p = self.top_p
+                            self._apply_generation_config(request)
 
                             # Create internal LM instance for generation
                             # TODO: Use model_config when provided
@@ -2017,12 +2052,7 @@ class Agent:
                                                 "tool_call_index": response.tool_calls.index(tool_call),
                                             },
                                             "all_tool_calls": all_tool_calls,
-                                            "model_config": {
-                                                "model": self.model,
-                                                "temperature": self.temperature,
-                                                "max_tokens": self.max_tokens,
-                                                "top_p": self.top_p,
-                                            },
+                                            "model_config": self._model_config_snapshot(),
                                         },
                                     ) from e
 
@@ -2275,13 +2305,6 @@ class Agent:
         Returns:
             AgentResult with output and tool calls
         """
-        # Extract workflow context for checkpointing
-        workflow_ctx = None
-        if hasattr(context, "_workflow_entity"):
-            workflow_ctx = context
-        elif hasattr(context, "_agent_data") and "_workflow_ctx" in context._agent_data:
-            workflow_ctx = context._agent_data["_workflow_ctx"]
-
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
         agent_correlation_id = generate_cid()
 
@@ -2308,11 +2331,7 @@ class Agent:
                 messages=messages,
                 tools=tool_defs if tool_defs else [],
             )
-            request.config.temperature = self.temperature
-            if self.max_tokens:
-                request.config.max_tokens = self.max_tokens
-            if self.top_p:
-                request.config.top_p = self.top_p
+            self._apply_generation_config(request)
 
             response = await self._generate_with_callbacks(
                 context=context,
@@ -2423,12 +2442,7 @@ class Agent:
                                     "tool_call_index": response.tool_calls.index(tool_call),
                                 },
                                 "all_tool_calls": all_tool_calls,
-                                "model_config": {
-                                    "model": self.model,
-                                    "temperature": self.temperature,
-                                    "max_tokens": self.max_tokens,
-                                    "top_p": self.top_p,
-                                },
+                                "model_config": self._model_config_snapshot(),
                             },
                         ) from e
 
