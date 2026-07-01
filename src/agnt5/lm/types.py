@@ -141,6 +141,12 @@ class GenerationConfig:
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
+    cache: Optional["PromptCache"] = None
+    # Deprecated compatibility aliases. Prefer ``cache=PromptCache(...)`` or
+    # ``cache=True`` through the helper APIs.
+    cache_control: bool = False
+    cache_ttl: Optional[str] = None
+    google_cached_content: Optional[str] = None
 
     # Responses API specific
     built_in_tools: List[BuiltInTool] = field(default_factory=list)
@@ -148,6 +154,17 @@ class GenerationConfig:
     modalities: Optional[List[Modality]] = None
     store: Optional[bool] = None
     previous_response_id: Optional[str] = None
+
+
+@dataclass
+class PromptCache:
+    """Provider-neutral prompt-cache policy."""
+
+    enabled: bool = True
+    ttl: Optional[str] = None
+    key: Optional[str] = None
+    retention: Optional[str] = None
+    resource: Optional[str] = None
 
 
 @dataclass

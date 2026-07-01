@@ -4,7 +4,7 @@ import inspect
 import json
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -173,6 +173,11 @@ class Agent:
         temperature: Optional[float] = _DEFAULT_AGENT_TEMPERATURE,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
+        cache: Optional[Union[bool, lm.PromptCache, lm.ContextCache, str]] = None,
+        # Deprecated compatibility aliases. Prefer cache=True or
+        # cache=lm.PromptCache(...).
+        cache_control: bool = False,
+        cache_ttl: Optional[str] = None,
         max_iterations: int = 10,
         skills: Optional[Sequence[Union[str, "Skill"]]] = None,
         skills_dir: Optional[Union[str, Path]] = None,
@@ -207,6 +212,11 @@ class Agent:
             temperature: LLM temperature (0-1). Legacy parameter - prefer model_config.
             max_tokens: Maximum tokens in response. Legacy parameter - prefer model_config.
             top_p: Top-p sampling. Legacy parameter - prefer model_config.
+            cache: Enable provider-native prompt caching with ``True``, pass
+                ``lm.PromptCache(...)`` for TTL/key/retention hints, or pass a
+                Gemini ``lm.ContextCache`` for reusable explicit caches.
+            cache_control: Deprecated compatibility alias for ``cache=True``.
+            cache_ttl: Deprecated compatibility alias for ``cache=lm.PromptCache(ttl=...)``.
             max_iterations: Maximum reasoning iterations
             skills: On-demand skills — names (resolved against ``skills_dir``) or
                 ``Skill`` objects. Only name+description sit in context until the
@@ -253,6 +263,22 @@ class Agent:
         self.temperature = None if temperature is None else float(temperature)
         self.max_tokens = max_tokens
         self.top_p = top_p
+        self.cache = lm._coerce_prompt_cache(cache)
+        if cache_control or cache_ttl is not None:
+            if self.cache is None:
+                self.cache = lm.PromptCache(
+                    enabled=cache_control or cache_ttl is not None,
+                    ttl=cache_ttl,
+                )
+            elif cache_ttl is not None and self.cache.ttl is None:
+                self.cache = replace(self.cache, enabled=True, ttl=cache_ttl)
+        if (
+            self.cache is not None
+            and self.cache.resource is not None
+            and "/" in self.model
+            and self.model.split("/", 1)[0] not in {"google", "gemini"}
+        ):
+            raise ValueError("Explicit context caches can only be used with google/gemini models")
         self._built_in_tools: List[BuiltInTool] = list(built_in_tools or [])
 
         # Cost tracking
@@ -372,15 +398,27 @@ class Agent:
             request.config.max_tokens = self.max_tokens
         if self.top_p is not None:
             request.config.top_p = self.top_p
+        if self.cache is not None:
+            request.config.cache = self.cache
         if include_built_in_tools and self._built_in_tools:
             request.config.built_in_tools = list(self._built_in_tools)
 
     def _model_config_snapshot(self) -> Dict[str, Any]:
+        cache = None
+        if self.cache is not None:
+            cache = {
+                "enabled": self.cache.enabled,
+                "ttl": self.cache.ttl,
+                "key": self.cache.key,
+                "retention": self.cache.retention,
+                "resource": self.cache.resource,
+            }
         return {
             "model": self.model,
             "temperature": self._temperature_for_request(),
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
+            "cache": cache,
         }
 
     def to_tool(self) -> Tool:

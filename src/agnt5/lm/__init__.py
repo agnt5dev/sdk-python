@@ -12,8 +12,8 @@ Usage:
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from dataclasses import dataclass, replace
+from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Union
 
 from .._schema_utils import detect_format_type
 from ..context import get_current_context
@@ -39,6 +39,7 @@ from .types import (
     Modality,
     ModelConfig,
     Prompt,
+    PromptCache,
     PromptRef,
     ReasoningEffort,
     TokenUsage,
@@ -75,7 +76,10 @@ __all__ = [
     # Public API
     "generate",
     "stream",
+    "create_cache",
+    "delete_cache",
     # Client
+    "ContextCache",
     "LanguageModel",
     "LMClient",
     # Events
@@ -97,6 +101,7 @@ __all__ = [
     "Modality",
     "ModelConfig",
     "Prompt",
+    "PromptCache",
     "ReasoningEffort",
     "PromptRef",
     "TokenUsage",
@@ -217,6 +222,103 @@ def _runtime_llm_options(prompt_id: Optional[str] = None) -> Any:
     return None
 
 
+@dataclass(frozen=True)
+class ContextCache:
+    """Provider context-cache resource returned by ``create_cache``."""
+
+    name: str
+    model: str
+    provider: str = "google"
+
+    async def delete(self) -> None:
+        await delete_cache(self)
+
+
+def _coerce_cache_contents(contents: Union[str, Sequence[str]]) -> List[str]:
+    if isinstance(contents, str):
+        values = [contents]
+    else:
+        values = list(contents)
+
+    if not values:
+        raise ValueError("contents must include at least one item")
+    if not all(isinstance(item, str) for item in values):
+        raise TypeError("contents must be a string or a sequence of strings")
+
+    return values
+
+
+def _coerce_prompt_cache(
+    cache: Optional[Union[bool, PromptCache, ContextCache, str]],
+) -> Optional[PromptCache]:
+    if cache is None:
+        return None
+    if isinstance(cache, bool):
+        return PromptCache(enabled=cache) if cache else None
+    if isinstance(cache, PromptCache):
+        return cache
+    if isinstance(cache, ContextCache):
+        return PromptCache(enabled=True, resource=cache.name)
+    if isinstance(cache, str):
+        return PromptCache(enabled=True, resource=cache)
+    raise TypeError("cache must be a bool, PromptCache, ContextCache, or resource-name string")
+
+
+def _cache_resource_name(cache: Union[ContextCache, str]) -> str:
+    if isinstance(cache, ContextCache):
+        return cache.name
+    if isinstance(cache, str):
+        return cache
+    raise TypeError("cache must be a ContextCache or resource-name string")
+
+
+async def create_cache(
+    model: str,
+    contents: Union[str, Sequence[str]],
+    *,
+    system_prompt: Optional[str] = None,
+    system: Optional[str] = None,
+    ttl_seconds: Optional[int] = None,
+) -> ContextCache:
+    """Create a Gemini explicit context cache."""
+    if system_prompt is not None and system is not None:
+        raise ValueError("Provide either 'system_prompt' or 'system', not both")
+
+    provider, model_name = _parse_model(model)
+    if provider not in {"google", "gemini"}:
+        raise ValueError("Explicit context caching is only supported for google/gemini models")
+
+    client = LMClient(provider=provider.lower())
+    full_model = f"{provider}/{model_name}"
+    name = await client.create_cache(
+        model=full_model,
+        contents=_coerce_cache_contents(contents),
+        system_prompt=system_prompt if system_prompt is not None else system,
+        ttl_seconds=ttl_seconds,
+    )
+    return ContextCache(name=name, model=full_model, provider=provider)
+
+
+async def delete_cache(
+    cache: Union[ContextCache, str],
+    *,
+    provider: Optional[str] = None,
+) -> None:
+    """Delete a Gemini explicit context cache."""
+    name = _cache_resource_name(cache)
+
+    cache_provider = provider
+    if cache_provider is None and isinstance(cache, ContextCache):
+        cache_provider = cache.provider
+    cache_provider = cache_provider or "google"
+
+    if cache_provider not in {"google", "gemini"}:
+        raise ValueError("Explicit context cache deletion is only supported for google/gemini")
+
+    client = LMClient(provider=cache_provider)
+    await client.delete_cache(name)
+
+
 async def generate(
     model: str,
     prompt: Optional[Union[str, Prompt, Dict[str, Any]]] = None,
@@ -233,6 +335,7 @@ async def generate(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
+    cache: Optional[Union[bool, PromptCache, ContextCache, str]] = None,
     response_format: Optional[Any] = None,
     # Responses API specific
     built_in_tools: Optional[List[BuiltInTool]] = None,
@@ -251,6 +354,9 @@ async def generate(
         temperature: Sampling temperature (0.0-2.0)
         max_tokens: Maximum tokens to generate
         top_p: Nucleus sampling parameter
+        cache: Enable provider-native prompt caching with ``True``, pass
+            ``PromptCache(...)`` for TTL/key/retention hints, or pass a
+            ``ContextCache`` for reusable explicit caches.
         response_format: Pydantic model, dataclass, or JSON schema for structured output
         built_in_tools: Built-in tools (OpenAI Responses API)
         reasoning_effort: Reasoning effort for o-series models
@@ -315,6 +421,10 @@ async def generate(
     provider, model_name = _parse_model(effective_model)
     model = f"{provider}/{model_name}"
 
+    cache_config = _coerce_prompt_cache(cache)
+    if cache_config is not None and cache_config.resource is not None and provider not in {"google", "gemini"}:
+        raise ValueError("Explicit context caches can only be used with google/gemini models")
+
     response_schema_json = None
     if response_format is not None:
         _, json_schema = detect_format_type(response_format)
@@ -326,6 +436,7 @@ async def generate(
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
+        cache=cache_config,
         built_in_tools=built_in_tools or [],
         reasoning_effort=reasoning_effort,
         modalities=modalities,
@@ -353,6 +464,7 @@ async def stream(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
+    cache: Optional[Union[bool, PromptCache, ContextCache, str]] = None,
     # Responses API specific
     built_in_tools: Optional[List[BuiltInTool]] = None,
     reasoning_effort: Optional[ReasoningEffort] = None,
@@ -370,6 +482,9 @@ async def stream(
         temperature: Sampling temperature (0.0-2.0)
         max_tokens: Maximum tokens to generate
         top_p: Nucleus sampling parameter
+        cache: Enable provider-native prompt caching with ``True``, pass
+            ``PromptCache(...)`` for TTL/key/retention hints, or pass a
+            ``ContextCache`` for reusable explicit caches.
         built_in_tools: Built-in tools (OpenAI Responses API)
         reasoning_effort: Reasoning effort for o-series models
         modalities: Output modalities (text, audio, image)
@@ -383,12 +498,17 @@ async def stream(
     model = f"{provider}/{model_name}"
     message_objects = _build_messages(prompt, messages)
 
+    cache_config = _coerce_prompt_cache(cache)
+    if cache_config is not None and cache_config.resource is not None and provider not in {"google", "gemini"}:
+        raise ValueError("Explicit context caches can only be used with google/gemini models")
+
     client = LMClient(provider=provider.lower())
 
     config = GenerationConfig(
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
+        cache=cache_config,
         built_in_tools=built_in_tools or [],
         reasoning_effort=reasoning_effort,
         modalities=modalities,

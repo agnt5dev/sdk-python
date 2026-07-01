@@ -8,8 +8,9 @@ use agnt5_sdk_core::lm::{
     ContentBlockType, DeepSeekProvider, FireworksProvider, GenerateRequest, GenerateResponse,
     GenerationConfig, GoogleProvider, GroqProvider, HuggingFaceProvider, JsonSchemaFormat,
     LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, OllamaProvider,
-    OpenAiProvider, OpenRouterProvider, ResponseFormat, StreamChunk, StreamHandle, StreamRequest,
-    TogetherProvider, TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
+    OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat, StreamChunk,
+    StreamHandle, StreamRequest, TogetherProvider, TokenUsage, ToolCall, ToolChoice,
+    ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
 use opentelemetry::Context as OtelContext;
@@ -133,6 +134,37 @@ impl ProviderKind {
             ProviderKind::HuggingFace(provider) => provider.stream(request).await,
         }
     }
+
+    async fn create_cached_content(
+        &self,
+        model: &str,
+        system: Option<String>,
+        contents: Vec<String>,
+        ttl_seconds: Option<u32>,
+    ) -> SdkResult<String> {
+        match self {
+            ProviderKind::Google(provider) => {
+                provider
+                    .create_cached_content(model, system, contents, ttl_seconds)
+                    .await
+            }
+            _ => Err(SdkError::Configuration {
+                message: "explicit context caching is only supported for Google Gemini".to_string(),
+                field: Some("provider".to_string()),
+            }),
+        }
+    }
+
+    async fn delete_cached_content(&self, name: &str) -> SdkResult<()> {
+        match self {
+            ProviderKind::Google(provider) => provider.delete_cached_content(name).await,
+            _ => Err(SdkError::Configuration {
+                message: "explicit context cache deletion is only supported for Google Gemini"
+                    .to_string(),
+                field: Some("provider".to_string()),
+            }),
+        }
+    }
 }
 
 /// Python wrapper for the simplified LanguageModel API.
@@ -185,7 +217,12 @@ impl PyLanguageModel {
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
         let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let prompt_cache_kw = get_optional_string(kwargs_ref, "prompt_cache")?;
+        let cache_control_kw = get_optional_bool(kwargs_ref, "cache_control")?;
+        let cache_ttl_kw = get_optional_string(kwargs_ref, "cache_ttl")?;
+        let google_cached_content_kw = get_optional_string(kwargs_ref, "google_cached_content")?;
         let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
+        let prompt_cache = parse_prompt_cache_json(prompt_cache_kw.as_deref())?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -222,6 +259,14 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+
+        apply_prompt_cache_config(
+            &mut request.config,
+            prompt_cache,
+            cache_control_kw,
+            cache_ttl_kw,
+            google_cached_content_kw,
+        );
 
         let provider = self.get_or_init_provider(&provider_name)?;
 
@@ -259,6 +304,54 @@ impl PyLanguageModel {
         })
     }
 
+    #[pyo3(signature = (model, contents, system_prompt=None, ttl_seconds=None, provider=None))]
+    fn create_cache<'py>(
+        &self,
+        py: Python<'py>,
+        model: String,
+        contents: String,
+        system_prompt: Option<String>,
+        ttl_seconds: Option<u32>,
+        provider: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let contents: Vec<String> = serde_json::from_str(&contents)
+            .map_err(|err| PyValueError::new_err(format!("Failed to parse contents: {err}")))?;
+        let (model, provider_name) = self.resolve_model_and_provider(Some(model), provider)?;
+        let provider = self.get_or_init_provider(&provider_name)?;
+
+        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            let name = provider
+                .create_cached_content(&model, system_prompt, contents, ttl_seconds)
+                .await
+                .map_err(sdk_error_to_py)?;
+            Ok(name)
+        })
+    }
+
+    #[pyo3(signature = (name, provider=None))]
+    fn delete_cache<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        provider: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let provider_name = provider
+            .or_else(|| self.default_provider.clone())
+            .unwrap_or_else(|| "google".to_string())
+            .to_lowercase();
+        let provider = self.get_or_init_provider(&provider_name)?;
+
+        let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
+        pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+            provider
+                .delete_cached_content(&name)
+                .await
+                .map_err(sdk_error_to_py)?;
+            Ok(())
+        })
+    }
+
     #[pyo3(signature = (prompt, **kwargs))]
     fn stream<'py>(
         &self,
@@ -280,7 +373,12 @@ impl PyLanguageModel {
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
         let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let prompt_cache_kw = get_optional_string(kwargs_ref, "prompt_cache")?;
+        let cache_control_kw = get_optional_bool(kwargs_ref, "cache_control")?;
+        let cache_ttl_kw = get_optional_string(kwargs_ref, "cache_ttl")?;
+        let google_cached_content_kw = get_optional_string(kwargs_ref, "google_cached_content")?;
         let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
+        let prompt_cache = parse_prompt_cache_json(prompt_cache_kw.as_deref())?;
         let response_format =
             parse_response_format(response_format_kw.as_deref(), response_schema_kw.as_deref())?;
         let tools = parse_tools_json(tools_kw.as_deref())?;
@@ -317,6 +415,14 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+
+        apply_prompt_cache_config(
+            &mut request.config,
+            prompt_cache,
+            cache_control_kw,
+            cache_ttl_kw,
+            google_cached_content_kw,
+        );
 
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_delta = model.clone();
@@ -420,7 +526,12 @@ impl PyLanguageModel {
         let tool_choice_kw = get_optional_string(kwargs_ref, "tool_choice")?;
         let previous_response_id_kw = get_optional_string(kwargs_ref, "previous_response_id")?;
         let built_in_tools_kw = get_optional_string(kwargs_ref, "built_in_tools")?;
+        let prompt_cache_kw = get_optional_string(kwargs_ref, "prompt_cache")?;
+        let cache_control_kw = get_optional_bool(kwargs_ref, "cache_control")?;
+        let cache_ttl_kw = get_optional_string(kwargs_ref, "cache_ttl")?;
+        let google_cached_content_kw = get_optional_string(kwargs_ref, "google_cached_content")?;
         let built_in_tools = parse_built_in_tools_json(built_in_tools_kw.as_deref())?;
+        let prompt_cache = parse_prompt_cache_json(prompt_cache_kw.as_deref())?;
 
         let response_format =
             parse_response_format(response_format_str.as_deref(), response_schema.as_deref())?;
@@ -456,6 +567,14 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+
+        apply_prompt_cache_config(
+            &mut request.config,
+            prompt_cache,
+            cache_control_kw,
+            cache_ttl_kw,
+            google_cached_content_kw,
+        );
 
         let provider = self.get_or_init_provider(&provider_name)?;
         let model_for_chunks = model.clone();
@@ -973,6 +1092,21 @@ fn get_optional_u32(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<O
     Ok(None)
 }
 
+fn get_optional_bool(kwargs: Option<&Bound<'_, PyDict>>, key: &str) -> PyResult<Option<bool>> {
+    if let Some(kwargs) = kwargs {
+        if let Some(value) = kwargs.get_item(key)? {
+            if value.is_none() {
+                return Ok(None);
+            }
+            return value
+                .extract::<bool>()
+                .map(Some)
+                .map_err(|_| PyValueError::new_err(format!("Expected `{key}` to be a boolean")));
+        }
+    }
+    Ok(None)
+}
+
 fn parse_response_format(
     format: Option<&str>,
     schema_json: Option<&str>,
@@ -1056,6 +1190,69 @@ struct ToolSpec {
     parameters: Option<Value>,
     #[serde(default)]
     strict: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct PromptCacheSpec {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    ttl: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    retention: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+}
+
+fn parse_prompt_cache_json(json: Option<&str>) -> PyResult<Option<PromptCacheConfig>> {
+    let raw = match json {
+        None => return Ok(None),
+        Some(raw) if raw.trim().is_empty() => return Ok(None),
+        Some(raw) => raw,
+    };
+
+    let spec: PromptCacheSpec = serde_json::from_str(raw)
+        .map_err(|err| PyValueError::new_err(format!("Failed to parse prompt_cache: {err}")))?;
+    Ok(Some(PromptCacheConfig {
+        enabled: spec.enabled.unwrap_or(true),
+        ttl: spec.ttl,
+        key: spec.key,
+        retention: spec.retention,
+        resource: spec.resource,
+    }))
+}
+
+fn apply_prompt_cache_config(
+    config: &mut GenerationConfig,
+    prompt_cache: Option<PromptCacheConfig>,
+    cache_control: Option<bool>,
+    cache_ttl: Option<String>,
+    google_cached_content: Option<String>,
+) {
+    if let Some(cache) = prompt_cache {
+        config.prompt_cache = Some(cache);
+    }
+
+    if cache_control.is_some() || cache_ttl.is_some() || google_cached_content.is_some() {
+        let mut cache = config
+            .prompt_cache
+            .take()
+            .unwrap_or_else(PromptCacheConfig::enabled);
+        if let Some(enabled) = cache_control {
+            cache.enabled = enabled;
+        }
+        if let Some(ttl) = cache_ttl {
+            cache.ttl = Some(ttl);
+            cache.enabled = true;
+        }
+        if let Some(name) = google_cached_content {
+            cache.resource = Some(name);
+            cache.enabled = true;
+        }
+        config.prompt_cache = Some(cache);
+    }
 }
 
 fn parse_built_in_tools_json(json: Option<&str>) -> PyResult<Vec<BuiltInTool>> {

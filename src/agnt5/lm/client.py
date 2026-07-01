@@ -315,6 +315,22 @@ class LMClient(LanguageModel):
             kwargs["max_tokens"] = request.config.max_tokens
         if request.config.top_p is not None:
             kwargs["top_p"] = request.config.top_p
+        if request.config.cache is not None:
+            kwargs["prompt_cache"] = json.dumps(
+                {
+                    "enabled": request.config.cache.enabled,
+                    "ttl": request.config.cache.ttl,
+                    "key": request.config.cache.key,
+                    "retention": request.config.cache.retention,
+                    "resource": request.config.cache.resource,
+                }
+            )
+        if request.config.cache_control:
+            kwargs["cache_control"] = request.config.cache_control
+        if request.config.cache_ttl is not None:
+            kwargs["cache_ttl"] = request.config.cache_ttl
+        if request.config.google_cached_content is not None:
+            kwargs["google_cached_content"] = request.config.google_cached_content
         if request.response_schema is not None:
             kwargs["response_schema_kw"] = request.response_schema
         if request.prompt_ref is not None:
@@ -353,6 +369,28 @@ class LMClient(LanguageModel):
             kwargs["tool_choice"] = json.dumps(request.tool_choice.value)
 
         return kwargs
+
+    async def create_cache(
+        self,
+        *,
+        model: str,
+        contents: List[str],
+        system_prompt: Optional[str] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> str:
+        """Create a Gemini explicit context cache and return its resource name."""
+        contents_json = json.dumps(contents)
+        return await self._rust_lm.create_cache(
+            model=model,
+            contents=contents_json,
+            system_prompt=system_prompt,
+            ttl_seconds=ttl_seconds,
+            provider=self._provider,
+        )
+
+    async def delete_cache(self, name: str) -> None:
+        """Delete a Gemini explicit context cache by resource name."""
+        await self._rust_lm.delete_cache(name=name, provider=self._provider)
 
     def _build_prompt_messages(self, request: GenerateRequest) -> List[Dict[str, Any]]:
         """Build message list for Rust."""

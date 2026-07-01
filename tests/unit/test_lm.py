@@ -91,6 +91,52 @@ class MockAsyncStreamIterator:
         return chunk
 
 
+def test_lm_client_build_kwargs_for_prompt_cache_options():
+    import json
+
+    from agnt5.lm import GenerateRequest, GenerationConfig, LMClient, Message, PromptCache
+
+    with patch("agnt5.lm.client.RustLanguageModel"):
+        client = LMClient(provider="anthropic")
+
+    request = GenerateRequest(
+        model="anthropic/claude-3-5-haiku-latest",
+        messages=[Message.user("hello")],
+        config=GenerationConfig(cache=PromptCache(ttl="1h", key="tenant-a", retention="24h")),
+    )
+
+    kwargs = client._build_kwargs(request, request.model)
+    prompt_cache = json.loads(kwargs["prompt_cache"])
+
+    assert prompt_cache == {
+        "enabled": True,
+        "ttl": "1h",
+        "key": "tenant-a",
+        "retention": "24h",
+        "resource": None,
+    }
+
+
+def test_lm_client_build_kwargs_for_gemini_cached_content():
+    import json
+
+    from agnt5.lm import GenerateRequest, GenerationConfig, LMClient, Message, PromptCache
+
+    with patch("agnt5.lm.client.RustLanguageModel"):
+        client = LMClient(provider="google")
+
+    request = GenerateRequest(
+        model="google/gemini-2.5-flash",
+        messages=[Message.user("question")],
+        config=GenerationConfig(cache=PromptCache(resource="cachedContents/cache_123")),
+    )
+
+    kwargs = client._build_kwargs(request, request.model)
+    prompt_cache = json.loads(kwargs["prompt_cache"])
+
+    assert prompt_cache["resource"] == "cachedContents/cache_123"
+
+
 @pytest.fixture
 def mock_rust_stream_chunks():
     """Mock Rust stream response chunks with proper structure.

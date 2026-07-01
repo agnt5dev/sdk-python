@@ -54,6 +54,7 @@ class MockLanguageModel(LanguageModel):
 
     async def stream(self, request: GenerateRequest):
         # Tests below force the generate() path by setting built_in_tools or tools.
+        self.requests.append(request)
         response_text = self.responses[min(self.call_count, len(self.responses) - 1)]
         self.call_count += 1
         yield LMContentBlockStarted(name="mock-model", correlation_id="c", parent_correlation_id="p", block_type="text", index=0)
@@ -94,6 +95,27 @@ async def test_built_in_tools_forwarded_to_request_config():
     sent = mock_lm.requests[0].config.built_in_tools
     assert sent == [BuiltInTool.WEB_SEARCH]
     assert "sky is blue" in result.output
+
+
+@pytest.mark.asyncio
+async def test_agent_prompt_cache_forwarded_to_request_config():
+    """Agent passes prompt-cache options through to GenerationConfig."""
+    from agnt5 import lm
+
+    mock_lm = MockLanguageModel(responses=["Cached answer."])
+
+    agent = Agent(
+        name="cache_agent",
+        model=mock_lm,
+        instructions="Use the stable instructions.",
+        cache=lm.PromptCache(ttl="1h"),
+    )
+
+    await agent.run("Answer from the cached context.")
+
+    assert mock_lm.requests, "agent should have made at least one LM request"
+    sent = mock_lm.requests[0].config
+    assert sent.cache == lm.PromptCache(ttl="1h")
 
 
 @pytest.mark.asyncio
