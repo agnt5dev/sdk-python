@@ -10,6 +10,8 @@ Tests cover:
 - Error handling
 """
 
+import json
+
 import pytest
 
 from agnt5 import Context, tool
@@ -222,6 +224,45 @@ async def test_tool_invocation():
 
     result = await tool_instance.invoke(ctx, a=5, b=3)
     assert result == 8
+
+
+@pytest.mark.asyncio
+async def test_eval_tool_fault_injection_from_runtime_metadata():
+    """Eval target metadata can inject deterministic tool faults."""
+    @tool
+    async def search(ctx: Context, query: str) -> dict:
+        return {"title": query}
+
+    ctx = Context(
+        run_id="test-123",
+        correlation_id="corr-123",
+        parent_correlation_id="parent-123",
+        trace_metadata={
+            "agnt5_eval_role": "target",
+            "agnt5.eval.tool_faults": json.dumps([
+                {
+                    "tool": "search",
+                    "error_code": "SIMULATED_TIMEOUT",
+                    "message": "search timed out",
+                    "times": 1,
+                }
+            ]),
+        },
+    )
+    with pytest.raises(RuntimeError, match="SIMULATED_TIMEOUT: search timed out"):
+        await search.invoke(ctx, query="first")
+    assert await search.invoke(ctx, query="second") == {"title": "second"}
+
+    non_target = Context(
+        run_id="test-456",
+        correlation_id="corr-456",
+        parent_correlation_id="parent-456",
+        trace_metadata={
+            "agnt5_eval_role": "scorer",
+            "agnt5.eval.tool_faults": json.dumps([{"tool": "search"}]),
+        },
+    )
+    assert await search.invoke(non_target, query="safe") == {"title": "safe"}
 
 
 @pytest.mark.asyncio

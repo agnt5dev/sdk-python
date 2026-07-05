@@ -189,7 +189,9 @@ class Client:
         # Use provided values or fallback to environment variables
         self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
         self.tenant_id = tenant_id or os.environ.get(AGNT5_TENANT_ID_ENV)
-        self.deployment_id = deployment_id or os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
+        ambient_deployment_id = os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
+        self.deployment_id = deployment_id or ambient_deployment_id
+        self._deployment_id_is_ambient = deployment_id is None and bool(ambient_deployment_id)
 
         # Validate if the key starts with "agnt5_sk_"
         if self.api_key and not self.api_key.startswith("agnt5_sk_"):
@@ -202,6 +204,8 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         tenant_override: Optional[str] = None,
+        deployment_id: Optional[str] = None,
+        include_ambient_deployment_id: bool = True,
     ) -> Dict[str, str]:
         """Build request headers with authentication and optional session/user context.
 
@@ -210,18 +214,26 @@ class Client:
             user_id: User identifier for user-scoped memory
             tenant_override: Per-call sub-tenant override. Wins over the
                              client-level `tenant_id` when set.
+            deployment_id: Per-call deployment ID override.
+            include_ambient_deployment_id: Include AGNT5_DEPLOYMENT_ID-derived
+                deployment context when no explicit deployment is provided.
 
         Returns:
             Dictionary of HTTP headers
         """
         effective_tenant = tenant_override if tenant_override is not None else self.tenant_id
+        effective_deployment_id = deployment_id
+        if effective_deployment_id is None:
+            if include_ambient_deployment_id or not self._deployment_id_is_ambient:
+                effective_deployment_id = self.deployment_id
+
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
         if effective_tenant:
             headers["X-TENANT-ID"] = effective_tenant
-        if self.deployment_id:
-            headers["X-DEPLOYMENT-ID"] = self.deployment_id
+        if effective_deployment_id:
+            headers["X-DEPLOYMENT-ID"] = effective_deployment_id
         if session_id:
             headers["X-Session-ID"] = session_id
         if user_id:
@@ -239,6 +251,7 @@ class Client:
         tenant: Optional[str] = None,
         timeout: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
+        deployment_id: Optional[str] = None,
     ) -> RunResponse[Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -254,6 +267,8 @@ class Client:
             tenant: Sub-tenant override for this call (X-TENANT-ID). Opaque
                 customer string. Wins over client-level tenant_id when set.
                 See Client.__init__ docstring for semantics.
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Request timeout in seconds (optional, defaults to client timeout)
             headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
 
@@ -291,7 +306,11 @@ class Client:
 
         # Build headers and merge with custom headers
         request_headers = self._build_headers(
-            session_id=session_id, user_id=user_id, tenant_override=tenant
+            session_id=session_id,
+            user_id=user_id,
+            tenant_override=tenant,
+            deployment_id=deployment_id,
+            include_ambient_deployment_id=False,
         )
         if headers:
             request_headers.update(headers)
@@ -375,6 +394,7 @@ class Client:
         component_type: str = "function",
         metadata: Optional[Dict[str, str]] = None,
         tenant: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -393,6 +413,8 @@ class Client:
                 forwarded to the worker handling the job.
             tenant: Sub-tenant override for this call (X-TENANT-ID). See
                 Client.__init__ docstring.
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -436,7 +458,11 @@ class Client:
         response = self._client.post(
             url,
             json=request_body,
-            headers=self._build_headers(tenant_override=tenant),
+            headers=self._build_headers(
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
         )
 
         # Handle errors
@@ -637,6 +663,7 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> EvalResponse[Any]:
         """Evaluate a component's output using specified scorers.
 
@@ -653,6 +680,8 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Request timeout in seconds (optional, defaults to client timeout)
 
         Returns:
@@ -728,7 +757,12 @@ class Client:
         url = urljoin(self.gateway_url + "/", "v1/eval")
 
         # Build headers and make request
-        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+        request_headers = self._build_headers(
+            session_id=session_id,
+            user_id=user_id,
+            deployment_id=deployment_id,
+            include_ambient_deployment_id=False,
+        )
 
         response = self._client.post(
             url,
@@ -772,6 +806,8 @@ class Client:
         component: str,
         input_data: Optional[Dict[str, Any]] = None,
         component_type: str = "function",
+        tenant: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ):
         """Stream responses from a component using Server-Sent Events (SSE).
 
@@ -782,6 +818,9 @@ class Client:
             component: Name of the component to execute
             input_data: Input data for the component (will be sent as JSON body)
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
+            tenant: Sub-tenant override for this call (optional)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
 
         Yields:
             String chunks as they arrive from the component
@@ -808,7 +847,11 @@ class Client:
             "POST",
             url,
             json=input_data,
-            headers=self._build_headers(),
+            headers=self._build_headers(
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
             timeout=300.0,  # 5 minute timeout for streaming
         ) as response:
             # Check for errors
@@ -878,7 +921,9 @@ class Client:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant: Optional[str] = None,
         timeout: float = 300.0,
+        deployment_id: Optional[str] = None,
     ) -> Iterator[ReceivedEvent]:
         """Stream events from a component execution.
 
@@ -892,6 +937,9 @@ class Client:
             component_type: Type of component - "function", "workflow", "agent", "tool"
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            tenant: Sub-tenant override for this call (optional)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
 
         Yields:
@@ -931,7 +979,13 @@ class Client:
             "POST",
             url,
             json=input_data,
-            headers=self._build_headers(session_id=session_id, user_id=user_id),
+            headers=self._build_headers(
+                session_id=session_id,
+                user_id=user_id,
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
             timeout=timeout,
         ) as response:
             # Check for errors
@@ -1086,6 +1140,7 @@ class Client:
         item_timeout_ms: Optional[int] = None,
         metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs.
 
@@ -1109,6 +1164,8 @@ class Client:
             metadata: Optional batch-level metadata key-value pairs. Merged with
                 per-item metadata (item metadata takes precedence on key conflicts).
                 In managed edition this is stored on each job queue entry.
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: HTTP request timeout in seconds (optional)
 
         Returns:
@@ -1179,7 +1236,10 @@ class Client:
         if metadata:
             request_body["metadata"] = metadata
 
-        headers = self._build_headers()
+        headers = self._build_headers(
+            deployment_id=deployment_id,
+            include_ambient_deployment_id=False,
+        )
         response = self._client.post(url, json=request_body, headers=headers, timeout=timeout)
         response.raise_for_status()
 
@@ -1196,6 +1256,7 @@ class Client:
         component_type: str = "function",
         max_concurrency: int = 10,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> "BatchEvalResult":
         """Evaluate a component in batch with multiple inputs and scoring.
 
@@ -1209,6 +1270,8 @@ class Client:
             expected: Optional list of expected outputs (parallel to items)
             component_type: Type of component - "function", "workflow", "agent" (default: "function")
             max_concurrency: Maximum evaluations to run in parallel (default: 10)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Per-item timeout in seconds (optional)
 
         Returns:
@@ -1285,6 +1348,7 @@ class Client:
                         expected=item.expected,
                         scorers=scorers,
                         component_type=component_type,
+                        deployment_id=deployment_id,
                         timeout=timeout,
                     )
 
@@ -1869,7 +1933,9 @@ class AsyncClient:
         # Use provided values or fallback to environment variables
         self.api_key = api_key or os.environ.get(AGNT5_API_KEY_ENV)
         self.tenant_id = tenant_id or os.environ.get(AGNT5_TENANT_ID_ENV)
-        self.deployment_id = deployment_id or os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
+        ambient_deployment_id = os.environ.get(AGNT5_DEPLOYMENT_ID_ENV)
+        self.deployment_id = deployment_id or ambient_deployment_id
+        self._deployment_id_is_ambient = deployment_id is None and bool(ambient_deployment_id)
         self._client: Optional[httpx.AsyncClient] = None
 
     def _build_headers(
@@ -1877,6 +1943,8 @@ class AsyncClient:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         tenant_override: Optional[str] = None,
+        deployment_id: Optional[str] = None,
+        include_ambient_deployment_id: bool = True,
     ) -> Dict[str, str]:
         """Build request headers with authentication and optional session/user context.
 
@@ -1885,18 +1953,26 @@ class AsyncClient:
             user_id: User identifier for user-scoped memory
             tenant_override: Per-call sub-tenant override. Wins over the
                              client-level `tenant_id` when set.
+            deployment_id: Per-call deployment ID override.
+            include_ambient_deployment_id: Include AGNT5_DEPLOYMENT_ID-derived
+                deployment context when no explicit deployment is provided.
 
         Returns:
             Dictionary of HTTP headers
         """
         effective_tenant = tenant_override if tenant_override is not None else self.tenant_id
+        effective_deployment_id = deployment_id
+        if effective_deployment_id is None:
+            if include_ambient_deployment_id or not self._deployment_id_is_ambient:
+                effective_deployment_id = self.deployment_id
+
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-KEY"] = self.api_key
         if effective_tenant:
             headers["X-TENANT-ID"] = effective_tenant
-        if self.deployment_id:
-            headers["X-DEPLOYMENT-ID"] = self.deployment_id
+        if effective_deployment_id:
+            headers["X-DEPLOYMENT-ID"] = effective_deployment_id
         if session_id:
             headers["X-Session-ID"] = session_id
         if user_id:
@@ -1934,6 +2010,7 @@ class AsyncClient:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         tenant: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ) -> RunResponse[Any]:
         """Execute a component asynchronously and wait for the result.
 
@@ -1944,6 +2021,8 @@ class AsyncClient:
             session_id: Session identifier for multi-turn conversations
             user_id: User identifier for user-scoped memory
             tenant: Sub-tenant override for this call (X-TENANT-ID).
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
 
         Returns:
             RunResponse containing the output and metadata
@@ -1961,7 +2040,11 @@ class AsyncClient:
             url,
             json=input_data,
             headers=self._build_headers(
-                session_id=session_id, user_id=user_id, tenant_override=tenant
+                session_id=session_id,
+                user_id=user_id,
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
             ),
         )
 
@@ -2000,7 +2083,9 @@ class AsyncClient:
         component_type: str = "function",
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant: Optional[str] = None,
         timeout: float = 300.0,
+        deployment_id: Optional[str] = None,
     ) -> AsyncIterator[ReceivedEvent]:
         """Async stream events from a component execution.
 
@@ -2014,6 +2099,9 @@ class AsyncClient:
             component_type: Type of component - "function", "workflow", "agent", "tool"
             session_id: Session identifier for multi-turn conversations
             user_id: User identifier for user-scoped memory
+            tenant: Sub-tenant override for this call (optional)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
 
         Yields:
@@ -2046,7 +2134,13 @@ class AsyncClient:
             "POST",
             url,
             json=input_data,
-            headers=self._build_headers(session_id=session_id, user_id=user_id),
+            headers=self._build_headers(
+                session_id=session_id,
+                user_id=user_id,
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
             timeout=timeout,
         ) as response:
             if response.status_code != 200:
@@ -2104,6 +2198,7 @@ class AsyncClient:
         component_type: str = "function",
         metadata: Optional[Dict[str, str]] = None,
         tenant: Optional[str] = None,
+        deployment_id: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -2118,6 +2213,8 @@ class AsyncClient:
                 In managed edition, metadata is stored on the job queue entry and
                 forwarded to the worker handling the job.
             tenant: Sub-tenant override for this call (X-TENANT-ID).
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -2137,7 +2234,11 @@ class AsyncClient:
         response = await client.post(
             url,
             json=request_body,
-            headers=self._build_headers(tenant_override=tenant),
+            headers=self._build_headers(
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
         )
         response.raise_for_status()
 
@@ -2251,6 +2352,7 @@ class AsyncClient:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> EvalResponse[Any]:
         """Evaluate a component's output using specified scorers.
 
@@ -2267,6 +2369,8 @@ class AsyncClient:
             component_type: Type of component - "function", "workflow", "agent", "tool" (default: "function")
             session_id: Session identifier for multi-turn conversations (optional)
             user_id: User identifier for user-scoped memory (optional)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Request timeout in seconds (optional, defaults to client timeout)
 
         Returns:
@@ -2336,7 +2440,12 @@ class AsyncClient:
         url = urljoin(self.gateway_url + "/", "v1/eval")
 
         # Build headers and make request
-        request_headers = self._build_headers(session_id=session_id, user_id=user_id)
+        request_headers = self._build_headers(
+            session_id=session_id,
+            user_id=user_id,
+            deployment_id=deployment_id,
+            include_ambient_deployment_id=False,
+        )
 
         response = await client.post(
             url,
@@ -2386,6 +2495,7 @@ class AsyncClient:
         item_timeout_ms: Optional[int] = None,
         metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs asynchronously.
 
@@ -2409,6 +2519,8 @@ class AsyncClient:
             metadata: Optional batch-level metadata key-value pairs. Merged with
                 per-item metadata (item metadata takes precedence on key conflicts).
                 In managed edition this is stored on each job queue entry.
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: HTTP request timeout in seconds (optional)
 
         Returns:
@@ -2480,7 +2592,10 @@ class AsyncClient:
             request_body["metadata"] = metadata
 
         client = await self._ensure_client()
-        headers = self._build_headers()
+        headers = self._build_headers(
+            deployment_id=deployment_id,
+            include_ambient_deployment_id=False,
+        )
         response = await client.post(url, json=request_body, headers=headers, timeout=timeout)
         response.raise_for_status()
 
@@ -2497,6 +2612,7 @@ class AsyncClient:
         component_type: str = "function",
         max_concurrency: int = 10,
         timeout: Optional[float] = None,
+        deployment_id: Optional[str] = None,
     ) -> "BatchEvalResult":
         """Evaluate a component in batch with multiple inputs and scoring.
 
@@ -2510,6 +2626,8 @@ class AsyncClient:
             expected: Optional list of expected outputs (parallel to items)
             component_type: Type of component - "function", "workflow", "agent" (default: "function")
             max_concurrency: Maximum evaluations to run in parallel (default: 10)
+            deployment_id: Explicit deployment ID for this call. Ambient
+                AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Per-item timeout in seconds (optional)
 
         Returns:
@@ -2568,6 +2686,7 @@ class AsyncClient:
                     expected=item.expected,
                     scorers=scorers,
                     component_type=component_type,
+                    deployment_id=deployment_id,
                     timeout=timeout,
                 )
 

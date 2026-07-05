@@ -19,6 +19,7 @@ from . import chat
 from . import eval
 from . import events
 from . import lm
+from . import serverless
 from .batch import (
     BatchConfig,
     BatchError,
@@ -257,6 +258,7 @@ __all__ = [
     "eval",
     "events",
     "lm",
+    "serverless",
     # Chat SDK
     "ChatBot",
     "SlackConfig",
