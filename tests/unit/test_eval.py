@@ -1686,6 +1686,52 @@ class TestLLMJudge:
         assert "web_search" in prompt
         assert "step_efficiency" in prompt
 
+    def test_goal_success_builtin_handler_includes_session_evidence(self, monkeypatch):
+        """Goal success judges outcome using trace context and session evidence."""
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = '{"score":0.9,"passed":true,"explanation":"goal achieved","label":"pass"}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            input={"goal": "Refund the order"},
+            output={"status": "refunded"},
+            expected={"status": "refunded"},
+            trace_eval_context={
+                "schema_version": "agnt5.eval.trace_eval_context.v1",
+                "features": {"tool_call_count": 2, "error_count": 0},
+            },
+            config={
+                "model": "gpt-test",
+                "session_fields": ["session.goal"],
+                "journal_event_fields": ["journal.events"],
+            },
+        )
+        result = asyncio.run(scorer_mod.run_scorer("goal_success", request))
+
+        prompt = captured["messages"][1]["content"]
+        assert result.passed is True
+        assert result.metadata["judge_preset"] == "goal_success"
+        assert "trace_eval_context" in result.metadata["evidence_sources"]
+        assert "session_fields" in result.metadata["evidence_sources"]
+        assert "journal_event_fields" in result.metadata["evidence_sources"]
+        assert "goal_success_evidence" in prompt
+        assert "session.goal" in prompt
+
     def test_builtin_judge_scorers_are_not_custom_registry_entries(self):
         """Built-in judges are AGNT5-owned and separate from custom scorers."""
         scorer_mod = importlib.import_module("agnt5.scorer")
@@ -1697,10 +1743,12 @@ class TestLLMJudge:
         assert scorer_mod.ScorerRegistry.get("llm_judge") is None
         assert scorer_mod.ScorerRegistry.get("correctness") is None
         assert scorer_mod.ScorerRegistry.get("faithfulness") is None
+        assert scorer_mod.ScorerRegistry.get("goal_success") is None
         assert scorer_mod.ScorerRegistry.get("agent_judge") is None
         assert scorer_mod.get_builtin_judge_scorer_config("llm_judge") is not None
         assert scorer_mod.get_builtin_judge_scorer_config("correctness") is not None
         assert scorer_mod.get_builtin_judge_scorer_config("faithfulness") is not None
+        assert scorer_mod.get_builtin_judge_scorer_config("goal_success") is not None
         assert scorer_mod.get_builtin_judge_scorer_config("agent_judge") is not None
 
     def test_custom_scorer_cannot_use_builtin_names(self):
@@ -1731,6 +1779,24 @@ class TestLLMJudge:
 
             @scorer_dec(name="plan_adherence")
             def plan_adherence_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="tool_sequence")
+            def tool_sequence_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="tool_failure_recovered")
+            def tool_failure_recovered_collision(request: ScorerRequest) -> ScorerResultType:
+                return ScorerResultType(score=1.0, passed=True)
+
+        with pytest.raises(ValueError, match="AGNT5 built-in scorer"):
+
+            @scorer_dec(name="goal_success")
+            def goal_success_collision(request: ScorerRequest) -> ScorerResultType:
                 return ScorerResultType(score=1.0, passed=True)
 
         with pytest.raises(ValueError, match="AGNT5 built-in scorer"):

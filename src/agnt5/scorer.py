@@ -45,11 +45,32 @@ BUILTIN_DETERMINISTIC_SCORER_NAMES = (
     "json_schema",
     "numeric_range",
     "levenshtein",
+    "tool_called",
+    "tool_not_called",
+    "tool_sequence",
+    "tool_sequence_in_order",
+    "tool_sequence_exact",
+    "tool_sequence_any_order",
+    "tool_trajectory",
+    "tool_params_match",
+    "max_tool_calls",
+    "max_llm_calls",
+    "max_tokens",
+    "duration_under",
+    "no_errors",
+    "tool_failure_recovered",
     "step_efficiency",
     "plan_quality",
     "plan_adherence",
+    "state_equals",
 )
-BUILTIN_JUDGE_SCORER_NAMES = ("llm_judge", "correctness", "faithfulness", "agent_judge")
+BUILTIN_JUDGE_SCORER_NAMES = (
+    "llm_judge",
+    "correctness",
+    "faithfulness",
+    "goal_success",
+    "agent_judge",
+)
 RESERVED_BUILTIN_SCORER_NAMES = (
     BUILTIN_DETERMINISTIC_SCORER_NAMES + BUILTIN_JUDGE_SCORER_NAMES
 )
@@ -205,6 +226,13 @@ FAITHFULNESS_JUDGE_CRITERIA = (
     "the answer."
 )
 
+GOAL_SUCCESS_JUDGE_CRITERIA = (
+    "Evaluate whether the overall session achieved the user's goal. Use available "
+    "trace-eval context, journal events, session state, input, output, and expected "
+    "result when provided. Penalize incomplete task completion, missing required "
+    "actions, tool failures that affected the outcome, and unsupported success claims."
+)
+
 AGENT_JUDGE_DEFAULT_CRITERIA = (
     "Investigate the provided evidence before scoring. Check factual correctness, "
     "grounding in the trace and tool evidence, appropriate tool usage, and whether the "
@@ -346,6 +374,36 @@ def _truncate_agent_judge_evidence(evidence: Dict[str, Any], max_chars: int) -> 
         "max_chars": max_chars,
         "evidence_excerpt": encoded[:max_chars],
     }
+
+
+def _goal_success_evidence(
+    request: ScorerRequest, config: Dict[str, Any]
+) -> tuple[Dict[str, Any], List[str]]:
+    evidence: Dict[str, Any] = {}
+    provided_context = (
+        config["context_data"]
+        if "context_data" in config and config["context_data"] is not None
+        else config.get("context")
+    )
+    if provided_context is not None:
+        evidence["provided_context"] = _to_jsonable(provided_context)
+    trace_eval_context = (
+        request.trace_eval_context
+        if request.trace_eval_context is not None
+        else config.get("trace_eval_context")
+    )
+    if trace_eval_context is not None:
+        evidence["trace_eval_context"] = _to_jsonable(trace_eval_context)
+    if _config_bool(config, "include_trace", True) and request.trace:
+        evidence["trace"] = [_to_jsonable(event) for event in request.trace]
+    if request.peer_scores:
+        evidence["peer_scores"] = _to_jsonable(request.peer_scores)
+    for key in ("session_fields", "journal_event_fields"):
+        values = _config_string_list(config, key)
+        if values:
+            evidence[key] = values
+    sources = sorted(evidence.keys())
+    return evidence, sources
 
 
 def _agent_judge_evidence(request: ScorerRequest, config: Dict[str, Any]) -> tuple[Dict[str, Any], List[str]]:
@@ -682,6 +740,41 @@ def register_builtin_scorer_handlers() -> None:
             handler=_faithfulness_handler,
             description="Managed LLM judge preset for faithfulness to configured context",
             scope="item",
+            is_async=True,
+        )
+
+    if "goal_success" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
+
+        async def _goal_success_handler(ctx: "ScorerContext", request: Any) -> Any:
+            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+
+            config = request.config or {}
+            evidence, evidence_sources = _goal_success_evidence(request, config)
+            result = await llm_judge(
+                output=request.output,
+                config=LLMJudgeConfig(
+                    criteria=GOAL_SUCCESS_JUDGE_CRITERIA,
+                    model=_judge_model(config),
+                    temperature=_judge_temperature(config),
+                    include_input=_judge_include_input(config, True),
+                ),
+                expected=request.expected,
+                input_data=request.input,
+                context_data={"goal_success_evidence": evidence} if evidence else None,
+            )
+            return _judge_result_to_scorer_result(
+                result,
+                {
+                    "judge_preset": "goal_success",
+                    "evidence_sources": evidence_sources,
+                },
+            )
+
+        _BUILTIN_JUDGE_SCORER_REGISTRY["goal_success"] = ScorerConfig(
+            name="goal_success",
+            handler=_goal_success_handler,
+            description="Managed LLM judge preset for session goal success",
+            scope="session",
             is_async=True,
         )
 

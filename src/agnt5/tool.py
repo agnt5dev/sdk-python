@@ -9,6 +9,7 @@ import asyncio
 import dataclasses as dc
 import functools
 import inspect
+import json
 import logging
 import secrets
 import uuid as _uuid
@@ -47,6 +48,53 @@ def _serialize_for_span(value: Any) -> str:
     except (TypeError, ValueError):
         serialized = repr(value)
     return truncate_span_attribute_value(serialized)
+
+
+def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
+    metadata = getattr(ctx, "_trace_metadata", None) or getattr(ctx, "metadata", None) or {}
+    if not isinstance(metadata, dict) or metadata.get("agnt5_eval_role") != "target":
+        return None
+    raw = metadata.get("agnt5.eval.tool_faults") or metadata.get("agnt5_eval_tool_faults")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+
+    counts = getattr(ctx, "_eval_tool_fault_counts", None)
+    if counts is None:
+        counts = {}
+        setattr(ctx, "_eval_tool_fault_counts", counts)
+    call_count = int(counts.get(tool_name, 0))
+    counts[tool_name] = call_count + 1
+
+    for spec in parsed:
+        if not isinstance(spec, dict):
+            continue
+        candidate = str(spec.get("tool") or spec.get("name") or "").strip()
+        if candidate != tool_name:
+            continue
+        after_calls = _nonnegative_int(spec.get("after_calls", spec.get("afterCalls", 0)), 0)
+        times = _nonnegative_int(spec.get("times", 1), 1)
+        if call_count < after_calls or call_count >= after_calls + times:
+            continue
+        code = str(
+            spec.get("error_code") or spec.get("errorCode") or "AGNT5_EVAL_TOOL_FAULT"
+        ).strip()
+        message = str(spec.get("message") or f"simulated eval tool fault for {tool_name}").strip()
+        return f"{code}: {message}"
+    return None
+
+
+def _nonnegative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _python_type_to_json_schema(py_type: Any) -> Dict[str, Any]:
@@ -252,6 +300,10 @@ class Tool:
             the journal for cached results before executing and cache results
             after successful execution.
         """
+        injected_fault = _consume_eval_tool_fault(ctx, self.name)
+        if injected_fault:
+            raise RuntimeError(injected_fault)
+
         # Check for memoization before tool execution
         step_key = None
         content_hash = None
