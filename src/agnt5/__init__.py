@@ -18,6 +18,7 @@ if not _agnt5_logger.handlers:
 from . import chat
 from . import eval
 from . import events
+from . import improvement
 from . import lm
 from . import serverless
 from .batch import (
@@ -87,6 +88,26 @@ from .responses import (
     SubmitResponse,
 )
 from .context import Context, LLMRuntimeOptions, RuntimeContext
+from .improvement import (
+    AGNT5ImprovementBlocks,
+    BehaviorTopic,
+    EvaluationResult as ImprovementEvaluationResult,
+    FixtureImprovementBlocks,
+    ImprovementControlPlaneClient,
+    ImprovementControlPlaneError,
+    ImprovementBlocks,
+    ImprovementLoopPolicy,
+    ImprovementLoopRequest,
+    ImprovementLoopResult,
+    ImprovementProposal,
+    LoopStatus,
+    PromotionAction,
+    PromotionDecision,
+    QualityCase,
+    RepresentativeRun,
+    SelfImprovementLoop,
+    default_fixture_topic,
+)
 
 # Entity API was removed in v0.4.0
 # Use State API (ctx.state) and Memory API (ctx.memory) instead
@@ -257,6 +278,7 @@ __all__ = [
     "chat",
     "eval",
     "events",
+    "improvement",
     "lm",
     "serverless",
     # Chat SDK
@@ -266,6 +288,25 @@ __all__ = [
     "Context",
     "LLMRuntimeOptions",
     "RuntimeContext",
+    # Self-improvement loop components
+    "AGNT5ImprovementBlocks",
+    "BehaviorTopic",
+    "ImprovementEvaluationResult",
+    "FixtureImprovementBlocks",
+    "ImprovementControlPlaneClient",
+    "ImprovementControlPlaneError",
+    "ImprovementBlocks",
+    "ImprovementLoopPolicy",
+    "ImprovementLoopRequest",
+    "ImprovementLoopResult",
+    "ImprovementProposal",
+    "LoopStatus",
+    "PromotionAction",
+    "PromotionDecision",
+    "QualityCase",
+    "RepresentativeRun",
+    "SelfImprovementLoop",
+    "default_fixture_topic",
     "FunctionContext",
     "Worker",
     "function",
