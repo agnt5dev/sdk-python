@@ -28,7 +28,7 @@ examples/
 Each example can run independently without the platform:
 
 ```bash
-cd sdk/sdk-python
+cd sdk-python
 
 # Run individual examples
 uv run python examples/ex_01_functions.py

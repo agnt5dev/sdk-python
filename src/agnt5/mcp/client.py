@@ -42,7 +42,7 @@ class MCPClient:
     ):
         if RustMCPClientCore is None:
             raise ImportError(
-                "Rust extension not available. Rebuild with: cd sdk/sdk-python && maturin develop"
+                "Rust extension not available. Rebuild with: maturin develop"
             )
 
         self._id = id

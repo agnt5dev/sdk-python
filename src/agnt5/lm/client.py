@@ -54,7 +54,7 @@ class LMClient(LanguageModel):
     ):
         if not _RUST_AVAILABLE:
             raise ImportError(
-                "Rust extension not available. Rebuild with: cd sdk/sdk-python && maturin develop"
+                "Rust extension not available. Rebuild with: maturin develop"
             )
 
         self._provider = provider
