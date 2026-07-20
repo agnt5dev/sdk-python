@@ -63,6 +63,7 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "huggingface",
         "lepton",
         "mistral",
+        "moonshot",
         "ollama",
         "openai",
         "openrouter",

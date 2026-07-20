@@ -8,8 +8,8 @@ use agnt5_sdk_core::lm::{
     ContentBlockType, DeepSeekProvider, FireworksProvider, GenerateRequest, GenerateResponse,
     GenerationConfig, GoogleProvider, GroqProvider, HuggingFaceProvider, JsonSchemaFormat,
     LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, OllamaProvider,
-    OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat, StreamChunk,
-    StreamHandle, StreamRequest, TogetherProvider, TokenUsage, ToolCall, ToolChoice,
+    MoonshotProvider, OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat,
+    StreamChunk, StreamHandle, StreamRequest, TogetherProvider, TokenUsage, ToolCall, ToolChoice,
     ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
@@ -85,6 +85,7 @@ enum ProviderKind {
     Groq(GroqProvider),
     Lepton(LeptonProvider),
     Mistral(MistralProvider),
+    Moonshot(MoonshotProvider),
     Ollama(OllamaProvider),
     OpenRouter(OpenRouterProvider),
     Together(TogetherProvider),
@@ -106,6 +107,7 @@ impl ProviderKind {
             ProviderKind::Groq(provider) => provider.generate(request).await,
             ProviderKind::Lepton(provider) => provider.generate(request).await,
             ProviderKind::Mistral(provider) => provider.generate(request).await,
+            ProviderKind::Moonshot(provider) => provider.generate(request).await,
             ProviderKind::Ollama(provider) => provider.generate(request).await,
             ProviderKind::OpenRouter(provider) => provider.generate(request).await,
             ProviderKind::Together(provider) => provider.generate(request).await,
@@ -127,6 +129,7 @@ impl ProviderKind {
             ProviderKind::Groq(provider) => provider.stream(request).await,
             ProviderKind::Lepton(provider) => provider.stream(request).await,
             ProviderKind::Mistral(provider) => provider.stream(request).await,
+            ProviderKind::Moonshot(provider) => provider.stream(request).await,
             ProviderKind::Ollama(provider) => provider.stream(request).await,
             ProviderKind::OpenRouter(provider) => provider.stream(request).await,
             ProviderKind::Together(provider) => provider.stream(request).await,
@@ -707,6 +710,9 @@ impl PyLanguageModel {
         if env::var("MISTRAL_API_KEY").is_ok() {
             providers.push("mistral".to_string());
         }
+        if env::var("MOONSHOT_API_KEY").is_ok() {
+            providers.push("moonshot".to_string());
+        }
         // Ollama doesn't require an API key - check for OLLAMA_HOST or assume localhost
         if env::var("OLLAMA_HOST").is_ok() || env::var("OLLAMA_BASE_URL").is_ok() {
             providers.push("ollama".to_string());
@@ -814,6 +820,7 @@ fn instantiate_provider(provider: &str) -> SdkResult<ProviderKind> {
         "groq" => Ok(ProviderKind::Groq(GroqProvider::from_env()?)),
         "lepton" => Ok(ProviderKind::Lepton(LeptonProvider::from_env()?)),
         "mistral" => Ok(ProviderKind::Mistral(MistralProvider::from_env()?)),
+        "moonshot" => Ok(ProviderKind::Moonshot(MoonshotProvider::from_env()?)),
         "ollama" => Ok(ProviderKind::Ollama(OllamaProvider::from_env()?)),
         "openrouter" => Ok(ProviderKind::OpenRouter(OpenRouterProvider::from_env()?)),
         "together" => Ok(ProviderKind::Together(TogetherProvider::from_env()?)),

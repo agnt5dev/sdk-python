@@ -1600,7 +1600,7 @@ class WorkflowContext(Context):
             self._workflow_entity._resumed_step_name = None
 
             # Decode wire format
-            if response == "__skipped__":
+            if response in {"__skipped__", "__skip__"}:
                 return None
             if isinstance(response, str) and response.startswith("__custom__:"):
                 return response[len("__custom__:"):]

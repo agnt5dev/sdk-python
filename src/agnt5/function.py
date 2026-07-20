@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Callable, Optional, TypeVar, Union, cast
 
 from ._ids import generate_cid
+from ._state_adapter import StateInterface
 from ._retry_utils import parse_backoff_policy, parse_retry_policy
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from .context import Context, set_current_context
@@ -51,6 +52,12 @@ class FunctionContext(Context):
             memo_namespace=memo_namespace,
         )
         self._retry_policy = retry_policy
+        self._state = StateInterface({})
+
+    @property
+    def state(self) -> StateInterface:
+        """Run-scoped function state for parity with workflow and other SDK contexts."""
+        return self._state
 
     def log(self, message: str, **extra: Any) -> None:
         """Log with structured data: ctx.log("msg", key=value)"""

@@ -41,11 +41,10 @@ Legacy AGNT5 remote sandbox usage:
 """
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 import httpx
-
 
 # ============= Response Types =============
 
@@ -186,6 +185,128 @@ class StreamEvent:
 
 
 # ============= Main Classes =============
+
+
+class InMemorySandbox:
+    """Deterministic sandbox workspace for tests and local examples.
+
+    This backend exercises the public sandbox file API without requiring a
+    provider account, remote sandbox service, or QuickJS WASM binary. Code and
+    command execution intentionally mirror the Go SDK's deterministic test
+    backend; integration suites must use :class:`Sandbox` instead.
+    """
+
+    def __init__(self, sandbox_id: str = "memory") -> None:
+        self.sandbox_id = sandbox_id
+        self._files: Dict[str, bytes] = {}
+
+    async def __aenter__(self) -> "InMemorySandbox":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        """Release resources; retained for parity with provider sandboxes."""
+
+    async def execute_code(
+        self,
+        code: str,
+        language: str = "python",
+        timeout_ms: int = 30000,
+        env: Optional[Dict[str, str]] = None,
+        work_dir: Optional[str] = None,
+    ) -> ExecuteCodeResult:
+        del timeout_ms, env, work_dir
+        return ExecuteCodeResult(
+            stdout=f"[{language}] {code}",
+            stderr="",
+            exit_code=0,
+            execution_time_ms=0,
+        )
+
+    async def run_command(
+        self,
+        command: str,
+        args: Optional[List[str]] = None,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout_ms: int = 30000,
+    ) -> RunCommandResult:
+        del working_dir, env, timeout_ms
+        rendered = " ".join([command, *(args or [])])
+        return RunCommandResult(
+            stdout=rendered,
+            stderr="",
+            exit_code=0,
+            execution_time_ms=0,
+        )
+
+    async def write_file(
+        self,
+        path: str,
+        content: Union[bytes, str],
+        mode: int = 0o644,
+    ) -> WriteFileResult:
+        del mode
+        encoded = content.encode() if isinstance(content, str) else bytes(content)
+        self._files[path] = encoded
+        return WriteFileResult(success=True, path=path, size=len(encoded))
+
+    async def read_file(self, path: str) -> ReadFileResult:
+        try:
+            content = self._files[path]
+        except KeyError as exc:
+            raise FileNotFoundError(f"sandbox file not found: {path}") from exc
+        return ReadFileResult(
+            path=path,
+            content=bytes(content),
+            size=len(content),
+            mode=0o644,
+            is_dir=False,
+        )
+
+    async def delete_file(self, path: str, recursive: bool = False) -> bool:
+        if path in self._files:
+            del self._files[path]
+            return True
+        if recursive:
+            prefix = path.rstrip("/") + "/"
+            matches = [file_path for file_path in self._files if file_path.startswith(prefix)]
+            for file_path in matches:
+                del self._files[file_path]
+            return bool(matches)
+        return False
+
+    async def list_files(
+        self, path: str = ".", recursive: bool = False
+    ) -> ListFilesResult:
+        prefix = "" if path in {"", "."} else path.rstrip("/") + "/"
+        files: List[FileInfo] = []
+        for file_path, content in sorted(self._files.items()):
+            if prefix and not file_path.startswith(prefix):
+                continue
+            relative = file_path[len(prefix) :] if prefix else file_path.lstrip("/")
+            if not recursive and "/" in relative:
+                continue
+            files.append(
+                FileInfo(
+                    name=file_path.rstrip("/").rsplit("/", 1)[-1],
+                    path=file_path,
+                    size=len(content),
+                    mode=0o644,
+                    is_dir=False,
+                    mod_time=0,
+                )
+            )
+        return ListFilesResult(path=path, files=files, total=len(files))
+
+    async def health(self) -> SandboxHealthResult:
+        return SandboxHealthResult(
+            status="running",
+            sandbox_id=self.sandbox_id,
+            uptime_ms=0,
+        )
 
 
 class Sandbox:

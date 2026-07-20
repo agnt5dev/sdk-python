@@ -54,6 +54,9 @@ class ReceivedEvent:
     sequence: int = 0
     """Sequence number for ordering events."""
 
+    run_id: Optional[str] = None
+    """Run identifier from the gateway event envelope, when available."""
+
 
 def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = None) -> "RunError":
     """Parse error response from platform and create RunError with structured fields.
@@ -110,7 +113,11 @@ def _parse_error_response(error_data: Dict[str, Any], run_id: Optional[str] = No
     )
 
 
-def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> ReceivedEvent:
+def _parse_sse_to_event(
+    event_type_str: str,
+    data: Dict[str, Any],
+    default_sequence: int = 0,
+) -> ReceivedEvent:
     """Convert SSE event type and data to ReceivedEvent.
 
     Args:
@@ -120,12 +127,37 @@ def _parse_sse_to_event(event_type_str: str, data: Dict[str, Any]) -> ReceivedEv
     Returns:
         ReceivedEvent with event_type string and data payload
     """
+    payload = _sse_payload(data)
     return ReceivedEvent(
         event_type=event_type_str,
-        data=data,
-        content_index=data.get("index", 0),
-        sequence=data.get("sequence", 0),
+        data=payload,
+        content_index=payload.get(
+            "index",
+            payload.get("content_index", payload.get("contentIndex", data.get("index", 0))),
+        ),
+        sequence=payload.get("sequence", data.get("sequence", default_sequence)),
+        run_id=data.get("run_id") or data.get("runId") or payload.get("run_id") or payload.get("runId"),
     )
+
+
+def _sse_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the record payload from the gateway SSE envelope.
+
+    The gateway sends record metadata at the top level and the SDK event body
+    under ``data``. Flat payloads remain supported for older gateways.
+    """
+    nested = data.get("data")
+    is_gateway_envelope = any(key in data for key in ("event_type", "eventType", "run_id", "runId"))
+    if is_gateway_envelope and isinstance(nested, dict):
+        return nested
+    return data
+
+
+def _stream_chunk(payload: Dict[str, Any]) -> Any:
+    for key in ("content", "delta", "output_data", "chunk"):
+        if key in payload:
+            return payload[key]
+    return None
 
 
 class Client:
@@ -888,27 +920,30 @@ class Client:
                         if data.get("done") or current_event == "done":
                             return
 
+                        payload = _sse_payload(data)
+
                         # Check for error
-                        if "error" in data:
+                        if current_event in {"error", "run.failed"} or "error" in data:
+                            error_data = payload if payload else data
+                            if "error" not in error_data and error_data.get("error_message"):
+                                error_data = dict(error_data)
+                                error_data["error"] = error_data["error_message"]
                             # Use helper to properly parse error structure
-                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
+                            raise _parse_error_response(
+                                error_data,
+                                run_id=data.get("runId") or data.get("run_id"),
+                            )
 
                         # Yield chunk from output.delta events
                         if current_event == "output.delta":
-                            # Try different content field formats
-                            if "content" in data:
-                                yield data["content"]
-                            elif "output_data" in data:
-                                # output_data is proper JSON (string, number, object, etc.)
-                                output = data["output_data"]
-                                if isinstance(output, str):
-                                    yield output
-                                elif output is not None:
-                                    # For non-string types, yield JSON string representation
-                                    yield json.dumps(output)
+                            output = _stream_chunk(payload)
+                            if isinstance(output, str):
+                                yield output
+                            elif output is not None:
+                                yield json.dumps(output)
                         # Also support legacy "chunk" format
-                        elif "chunk" in data:
-                            yield data["chunk"]
+                        elif "chunk" in payload:
+                            yield payload["chunk"]
 
                     except json.JSONDecodeError:
                         # Skip malformed JSON
@@ -1003,6 +1038,7 @@ class Client:
 
             # Parse SSE stream
             current_event_type: Optional[str] = None
+            sequence = 0
             for line in response.iter_lines():
                 line = line.strip()
 
@@ -1033,7 +1069,8 @@ class Client:
 
                         # Yield typed Event object
                         if current_event_type:
-                            yield _parse_sse_to_event(current_event_type, data)
+                            sequence += 1
+                            yield _parse_sse_to_event(current_event_type, data, sequence)
 
                     except json.JSONDecodeError:
                         # Skip malformed JSON
@@ -2156,6 +2193,7 @@ class AsyncClient:
                 raise RunError(error_msg, run_id=run_id)
 
             current_event_type: Optional[str] = None
+            sequence = 0
             async for line in response.aiter_lines():
                 line = line.strip()
 
@@ -2186,7 +2224,8 @@ class AsyncClient:
 
                         # Yield typed Event object
                         if current_event_type:
-                            yield _parse_sse_to_event(current_event_type, data)
+                            sequence += 1
+                            yield _parse_sse_to_event(current_event_type, data, sequence)
 
                     except json.JSONDecodeError:
                         continue

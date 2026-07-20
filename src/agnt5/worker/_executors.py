@@ -230,7 +230,7 @@ class ExecutorMixin:
 
         def create_context(input_dict: dict, req: Any) -> FunctionContext:
             correlation_id = generate_cid()
-            return FunctionContext(
+            ctx = FunctionContext(
                 run_id=req.invocation_id,  # Use actual invocation_id for event routing
                 correlation_id=correlation_id,
                 parent_correlation_id="",
@@ -240,6 +240,8 @@ class ExecutorMixin:
                 worker=self._rust_worker,
                 trace_metadata=getattr(req, "metadata", None),
             )
+            ctx.component_name = config.name
+            return ctx
 
         async def execute(ctx: FunctionContext, input_dict: dict, req: Any):
             # Create short run correlation id (matches pattern of other events)
@@ -389,7 +391,7 @@ class ExecutorMixin:
 
     async def _handle_streaming_function(self, ctx: Any, result: Any) -> None:
         """Handle streaming function by queueing deltas."""
-        from ..events import Event
+        from ..events import ComponentType, Completed, Event, OutputDelta, OutputStart, OutputStop
 
         sequence = 0
         has_typed_events = False
@@ -398,27 +400,15 @@ class ExecutorMixin:
         async for chunk in result:
             if isinstance(chunk, Event):
                 has_typed_events = True
-                event_fields = chunk.to_dict()
-                output_data = event_fields.get("output_data", b"")
-
-                if isinstance(output_data, bytes):
-                    try:
-                        event_data = deserialize(output_data)
-                    except (ValueError, Exception):
-                        event_data = {"content": output_data.decode("utf-8", errors="replace")}
-                elif isinstance(output_data, dict):
-                    event_data = output_data
-                else:
-                    event_data = {"content": str(output_data or "")}
-
-                ctx.emit(
-                    event_fields.get("event_type", "output.delta"),
-                    event_data,
-                    content_index=event_fields.get("content_index", 0),
-                )
+                ctx.emit(chunk)
             else:
                 if first_chunk:
-                    ctx.emit("output.start", {}, content_index=0)
+                    ctx.emit(OutputStart(
+                        name="output",
+                        correlation_id=ctx.correlation_id,
+                        parent_correlation_id=ctx.parent_correlation_id,
+                        index=0,
+                    ))
                     sequence += 1
                     first_chunk = False
 
@@ -431,17 +421,31 @@ class ExecutorMixin:
                 else:
                     chunk_content = serialize(chunk).decode("utf-8")
 
-                if isinstance(chunk_content, dict):
-                    ctx.emit("output.delta", chunk_content, content_index=0)
-                else:
-                    ctx.emit("output.delta", {"content": chunk_content}, content_index=0)
+                ctx.emit(OutputDelta(
+                    name="output",
+                    correlation_id=ctx.correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    content=chunk_content,
+                    index=0,
+                ))
             sequence += 1
 
         if not has_typed_events and not first_chunk:
-            ctx.emit("output.stop", {}, content_index=0)
+            ctx.emit(OutputStop(
+                name="output",
+                correlation_id=ctx.correlation_id,
+                parent_correlation_id=ctx.parent_correlation_id,
+                index=0,
+            ))
 
-        ctx.emit("run.completed", {}, content_index=0)
         logger.debug(f"Streaming function queued {sequence + 1} events")
+        ctx.emit(Completed(
+            name="stream",
+            correlation_id=ctx.parent_correlation_id,
+            parent_correlation_id="",
+            component_type=ComponentType.RUN,
+            output_data={"emitted": sequence},
+        ))
         return None
 
     # -------------------------------------------------------------------------
@@ -1619,14 +1623,36 @@ class ExecutorMixin:
             # Return None - the event queue handles delivery
             return None
 
-        except WaitingForUserInputException:
+        except WaitingForUserInputException as pause:
             # Workflow paused for user input.
             # The workflow.paused event was already emitted via ctx.emit()
-            # and flows through WriteCheckpoint to the Engine, which writes
-            # run.paused. The coordinator's journal consumer watches for
-            # run.paused and decrements active_invocations.
+            # and persisted through WriteCheckpoint. Also return an explicit
+            # run.paused worker response so the coordinator that owns the
+            # dispatch can release its lease immediately. Relying only on the
+            # journal notification is racy in HA because another coordinator
+            # may own the partition processor.
             logger.info("Workflow paused waiting for user input")
-            return None
+            pause_output = {
+                "_paused": True,
+                "question": pause.question,
+                "pause_index": pause.pause_index,
+            }
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,
+                output_data=json.dumps(pause_output).encode("utf-8"),
+                state_update=None,
+                error_message=None,
+                metadata={
+                    "component_name": config.name,
+                    "component_type": "workflow",
+                    "pause_index": str(pause.pause_index),
+                },
+                event_type="run.paused",
+                content_index=0,
+                sequence=0,
+                attempt=getattr(request, "attempt", 0),
+            )
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
