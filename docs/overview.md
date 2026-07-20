@@ -133,7 +133,7 @@ Layer 3 components don't add new durability guarantees - they build on the relia
 
 **Dependencies**: Context
 
-**Status**: ✅ Fully implemented (Phase 1 complete)
+**Status**: Implemented
 
 **Example**:
 ```python
@@ -163,7 +163,7 @@ async def process_data(ctx: Context, data: dict) -> dict:
 
 **Dependencies**: Context, Function patterns
 
-**Status**: Phase 2 (not yet implemented)
+**Status**: Not implemented
 
 **Example Pattern**:
 ```python
@@ -197,7 +197,7 @@ result = await account.deposit(amount=100.0)
 
 **Dependencies**: Context, Function, Entity
 
-**Status**: Phase 2 (not yet implemented)
+**Status**: Not implemented
 
 **Example Pattern**:
 ```python
@@ -234,7 +234,7 @@ async def order_fulfillment(ctx: Context, order_id: str) -> dict:
 
 **Dependencies**: Function (inherits durability)
 
-**Status**: Phase 2 (not yet implemented)
+**Status**: Not implemented
 
 **Example Pattern**:
 ```python
@@ -273,7 +273,7 @@ def delete_database(database_name: str) -> dict:
 
 **Dependencies**: Tool, Entity (for sessions), Workflow (for orchestration)
 
-**Status**: Phase 2 (not yet implemented)
+**Status**: Not implemented
 
 **Example Pattern**:
 ```python
@@ -321,9 +321,9 @@ session = ConversationSession(key="chat-123")
 await session.add_message(role="user", content="Hello!")
 ```
 
-## Implementation Phases
+## Capability overview
 
-### Phase 1: Core Contracts (Complete ✅)
+### Core contracts
 
 **Status**: Released as v0.2.0
 
@@ -345,7 +345,7 @@ await session.add_message(role="user", content="Hello!")
 - No platform integration
 - No orchestration, LLM, or coordination features
 
-### Phase 2: Platform Integration (Next)
+### Platform integration
 
 **Focus**: Connect to AGNT5 platform services
 
@@ -369,7 +369,7 @@ await session.add_message(role="user", content="Hello!")
 - Exactly-once semantics
 - Production-grade observability
 
-### Phase 3: Advanced Features (Q1 2025)
+### Advanced features
 
 **Focus**: Entity component and advanced patterns
 
@@ -426,7 +426,7 @@ Components work together seamlessly:
 
 ## Migration Path
 
-### From Phase 1 to Phase 2
+### Adopting platform integration
 
 **No Breaking Changes**:
 - Existing `@function` decorators work as-is
@@ -444,7 +444,7 @@ Components work together seamlessly:
 - Migrate functions one at a time
 - Test with local platform instance
 
-### From Phase 2 to Phase 3
+### Adopting advanced features
 
 **Additive Changes**:
 - Entity component becomes available
@@ -511,7 +511,7 @@ async def fetch_data(ctx: Context, url: str) -> dict:
    - Basic functions
    - Retry policies
    - Function registry
-   - (More coming in Phase 2)
+
 
 3. **Check Status**: Track implementation progress
    - [SDK Status](../../docs/status/sdk-python-status.md)
@@ -529,6 +529,6 @@ The AGNT5 Python SDK provides a layered architecture for building reliable AI ap
 - **Layer 2 (Durability)**: Function, Entity, Workflow provide fault tolerance
 - **Layer 3 (High-Level)**: Tool and Agent provide specialized abstractions
 
-Each layer builds on the one below, with clear dependencies and separation of concerns. Start with Functions (Phase 1), then add platform integration (Phase 2), and finally leverage advanced Entity patterns (Phase 3).
+Each layer builds on the one below, with clear dependencies and separation of concerns. Start with Functions, then add platform integration and advanced Entity patterns as needed.
 
 The SDK is designed for progressive disclosure - simple things are simple, complex things are possible.

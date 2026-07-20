@@ -886,10 +886,6 @@ fn shutdown_telemetry() {
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize PyO3-log to bridge Rust logs to Python
-    // TODO: Re-enable once pyo3-log supports pyo3 0.27
-    // pyo3_log::init();
-
     // Worker-related classes
     m.add_class::<PyWorkerConfig>()?;
     m.add_class::<PyWorker>()?;
@@ -907,10 +903,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Language Model classes
     language_model::register_language_model(m)?;
 
-    // ADK scaffolding
+    // Agent Development Toolkit
     adk::register_adk(m)?;
 
-    // Checkpoint client for step-level memoization (Phase 3)
+    // Checkpoint client for step-level memoization
     checkpoint_client::register_checkpoint_client(m)?;
 
     // Semantic memory

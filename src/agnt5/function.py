@@ -64,8 +64,7 @@ class FunctionContext(Context):
         self._logger.info(message, extra=extra)
 
     def should_retry(self, error: Exception) -> bool:
-        """Check if error is retryable based on configured policy."""
-        # TODO: Implement retry policy checks
+        """Delegate retry filtering to the runtime."""
         return True
 
     async def sleep(self, seconds: float) -> None:

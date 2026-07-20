@@ -29,8 +29,6 @@ serde_json = "1.0"
 futures = "0.3"
 
 # Logging integration
-# TODO: Re-enable pyo3-log once it supports pyo3 0.27
-# pyo3-log = "0.13"
 log = "0.4"
 
 # OpenTelemetry for baggage support

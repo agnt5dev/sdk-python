@@ -394,51 +394,6 @@ async def test_workflow_with_loops():
     await run_test()
 
 
-# Test Signal Coordination
-# TODO: Implement signal() and signal_send() in WorkflowContext
-
-# @pytest.mark.asyncio
-# async def test_workflow_with_signals():
-#     """Test workflow signal coordination."""
-#
-#     @workflow
-#     async def signal_workflow(ctx: WorkflowContext) -> dict:
-#         """Workflow with signal."""
-#         ctx.state.set("status", "waiting")
-#
-#         # Send signal after delay
-#         async def send_signal():
-#             await asyncio.sleep(0.05)
-#             ctx.signal_send("approval", {"approved": True})
-#
-#         # Start background task
-#         asyncio.create_task(send_signal())
-#
-#         # Wait for signal
-#         approval = await ctx.signal("approval", timeout_ms=1000)
-#         ctx.state.set("status", "received")
-#
-#         return {"approved": approval["approved"]}
-#
-#     result = await signal_workflow()
-#     assert result["approved"] is True
-
-
-# @pytest.mark.asyncio
-# async def test_workflow_signal_timeout():
-#     """Test workflow signal timeout."""
-#
-#     @workflow
-#     async def timeout_workflow(ctx: WorkflowContext) -> dict:
-#         """Workflow with signal timeout."""
-#         # Wait for signal that never comes
-#         result = await ctx.signal("missing_signal", timeout_ms=10, default={"timeout": True})
-#         return result
-#
-#     result = await timeout_workflow()
-#     assert result["timeout"] is True
-
-
 # Test Workflow Registry
 
 
@@ -533,49 +488,6 @@ def test_workflow_name_collision_with_custom_name():
         @workflow(name="my_custom_workflow")
         def workflow_b(ctx: WorkflowContext) -> None:
             pass
-
-
-# Test Delays
-# TODO: Implement sleep() and timer() in WorkflowContext for durable delays
-
-# @pytest.mark.asyncio
-# async def test_workflow_with_sleep():
-#     """Test workflow with ctx.sleep()."""
-#
-#     @workflow
-#     async def sleep_workflow(ctx: WorkflowContext) -> str:
-#         """Workflow with sleep."""
-#         await ctx.sleep(0.05)
-#         return "done"
-#
-#     import time
-#
-#     start = time.time()
-#     result = await sleep_workflow()
-#     elapsed = time.time() - start
-#
-#     assert result == "done"
-#     assert elapsed >= 0.05
-
-
-# @pytest.mark.asyncio
-# async def test_workflow_with_timer():
-#     """Test workflow with ctx.timer()."""
-#
-#     @workflow
-#     async def timer_workflow(ctx: WorkflowContext) -> str:
-#         """Workflow with timer."""
-#         await ctx.timer(delay_ms=50)
-#         return "done"
-#
-#     import time
-#
-#     start = time.time()
-#     result = await timer_workflow()
-#     elapsed = time.time() - start
-#
-#     assert result == "done"
-#     assert elapsed >= 0.05
 
 
 # Test Type-Safe Task Execution

@@ -209,7 +209,7 @@ class ConversationAccessor:
                 # Parse the payload field which contains our JSON
                 try:
                     # Try to decode as proto ChatMessage and extract payload
-                    # For now, attempt JSON decode of the payload field
+                    # Decode the payload field as JSON when possible.
                     # The proto ChatMessage has payload as bytes field
                     import struct
                     # Simple approach: try JSON decode directly

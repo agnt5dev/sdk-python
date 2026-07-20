@@ -343,7 +343,7 @@ class AgentContext(Context):
         """
         Retrieve conversation history, preferring runs-based history from the platform.
 
-        Load order (as of Phase 5.2 - runs-first architecture):
+        Load order (as of runs-first architecture):
         1. For workflow mode: Load from workflow entity state (shared state)
         2. For standalone mode:
            a. Try loading from runs via gateway API (/v1/sessions/{id}/history)
@@ -355,7 +355,7 @@ class AgentContext(Context):
         if self._storage_mode == "workflow":
             return await self._load_from_workflow_state()
         else:
-            # Try runs-based API first (Phase 5.2 architecture)
+            # Try runs-based API first (runs-first architecture)
             messages = await self._load_from_runs_api()
             if messages:
                 return messages
@@ -384,7 +384,7 @@ class AgentContext(Context):
         """
         Load conversation history from runs via gateway API.
 
-        This is the new Phase 5.2 architecture where conversation history
+        This is the new runs-first architecture where conversation history
         is derived from runs (each run = one conversation turn) rather than
         stored in entity state.
 
@@ -558,7 +558,7 @@ class AgentContext(Context):
         Save conversation history to AgentSession entity (standalone mode).
 
         DEPRECATED: This method saves to entity storage which is the legacy approach.
-        In the Phase 5.2 architecture, conversation history is derived from runs
+        In the runs-first architecture, conversation history is derived from runs
         (each run = one turn). New conversations should not need to call this
         as the platform automatically records run inputs/outputs.
         """

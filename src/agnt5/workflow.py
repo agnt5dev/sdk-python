@@ -890,9 +890,7 @@ class WorkflowContext(Context):
         if runtime_ctx is None:
             raise RuntimeError("WorkflowContext not initialized with runtime context")
 
-        # Call the platform's batch API via the runtime
-        # For now, we use local parallel execution as a fallback
-        # In production, this would call the gateway's batch endpoint
+        # Use the runtime batch API when available, otherwise execute locally.
         try:
             result = await runtime_ctx.execute_batch(
                 function_name=function_name,
@@ -1173,7 +1171,7 @@ class WorkflowContext(Context):
         # Use step_event_id as correlation_id for pairing started ↔ completed
         step_correlation_id = generate_cid()
 
-        # Check platform-side memoization first (Phase 3)
+        # Check platform-side memoization first
         if self._checkpoint_client:
             try:
                 # Engine cache key is still (tenant_id, run_id). On worker
@@ -1249,7 +1247,7 @@ class WorkflowContext(Context):
             # Record step completion locally for in-memory replay
             self._workflow_entity.record_step_completion(name, "checkpoint", None, result)
 
-            # Record to platform for persistent memoization (Phase 3)
+            # Record to platform for persistent memoization
             if self._checkpoint_client:
                 try:
                     output_bytes = serialize_to_str(result).encode("utf-8")
@@ -1303,7 +1301,7 @@ class WorkflowContext(Context):
                         f"Step event stack mismatch in step() error path: expected {step_event_id}, got {popped_id}"
                     )
 
-            # Record failure to platform (Phase 3)
+            # Record failure to platform
             if self._checkpoint_client:
                 try:
                     project_or_tenant_id = (

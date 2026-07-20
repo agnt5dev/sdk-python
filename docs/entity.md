@@ -48,7 +48,7 @@ await ctx.entity("agent", "conv-1").send_message(msg2)  # Serial
 
 ## How to Use Entities
 
-> **Note**: Entities are being implemented in Phase 2 of AGNT5 (Target: Q1 2025). The API shown represents the planned design. Check current SDK status for availability.
+> **Note**: This page describes the Entity API. Check the current SDK release notes for availability.
 
 ### Basic Entity Definition
 

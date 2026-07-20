@@ -21,7 +21,6 @@ from ..scorer import (
     register_builtin_scorer_handlers,
 )
 
-# from ..workflow import WorkflowRegistry  # COMMENTED OUT - functions only for now
 from ._executors import ExecutorMixin
 from ._prompt_executor import (
     PROMPT_EXECUTOR_COMPONENT_NAME,

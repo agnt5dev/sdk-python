@@ -37,14 +37,10 @@ Don't add fixtures here if:
 - Tests should cover edge cases and error scenarios
 - Use this directory to bridge the gap when needed
 
-## Next Steps (from Testing Plan)
-
-As we implement error scenario testing (Task 1.3), we'll add fixtures here for:
+Useful error fixtures include:
 - Parameter validation errors
 - LLM API failures (rate limits, timeouts, auth errors)
 - Worker crash scenarios
 - Network partition simulations
 - State corruption testing
 - Resource exhaustion scenarios
-
-These will be built incrementally as we write the corresponding tests.

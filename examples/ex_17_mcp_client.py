@@ -255,7 +255,7 @@ async def main():
     # Requires: OPENAI_API_KEY and npx
     # await example_agent_with_mcp_tools()
 
-    # For now, just show the API usage
+    # Show the API without requiring external services.
     print("\nMCP Client API Example:")
     print("""
     from agnt5.mcp import MCPClient

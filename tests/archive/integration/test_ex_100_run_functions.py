@@ -10,7 +10,7 @@ Tests synchronous function execution using client.run():
 Run with:
     pytest tests/integration/test_ex_100_run_functions.py -v
 
-TODO: Additional tests to add:
+Additional useful coverage:
 - Timeout handling: Test behavior when function exceeds timeout
 - Large payload handling: Test with large inputs/outputs (e.g., 1MB+ data)
 - Custom function names: Test name= parameter in @function decorator (currently not registering)

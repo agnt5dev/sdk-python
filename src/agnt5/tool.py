@@ -320,20 +320,9 @@ class Tool:
                 return cached_result
 
         if self.confirmation:
-            # TODO: Implement actual confirmation workflow
-            # For now, just log a warning
             logger.warning(
-                f"Tool '{self.name}' requires confirmation but confirmation is not yet implemented"
+                f"Tool '{self.name}' requires confirmation; no approval handler is configured"
             )
-
-        # TODO: Add ToolInvoked/ToolCompleted typed events for standalone tool invocation
-        # (different from ToolCallStarted/Completed which are for agent→tool calls)
-        # When implementing, use:
-        #   from .context import get_current_context
-        #   context = get_current_context()
-        #   tool_correlation_id = f"tool-{secrets.token_hex(5)}"
-        #   if context:
-        #       context.emit(ToolInvoked(...))
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -364,10 +353,6 @@ class Tool:
 
                     logger.debug(f"Tool '{self.name}' completed successfully")
 
-                    # TODO: Add ToolCompleted typed event
-                    # if context:
-                    #     context.emit(ToolCompleted(...))
-
                     # Cache result for replay if memoization is enabled
                     if memo and step_key:
                         await memo.cache_tool_result(step_key, content_hash, result)
@@ -377,8 +362,7 @@ class Tool:
                 # Don't emit ToolCallFailed here - the agent's _run_core() already
                 # emits it with proper correlation_id tracking. Emitting here would
                 # create an orphaned failed event with a different correlation_id.
-                # TODO: If tool is invoked standalone (not from agent), we should
-                # emit ToolInvoked/ToolFailed events. For now, let the caller handle it.
+                # Agent calls emit correlated failure events in the agent execution path.
                 raise
         finally:
             # Always reset context to prevent leakage

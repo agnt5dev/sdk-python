@@ -372,12 +372,6 @@ class Agent:
                 f"cumulative: ${self._cumulative_cost_usd:.6f}"
             )
 
-            # Emit cost event for observability
-            # TODO: Add AgentLLMCost typed event
-            # if context:
-            #     usage = getattr(response, 'usage', None)
-            #     context.emit(AgentLLMCost(...))
-
     def _temperature_for_request(self) -> Optional[float]:
         if self._temperature_explicit:
             return self.temperature
@@ -1362,10 +1356,6 @@ class Agent:
                 self.logger.warning(f"Agent reached max iterations ({self.max_iterations})")
                 final_output = messages[-1].content if messages else "No output generated"
 
-                # TODO: Add AgentMaxIterationsReached typed event
-                # if context:
-                #     context.emit(AgentMaxIterationsReached(...))
-
                 if isinstance(context, AgentContext):
                     await context.save_conversation_history(messages)
 
@@ -1933,8 +1923,7 @@ class Agent:
                             )
                             self._apply_generation_config(request)
 
-                            # Create internal LM instance for generation
-                            # TODO: Use model_config when provided
+                            # Create an internal LM instance for generation.
                             from ..lm import LMClient as _LanguageModel
                             provider, model_name = self.model.split('/', 1)
                             internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)

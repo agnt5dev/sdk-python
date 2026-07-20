@@ -23,7 +23,7 @@ class SlackConfig:
 
 @dataclass(frozen=True)
 class DiscordConfig:
-    """Configuration for connecting to Discord (Phase 3).
+    """Configuration for connecting to Discord.
 
     Args:
         bot_token: Discord bot token.
@@ -39,7 +39,7 @@ class DiscordConfig:
 
 @dataclass(frozen=True)
 class TeamsConfig:
-    """Configuration for connecting to Microsoft Teams (Phase 4).
+    """Configuration for connecting to Microsoft Teams.
 
     Args:
         app_id: Microsoft App ID.
@@ -55,7 +55,7 @@ class TeamsConfig:
 
 @dataclass(frozen=True)
 class TelegramConfig:
-    """Configuration for connecting to Telegram (Phase 3).
+    """Configuration for connecting to Telegram.
 
     Args:
         bot_token: Telegram Bot API token from @BotFather.

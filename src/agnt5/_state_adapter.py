@@ -383,7 +383,7 @@ class StateAdapter:
             await self._rust_core.py_clear_cache()
 
     # -------------------------------------------------------------------
-    # Session / Message operations (Phase 2 — conversation memory)
+    # Session / Message operations
     # -------------------------------------------------------------------
 
     @property

@@ -596,7 +596,7 @@ print(result)
 - **Document local vs platform behavior** - Help future maintainers
 
 ```python
-@with_entity_context  # TODO: Remove before platform deployment
+@with_entity_context  # Local-only decorator; remove for platform deployment
 async def main():
     """
     Local: State in-memory, lost on exit

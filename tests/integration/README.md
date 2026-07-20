@@ -106,68 +106,11 @@ pytest tests/integration/ -v --tb=short
 ## Test Structure
 
 - `conftest.py` - Multi-mode platform fixtures
-- `test_client_entities.py` - Entity persistence and concurrency tests
-- `test_client_workflows.py` - Workflow execution and recovery tests
-- `test_client_functions.py` - Function invocation and retry tests
+- `test_functions.py` - Function invocation tests
+- `test_batch_eval.py` - Batch evaluation tests
+- `test_worker_app.py` - Worker application tests
+- `test_helpers.py` - Integration helper tests
 - `utils.py` - Backend-agnostic platform verification utilities
-- `blueprints/test-service/` - Test worker service
-- `pytest.ini` - Test configuration and markers
-- `MULTI_MODE_GUIDE.md` - Complete multi-mode testing guide
-- `WEEK1_SUMMARY.md` - Week 1 implementation summary
-
-## Expected Results
-
-### Week 1 - RED Phase (Baseline)
-
-Initial run will show ~60% passing (across all modes):
-
-```
-========================== test session starts ==========================
-collected 75 items (25 tests × 3 modes)
-
-test_entity_basic_operation[embedded] PASSED              [  4%] ✅
-test_entity_basic_operation[postgres] PASSED              [  8%] ✅
-test_entity_basic_operation[managed] PASSED               [ 12%] ✅
-
-test_entity_state_persists[embedded] FAILED               [ 16%] ❌
-test_entity_state_persists[postgres] FAILED               [ 20%] ❌
-test_entity_state_persists[managed] FAILED                [ 24%] ❌
-
-test_concurrent_updates[embedded] FAILED                  [ 28%] ❌
-test_concurrent_updates[postgres] FAILED                  [ 32%] ❌
-test_concurrent_updates[managed] FAILED                   [ 36%] ❌
-...
-
-==================== 45 passed, 30 failed in 120s ====================
-
-Production Readiness by Mode:
-- Embedded: 60% (15/25 tests) ❌
-- Postgres: 60% (15/25 tests) ❌
-- Managed: 60% (15/25 tests) ❌
-
-Overall: 60% ready across all deployment scenarios
-```
-
-**This is intentional!** Failures expose TODOs:
-- ❌ Entity persistence to platform (entity.py:355-363)
-- ❌ Distributed locking for concurrent updates
-- ❌ Workflow checkpoint persistence
-- ❌ Retry error filtering
-
-### Week 5+ - GREEN Phase (Target)
-
-When implementation is complete:
-
-```
-==================== 75 passed in 90s ====================
-
-Production Readiness by Mode:
-- Embedded: 100% (25/25 tests) ✅
-- Postgres: 100% (25/25 tests) ✅
-- Managed: 100% (25/25 tests) ✅
-
-Overall: 100% - SDK is production-ready! 🎉
-```
 
 ## Understanding Test Failures
 
@@ -214,9 +157,8 @@ pytest tests/integration/ -v  # ~75s
 ## Documentation
 
 - **`README.md`** (this file) - Quick start and usage
-- **`MULTI_MODE_GUIDE.md`** - Complete multi-mode testing guide
-- **`WEEK1_SUMMARY.md`** - Week 1 implementation details
-- **`e2e-integration-python.md`** (parent dir) - E2E testing architecture
+- **`JOURNAL_EVENTS_EXAMPLES.md`** - Journal event examples
+- **`README_TEST_HELPERS.md`** - Test helper reference
 
 ## Benefits of Multi-Mode Testing
 

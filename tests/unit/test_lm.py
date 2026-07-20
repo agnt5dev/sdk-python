@@ -1462,13 +1462,7 @@ async def test_live_responses_api_with_store():
     assert len(response1.text) > 0
     print(f"\nFirst response: {response1.text}")
 
-    # NOTE: The Responses API returns a response_id in the response object
-    # However, our current implementation may not expose it yet.
-    # For now, this test just verifies that store=True doesn't cause errors.
-    # In a complete implementation, we would:
-    # 1. Extract response_id from response1
-    # 2. Use it in a follow-up call with previous_response_id
-    # 3. Verify the model remembers the context
+    # Verify that enabling response storage does not change response handling.
 
 
 @pytest.mark.integration

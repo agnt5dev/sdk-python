@@ -2,7 +2,7 @@
 
 Provides memory abstractions for workflows and agents:
 - ConversationMemory: KV-backed message history for sessions
-- SemanticMemory: Vector-backed semantic search for user/tenant memory (Phase 3)
+- SemanticMemory: Vector-backed semantic search for user/tenant memory
 """
 
 from __future__ import annotations
