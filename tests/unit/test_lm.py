@@ -794,6 +794,11 @@ async def test_generate_unsupported_provider_prefix():
         )
 
 
+def test_parse_moonshot_provider_prefix():
+    """Moonshot models use the same provider/model contract as other adapters."""
+    assert lm._parse_model("moonshot/kimi-k3") == ("moonshot", "kimi-k3")
+
+
 @pytest.mark.asyncio
 async def test_generate_empty_model_name():
     """Test provider prefix must include a model name."""
