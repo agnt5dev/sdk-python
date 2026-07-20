@@ -11,9 +11,9 @@ Tests cover:
 import pytest
 
 from agnt5.mcp import (
+    CallToolResult,
     MCPClient,
     MCPError,
-    CallToolResult,
     McpTool,
     McpToolWithServer,
     ServerCapabilities,
@@ -24,7 +24,6 @@ from agnt5.mcp import (
     ToolContent,
     TransportType,
 )
-
 
 # =============================================================================
 # TYPE TESTS

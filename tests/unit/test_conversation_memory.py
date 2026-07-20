@@ -2,8 +2,8 @@
 
 import pytest
 
-from agnt5.memory import ConversationAccessor, ConversationMessage
 from agnt5._state_adapter import StateAdapter
+from agnt5.memory import ConversationAccessor, ConversationMessage
 
 
 @pytest.fixture

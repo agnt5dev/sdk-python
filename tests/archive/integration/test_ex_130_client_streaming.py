@@ -19,11 +19,10 @@ Run with:
 """
 
 import os
+
 import pytest
-import asyncio
 
-from agnt5 import Client, AsyncClient, Event, EventType
-
+from agnt5 import AsyncClient, Event, EventType
 
 # Skip all tests if no API key
 pytestmark = [

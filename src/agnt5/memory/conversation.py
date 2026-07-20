@@ -211,7 +211,6 @@ class ConversationAccessor:
                     # Try to decode as proto ChatMessage and extract payload
                     # Decode the payload field as JSON when possible.
                     # The proto ChatMessage has payload as bytes field
-                    import struct
                     # Simple approach: try JSON decode directly
                     msg_data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
                     if isinstance(msg_data, dict) and "payload" in msg_data:
@@ -223,7 +222,7 @@ class ConversationAccessor:
                         messages.append(ConversationMessage.from_dict(msg_data))
                 except (json.JSONDecodeError, KeyError, TypeError):
                     # Proto bytes — fall back to extracting what we can
-                    logger.debug(f"Could not parse native message, skipping")
+                    logger.debug("Could not parse native message, skipping")
                     continue
 
             return messages

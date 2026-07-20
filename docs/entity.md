@@ -227,7 +227,7 @@ await ctx.entity("agent", "conv-1").send_message(msg2)  # Serial
 Entities use event sourcing for durability and single-writer consistency:
 
 1. Each `ctx.set()` generates an event logged to Redpanda
-2. State projected to CockroachDB for querying
+2. State projected for querying
 3. Runtime serializes write handlers per key (queue per key)
 4. Shared handlers can run concurrently for the same key
 5. Different keys execute in parallel across workers

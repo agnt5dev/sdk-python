@@ -5,15 +5,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import secrets
 import time
 import uuid
 from typing import Any, Callable, Optional, TypeVar, Union, cast
 
 from ._ids import generate_cid
-from ._state_adapter import StateInterface
 from ._retry_utils import parse_backoff_policy, parse_retry_policy
 from ._schema_utils import extract_function_metadata, extract_function_schemas
+from ._state_adapter import StateInterface
 from .context import Context, set_current_context
 from .events import Completed, ComponentType, Failed, Started
 from .types import BackoffPolicy, FunctionConfig, HandlerFunc, RetryPolicy

@@ -352,8 +352,8 @@ await session.add_message(role="user", content="Hello!")
 **Features**:
 - Rust core integration for performance
 - gRPC communication with Gateway and Execution Engine
-- Event sourcing with Redpanda
-- State projections with CockroachDB
+- Durable event persistence
+- Durable state projections
 - Orchestration APIs (`task`, `parallel`, `gather`, `spawn`)
 - LLM integration (`ctx.llm`)
 - Signals and timers

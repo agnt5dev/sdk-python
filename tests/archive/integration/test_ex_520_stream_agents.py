@@ -21,8 +21,8 @@ Run with:
 import base64
 import json
 import os
-import pytest
 
+import pytest
 
 # Skip all agent streaming tests if no API key
 pytestmark = [

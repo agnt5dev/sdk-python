@@ -19,10 +19,12 @@ Run with:
     ANTHROPIC_API_KEY=sk-ant-... pytest tests/api_compat/test_anthropic.py -v
 """
 
-import pytest
 from dataclasses import dataclass
 
+import pytest
+
 from agnt5 import lm
+from agnt5.events import EventType
 from agnt5.lm import (
     GenerateRequest,
     GenerationConfig,
@@ -31,10 +33,8 @@ from agnt5.lm import (
     ToolDefinition,
     _LanguageModel,
 )
-from agnt5.events import EventType
 
 from .conftest import skip_without_anthropic
-
 
 # All tests in this module require Anthropic API key
 pytestmark = [

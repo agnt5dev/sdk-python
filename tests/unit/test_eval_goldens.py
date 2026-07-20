@@ -1,6 +1,6 @@
 """Cross-language golden parity tests for builtin scorers.
 
-Reads `sdk/test-fixtures/eval/builtin_goldens.json` (shared with the
+Reads `sdk-core/test-fixtures/eval/builtin_goldens.json` (shared with the
 Rust and TypeScript SDKs) and asserts each row produces the same
 `(score, passed)` here as in the other two SDKs. Rows with a `label`
 field also enforce label equality.
@@ -28,7 +28,11 @@ from agnt5.eval import (
 )
 
 FIXTURE_PATH = (
-    Path(__file__).resolve().parents[2].parent / "test-fixtures" / "eval" / "builtin_goldens.json"
+    Path(__file__).resolve().parents[2].parent
+    / "sdk-core"
+    / "test-fixtures"
+    / "eval"
+    / "builtin_goldens.json"
 )
 
 

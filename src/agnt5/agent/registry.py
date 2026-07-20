@@ -1,7 +1,7 @@
 """Global agent registry for lookups."""
 
 import logging
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     from .core import Agent

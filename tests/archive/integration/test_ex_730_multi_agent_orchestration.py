@@ -19,8 +19,8 @@ Run with:
 """
 
 import os
-import pytest
 
+import pytest
 
 # Skip all multi-agent tests if no API key is available
 pytestmark = [

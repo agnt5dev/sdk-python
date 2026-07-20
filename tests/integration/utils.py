@@ -24,7 +24,6 @@ from typing import Dict, Optional
 
 import psycopg2
 
-
 # ==================== Backend Detection ====================
 
 

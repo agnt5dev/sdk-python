@@ -2,10 +2,9 @@
 
 import logging
 import os
-import secrets
 import time
 import warnings
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .._ids import generate_cid
 from ..context import Context
@@ -120,7 +119,8 @@ class AgentContext(Context):
         self.parent_context = parent_context  # Store for context chain traversal
 
         # Determine state adapter based on parent context
-        from .._state_adapter import StateAdapter as EntityStateAdapter, _get_state_adapter
+        from .._state_adapter import StateAdapter as EntityStateAdapter
+        from .._state_adapter import _get_state_adapter
 
         if state_manager:
             # Explicit state adapter provided (parameter name kept for backward compat)

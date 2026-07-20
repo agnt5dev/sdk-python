@@ -5,11 +5,21 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-import logging
-import secrets
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, TypeVar, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from ._ids import generate_cid
 from ._schema_utils import extract_function_metadata, extract_function_schemas
@@ -19,6 +29,9 @@ from ._telemetry import setup_module_logger, truncate_span_attribute_value
 from .context import Context, set_current_context
 from .function import FunctionContext
 from .types import HandlerFunc, TriggerSpec, WorkflowConfig
+
+if TYPE_CHECKING:
+    from .batch import BatchResult
 
 logger = setup_module_logger(__name__)
 
@@ -81,7 +94,6 @@ class WorkflowContext(Context):
             correlation_id: Unique identifier for this workflow execution
             parent_correlation_id: Parent's correlation ID for event hierarchy
         """
-        import uuid
         super().__init__(
             run_id=run_id,
             correlation_id=correlation_id or generate_cid(),
@@ -144,6 +156,7 @@ class WorkflowContext(Context):
             source_timestamp_ns: Nanosecond timestamp when event was created (default: 0, will be generated if not provided)
         """
         import json
+
         from .events import ComponentType, Delta, OperationType
 
         try:
@@ -187,7 +200,6 @@ class WorkflowContext(Context):
             - For agents: The output from agent.completed event
             - For functions: The last yielded value or collected output
         """
-        import json
         from .events import Event
 
         final_result = None
@@ -859,7 +871,7 @@ class WorkflowContext(Context):
                 }
             ```
         """
-        from .batch import BatchConfig, BatchResult, BatchError
+        from .batch import BatchConfig
         from .function import get_function_config
 
         # Get function name from registered function
@@ -917,7 +929,8 @@ class WorkflowContext(Context):
         This is used when the runtime doesn't support native batch execution.
         """
         import asyncio
-        from .batch import BatchResult, BatchItemResult, BatchStats, BatchError
+
+        from .batch import BatchError, BatchItemResult, BatchResult, BatchStats
 
         semaphore = asyncio.Semaphore(max_concurrency)
         results: List[BatchItemResult] = []
@@ -1166,9 +1179,8 @@ class WorkflowContext(Context):
         step_key = f"step:{name}:{self._step_counter}"
         self._step_counter += 1
 
-        # Generate unique event_id for this step (for hierarchy tracking)
+        # Generate identifiers for this step and its event correlation.
         step_event_id = str(uuid.uuid4())
-        # Use step_event_id as correlation_id for pairing started ↔ completed
         step_correlation_id = generate_cid()
 
         # Check platform-side memoization first
@@ -1394,8 +1406,6 @@ class WorkflowContext(Context):
         self._workflow_entity.record_step_completion(step_key, "sleep", None, sleep_record)
 
         # Emit checkpoint for observability
-        step_event_id = str(uuid.uuid4())
-        # Use step_event_id as correlation_id for pairing started ↔ completed
         step_correlation_id = generate_cid()
 
         from .events import Completed, ComponentType, OperationType, Started
@@ -1562,7 +1572,6 @@ class WorkflowContext(Context):
             else:
                 # Normal during multi-step HITL replay — only the latest paused step
                 # has a correlation ID from the platform; earlier replayed steps generate new ones.
-                step_event_id = str(uuid.uuid4())
                 original_step_correlation_id = generate_cid()
                 self._logger.debug(f"No restored step correlation ID, using new: {original_step_correlation_id}")
 
@@ -1605,7 +1614,6 @@ class WorkflowContext(Context):
             return response
 
         # No cached response - this is a fresh execution, emit step.started
-        step_event_id = str(uuid.uuid4())
         step_correlation_id = generate_cid()
 
         # Emit workflow.step.started - this step is entering
@@ -2394,7 +2402,7 @@ def workflow(
 
                 # Set up standalone state adapter if not already set
                 # This enables direct workflow execution without Worker
-                from ._state_adapter import _state_adapter_ctx, StateAdapter
+                from ._state_adapter import StateAdapter, _state_adapter_ctx
 
                 existing_adapter = _state_adapter_ctx.get()
                 state_token = None

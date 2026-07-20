@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 from ..events import (
     Completed,
@@ -13,7 +13,6 @@ from ..events import (
     OperationType,
     Started,
 )
-
 
 # =============================================================================
 # LM Content Block Events (for streaming)

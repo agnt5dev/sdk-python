@@ -6,7 +6,6 @@ import functools
 from typing import Any, Callable, List, Optional
 
 from ..lm import LanguageModel
-
 from .core import Agent
 from .registry import AgentRegistry
 

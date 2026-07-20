@@ -18,9 +18,12 @@ Run with:
     HUGGINGFACE_API_KEY=hf_... pytest tests/api_compat/test_huggingface.py -v
 """
 
+from typing import Callable
+
 import pytest
 
 from agnt5 import lm
+from agnt5.events import EventType
 from agnt5.lm import (
     GenerateRequest,
     GenerationConfig,
@@ -29,12 +32,8 @@ from agnt5.lm import (
     ToolDefinition,
     _LanguageModel,
 )
-from agnt5.events import EventType
-from typing import Callable
-from .conftest import simulate_tool_execution
 
 from .conftest import skip_without_huggingface
-
 
 # All tests in this module require HuggingFace API key
 pytestmark = [

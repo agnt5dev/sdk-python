@@ -21,6 +21,7 @@ Run with:
 import pytest
 
 from agnt5 import lm
+from agnt5.events import EventType
 from agnt5.lm import (
     GenerateRequest,
     GenerationConfig,
@@ -29,10 +30,8 @@ from agnt5.lm import (
     ToolDefinition,
     _LanguageModel,
 )
-from agnt5.events import EventType
 
 from .conftest import skip_without_groq
-
 
 # All tests in this module require Groq API key
 pytestmark = [

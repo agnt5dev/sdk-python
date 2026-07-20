@@ -31,10 +31,10 @@ Example:
 
 import functools
 import inspect
-from contextvars import ContextVar
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from ._core import create_span as _rust_create_span
 
@@ -177,12 +177,12 @@ def span(
                     if isinstance(args[0], Context):
                         ctx = args[0]._runtime_context
 
-                with create_span(span_name, component_type, ctx, attributes) as s:
+                with create_span(span_name, component_type, ctx, attributes):
                     try:
                         result = await func(*args, **kwargs)
                         # Span automatically marked as OK on success
                         return result
-                    except Exception as e:
+                    except Exception:
                         # Exception automatically recorded by PySpan.__exit__
                         raise
             return async_wrapper
@@ -196,11 +196,11 @@ def span(
                     if isinstance(args[0], Context):
                         ctx = args[0]._runtime_context
 
-                with create_span(span_name, component_type, ctx, attributes) as s:
+                with create_span(span_name, component_type, ctx, attributes):
                     try:
                         result = func(*args, **kwargs)
                         return result
-                    except Exception as e:
+                    except Exception:
                         raise
             return sync_wrapper
 

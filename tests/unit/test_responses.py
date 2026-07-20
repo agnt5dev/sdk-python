@@ -1,12 +1,12 @@
 """Unit tests for response classes."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
 from agnt5.responses import (
-    EventsResponse,
     Event,
+    EventsResponse,
     RunErrorDetail,
     RunResponse,
     RunStatus,

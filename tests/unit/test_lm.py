@@ -18,10 +18,10 @@ Test Strategy:
 """
 
 import json
-import pytest
 from dataclasses import dataclass
-from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from agnt5 import lm
 from agnt5.context import Context, LLMRuntimeOptions, set_current_context
@@ -33,7 +33,6 @@ from agnt5.lm import (
     TokenUsage,
 )
 from agnt5.prompt_manifest import PromptManifestError
-
 
 # ============================================================================
 # Test Fixtures
@@ -737,7 +736,7 @@ async def test_generate_with_all_config_options(mock_rust_generate):
         mock_instance.generate = AsyncMock(return_value=mock_rust_generate)
         mock_rust_class.return_value = mock_instance
 
-        response = await lm.generate(
+        await lm.generate(
             model="openai/gpt-4o",
             prompt="Test prompt",
             temperature=0.8,
@@ -1107,7 +1106,7 @@ async def test_generate_with_previous_response_id(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_generate_with_all_responses_api_features(mock_rust_generate):
     """Test generation with all Responses API features combined."""
-    from agnt5.lm import BuiltInTool, ReasoningEffort, Modality
+    from agnt5.lm import BuiltInTool, Modality, ReasoningEffort
 
     with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
@@ -1142,8 +1141,8 @@ async def test_generate_with_all_responses_api_features(mock_rust_generate):
 @pytest.mark.asyncio
 async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
     """Test streaming with OpenAI built-in tools."""
-    from agnt5.lm import BuiltInTool
     from agnt5.events import Event
+    from agnt5.lm import BuiltInTool
 
     with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
@@ -1171,8 +1170,8 @@ async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
 @pytest.mark.asyncio
 async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
     """Test streaming with reasoning effort for o-series models."""
-    from agnt5.lm import ReasoningEffort
     from agnt5.events import Event
+    from agnt5.lm import ReasoningEffort
 
     with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
@@ -1197,8 +1196,8 @@ async def test_stream_with_reasoning_effort(mock_rust_stream_chunks):
 @pytest.mark.asyncio
 async def test_stream_with_modalities(mock_rust_stream_chunks):
     """Test streaming with modalities specification."""
-    from agnt5.lm import Modality
     from agnt5.events import Event
+    from agnt5.lm import Modality
 
     with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
         mock_instance = MagicMock()
@@ -1345,6 +1344,7 @@ async def test_live_responses_api_with_web_search():
     Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_web_search -m lm_live -v
     """
     import os
+
     from agnt5.lm import BuiltInTool
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1380,6 +1380,7 @@ async def test_live_responses_api_with_reasoning_effort():
     Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_reasoning_effort -m lm_live -v
     """
     import os
+
     from agnt5.lm import ReasoningEffort
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1414,6 +1415,7 @@ async def test_live_responses_api_with_modalities():
     Run with: pytest tests/unit/test_lm.py::test_live_responses_api_with_modalities -m lm_live -v
     """
     import os
+
     from agnt5.lm import Modality
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1474,6 +1476,7 @@ async def test_live_responses_api_comprehensive():
     Run with: pytest tests/unit/test_lm.py::test_live_responses_api_comprehensive -m lm_live -v
     """
     import os
+
     from agnt5.lm import Modality
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1561,6 +1564,7 @@ async def test_live_stream_with_built_in_tools():
     Run with: pytest tests/unit/test_lm.py::test_live_stream_with_built_in_tools -m lm_live -v
     """
     import os
+
     from agnt5.lm import BuiltInTool
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1595,6 +1599,7 @@ async def test_live_stream_with_modalities():
     Run with: pytest tests/unit/test_lm.py::test_live_stream_with_modalities -m lm_live -v
     """
     import os
+
     from agnt5.lm import Modality
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -1635,10 +1640,10 @@ async def test_generate_with_tools_request_agnt5_183(mock_rust_generate):
     from agnt5.lm import (
         GenerateRequest,
         GenerationConfig,
-        ToolDefinition,
+        LMClient,
         Message,
         MessageRole,
-        LMClient,
+        ToolDefinition,
     )
 
     # Create a request with tools to exercise the tools_count code path
@@ -1693,9 +1698,9 @@ async def test_generate_without_tools_request():
     from agnt5.lm import (
         GenerateRequest,
         GenerationConfig,
+        LMClient,
         Message,
         MessageRole,
-        LMClient,
     )
 
     # Mock response

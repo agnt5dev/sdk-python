@@ -20,7 +20,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
 ]
 dependencies = [
-    "maturin>=1.9.3",
     "docstring-parser>=0.15",
     "typing-extensions>=4.8",
     "httpx>=0.28.1",
@@ -62,10 +61,18 @@ target-version = ['py39']
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["tests/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/agnt5/__init__.py" = ["E402", "F401", "F811"]
+"src/agnt5/_compat.py" = ["F401"]
+"src/agnt5/chat/bot.py" = ["E402"]
+"tests/integration/test_worker_app.py" = ["E402"]
+"tests/unit/test_function.py" = ["N801"]
 
 [tool.mypy]
 python_version = "3.9"

@@ -6,14 +6,21 @@ with automatic schema generation from Python type hints and docstrings.
 """
 
 import asyncio
-import dataclasses as dc
 import functools
 import inspect
 import json
-import logging
-import secrets
-import uuid as _uuid
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    TypeVar,
+    get_args,
+    get_origin,
+)
 
 from docstring_parser import parse as parse_docstring
 
@@ -21,6 +28,9 @@ from ._serialization import serialize_to_str
 from ._telemetry import setup_module_logger, truncate_span_attribute_value
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from .workflow import WorkflowContext
 
 logger = setup_module_logger(__name__)
 
@@ -358,7 +368,7 @@ class Tool:
                         await memo.cache_tool_result(step_key, content_hash, result)
 
                     return result
-            except Exception as e:
+            except Exception:
                 # Don't emit ToolCallFailed here - the agent's _run_core() already
                 # emits it with proper correlation_id tracking. Emitting here would
                 # create an orphaned failed event with a different correlation_id.

@@ -16,7 +16,6 @@ Run with:
 import pytest
 import requests
 
-
 # Valid configurations per mode
 VALID_MODES = ["local", "subprocess", "embedded", "postgres", "managed"]
 VALID_DB_TYPES = ["sqlite", "postgres", "cockroach"]
@@ -64,7 +63,7 @@ def test_gateway_health_check(platform):
         f"Expected 200 OK from health endpoint, got {response.status_code}"
     )
 
-    print(f"\n✅ Gateway health check passed")
+    print("\n✅ Gateway health check passed")
     print(f"   Status: {response.status_code}")
     print(f"   Response: {response.text[:100]}")
 
@@ -84,7 +83,7 @@ def test_database_accessible(platform):
     assert db_type in VALID_DB_TYPES, f"Invalid db_type: {db_type}"
     assert db_url is not None and len(db_url) > 0, "db_url should not be empty"
 
-    print(f"\n✅ Database configuration correct")
+    print("\n✅ Database configuration correct")
     print(f"   Type: {db_type}")
     print(f"   URL: {db_url}")
 
@@ -101,7 +100,7 @@ def test_client_creation(client):
     """
     assert client is not None
 
-    print(f"\n✅ Client created successfully")
+    print("\n✅ Client created successfully")
 
 
 @pytest.mark.integration
@@ -136,7 +135,7 @@ def test_platform_mode_configuration(platform):
         assert orchestration_backend == "cockroach"
         assert journal_backend == "redpanda"
 
-    print(f"\n✅ Platform configuration correct")
+    print("\n✅ Platform configuration correct")
     print(f"   Mode: {mode}")
     print(f"   Journal: {journal_backend}")
     print(f"   Orchestration: {orchestration_backend}")
@@ -183,7 +182,7 @@ def test_health_liveness_schema(platform):
     assert "build_time" in data, "Missing 'build_time' field in liveness response"
     assert "git_commit" in data, "Missing 'git_commit' field in liveness response"
 
-    print(f"\n✅ Liveness endpoint schema correct")
+    print("\n✅ Liveness endpoint schema correct")
     print(f"   Status: {data['status']}")
     print(f"   Service: {data['service']}")
     print(f"   Version: {data['version']}")
@@ -240,7 +239,7 @@ def test_health_readiness_schema(platform):
         f"Expected DB status 'healthy' or 'unhealthy', got '{db_check['status']}'"
     )
 
-    print(f"\n✅ Readiness endpoint schema correct")
+    print("\n✅ Readiness endpoint schema correct")
     print(f"   Status: {data['status']}")
     print(f"   DB Check: {db_check['status']}")
 
@@ -274,6 +273,6 @@ def test_health_db_connectivity(platform):
         f"Error: {db_check.get('error', 'N/A')}"
     )
 
-    print(f"\n✅ Database connectivity verified")
+    print("\n✅ Database connectivity verified")
     print(f"   Overall: {data['status']}")
     print(f"   DB: {db_check['status']}")

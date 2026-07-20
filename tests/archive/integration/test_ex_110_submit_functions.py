@@ -11,9 +11,9 @@ Run with:
     pytest tests/integration/test_ex_110_submit_functions.py -v
 """
 
-import pytest
 import time
 
+import pytest
 
 # =============================================================================
 # BASIC SUBMIT AND WAIT

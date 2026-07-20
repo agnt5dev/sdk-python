@@ -23,13 +23,13 @@ Run with:
 """
 
 import os
+
 import pytest
 
 from agnt5 import lm
 from agnt5.events import EventType
 
 from .conftest import skip_without_ollama
-
 
 # All tests in this module require Ollama running locally
 pytestmark = [

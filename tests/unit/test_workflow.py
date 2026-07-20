@@ -25,10 +25,10 @@ from agnt5 import (
     function,
     workflow,
 )
+from agnt5._state_adapter import with_state_context as with_entity_context
 from agnt5.exceptions import WaitingForUserInputException
 from agnt5.lm import GenerateResponse, Message
 from agnt5.workflow import WorkflowEntity
-from agnt5._state_adapter import with_state_context as with_entity_context
 
 
 @pytest.fixture(autouse=True)
@@ -825,7 +825,7 @@ async def test_workflow_state_change_tracking():
     async def run_test():
         workflow_entity = WorkflowEntity(run_id="test-tracking")
         ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="test-tracking")
-        result = await tracked_workflow(ctx)
+        await tracked_workflow(ctx)
 
         # Verify state changes were tracked
         assert len(workflow_entity._state_changes) >= 3  # At least 3 changes

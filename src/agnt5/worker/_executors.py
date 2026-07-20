@@ -391,7 +391,7 @@ class ExecutorMixin:
 
     async def _handle_streaming_function(self, ctx: Any, result: Any) -> None:
         """Handle streaming function by queueing deltas."""
-        from ..events import ComponentType, Completed, Event, OutputDelta, OutputStart, OutputStop
+        from ..events import Completed, ComponentType, Event, OutputDelta, OutputStart, OutputStop
 
         sequence = 0
         has_typed_events = False
@@ -630,7 +630,6 @@ class ExecutorMixin:
         )
 
         def create_context(input_dict: dict, req: Any) -> Context:
-            entity_key = input_dict.get("key", "unknown")
             correlation_id = f"ent-{secrets.token_hex(5)}"
             return Context(
                 run_id=req.invocation_id,
@@ -831,7 +830,6 @@ class ExecutorMixin:
             )
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
-            from .._core import PyExecuteComponentResponse
 
             user_message = input_dict.get("message", "")
             if not user_message:
@@ -1291,7 +1289,6 @@ class ExecutorMixin:
         Returns None to let the event queue handle delivery.
         """
         import json
-        import time as _time
         import traceback as _traceback
 
         from .._core import PyExecuteComponentResponse
@@ -1309,7 +1306,6 @@ class ExecutorMixin:
         token = None
         span_token = None
         session_id = None
-        workflow_start_time = _time.time()
         start_time_ns = time.time_ns()
 
         try:

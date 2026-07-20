@@ -1,5 +1,7 @@
 # AGNT5 Python SDK
 
+[![CI](https://github.com/agnt5dev/sdk-python/actions/workflows/ci.yml/badge.svg)](https://github.com/agnt5dev/sdk-python/actions/workflows/ci.yml)
+
 Build durable AI agents and workflows with automatic retries, checkpointing, and state management.
 
 ## Documentation

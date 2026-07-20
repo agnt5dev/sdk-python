@@ -30,7 +30,7 @@ cd sdk/sdk-python
 uv sync --group integration
 
 # 2. Start dev-server
-cd [private-monorepo]
+cd /path/to/agnt5
 just dev-server
 
 # 3. Run integration tests

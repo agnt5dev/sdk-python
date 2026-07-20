@@ -16,7 +16,12 @@ import pytest
 
 from agnt5 import Context, tool
 from agnt5.exceptions import ConfigurationError
-from agnt5.tool import Tool, ToolRegistry, _extract_schema_from_function, _python_type_to_json_schema
+from agnt5.tool import (
+    Tool,
+    ToolRegistry,
+    _extract_schema_from_function,
+    _python_type_to_json_schema,
+)
 
 
 @pytest.fixture(autouse=True)

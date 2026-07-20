@@ -23,10 +23,12 @@ Run with:
     OPENAI_API_KEY=sk-... pytest tests/api_compat/test_openai.py -v
 """
 
-import pytest
 from dataclasses import dataclass
 
+import pytest
+
 from agnt5 import lm
+from agnt5.events import EventType
 from agnt5.lm import (
     BuiltInTool,
     GenerateRequest,
@@ -36,10 +38,8 @@ from agnt5.lm import (
     ToolDefinition,
     _LanguageModel,
 )
-from agnt5.events import EventType
 
 from .conftest import skip_without_openai
-
 
 # All tests in this module require OpenAI API key
 pytestmark = [

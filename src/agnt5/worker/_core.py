@@ -20,7 +20,6 @@ from ..scorer import (
     get_builtin_judge_scorer_config,
     register_builtin_scorer_handlers,
 )
-
 from ._executors import ExecutorMixin
 from ._prompt_executor import (
     PROMPT_EXECUTOR_COMPONENT_NAME,

@@ -19,8 +19,8 @@ Run with:
 """
 
 import os
-import pytest
 
+import pytest
 
 # Skip all workflow streaming tests if no API key
 pytestmark = [

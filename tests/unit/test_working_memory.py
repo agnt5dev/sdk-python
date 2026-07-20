@@ -2,8 +2,8 @@
 
 import pytest
 
-from agnt5.memory import WorkingMemory, MemoryScope
 from agnt5._state_adapter import StateAdapter
+from agnt5.memory import MemoryScope, WorkingMemory
 
 
 @pytest.fixture

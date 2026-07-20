@@ -293,7 +293,7 @@ Workflows are executed by the Orchestration Plane:
 1. Workflow registered with `@workflow` decorator
 2. Triggered via Gateway API with input parameters
 3. Orchestrator executes workflow step-by-step
-4. Each `await` checkpoints state to Redpanda
+4. Each `await` checkpoints state to the platform event store
 5. On failure, workflow resumes from last checkpoint
 6. Parallel tasks distributed across workers
 7. Signals and timers managed by orchestrator

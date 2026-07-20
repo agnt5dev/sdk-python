@@ -16,7 +16,6 @@ from dataclasses import fields as dataclass_fields
 from typing import (
     Any,
     Dict,
-    Generic,
     Optional,
     Tuple,
     Type,

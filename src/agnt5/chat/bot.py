@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import httpx
 
@@ -287,6 +287,6 @@ class ChatBot:
         """
         import uuid
         # Namespace UUID for AGNT5 chat sessions (deterministic, never changes)
-        CHAT_SESSION_NS = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        chat_session_ns = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
         key = f"{platform}:{channel_id}:{thread_id}"
-        return str(uuid.uuid5(CHAT_SESSION_NS, key))
+        return str(uuid.uuid5(chat_session_ns, key))

@@ -18,6 +18,7 @@ Run with:
 """
 
 import os
+
 import pytest
 
 # Skip all agent tests if no API key is available

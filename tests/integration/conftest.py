@@ -16,11 +16,10 @@ Usage:
 import logging
 import os
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import httpx
 import pytest
@@ -121,7 +120,7 @@ def wait_for_health(url: str, timeout: int = 30) -> None:
         try:
             response = httpx.get(health_url, timeout=2)
             if response.status_code == 200:
-                logger.info(f"✅ Platform is healthy")
+                logger.info("✅ Platform is healthy")
                 return
         except httpx.RequestError:
             pass
@@ -406,7 +405,7 @@ def worker_process(platform):
 
         # Check if platform process died (CI debugging)
         if platform_process and platform_process.poll() is not None:
-            logger.error(f"❌ Platform process died during worker registration!")
+            logger.error("❌ Platform process died during worker registration!")
             try:
                 platform_stdout, _ = platform_process.communicate(timeout=1)
                 logger.error(f"📋 Platform logs:\n{platform_stdout}")
@@ -435,7 +434,7 @@ def worker_process(platform):
     else:
         # Timeout - check platform health before continuing
         if platform_process and platform_process.poll() is not None:
-            logger.error(f"❌ Platform died during worker registration wait!")
+            logger.error("❌ Platform died during worker registration wait!")
             try:
                 platform_stdout, _ = platform_process.communicate(timeout=1)
                 logger.error(f"📋 Platform logs:\n{platform_stdout}")
