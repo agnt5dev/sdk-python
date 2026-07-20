@@ -201,6 +201,7 @@ from .memory import (
 
 # Sandbox components
 from .sandbox import (
+    InMemorySandbox,
     Sandbox,
     SandboxPool,
     ExecuteCodeResult,
@@ -456,6 +457,7 @@ __all__ = [
     "RetryError",
     "WaitingForUserInputException",
     # Sandbox components
+    "InMemorySandbox",
     "Sandbox",
     "SandboxPool",
     "ExecuteCodeResult",

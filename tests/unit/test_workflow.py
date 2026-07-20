@@ -186,6 +186,19 @@ async def test_wait_for_user_replay_does_not_emit_pause_logs():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sentinel", ["__skip__", "__skipped__"])
+async def test_wait_for_user_replay_decodes_skip_sentinels(sentinel):
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = sentinel
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+
+    response = await ctx.wait_for_user("Optional input", skippable=True)
+
+    assert response is None
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_management():
     """Test workflow can use context state."""
 

@@ -50,6 +50,20 @@ def test_context():
 class TestFunctionDecorator:
     """Test @function decorator."""
 
+    def test_function_context_has_run_scoped_state(self, test_context: FunctionContext) -> None:
+        test_context.state.set("key", "value")
+        assert test_context.state.get("key") == "value"
+
+    def test_function_context_exposes_dispatch_metadata(self) -> None:
+        ctx = FunctionContext(
+            run_id="run-1",
+            correlation_id="corr-1",
+            parent_correlation_id="parent-1",
+            trace_metadata={"dispatch_mode": "pull"},
+        )
+
+        assert ctx.metadata == {"dispatch_mode": "pull"}
+
     def test_function_basic(self) -> None:
         @function
         async def my_func(ctx: FunctionContext, value: str) -> str:

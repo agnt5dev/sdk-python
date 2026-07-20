@@ -235,6 +235,11 @@ class Context:
         return self._attempt
 
     @property
+    def metadata(self) -> dict[str, str]:
+        """Runtime dispatch metadata for this invocation."""
+        return dict(self._trace_metadata or {})
+
+    @property
     def logger(self) -> ContextLogger:
         """Logger with correlation IDs. Supports keyword args as log attributes."""
         return self._logger
