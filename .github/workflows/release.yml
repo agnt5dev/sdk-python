@@ -21,7 +21,7 @@ env:
 jobs:
   build-wheels-linux:
     name: Linux Wheels
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,6 +43,11 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
           # Make cargo available in subsequent steps
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install ARM64 cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -141,7 +146,7 @@ jobs:
 
   build-wheels-macos:
     name: macOS Wheels
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
         with:
