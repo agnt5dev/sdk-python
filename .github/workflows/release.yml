@@ -1,6 +1,7 @@
 name: SDK Python Release
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       skip-publish:
@@ -20,8 +21,20 @@ env:
 
 jobs:
   build-wheels-linux:
-    name: Linux Wheels
-    runs-on: [self-hosted, Linux, X64]
+    name: Linux Wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x64
+            runner: ubuntu-latest
+            sccache-target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            sccache-target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v7
         with:
@@ -39,8 +52,7 @@ jobs:
             rustup update stable
             rustup default stable
           fi
-          # Add ARM64 cross-compilation target
-          rustup target add aarch64-unknown-linux-gnu
+          rustup target add ${{ matrix.target }}
           # Make cargo available in subsequent steps
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
@@ -53,10 +65,10 @@ jobs:
           if ! command -v sccache &> /dev/null; then
             echo "Installing sccache..."
             SCCACHE_VERSION="0.8.2"
-            curl -L "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o /tmp/sccache.tar.gz
+            curl -L "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${{ matrix.sccache-target }}.tar.gz" -o /tmp/sccache.tar.gz
             tar xzf /tmp/sccache.tar.gz -C /tmp
             mkdir -p "$HOME/.local/bin"
-            mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" "$HOME/.local/bin/"
+            mv "/tmp/sccache-v${SCCACHE_VERSION}-${{ matrix.sccache-target }}/sccache" "$HOME/.local/bin/"
             rm -rf /tmp/sccache*
             echo "$HOME/.local/bin" >> $GITHUB_PATH
           else
@@ -98,35 +110,16 @@ jobs:
             echo "Cache validation complete"
           fi
 
-      - name: Configure ARM64 cross-compilation
-        working-directory: .
-        run: |
-          # Configure Cargo to use the ARM64 cross-compiler's linker
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
       - name: Show sccache stats (before)
         run: sccache --show-stats || true
 
-      - name: Build x86_64 wheel
+      - name: Build wheel
         working-directory: .
         run: |
           ~/.local/bin/uv run --with maturin \
             maturin build \
             --release \
-            --target x86_64-unknown-linux-gnu \
-            --out dist
-
-      - name: Build ARM64 wheel
-        working-directory: .
-        run: |
-          ~/.local/bin/uv run --with maturin \
-            maturin build \
-            --release \
-            --target aarch64-unknown-linux-gnu \
+            --target ${{ matrix.target }} \
             --out dist
 
       - name: Show sccache stats (after)
@@ -135,13 +128,13 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-linux
+          name: wheels-linux-${{ matrix.arch }}
           path: ./dist/*.whl
           retention-days: 7
 
   build-wheels-macos:
     name: macOS Wheels
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
         with:
@@ -159,8 +152,6 @@ jobs:
             rustup update stable
             rustup default stable
           fi
-          # Add both cross-compilation targets
-          rustup target add x86_64-apple-darwin
           rustup target add aarch64-apple-darwin
           # Make cargo available in subsequent steps
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
@@ -222,15 +213,6 @@ jobs:
       - name: Show sccache stats (before)
         run: sccache --show-stats || true
 
-      - name: Build x86_64 wheel
-        working-directory: .
-        run: |
-          ~/.local/bin/uv run --with maturin \
-            maturin build \
-            --release \
-            --target x86_64-apple-darwin \
-            --out dist
-
       - name: Build ARM64 wheel
         working-directory: .
         run: |
@@ -254,7 +236,7 @@ jobs:
     name: Publish to PyPI
     needs: [build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
-    if: inputs.skip-publish != true
+    if: github.event_name == 'workflow_dispatch' && inputs.skip-publish != true
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -277,7 +259,7 @@ jobs:
           echo "=== Built wheels ==="
           ls -lh dist/
           echo ""
-          echo "Expected 4 wheels (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin)"
+          echo "Expected 3 wheels (x86_64-linux, aarch64-linux, aarch64-darwin)"
 
       - name: Get SDK version
         id: version
