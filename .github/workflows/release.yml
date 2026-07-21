@@ -1,0 +1,331 @@
+name: SDK Python Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip-publish:
+        description: "Skip PyPI publish"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-wheels-linux:
+    name: Linux Wheels
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Setup Rust toolchain
+        run: |
+          # Check if rustup exists, install if not
+          if ! command -v rustup &> /dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            # Source cargo env for current shell
+            source "$HOME/.cargo/env"
+          else
+            # Update to latest stable if rustup exists
+            rustup update stable
+            rustup default stable
+          fi
+          # Add ARM64 cross-compilation target
+          rustup target add aarch64-unknown-linux-gnu
+          # Make cargo available in subsequent steps
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install sccache
+        run: |
+          # Check if sccache exists, install if not
+          if ! command -v sccache &> /dev/null; then
+            echo "Installing sccache..."
+            SCCACHE_VERSION="0.8.2"
+            curl -L "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o /tmp/sccache.tar.gz
+            tar xzf /tmp/sccache.tar.gz -C /tmp
+            mkdir -p "$HOME/.local/bin"
+            mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" "$HOME/.local/bin/"
+            rm -rf /tmp/sccache*
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+          else
+            echo "sccache already installed: $(sccache --version)"
+          fi
+
+      - name: Configure build caches
+        run: |
+          # Set up cache directories
+          CACHE_BASE="${HOME}/.cache/agnt5-build"
+          mkdir -p "${CACHE_BASE}/cargo"
+          mkdir -p "${CACHE_BASE}/uv"
+          mkdir -p "${CACHE_BASE}/sccache"
+
+          echo "CARGO_HOME=${CACHE_BASE}/cargo" >> $GITHUB_ENV
+          echo "UV_CACHE_DIR=${CACHE_BASE}/uv" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=${CACHE_BASE}/sccache" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+          # Optimize build parallelism
+          echo "CARGO_BUILD_JOBS=$(nproc 2>/dev/null || echo 4)" >> $GITHUB_ENV
+
+      - name: Validate cargo cache
+        run: |
+          # Detect and remove corrupted cargo cache entries
+          CARGO_REGISTRY="${HOME}/.cache/agnt5-build/cargo/registry"
+          if [ -d "$CARGO_REGISTRY" ]; then
+            echo "Validating cargo cache..."
+            # Try to read all Cargo.toml files in the cache
+            find "$CARGO_REGISTRY/src" -name "Cargo.toml" -type f 2>/dev/null | while read -r file; do
+              if ! head -1 "$file" >/dev/null 2>&1; then
+                echo "Found corrupted cache entry: $file"
+                # Remove the entire crate directory
+                CRATE_DIR=$(dirname "$file")
+                echo "Removing corrupted crate: $CRATE_DIR"
+                rm -rf "$CRATE_DIR"
+              fi
+            done
+            echo "Cache validation complete"
+          fi
+
+      - name: Configure ARM64 cross-compilation
+        working-directory: .
+        run: |
+          # Configure Cargo to use the ARM64 cross-compiler's linker
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Show sccache stats (before)
+        run: sccache --show-stats || true
+
+      - name: Build x86_64 wheel
+        working-directory: .
+        run: |
+          ~/.local/bin/uv run --with maturin \
+            maturin build \
+            --release \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
+
+      - name: Build ARM64 wheel
+        working-directory: .
+        run: |
+          ~/.local/bin/uv run --with maturin \
+            maturin build \
+            --release \
+            --target aarch64-unknown-linux-gnu \
+            --out dist
+
+      - name: Show sccache stats (after)
+        run: sccache --show-stats
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux
+          path: ./dist/*.whl
+          retention-days: 7
+
+  build-wheels-macos:
+    name: macOS Wheels
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Setup Rust toolchain
+        run: |
+          # Check if rustup exists, install if not
+          if ! command -v rustup &> /dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            # Source cargo env for current shell
+            source "$HOME/.cargo/env"
+          else
+            # Update to latest stable if rustup exists
+            rustup update stable
+            rustup default stable
+          fi
+          # Add both cross-compilation targets
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
+          # Make cargo available in subsequent steps
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install sccache
+        run: |
+          # Check if sccache exists, install if not
+          if ! command -v sccache &> /dev/null; then
+            echo "Installing sccache..."
+            SCCACHE_VERSION="0.8.2"
+            curl -L "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin.tar.gz" -o /tmp/sccache.tar.gz
+            tar xzf /tmp/sccache.tar.gz -C /tmp
+            mkdir -p "$HOME/.local/bin"
+            mv "/tmp/sccache-v${SCCACHE_VERSION}-aarch64-apple-darwin/sccache" "$HOME/.local/bin/"
+            rm -rf /tmp/sccache*
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+          else
+            echo "sccache already installed: $(sccache --version)"
+          fi
+
+      - name: Configure build caches
+        run: |
+          # Set up cache directories
+          CACHE_BASE="${HOME}/.cache/agnt5-build"
+          mkdir -p "${CACHE_BASE}/cargo"
+          mkdir -p "${CACHE_BASE}/uv"
+          mkdir -p "${CACHE_BASE}/sccache"
+
+          echo "CARGO_HOME=${CACHE_BASE}/cargo" >> $GITHUB_ENV
+          echo "UV_CACHE_DIR=${CACHE_BASE}/uv" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=${CACHE_BASE}/sccache" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+          # Optimize build parallelism (macOS uses sysctl)
+          echo "CARGO_BUILD_JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" >> $GITHUB_ENV
+
+      - name: Validate cargo cache
+        run: |
+          # Detect and remove corrupted cargo cache entries
+          CARGO_REGISTRY="${HOME}/.cache/agnt5-build/cargo/registry"
+          if [ -d "$CARGO_REGISTRY" ]; then
+            echo "Validating cargo cache..."
+            # Try to read all Cargo.toml files in the cache
+            find "$CARGO_REGISTRY/src" -name "Cargo.toml" -type f 2>/dev/null | while read -r file; do
+              if ! head -1 "$file" >/dev/null 2>&1; then
+                echo "Found corrupted cache entry: $file"
+                # Remove the entire crate directory
+                CRATE_DIR=$(dirname "$file")
+                echo "Removing corrupted crate: $CRATE_DIR"
+                rm -rf "$CRATE_DIR"
+              fi
+            done
+            echo "Cache validation complete"
+          fi
+
+      - name: Show sccache stats (before)
+        run: sccache --show-stats || true
+
+      - name: Build x86_64 wheel
+        working-directory: .
+        run: |
+          ~/.local/bin/uv run --with maturin \
+            maturin build \
+            --release \
+            --target x86_64-apple-darwin \
+            --out dist
+
+      - name: Build ARM64 wheel
+        working-directory: .
+        run: |
+          ~/.local/bin/uv run --with maturin \
+            maturin build \
+            --release \
+            --target aarch64-apple-darwin \
+            --out dist
+
+      - name: Show sccache stats (after)
+        run: sccache --show-stats
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-macos
+          path: ./dist/*.whl
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: [build-wheels-linux, build-wheels-macos]
+    runs-on: ubuntu-latest
+    if: inputs.skip-publish != true
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require main branch
+        run: test "${GITHUB_REF_NAME}" = main
+
+      - name: Download all wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List wheels
+        run: |
+          echo "=== Built wheels ==="
+          ls -lh dist/
+          echo ""
+          echo "Expected 4 wheels (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin)"
+
+      - name: Get SDK version
+        id: version
+        run: |
+          VERSION=$(grep -m1 'version = ' ./pyproject.toml | sed 's/.*version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
+          verbose: true
+
+      - name: Create and push release tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists" >&2
+            exit 1
+          fi
+          git config user.name "agnt5-release-bot"
+          git config user.email "release-bot@agnt5.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Output release summary
+        run: |
+          echo "## Release Complete" >> $GITHUB_STEP_SUMMARY
+          echo "**Package:** \`agnt5\` (PyPI)" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Wheels" >> $GITHUB_STEP_SUMMARY
+          for wheel in dist/*.whl; do
+            echo "- \`$(basename "$wheel")\`" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Post to Slack channel
+        if: always() && env.SLACK_BOT_TOKEN != ''
+        uses: slackapi/slack-github-action@v4
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: "${{ job.status == 'success' && '✓' || '✗' }} agnt5-sdk-python:${{ steps.version.outputs.version }}${{ job.status != 'success' && format(' - {0}', job.status) || '' }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
