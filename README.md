@@ -1,6 +1,6 @@
 # AGNT5 Python SDK
 
-[![CI](https://github.com/agnt5dev/sdk-python/actions/workflows/ci.yml/badge.svg)](https://github.com/agnt5dev/sdk-python/actions/workflows/ci.yml)
+[![CI](https://github.com/agnt5dev/agnt5/actions/workflows/sdk-python-tests.yml/badge.svg)](https://github.com/agnt5dev/agnt5/actions/workflows/sdk-python-tests.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Build reliable AI agents and durable workflows in Python. The AGNT5 SDK
