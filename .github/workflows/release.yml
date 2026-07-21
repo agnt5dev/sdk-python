@@ -152,8 +152,6 @@ jobs:
             rustup update stable
             rustup default stable
           fi
-          # Add both cross-compilation targets
-          rustup target add x86_64-apple-darwin
           rustup target add aarch64-apple-darwin
           # Make cargo available in subsequent steps
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
@@ -215,15 +213,6 @@ jobs:
       - name: Show sccache stats (before)
         run: sccache --show-stats || true
 
-      - name: Build x86_64 wheel
-        working-directory: .
-        run: |
-          ~/.local/bin/uv run --with maturin \
-            maturin build \
-            --release \
-            --target x86_64-apple-darwin \
-            --out dist
-
       - name: Build ARM64 wheel
         working-directory: .
         run: |
@@ -270,7 +259,7 @@ jobs:
           echo "=== Built wheels ==="
           ls -lh dist/
           echo ""
-          echo "Expected 4 wheels (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin)"
+          echo "Expected 3 wheels (x86_64-linux, aarch64-linux, aarch64-darwin)"
 
       - name: Get SDK version
         id: version
