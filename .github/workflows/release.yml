@@ -1,6 +1,7 @@
 name: SDK Python Release
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       skip-publish:
@@ -254,7 +255,7 @@ jobs:
     name: Publish to PyPI
     needs: [build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
-    if: inputs.skip-publish != true
+    if: github.event_name == 'workflow_dispatch' && inputs.skip-publish != true
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
