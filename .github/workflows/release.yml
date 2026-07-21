@@ -2,6 +2,8 @@ name: SDK Python Release
 
 on:
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       skip-publish:
@@ -20,8 +22,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate-release:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate version and changelog
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SKIP_PUBLISH: ${{ inputs.skip-publish }}
+        run: |
+          PACKAGE_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*version = "\(.*\)"/\1/')
+
+          if [ "$EVENT_NAME" = release ]; then
+            if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Release tag must be vX.Y.Z: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            RELEASE_VERSION=${RELEASE_TAG#v}
+            if [ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]; then
+              echo "Release tag $RELEASE_TAG does not match package version $PACKAGE_VERSION" >&2
+              exit 1
+            fi
+            if ! grep -Fq "## [$RELEASE_VERSION]" CHANGELOG.md; then
+              echo "CHANGELOG.md is missing ## [$RELEASE_VERSION]" >&2
+              exit 1
+            fi
+          elif [ "$EVENT_NAME" = workflow_dispatch ] && [ "$SKIP_PUBLISH" != true ]; then
+            test "${GITHUB_REF_NAME}" = main
+          fi
+
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
   build-wheels-linux:
     name: Linux Wheel (${{ matrix.target }})
+    needs: validate-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -134,6 +174,7 @@ jobs:
 
   build-wheels-macos:
     name: macOS Wheels
+    needs: validate-release
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
@@ -234,9 +275,9 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build-wheels-linux, build-wheels-macos]
+    needs: [validate-release, build-wheels-linux, build-wheels-macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && inputs.skip-publish != true
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.skip-publish != true)
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -245,6 +286,7 @@ jobs:
           fetch-depth: 0
 
       - name: Require main branch
+        if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF_NAME}" = main
 
       - name: Download all wheels
@@ -264,7 +306,7 @@ jobs:
       - name: Get SDK version
         id: version
         run: |
-          VERSION=$(grep -m1 'version = ' ./pyproject.toml | sed 's/.*version = "\(.*\)"/\1/')
+          VERSION=${{ needs.validate-release.outputs.version }}
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Publish to PyPI
@@ -276,6 +318,7 @@ jobs:
           verbose: true
 
       - name: Create and push release tag
+        if: github.event_name == 'workflow_dispatch'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
