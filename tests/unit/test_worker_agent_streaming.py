@@ -10,6 +10,7 @@ from agnt5.lm.events import (
     LMContentBlockCompleted,
     LMContentBlockDelta,
     LMContentBlockStarted,
+    LMFailed,
 )
 from agnt5.worker._executors import ExecutorMixin
 
@@ -92,6 +93,25 @@ class _StreamingAgent:
         raise AssertionError("hosted Agent execution must use Agent.stream()")
 
 
+class _FailingStreamingAgent:
+    name = "failing_streaming_agent"
+
+    async def stream(self, message, context):
+        assert message == "hello"
+        failure = LMFailed(
+            name="mock-model",
+            correlation_id="lm-1",
+            parent_correlation_id="iteration-1",
+            model="mock-model",
+            provider="mock",
+            error_code="RuntimeError",
+            error_message="provider failed",
+        )
+        context.emit(failure)
+        yield failure
+        raise RuntimeError("provider failed")
+
+
 def _request():
     return SimpleNamespace(
         invocation_id="run-streaming-agent",
@@ -132,4 +152,28 @@ async def test_execute_agent_forwards_stream_events_and_terminal_lifecycle():
         "agent.completed",
         "run.completed",
         "session.created",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_does_not_duplicate_persisted_lm_failure():
+    worker = _RecordingWorker()
+    executor = _DummyExecutor(worker)
+
+    response = await executor._execute_agent(
+        _FailingStreamingAgent(),
+        b"",
+        _request(),
+    )
+
+    assert response is None
+    component_event_types = [
+        event_type for event_type in worker.event_types if not event_type.startswith("log")
+    ]
+    assert component_event_types == [
+        "run.started",
+        "agent.started",
+        "lm.failed",
+        "agent.failed",
+        "run.failed",
     ]

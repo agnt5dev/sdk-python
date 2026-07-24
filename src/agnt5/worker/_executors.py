@@ -809,6 +809,7 @@ class ExecutorMixin:
             ToolCallStarted,
         )
         from ..events import Completed, ComponentType, Event, Failed, Started
+        from ..lm.events import LMFailed
 
         logger.debug(
             f"[_execute_agent] Starting execution for agent={agent.name}, "
@@ -908,11 +909,19 @@ class ExecutorMixin:
                                         handoff_to = event.output_data.get("handoff_to")
                                 continue
 
-                            # Agent._run_core() persists tool lifecycle events as
-                            # part of durable tool execution. They are also yielded
-                            # for local stream consumers, so emitting them again here
-                            # would duplicate the journal records.
-                            if isinstance(event, (ToolCallStarted, ToolCallCompleted, ToolCallFailed)):
+                            # Agent._run_core() persists tool lifecycle and LM
+                            # failure events before yielding them to local stream
+                            # consumers. Emitting them again here would duplicate
+                            # the durable journal records.
+                            if isinstance(
+                                event,
+                                (
+                                    LMFailed,
+                                    ToolCallStarted,
+                                    ToolCallCompleted,
+                                    ToolCallFailed,
+                                ),
+                            ):
                                 continue
 
                             # Forward other events to the context
