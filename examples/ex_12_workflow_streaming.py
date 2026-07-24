@@ -6,10 +6,10 @@ This example demonstrates streaming from agents within workflows:
 - Streaming events from nested agents are forwarded to client
 - Final agent output is extracted and returned to the workflow
 
-When a workflow step calls an agent that returns an async generator,
+When a workflow step consumes Agent.stream(),
 the workflow step executor:
 1. Detects the async generator
-2. Forwards all events via delta queue (agent.started, lm.message.delta, etc.)
+2. Forwards yielded events via the workflow context
 3. Extracts the final output from agent.completed
 4. Returns the output to the workflow for the next step
 
@@ -22,8 +22,7 @@ Each workflow can be:
 import asyncio
 import os
 
-from agnt5 import workflow, WorkflowContext, Agent
-
+from agnt5 import Agent, WorkflowContext, workflow
 
 # =============================================================================
 # STREAMING AGENT WORKFLOW
@@ -35,7 +34,7 @@ async def research_workflow(ctx: WorkflowContext, topic: str) -> dict:
     """
     Research workflow with streaming agent.
 
-    The agent.run() returns an async generator. The workflow step executor
+    Agent.stream() returns an async generator. The workflow step executor
     automatically detects this and:
     - Forwards streaming events to the client
     - Extracts the final output for the next step
@@ -62,10 +61,10 @@ async def research_workflow(ctx: WorkflowContext, topic: str) -> dict:
     )
 
     # Step 1: Research - the async generator is auto-detected
-    # Events like agent.started, lm.message.delta, agent.completed are forwarded
+    # Events like agent.started, lm.content_block.delta, agent.completed are forwarded
     research = await ctx.step(
         "research",
-        researcher.run(f"Research: {topic}", context=ctx),
+        researcher.stream(f"Research: {topic}", context=ctx),
     )
     ctx.logger.info(f"Research result: {research[:100] if research else 'None'}...")
 
@@ -80,7 +79,7 @@ async def research_workflow(ctx: WorkflowContext, topic: str) -> dict:
     # Step 2: Summarize - also streams events
     summary = await ctx.step(
         "summarize",
-        summarizer.run(f"Summarize: {research}", context=ctx),
+        summarizer.stream(f"Summarize: {research}", context=ctx),
     )
     ctx.logger.info(f"Summary: {summary}")
 
@@ -128,7 +127,7 @@ async def mixed_workflow(ctx: WorkflowContext, x: int = 10, y: int = 5) -> dict:
 
     description = await ctx.step(
         "describe",
-        agent.run(f"Describe the number {result}", context=ctx),
+        agent.stream(f"Describe the number {result}", context=ctx),
     )
     ctx.logger.info(f"Description: {description}")
 
@@ -169,7 +168,7 @@ async def simple_agent_workflow(ctx: WorkflowContext, message: str = "Hello") ->
     # This step returns an async generator - auto-detected by step executor
     response = await ctx.step(
         "respond",
-        agent.run(message, context=ctx),
+        agent.stream(message, context=ctx),
     )
 
     return {

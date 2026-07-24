@@ -200,35 +200,47 @@ class WorkflowContext(Context):
             - For agents: The output from agent.completed event
             - For functions: The last yielded value or collected output
         """
+        from .agent.events import (
+            AgentCompleted,
+            AgentFailed,
+            AgentStarted,
+            ToolCallCompleted,
+            ToolCallFailed,
+            ToolCallStarted,
+        )
         from .events import Event
+        from .lm.events import LMFailed
 
         final_result = None
         collected_output = []  # For streaming functions that yield chunks
 
         async for item in async_gen:
             if isinstance(item, Event):
-                # Forward typed Event via delta queue
-                event_data = item.to_response_fields()
-                output_data = event_data.get("output_data", b"")
-                output_str = output_data.decode("utf-8") if isinstance(output_data, bytes) else str(output_data or "{}")
-
-                self._forward_delta(
-                    event_type=event_data.get("event_type", ""),
-                    output_data=output_str,
-                    content_index=event_data.get("content_index", 0),
-                    source_timestamp_ns=item.source_timestamp_ns,
-                )
-
-                # Capture final result from specific event types
-                if item.event_type == "agent.completed":
-                    # For agents, extract the output from completed event
-                    output_data_dict = getattr(item, 'output_data', {}) or {}
+                if isinstance(item, AgentCompleted):
+                    output_data_dict = item.output_data or {}
                     final_result = output_data_dict.get("output", "")
                     logger.debug(f"Step '{step_name}': Captured agent output from agent.completed")
-                elif item.event_type == "output.stop":
-                    # For streaming functions, the collected output is the result
-                    # (already collected from delta events)
-                    pass
+
+                # Agent._run_core() already persists agent/tool lifecycle and
+                # LM failure events. Agent.stream() also yields them for local
+                # consumers, so forwarding those copies would duplicate journal
+                # records. Content-block events are yield-only and must be
+                # forwarded here.
+                if isinstance(
+                    item,
+                    (
+                        AgentStarted,
+                        AgentCompleted,
+                        AgentFailed,
+                        ToolCallStarted,
+                        ToolCallCompleted,
+                        ToolCallFailed,
+                        LMFailed,
+                    ),
+                ):
+                    continue
+
+                self.emit(item)
 
             else:
                 # Raw value (non-Event) - streaming function output

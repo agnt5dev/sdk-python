@@ -800,7 +800,14 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Execute an agent with session support."""
         from ..agent import AgentContext
-        from ..agent.events import AgentCompleted, AgentFailed, AgentStarted
+        from ..agent.events import (
+            AgentCompleted,
+            AgentFailed,
+            AgentStarted,
+            ToolCallCompleted,
+            ToolCallFailed,
+            ToolCallStarted,
+        )
         from ..events import Completed, ComponentType, Event, Failed, Started
 
         logger.debug(
@@ -880,7 +887,7 @@ class ExecutorMixin:
             ctx._executor_managed_lifecycle = True
 
             try:
-                result = agent.run(user_message, context=ctx)
+                result = agent.stream(user_message, context=ctx)
 
                 if inspect.isasyncgen(result):
                     sequence = 0
@@ -899,6 +906,13 @@ class ExecutorMixin:
                                         final_output = event.output_data.get("output", "")
                                         final_tool_calls = event.output_data.get("tool_calls", [])
                                         handoff_to = event.output_data.get("handoff_to")
+                                continue
+
+                            # Agent._run_core() persists tool lifecycle events as
+                            # part of durable tool execution. They are also yielded
+                            # for local stream consumers, so emitting them again here
+                            # would duplicate the journal records.
+                            if isinstance(event, (ToolCallStarted, ToolCallCompleted, ToolCallFailed)):
                                 continue
 
                             # Forward other events to the context
