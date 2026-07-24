@@ -175,7 +175,7 @@ jobs:
   build-wheels-macos:
     name: macOS Wheels
     needs: validate-release
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:

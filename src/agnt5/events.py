@@ -61,6 +61,7 @@ def is_sse_only_event(event_type: str) -> bool:
     SSE-only events are streaming/progress events that don't affect replay:
     - output.* (output.start, output.delta, output.stop)
     - lm.stream.* (deprecated streaming)
+    - lm.content_block.* (current content streaming)
     - lm.message.* (message deltas)
     - lm.thinking.* (thinking deltas)
     - progress.* (progress updates)
@@ -75,6 +76,7 @@ def is_sse_only_event(event_type: str) -> bool:
     return (
         event_type.startswith("output.")
         or event_type.startswith("lm.stream.")
+        or event_type.startswith("lm.content_block.")
         or event_type.startswith("lm.message.")
         or event_type.startswith("lm.thinking.")
         or event_type.startswith("progress.")
