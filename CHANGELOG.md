@@ -9,11 +9,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [0.9.2] - 2026-07-24
 
+### Added
+
+- Pull workers now complete jobs through the runtime's typed lease, session,
+  and attempt fence.
+- Pull workflow pause responses retain checkpoint and resume metadata without
+  emitting an unfenced terminal event.
+
 ### Fixed
 
 - Hosted Agent and nested Workflow executors now forward LM content and tool events to streaming clients.
 - Failed LM streams emit exactly one durable `lm.failed` lifecycle event.
 - Current `lm.content_block.*` events use the transient streaming path instead of durable checkpoints.
+- Push and pull dispatch metadata can no longer override the runtime-provided
+  dispatch mode or lease authority.
+- Pull completion waits for queued lifecycle events to flush before
+  acknowledging the job.
 
 ## [0.9.1] - 2026-07-20
 

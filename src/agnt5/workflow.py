@@ -1736,7 +1736,8 @@ class WorkflowContext(Context):
             },
             metadata=checkpoint_metadata,
         )
-        self.emit(workflow_paused)
+        if (self._trace_metadata or {}).get("dispatch_mode") != "pull":
+            self.emit(workflow_paused)
 
         raise WaitingForUserInputException(
             question=question,
@@ -1748,6 +1749,7 @@ class WorkflowContext(Context):
             step_correlation_id=step_correlation_id,
             allow_custom=allow_custom,
             skippable=skippable,
+            checkpoint_metadata=checkpoint_metadata,
         )
 
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agnt5._serialization import serialize
+from agnt5._serialization import deserialize, serialize
 from agnt5.worker._executors import ExecutorMixin, _agent_missing_message_error
 
 
@@ -103,6 +103,53 @@ async def test_non_object_inputs_fail_before_workflow_handler(payload):
 
     _assert_clear_non_object_failure(response, payload)
     assert handler_called is False
+
+
+@pytest.mark.asyncio
+async def test_pull_workflow_pause_returns_terminal_without_queueing_workflow_terminal():
+    executor = _DummyExecutor()
+    queued_events = []
+
+    async def handler(ctx):
+        ctx.emit = queued_events.append
+        await ctx.wait_for_user(
+            "Approve deployment?",
+            input_type="approval",
+            options=[
+                {"id": "approve", "label": "Approve"},
+                {"id": "reject", "label": "Reject"},
+            ],
+        )
+
+    request = _request({})
+    request.metadata = {
+        "dispatch_mode": "pull",
+        "lease_id": "lease-hitl",
+    }
+    request.component_type = "workflow"
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="approval_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is not None
+    assert response.success is True
+    assert response.event_type == "workflow.paused"
+    assert response.attempt == 0
+    assert deserialize(response.output_data) == {
+        "_paused": True,
+        "question": "Approve deployment?",
+        "pause_index": 0,
+    }
+    queued_types = [event.event_type for event in queued_events]
+    assert "workflow.paused" not in queued_types
+    assert "approval.requested" in queued_types
+    assert "workflow.step.paused" in queued_types
+    assert response.metadata["question"] == "Approve deployment?"
+    assert response.metadata["step_name"] == "wait_for_user_0"
+    assert response.metadata["step_correlation_id"]
+    assert response.metadata["workflow_correlation_id"]
 
 
 def test_agent_missing_message_error_lists_received_keys():
