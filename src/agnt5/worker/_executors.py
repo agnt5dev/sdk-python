@@ -97,6 +97,47 @@ def _agent_missing_message_error(input_dict: dict) -> str:
     )
 
 
+def _pull_terminal_response(
+    request: Any,
+    *,
+    success: bool,
+    output_data: Any = None,
+    error_message: str | None = None,
+    error_code: str | None = None,
+    event_type: str | None = None,
+) -> "PyExecuteComponentResponse | None":
+    """Return a fenced pull completion response, or None for push execution.
+
+    Pull assignments are identified by the runtime-authored dispatch metadata.
+    Their run terminal must go through CompleteJob; emitting it through the
+    generic journal queue would bypass the worker-session and lease fence.
+    """
+    metadata = getattr(request, "metadata", None) or {}
+    if metadata.get("dispatch_mode") != "pull":
+        return None
+
+    from .._core import PyExecuteComponentResponse
+
+    response_metadata = {
+        "component_name": getattr(request, "component_name", "") or "",
+        "component_type": getattr(request, "component_type", "") or "",
+    }
+    if error_code:
+        response_metadata["error_code"] = error_code
+    return PyExecuteComponentResponse(
+        invocation_id=request.invocation_id,
+        success=success,
+        output_data=serialize(output_data) if success else b"",
+        state_update=None,
+        error_message=error_message,
+        metadata=response_metadata,
+        event_type=event_type or ("run.completed" if success else "run.failed"),
+        content_index=0,
+        sequence=0,
+        attempt=getattr(request, "attempt", 0),
+    )
+
+
 class ExecutorMixin:
     """Mixin providing component execution methods for Worker.
 
@@ -174,6 +215,14 @@ class ExecutorMixin:
                     f"event_type={failed_event.event_type}, "
                     f"error={error_msg}"
                 )
+                pull_response = _pull_terminal_response(
+                    request,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is not None:
+                    return pull_response
                 current_ctx.emit(failed_event)
                 return None
 
@@ -299,7 +348,7 @@ class ExecutorMixin:
 
                 # Handle streaming
                 if inspect.isasyncgen(result):
-                    return await self._handle_streaming_function(ctx, result)
+                    return await self._handle_streaming_function(ctx, result, req)
 
             except asyncio.CancelledError:
                 # Cooperative cancellation (CancelExecution → task.cancel()).
@@ -347,6 +396,14 @@ class ExecutorMixin:
                     f"run.failed | run_id={req.invocation_id} component={config.name} "
                     f"type=function trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=error_code,
+                )
+                if pull_response is not None:
+                    return pull_response
                 await ctx.emit_async(run_failed_event)
 
                 # Return None - the event queue handles delivery
@@ -377,19 +434,26 @@ class ExecutorMixin:
             )
 
             await ctx.emit_async(fn_completed_event)
-            await ctx.emit_async(run_completed_event)
+            pull_response = _pull_terminal_response(
+                req,
+                success=True,
+                output_data=result,
+            )
+            if pull_response is None:
+                await ctx.emit_async(run_completed_event)
 
             logger.info(
                 f"run.completed | run_id={req.invocation_id} component={config.name} "
                 f"type=function trace_id={trace_id} duration_ms={duration_ms}"
             )
 
-            # Return None - the event queue handles delivery
-            return None
+            return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Function")
 
-    async def _handle_streaming_function(self, ctx: Any, result: Any) -> None:
+    async def _handle_streaming_function(
+        self, ctx: Any, result: Any, request: Any
+    ) -> "PyExecuteComponentResponse | None":
         """Handle streaming function by queueing deltas."""
         from ..events import Completed, ComponentType, Event, OutputDelta, OutputStart, OutputStop
 
@@ -439,14 +503,21 @@ class ExecutorMixin:
             ))
 
         logger.debug(f"Streaming function queued {sequence + 1} events")
-        ctx.emit(Completed(
+        run_completed_event = Completed(
             name="stream",
             correlation_id=ctx.parent_correlation_id,
             parent_correlation_id="",
             component_type=ComponentType.RUN,
             output_data={"emitted": sequence},
-        ))
-        return None
+        )
+        pull_response = _pull_terminal_response(
+            request,
+            success=True,
+            output_data={"emitted": sequence},
+        )
+        if pull_response is None:
+            ctx.emit(run_completed_event)
+        return pull_response
 
     # -------------------------------------------------------------------------
     # Tool Execution
@@ -560,15 +631,21 @@ class ExecutorMixin:
                     f"[_execute_tool] Emitting run.failed event: "
                     f"tool={tool.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_failed_event)
 
                 logger.info(
                     f"run.failed | run_id={req.invocation_id} component={tool.name} "
                     f"type=tool trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
 
-                # Return None - the event queue handles delivery
-                return None
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
             # Calculate tool duration
             end_time_ns = time.time_ns()
@@ -601,15 +678,20 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting run.completed event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_completed_event)
 
             logger.info(
                 f"run.completed | run_id={req.invocation_id} component={tool.name} "
                 f"type=tool trace_id={trace_id} duration_ms={duration_ms}"
             )
 
-            # Return None - the event queue handles delivery
-            return None
+            pull_response = _pull_terminal_response(
+                req,
+                success=True,
+                output_data=result,
+            )
+            if pull_response is None:
+                ctx.emit(run_completed_event)
+            return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Tool")
 
@@ -738,15 +820,21 @@ class ExecutorMixin:
                     f"[_execute_entity] Emitting run.failed event: "
                     f"entity={entity_type.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_failed_event)
 
                 logger.info(
                     f"run.failed | run_id={req.invocation_id} component={entity_type.name} "
                     f"type=entity trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
 
-                # Return None - the event queue handles delivery
-                return None
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
             # Calculate entity duration
             end_time_ns = time.time_ns()
@@ -779,15 +867,20 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting run.completed event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_completed_event)
 
             logger.info(
                 f"run.completed | run_id={req.invocation_id} component={entity_type.name} "
                 f"type=entity trace_id={trace_id} duration_ms={duration_ms}"
             )
 
-            # Return None - the event queue handles delivery
-            return None
+            pull_response = _pull_terminal_response(
+                req,
+                success=True,
+                output_data=result,
+            )
+            if pull_response is None:
+                ctx.emit(run_completed_event)
+            return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Entity")
 
@@ -962,7 +1055,13 @@ class ExecutorMixin:
                         component_type=ComponentType.RUN,
                         output_data=final_result,
                     )
-                    ctx.emit(run_completed_event)
+                    pull_response = _pull_terminal_response(
+                        req,
+                        success=True,
+                        output_data=final_result,
+                    )
+                    if pull_response is None:
+                        ctx.emit(run_completed_event)
 
                     # Emit session.created so the session projection materializes
                     # this session for GET /v1/sessions/{id} queries.
@@ -985,7 +1084,7 @@ class ExecutorMixin:
                         f"type=agent trace_id={trace_id} duration_ms={duration_ms}"
                     )
                     logger.debug(f"Agent streaming queued {sequence + 1} events")
-                    return None
+                    return pull_response
 
                 # Non-streaming fallback
                 if inspect.iscoroutine(result):
@@ -1024,7 +1123,16 @@ class ExecutorMixin:
                     f"[_execute_agent] Emitting run.completed event: "
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_completed_event)
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=True,
+                    output_data={
+                        "output": agent_result.output,
+                        "tool_calls": agent_result.tool_calls,
+                    },
+                )
+                if pull_response is None:
+                    ctx.emit(run_completed_event)
 
                 logger.info(
                     f"run.completed | run_id={req.invocation_id} component={agent.name} "
@@ -1047,7 +1155,7 @@ class ExecutorMixin:
                 }
                 ctx.emit(session_event)
 
-                return None
+                return pull_response
 
             except Exception as e:
                 # Calculate agent duration even on failure
@@ -1084,15 +1192,21 @@ class ExecutorMixin:
                     f"[_execute_agent] Emitting run.failed event: "
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_failed_event)
 
                 logger.info(
                     f"run.failed | run_id={req.invocation_id} component={agent.name} "
                     f"type=agent trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
 
-                # Return None - the event queue handles delivery
-                return None
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Agent")
 
@@ -1237,14 +1351,21 @@ class ExecutorMixin:
                     f"[_execute_scorer] Emitting run.failed event: "
                     f"scorer={config.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_failed_event)
 
                 logger.info(
                     f"run.failed | run_id={req.invocation_id} component={config.name} "
                     f"type=scorer trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
 
-                return None
+                pull_response = _pull_terminal_response(
+                    req,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
             # Calculate scorer duration
             end_time_ns = time.time_ns()
@@ -1286,14 +1407,20 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting run.completed event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_completed_event)
 
             logger.info(
                 f"run.completed | run_id={req.invocation_id} component={config.name} "
                 f"type=scorer trace_id={trace_id} duration_ms={duration_ms}"
             )
 
-            return None
+            pull_response = _pull_terminal_response(
+                req,
+                success=True,
+                output_data=result_dict,
+            )
+            if pull_response is None:
+                ctx.emit(run_completed_event)
+            return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Scorer")
 
@@ -1586,10 +1713,16 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting run.failed event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_failed_event)
 
-                # Return None - the event queue handles delivery
-                return None
+                pull_response = _pull_terminal_response(
+                    request,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(workflow_error).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
             # Calculate workflow duration
             end_time_ns = time.time_ns()
@@ -1637,10 +1770,15 @@ class ExecutorMixin:
                 f"[_execute_workflow] Emitting run.completed event: "
                 f"component={config.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_completed_event)
 
-            # Return None - the event queue handles delivery
-            return None
+            pull_response = _pull_terminal_response(
+                request,
+                success=True,
+                output_data=result,
+            )
+            if pull_response is None:
+                ctx.emit(run_completed_event)
+            return pull_response
 
         except WaitingForUserInputException as pause:
             # Workflow paused for user input.
@@ -1656,18 +1794,23 @@ class ExecutorMixin:
                 "question": pause.question,
                 "pause_index": pause.pause_index,
             }
+            pause_metadata = dict(pause.checkpoint_metadata)
+            pause_metadata.update(
+                {
+                    "component_name": config.name,
+                    "component_type": "workflow",
+                    "pause_index": str(pause.pause_index),
+                }
+            )
+            is_pull = (getattr(request, "metadata", None) or {}).get("dispatch_mode") == "pull"
             return PyExecuteComponentResponse(
                 invocation_id=request.invocation_id,
                 success=True,
                 output_data=json.dumps(pause_output).encode("utf-8"),
                 state_update=None,
                 error_message=None,
-                metadata={
-                    "component_name": config.name,
-                    "component_type": "workflow",
-                    "pause_index": str(pause.pause_index),
-                },
-                event_type="run.paused",
+                metadata=pause_metadata,
+                event_type="workflow.paused" if is_pull else "run.paused",
                 content_index=0,
                 sequence=0,
                 attempt=getattr(request, "attempt", 0),
@@ -1695,14 +1838,21 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                     error_message=error_msg,
                 )
-                ctx.emit(run_failed_event)
 
                 outer_trace_id = _trace_id_from_request(request)
                 logger.info(
                     f"run.failed | run_id={request.invocation_id} component={config.name} "
                     f"type=workflow trace_id={outer_trace_id} duration_ms={workflow_duration_ms} error={error_msg}"
                 )
-                return None
+                pull_response = _pull_terminal_response(
+                    request,
+                    success=False,
+                    error_message=error_msg,
+                    error_code=type(e).__name__,
+                )
+                if pull_response is None:
+                    ctx.emit(run_failed_event)
+                return pull_response
 
             # Fallback: if no context, return synchronous error response
             metadata = {

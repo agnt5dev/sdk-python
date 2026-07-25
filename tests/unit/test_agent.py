@@ -15,6 +15,7 @@ import pytest
 
 from agnt5 import Agent, Context, Sandbox, tool
 from agnt5.agent import AgentContext, AgentRegistry, AgentResult, Handoff, handoff
+from agnt5.exceptions import WaitingForUserInputException
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, TokenUsage
 from agnt5.lm.events import (
     LMCompleted,
@@ -499,6 +500,60 @@ async def test_agent_with_tool_execution(sample_tool):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0]["name"] == "test_tool"
     assert mock_lm.call_count == 2  # Initial call + after tool execution
+
+
+@pytest.mark.asyncio
+async def test_agent_hitl_preserves_workflow_pause_metadata():
+    """Agent state enrichment must not discard workflow resume metadata."""
+
+    @tool
+    async def request_approval(_ctx: Context) -> str:
+        raise WaitingForUserInputException(
+            question="Approve deployment?",
+            input_type="approval",
+            options=[{"label": "Approve", "value": "yes"}],
+            checkpoint_state={"stage": "deploy"},
+            pause_index=3,
+            step_name="wait_for_user_3",
+            step_correlation_id="step-correlation-3",
+            allow_custom=True,
+            skippable=True,
+            checkpoint_metadata={
+                "pause_index": "3",
+                "step_name": "wait_for_user_3",
+                "workflow_state": '{"stage":"deploy"}',
+            },
+        )
+
+    mock_lm = MockLanguageModel(
+        responses=["I need approval."],
+        tool_calls=[
+            [
+                {
+                    "id": "call-approval",
+                    "name": "request_approval",
+                    "arguments": "{}",
+                }
+            ]
+        ],
+    )
+    agent = Agent(
+        name="approval_agent",
+        model=mock_lm,
+        instructions="Request approval before deploying.",
+        tools=[request_approval],
+    )
+
+    with pytest.raises(WaitingForUserInputException) as raised:
+        await agent.run("Deploy now")
+
+    pause = raised.value
+    assert pause.pause_index == 3
+    assert pause.step_name == "wait_for_user_3"
+    assert pause.step_correlation_id == "step-correlation-3"
+    assert pause.checkpoint_metadata["workflow_state"] == '{"stage":"deploy"}'
+    assert pause.agent_context["agent_name"] == "approval_agent"
+    assert pause.agent_context["pending_tool_call"]["name"] == "request_approval"
 
 
 @pytest.mark.asyncio

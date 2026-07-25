@@ -159,6 +159,7 @@ jobs:
           ~/.local/bin/uv run --with maturin \
             maturin build \
             --release \
+            --locked \
             --target ${{ matrix.target }} \
             --out dist
 
@@ -260,6 +261,7 @@ jobs:
           ~/.local/bin/uv run --with maturin \
             maturin build \
             --release \
+            --locked \
             --target aarch64-apple-darwin \
             --out dist
 

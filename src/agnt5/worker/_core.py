@@ -935,13 +935,29 @@ class Worker(ExecutorMixin):
                 output = json.dumps(result) if result else "{}"
                 return PyExecuteComponentResponse(
                     invocation_id=request.invocation_id,
-                    output=output.encode("utf-8"),
+                    success=True,
+                    output_data=output.encode("utf-8"),
+                    state_update=None,
+                    error_message=None,
+                    metadata={},
+                    event_type="run.completed",
+                    content_index=0,
+                    sequence=0,
+                    attempt=getattr(request, "attempt", 0),
                 )
             except Exception as e:
                 logger.error(f"Chat event execution failed: {e}", exc_info=True)
                 return PyExecuteComponentResponse(
                     invocation_id=request.invocation_id,
-                    error=str(e),
+                    success=False,
+                    output_data=b"",
+                    state_update=None,
+                    error_message=str(e),
+                    metadata={"error_code": type(e).__name__},
+                    event_type="run.failed",
+                    content_index=0,
+                    sequence=0,
+                    attempt=getattr(request, "attempt", 0),
                 )
 
         return _run()

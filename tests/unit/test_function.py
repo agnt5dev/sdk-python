@@ -141,7 +141,9 @@ class TestFunctionDecorator:
             metadata={},
         )
 
-        await executor._execute_function(FunctionRegistry.get("parented_function"), b"{}", request)
+        response = await executor._execute_function(
+            FunctionRegistry.get("parented_function"), b"{}", request
+        )
 
         started_batch = executor._rust_worker.batches[0]
         run_started = next(item for item in started_batch if item[1] == "run.started")
@@ -152,11 +154,207 @@ class TestFunctionDecorator:
         function_correlation_id = function_started_data["correlation_id"]
         run_completed = next(item for item in executor._rust_worker.events if item[0] == "run.completed")
 
+        assert response is None
+        assert sum(item[0] == "run.completed" for item in executor._rust_worker.events) == 1
         assert run_started_data["parent_correlation_id"] == ""
         assert run_completed[2].get("parent_correlation_id") is None
         assert function_started_data["parent_correlation_id"] == run_correlation_id
         assert captured["function_context_id"] == function_correlation_id
         assert captured["child_parent_id"] == function_correlation_id
+
+    @pytest.mark.asyncio
+    async def test_push_function_failure_queues_one_terminal_and_returns_no_response(
+        self,
+    ) -> None:
+        class FakeRustWorker:
+            def __init__(self) -> None:
+                self.events = []
+
+            async def emit_event_batch_async(self, _batch_tuples):
+                return None
+
+            async def emit_event_async(
+                self,
+                run_id,
+                event_type,
+                event_data,
+                sequence_number,
+                metadata,
+                source_timestamp_ns,
+                timeout_ms,
+            ):
+                self.events.append((event_type, event_data, metadata))
+
+        class FakeExecutor(ExecutorMixin):
+            def __init__(self) -> None:
+                self._rust_worker = FakeRustWorker()
+
+        async def failing_handler(_ctx: FunctionContext):
+            raise RuntimeError("push failed")
+
+        executor = FakeExecutor()
+        request = SimpleNamespace(
+            invocation_id="push-run-1",
+            input_data=serialize({}),
+            attempt=0,
+            runtime_context=None,
+            metadata={"dispatch_mode": "push"},
+            component_name="push_function",
+            component_type="function",
+        )
+        response = await executor._execute_function(
+            SimpleNamespace(
+                name="push_function",
+                handler=failing_handler,
+                retries=None,
+                timeout_ms=None,
+            ),
+            b"{}",
+            request,
+        )
+
+        assert response is None
+        assert sum(item[0] == "run.failed" for item in executor._rust_worker.events) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("should_fail", [False, True])
+    async def test_pull_function_returns_terminal_response_without_queueing_run_terminal(
+        self, should_fail: bool
+    ) -> None:
+        class FakeRustWorker:
+            def __init__(self) -> None:
+                self.batches = []
+                self.events = []
+
+            async def emit_event_batch_async(self, batch_tuples):
+                self.batches.append(batch_tuples)
+
+            async def emit_event_async(
+                self,
+                run_id,
+                event_type,
+                event_data,
+                sequence_number,
+                metadata,
+                source_timestamp_ns,
+                timeout_ms,
+            ):
+                self.events.append((event_type, event_data, metadata))
+
+        class FakeExecutor(ExecutorMixin):
+            def __init__(self) -> None:
+                self._rust_worker = FakeRustWorker()
+
+        async def handler(ctx: FunctionContext):
+            if should_fail:
+                raise RuntimeError("pull failed")
+            return {"ok": True}
+
+        executor = FakeExecutor()
+        request = SimpleNamespace(
+            invocation_id="pull-run-1",
+            input_data=serialize({}),
+            attempt=4,
+            runtime_context=None,
+            metadata={
+                "dispatch_mode": "pull",
+                "lease_id": "lease-4",
+            },
+            component_name="pull_function",
+            component_type="function",
+        )
+
+        response = await executor._execute_function(
+            SimpleNamespace(
+                name="pull_function",
+                handler=handler,
+                retries=None,
+                timeout_ms=None,
+            ),
+            b"{}",
+            request,
+        )
+
+        assert response is not None
+        assert response.success is (not should_fail)
+        assert response.attempt == 4
+        assert response.event_type == ("run.failed" if should_fail else "run.completed")
+        queued_types = [
+            event_type
+            for batch in executor._rust_worker.batches
+            for _, event_type, *_ in batch
+        ] + [event_type for event_type, *_ in executor._rust_worker.events]
+        assert "run.completed" not in queued_types
+        assert "run.failed" not in queued_types
+        assert ("function.failed" if should_fail else "function.completed") in queued_types
+        if should_fail:
+            assert response.metadata["error_code"] == "RuntimeError"
+            assert "pull failed" in response.error_message
+        else:
+            assert deserialize(response.output_data) == {"ok": True}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("should_fail", [False, True])
+    async def test_pull_streaming_function_returns_terminal_response(
+        self, should_fail: bool
+    ) -> None:
+        class FakeRustWorker:
+            def __init__(self) -> None:
+                self.event_types = []
+
+            async def emit_event_batch_async(self, batch_tuples):
+                self.event_types.extend(item[1] for item in batch_tuples)
+
+            async def emit_event_async(
+                self,
+                run_id,
+                event_type,
+                event_data,
+                sequence_number,
+                metadata,
+                source_timestamp_ns,
+                timeout_ms,
+            ):
+                self.event_types.append(event_type)
+
+            def queue_event(self, *, event_type, **_kwargs):
+                self.event_types.append(event_type)
+
+        class FakeExecutor(ExecutorMixin):
+            def __init__(self) -> None:
+                self._rust_worker = FakeRustWorker()
+
+        async def handler(_ctx: FunctionContext):
+            yield "hello"
+            if should_fail:
+                raise RuntimeError("stream failed")
+
+        executor = FakeExecutor()
+        request = SimpleNamespace(
+            invocation_id="pull-stream-1",
+            input_data=serialize({}),
+            attempt=2,
+            runtime_context=None,
+            metadata={"dispatch_mode": "pull"},
+            component_name="pull_stream",
+            component_type="function",
+        )
+        response = await executor._execute_function(
+            SimpleNamespace(
+                name="pull_stream",
+                handler=handler,
+                retries=None,
+                timeout_ms=None,
+            ),
+            b"{}",
+            request,
+        )
+
+        assert response is not None
+        assert response.event_type == ("run.failed" if should_fail else "run.completed")
+        assert "run.failed" not in executor._rust_worker.event_types
+        assert "run.completed" not in executor._rust_worker.event_types
+        assert "output.delta" in executor._rust_worker.event_types
 
     def test_function_with_retry_policy_int(self) -> None:
         """Test simplified retry configuration with just max attempts."""

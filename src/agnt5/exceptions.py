@@ -104,6 +104,7 @@ class WaitingForUserInputException(BaseException):
         step_correlation_id: Optional[str] = None,
         allow_custom: bool = False,
         skippable: bool = False,
+        checkpoint_metadata: Optional[Dict[str, str]] = None,
     ) -> None:
         """Initialize WaitingForUserInputException.
 
@@ -126,6 +127,7 @@ class WaitingForUserInputException(BaseException):
             step_correlation_id: Correlation ID for the step events
             allow_custom: Whether to allow a free-text "Something else" option
             skippable: Whether the user can skip this input
+            checkpoint_metadata: Complete metadata needed to resume this pause
         """
         super().__init__(f"Waiting for user input: {question}")
         self.question = question
@@ -138,3 +140,4 @@ class WaitingForUserInputException(BaseException):
         self.step_correlation_id = step_correlation_id
         self.allow_custom = allow_custom
         self.skippable = skippable
+        self.checkpoint_metadata = checkpoint_metadata or {}
