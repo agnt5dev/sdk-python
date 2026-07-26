@@ -97,6 +97,26 @@ def _agent_missing_message_error(input_dict: dict) -> str:
     )
 
 
+def _normalize_hosted_agent_stream_event(event: Any) -> Any:
+    """Translate Python content blocks to the shared hosted LM stream contract."""
+    event_type = getattr(event, "event_type", "")
+    lifecycle = {
+        "lm.content_block.started": "start",
+        "lm.content_block.delta": "delta",
+        "lm.content_block.completed": "stop",
+    }.get(event_type)
+    if lifecycle is None:
+        return event
+
+    family = (
+        "thinking"
+        if getattr(event, "block_type", "text") == "thinking"
+        else "message"
+    )
+    object.__setattr__(event, "event_type", f"lm.{family}.{lifecycle}")
+    return event
+
+
 def _pull_terminal_response(
     request: Any,
     *,
@@ -981,7 +1001,14 @@ class ExecutorMixin:
             ctx._executor_managed_lifecycle = True
 
             try:
-                result = agent.stream(user_message, context=ctx)
+                # Gateway chat dispatches include the durable prior messages.
+                # Passing them explicitly keeps multi-turn behavior consistent
+                # across Python, TypeScript, and Go workers.
+                history = input_dict.get("messages")
+                if isinstance(history, list):
+                    result = agent.stream(user_message, context=ctx, history=history)
+                else:
+                    result = agent.stream(user_message, context=ctx)
 
                 if inspect.isasyncgen(result):
                     sequence = 0
@@ -1017,8 +1044,24 @@ class ExecutorMixin:
                             ):
                                 continue
 
-                            # Forward other events to the context
+                            # Hosted streams use one cross-SDK event vocabulary.
+                            event = _normalize_hosted_agent_stream_event(event)
                             ctx.emit(event)
+                            if event.event_type in {
+                                "lm.message.stop",
+                                "lm.thinking.stop",
+                                "lm.tool_call.stop",
+                            }:
+                                # Give the native transient queue a delivery
+                                # boundary before the next durable lifecycle
+                                # checkpoint can become visible.
+                                flush = getattr(
+                                    self._rust_worker,
+                                    "flush_workflow_checkpoints",
+                                    None,
+                                )
+                                if flush is not None:
+                                    flush()
                             sequence += 1
 
                             # Check for completion event to extract final results
@@ -1735,12 +1778,15 @@ class ExecutorMixin:
 
             # Persist workflow entity state
             if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
-                if ctx._workflow_entity._state.has_changes():
+                if ctx._workflow_entity._state.has_unpersisted_changes():
                     try:
                         await ctx._workflow_entity._persist_state()
                         logger.debug(f"Persisted WorkflowEntity state for run {request.invocation_id}")
                     except Exception as persist_error:
                         logger.error(f"Failed to persist WorkflowEntity state: {persist_error}", exc_info=True)
+                        raise RuntimeError(
+                            f"STATE_PERSISTENCE_FAILED: {persist_error}"
+                        ) from persist_error
 
             # Emit workflow.completed (child of run)
             workflow_completed_event = Completed(

@@ -6,8 +6,10 @@ The SDK executes functions once and reports results; the platform orchestrates r
 
 import asyncio
 from types import SimpleNamespace
+from typing import Annotated
 
 import pytest
+from pydantic import Field
 
 from agnt5 import (
     BackoffPolicy,
@@ -83,6 +85,27 @@ class TestFunctionDecorator:
         config = FunctionRegistry.get("custom_function")
         assert config is not None
         assert config.name == "custom_function"
+
+    def test_function_schema_preserves_annotated_field_description(self) -> None:
+        @function
+        async def locate(
+            ctx: FunctionContext,
+            location: Annotated[str, Field(description="City and state to search")],
+        ) -> str:
+            return location
+
+        config = FunctionRegistry.get("locate")
+        assert config is not None
+        assert config.input_schema == {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City and state to search",
+                }
+            },
+            "required": ["location"],
+        }
 
     def test_function_with_retry_policy_object(self) -> None:
         retry_policy = RetryPolicy(max_attempts=5, initial_interval_ms=500)

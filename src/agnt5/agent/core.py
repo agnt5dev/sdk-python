@@ -1454,16 +1454,24 @@ class Agent:
         usage_dict = None
         tool_calls = []
 
-        # When tools are present, use generate() since streaming doesn't support tool calls
-        # When no tools, use real streaming for proper thinking block support
+        # Tool streaming is opt-in because older/custom LanguageModel
+        # implementations may not include complete tool calls in LMCompleted.
         has_tools = bool(request.tools)
         has_built_in_tools = bool(request.config.built_in_tools)
+        supports_streaming_tools = bool(
+            self._language_model is not None
+            and self._language_model.supports_streaming_tools
+        )
         has_model_callbacks = (
             self.callbacks.before_model is not None
             or self.callbacks.after_model is not None
         )
 
-        if has_tools or has_built_in_tools or has_model_callbacks:
+        requires_non_streaming_tools = (
+            (has_tools or has_built_in_tools)
+            and not supports_streaming_tools
+        )
+        if requires_non_streaming_tools or has_model_callbacks:
             if context is not None:
                 response = await self._generate_with_callbacks(
                     context=context,
@@ -1521,6 +1529,11 @@ class Agent:
                         # Extract final text and usage from completion event
                         output_data = event.output_data or {}
                         collected_text = output_data.get("text", "") if isinstance(output_data, dict) else ""
+                        tool_calls = (
+                            output_data.get("tool_calls") or []
+                            if isinstance(output_data, dict)
+                            else []
+                        )
                         usage_dict = {
                             "input_tokens": event.input_tokens,
                             "output_tokens": event.output_tokens,
@@ -1543,6 +1556,11 @@ class Agent:
                         # Extract final text and usage from completion event
                         output_data = event.output_data or {}
                         collected_text = output_data.get("text", "") if isinstance(output_data, dict) else ""
+                        tool_calls = (
+                            output_data.get("tool_calls") or []
+                            if isinstance(output_data, dict)
+                            else []
+                        )
                         usage_dict = {
                             "input_tokens": event.input_tokens,
                             "output_tokens": event.output_tokens,

@@ -190,7 +190,7 @@ class Client:
     def __init__(
         self,
         gateway_url: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 45.0,
         api_key: Optional[str] = None,
         tenant_id: Optional[str] = None,
         deployment_id: Optional[str] = None,
@@ -200,7 +200,7 @@ class Client:
         Args:
             gateway_url: Base URL of the AGNT5 gateway. Falls back to
                          AGNT5_GATEWAY_URL env var, then https://gw.agnt5.com.
-            timeout: Request timeout in seconds (default: 30.0)
+            timeout: Request timeout in seconds (default: 45.0)
             api_key: Service key for authentication. Falls back to
                      AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
             tenant_id: Default sub-tenant for all invocations (sent as
@@ -352,7 +352,7 @@ class Client:
             url,
             json=input_data,
             headers=request_headers,
-            timeout=timeout,
+            timeout=self.timeout if timeout is None else timeout,
         )
 
         # Handle HTTP errors that don't return JSON
@@ -1940,7 +1940,7 @@ class AsyncClient:
     def __init__(
         self,
         gateway_url: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 45.0,
         api_key: Optional[str] = None,
         tenant_id: Optional[str] = None,
         deployment_id: Optional[str] = None,
@@ -1950,7 +1950,7 @@ class AsyncClient:
         Args:
             gateway_url: Base URL of the AGNT5 gateway. Falls back to
                          AGNT5_GATEWAY_URL env var, then https://gw.agnt5.com.
-            timeout: Request timeout in seconds (default: 30.0)
+            timeout: Request timeout in seconds (default: 45.0)
             api_key: Service key for authentication. Falls back to
                      AGNT5_API_KEY env var. Keys start with "agnt5_sk_".
             tenant_id: Default sub-tenant for all invocations (sent as

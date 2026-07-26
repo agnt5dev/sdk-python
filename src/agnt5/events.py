@@ -64,6 +64,7 @@ def is_sse_only_event(event_type: str) -> bool:
     - lm.content_block.* (current content streaming)
     - lm.message.* (message deltas)
     - lm.thinking.* (thinking deltas)
+    - lm.tool_call.* (tool-call argument deltas)
     - progress.* (progress updates)
     - log (log events)
 
@@ -79,6 +80,7 @@ def is_sse_only_event(event_type: str) -> bool:
         or event_type.startswith("lm.content_block.")
         or event_type.startswith("lm.message.")
         or event_type.startswith("lm.thinking.")
+        or event_type.startswith("lm.tool_call.")
         or event_type.startswith("progress.")
         or event_type.startswith("log")  # log, log.info, log.warn, log.error, etc.
     )
