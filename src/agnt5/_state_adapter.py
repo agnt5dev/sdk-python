@@ -362,8 +362,10 @@ class StateAdapter:
 
             return state, version
         except Exception as e:
-            logger.warning(f"Failed to load state with version for {entity_type}:{entity_key}: {e}")
-            return {}, 0
+            logger.error(f"Failed to load state with version for {entity_type}:{entity_key}: {e}")
+            raise RuntimeError(
+                f"Failed to load durable state for {entity_type}:{entity_key}: {e}"
+            ) from e
 
     async def invalidate_cache(self, entity_type: str, entity_key: str) -> None:
         """

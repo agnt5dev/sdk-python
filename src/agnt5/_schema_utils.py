@@ -9,7 +9,17 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from typing import Any, Callable, Dict, Optional, Tuple, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Dict,
+    Optional,
+    Tuple,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 try:
     from pydantic import BaseModel
@@ -136,6 +146,19 @@ def _type_to_schema(python_type: Any) -> Dict[str, Any]:
     origin = get_origin(python_type)
     args = get_args(python_type)
 
+    # Preserve useful JSON Schema metadata from Annotated fields, including
+    # Pydantic Field(description=...) values used in function parameters.
+    if origin is Annotated:
+        schema = _type_to_schema(args[0]) if args else {}
+        for metadata in args[1:]:
+            description = getattr(metadata, "description", None)
+            if description:
+                schema["description"] = description
+            json_schema_extra = getattr(metadata, "json_schema_extra", None)
+            if isinstance(json_schema_extra, dict):
+                schema.update(json_schema_extra)
+        return schema
+
     # Handle Optional[X] which is Union[X, None]
     if origin is type(None) or python_type is type(None):
         return {"type": "null"}
@@ -226,7 +249,7 @@ def extract_function_schemas(func: Callable[..., Any]) -> Tuple[Optional[Dict[st
     """
     try:
         # Get type hints
-        hints = get_type_hints(func)
+        hints = get_type_hints(func, include_extras=True)
         sig = inspect.signature(func)
 
         # Build input schema from parameters (excluding 'ctx')

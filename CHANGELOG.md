@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-26
+
+### Added
+
+- Add schema-aware scoped state adapters and agent streaming tool coverage.
+
+### Fixed
+
+- Preserve deterministic event ordering and timeout behavior across concurrent
+  agent, workflow, and worker execution.
+
 ## [0.9.2] - 2026-07-24
 
 ### Added
@@ -34,6 +45,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/agnt5dev/sdk-python/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/agnt5dev/sdk-python/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/agnt5dev/sdk-python/releases/tag/v0.9.1

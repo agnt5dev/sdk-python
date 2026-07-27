@@ -37,8 +37,12 @@ class _DummyExecutor(ExecutorMixin):
 class _StreamingAgent:
     name = "streaming_agent"
 
-    async def stream(self, message, context):
+    def __init__(self) -> None:
+        self.history = None
+
+    async def stream(self, message, context, history=None):
         assert message == "hello"
+        self.history = history
         yield LMContentBlockStarted(
             name="mock-model",
             correlation_id="lm-1",
@@ -60,6 +64,28 @@ class _StreamingAgent:
             parent_correlation_id="iteration-1",
             block_type="text",
             index=0,
+        )
+        yield LMContentBlockStarted(
+            name="mock-model",
+            correlation_id="thinking-1",
+            parent_correlation_id="iteration-1",
+            block_type="thinking",
+            index=1,
+        )
+        yield LMContentBlockDelta(
+            name="mock-model",
+            correlation_id="thinking-1",
+            parent_correlation_id="iteration-1",
+            content="considering",
+            block_type="thinking",
+            index=1,
+        )
+        yield LMContentBlockCompleted(
+            name="mock-model",
+            correlation_id="thinking-1",
+            parent_correlation_id="iteration-1",
+            block_type="thinking",
+            index=1,
         )
         tool_started = ToolCallStarted(
             name="search",
@@ -112,10 +138,13 @@ class _FailingStreamingAgent:
         raise RuntimeError("provider failed")
 
 
-def _request():
+def _request(*, messages=None):
+    input_data = {"message": "hello"}
+    if messages is not None:
+        input_data["messages"] = messages
     return SimpleNamespace(
         invocation_id="run-streaming-agent",
-        input_data=serialize({"message": "hello"}),
+        input_data=serialize(input_data),
         runtime_context=None,
         metadata={},
         session_id="",
@@ -130,23 +159,29 @@ def _request():
 async def test_execute_agent_forwards_stream_events_and_terminal_lifecycle():
     worker = _RecordingWorker()
     executor = _DummyExecutor(worker)
+    agent = _StreamingAgent()
+    history = [{"role": "user", "content": "prior turn"}]
 
     response = await executor._execute_agent(
-        _StreamingAgent(),
+        agent,
         b"",
-        _request(),
+        _request(messages=history),
     )
 
     assert response is None
+    assert agent.history == history
     component_event_types = [
         event_type for event_type in worker.event_types if not event_type.startswith("log")
     ]
     assert component_event_types == [
         "run.started",
         "agent.started",
-        "lm.content_block.started",
-        "lm.content_block.delta",
-        "lm.content_block.completed",
+        "lm.message.start",
+        "lm.message.delta",
+        "lm.message.stop",
+        "lm.thinking.start",
+        "lm.thinking.delta",
+        "lm.thinking.stop",
         "tool_call.started",
         "tool_call.completed",
         "agent.completed",

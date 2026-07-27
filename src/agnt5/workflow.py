@@ -1890,6 +1890,7 @@ class WorkflowEntity:
 
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []
+        self._persisted_state_change_count: int = 0
 
         logger.debug(f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}, component={component_name}")
 
@@ -2082,6 +2083,10 @@ class WorkflowEntity:
                 f"Persisted WorkflowEntity state for {self.run_id} "
                 f"(version {current_version} -> {new_version}, {len(state_dict)} keys)"
             )
+            # Preserve the audit trail while recording the durable boundary so
+            # the outer worker executor does not persist the same snapshot a
+            # second time.
+            self._persisted_state_change_count = len(self._state_changes)
         except Exception as e:
             logger.error(
                 f"❌ ERROR: Failed to persist workflow state for {self.run_id}: {e}",
@@ -2209,6 +2214,13 @@ class WorkflowState(StateInterface):
     def has_changes(self) -> bool:
         """Check if any state changes have been tracked."""
         return len(self._workflow_entity._state_changes) > 0
+
+    def has_unpersisted_changes(self) -> bool:
+        """Check whether tracked changes extend past the durable boundary."""
+        return (
+            len(self._workflow_entity._state_changes)
+            > self._workflow_entity._persisted_state_change_count
+        )
 
     def get_state_snapshot(self) -> Dict[str, Any]:
         """Get current state as a snapshot dictionary."""

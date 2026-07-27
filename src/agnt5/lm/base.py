@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 class LanguageModel(ABC):
     """Abstract base class for language models (for testing/mocking)."""
 
+    # Custom model implementations can opt in when ``stream()`` returns complete
+    # tool-call information in the terminal ``LMCompleted`` event. Agents keep
+    # using ``generate()`` for tools unless this is explicitly enabled.
+    supports_streaming_tools: bool = False
+
     @abstractmethod
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         """Generate completion from LLM."""

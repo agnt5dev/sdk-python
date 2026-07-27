@@ -1,6 +1,6 @@
 import pytest
 
-from agnt5._state_adapter import _entity_state_adapter_ctx, create_state_context
+from agnt5._state_adapter import StateAdapter, _entity_state_adapter_ctx, create_state_context
 from agnt5.agent import AgentContext
 from agnt5.workflow import WorkflowContext, WorkflowEntity
 
@@ -91,3 +91,35 @@ async def test_workflow_user_state_persists_across_sessions(state_context):
 
     assert second_session.user is not None
     assert await second_session.user.state.get("language") == "en"
+
+
+@pytest.mark.asyncio
+async def test_versioned_load_fails_closed_when_platform_is_unavailable():
+    class FailingRustState:
+        async def py_get_cached_or_load(self, *_args):
+            raise OSError("engine unavailable")
+
+    adapter = StateAdapter(FailingRustState())
+
+    with pytest.raises(RuntimeError, match="Failed to load durable state"):
+        await adapter.load_with_version(
+            "WorkflowEntity",
+            "ks_sequential",
+            scope="run",
+            scope_id="run-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_workflow_persistence_marks_changes_durable_without_clearing_audit():
+    adapter = StateAdapter()
+    token = _entity_state_adapter_ctx.set(adapter)
+    entity = WorkflowEntity(run_id="run-state")
+    entity.state.set("total_steps", 2)
+    try:
+        await entity._persist_state()
+    finally:
+        _entity_state_adapter_ctx.reset(token)
+
+    assert entity.state.has_changes()
+    assert not entity.state.has_unpersisted_changes()
