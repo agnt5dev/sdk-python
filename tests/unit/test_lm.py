@@ -26,12 +26,15 @@ import pytest
 from agnt5 import lm
 from agnt5.context import Context, LLMRuntimeOptions, set_current_context
 from agnt5.lm import (
+    GenerateRequest,
     GenerateResponse,
+    LMClient,
     Message,
     MessageRole,
     Prompt,
     TokenUsage,
 )
+from agnt5.lm.events import LMCompleted
 from agnt5.prompt_manifest import PromptManifestError
 
 # ============================================================================
@@ -62,6 +65,7 @@ class MockChunk:
         model="mock",
         finish_reason=None,
         usage=None,
+        tool_calls=None,
     ):
         self.chunk_type = chunk_type
         self.text = text
@@ -70,6 +74,7 @@ class MockChunk:
         self.model = model
         self.finish_reason = finish_reason
         self.usage = usage
+        self.tool_calls = tool_calls
 
 
 class MockAsyncStreamIterator:
@@ -1165,6 +1170,40 @@ async def test_stream_with_built_in_tools(mock_rust_stream_chunks):
         assert "built_in_tools" in call_kwargs
         built_in_tools = json.loads(call_kwargs["built_in_tools"])
         assert "web_search_preview" in built_in_tools
+
+
+@pytest.mark.asyncio
+async def test_stream_completed_preserves_tool_calls():
+    """Terminal stream events carry complete tool calls into the agent loop."""
+    tool_calls = [
+        {
+            "id": "call-search",
+            "name": "search_docs",
+            "arguments": '{"query":"agents"}',
+        }
+    ]
+    chunks = MockAsyncStreamIterator(
+        [
+            MockChunk(
+                "completed",
+                finish_reason="tool_calls",
+                tool_calls=tool_calls,
+            )
+        ]
+    )
+
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.stream_iter = MagicMock(return_value=chunks)
+        mock_rust_class.return_value = mock_instance
+
+        client = LMClient(provider="openai")
+        request = GenerateRequest(model="openai/gpt-4o-mini")
+        events = [event async for event in client.stream(request)]
+
+    completed = next(event for event in events if isinstance(event, LMCompleted))
+    assert completed.output_data["tool_calls"] == tool_calls
+    assert client.supports_streaming_tools is True
 
 
 @pytest.mark.asyncio

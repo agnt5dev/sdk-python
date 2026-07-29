@@ -1458,10 +1458,15 @@ class Agent:
         # implementations may not include complete tool calls in LMCompleted.
         has_tools = bool(request.tools)
         has_built_in_tools = bool(request.config.built_in_tools)
-        supports_streaming_tools = bool(
-            self._language_model is not None
-            and self._language_model.supports_streaming_tools
-        )
+        if self._language_model is not None:
+            supports_streaming_tools = bool(
+                self._language_model.supports_streaming_tools
+            )
+        else:
+            provider, _model_name = self.model.split('/', 1)
+            supports_streaming_tools = (
+                _LanguageModel.supports_streaming_tools_for_provider(provider)
+            )
         has_model_callbacks = (
             self.callbacks.before_model is not None
             or self.callbacks.after_model is not None

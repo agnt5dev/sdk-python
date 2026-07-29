@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "agnt5-sdk-python"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "agnt5-sdk-core",
  "anyhow",
