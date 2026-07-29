@@ -7,8 +7,8 @@ use agnt5_sdk_core::lm::{
     AnthropicProvider, AzureOpenAiProvider, BasetenProvider, BedrockProvider, BuiltInTool,
     ContentBlockType, DeepSeekProvider, FireworksProvider, GenerateRequest, GenerateResponse,
     GenerationConfig, GoogleProvider, GroqProvider, HuggingFaceProvider, JsonSchemaFormat,
-    LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, OllamaProvider,
-    MoonshotProvider, OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat,
+    LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, MoonshotProvider,
+    OllamaProvider, OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat,
     StreamChunk, StreamHandle, StreamRequest, TogetherProvider, TokenUsage, ToolCall, ToolChoice,
     ToolDefinition, XaiProvider,
 };
@@ -1477,6 +1477,8 @@ pub struct PyStreamChunk {
     object: Option<Value>,
     /// Raw API response (for completed chunks)
     raw: Option<Value>,
+    /// Tool calls (for completed chunks)
+    tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl PyStreamChunk {
@@ -1492,6 +1494,7 @@ impl PyStreamChunk {
             finish_reason: None,
             object: None,
             raw: None,
+            tool_calls: None,
         }
     }
 
@@ -1507,6 +1510,7 @@ impl PyStreamChunk {
             finish_reason: None,
             object: None,
             raw: None,
+            tool_calls: None,
         }
     }
 
@@ -1522,6 +1526,7 @@ impl PyStreamChunk {
             finish_reason: None,
             object: None,
             raw: None,
+            tool_calls: None,
         }
     }
 
@@ -1537,6 +1542,7 @@ impl PyStreamChunk {
             finish_reason: response.finish_reason,
             object: response.object,
             raw: response.raw,
+            tool_calls: response.tool_calls,
         }
     }
 }
@@ -1622,6 +1628,24 @@ impl PyStreamChunk {
             .as_ref()
             .map(|value| json_to_py(py, value))
             .transpose()
+    }
+
+    /// Tool calls (for completed chunks)
+    #[getter]
+    fn tool_calls(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(tool_calls) = &self.tool_calls else {
+            return Ok(None);
+        };
+
+        let py_list = PyList::empty(py);
+        for tool_call in tool_calls {
+            let dict = PyDict::new(py);
+            dict.set_item("id", &tool_call.id)?;
+            dict.set_item("name", &tool_call.name)?;
+            dict.set_item("arguments", &tool_call.arguments)?;
+            py_list.append(dict)?;
+        }
+        Ok(Some(py_list.into()))
     }
 
     /// Check if this is a thinking block

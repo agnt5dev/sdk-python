@@ -1,5 +1,7 @@
 """Agent tool streaming contract tests."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from agnt5 import Agent, Context, tool
@@ -66,5 +68,79 @@ async def test_agent_uses_opted_in_tool_stream_across_iterations():
 
     assert model.generate_calls == 0
     assert model.stream_calls == 2
+    assert completed.output_data["output"] == "The result is 4."
+    assert completed.output_data["tool_calls"][0]["name"] == "double"
+
+
+class _MockChunk:
+    def __init__(self, *, text: str = "", tool_calls=None) -> None:
+        self.chunk_type = "completed"
+        self.text = text
+        self.block_type = None
+        self.index = None
+        self.model = "gpt-4o-mini"
+        self.finish_reason = "tool_calls" if tool_calls else "stop"
+        self.usage = None
+        self.tool_calls = tool_calls
+
+
+class _MockAsyncStreamIterator:
+    def __init__(self, chunks) -> None:
+        self._chunks = iter(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._chunks)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
+@pytest.mark.asyncio
+async def test_string_model_streams_tools_across_iterations():
+    @tool
+    async def double(ctx: Context, value: int) -> int:
+        """Double an integer."""
+        return value * 2
+
+    streamed_responses = [
+        _MockAsyncStreamIterator(
+            [
+                _MockChunk(
+                    tool_calls=[
+                        {
+                            "id": "call-double",
+                            "name": "double",
+                            "arguments": '{"value":2}',
+                        }
+                    ]
+                )
+            ]
+        ),
+        _MockAsyncStreamIterator([_MockChunk(text="The result is 4.")]),
+    ]
+
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(
+            side_effect=AssertionError("tool-capable string models must stream")
+        )
+        mock_instance.stream_iter = MagicMock(side_effect=streamed_responses)
+        mock_rust_class.return_value = mock_instance
+
+        agent = Agent(
+            name="string-streaming-tools-agent",
+            model="openai/gpt-4o-mini",
+            instructions="Use the tool.",
+            tools=[double],
+            max_iterations=3,
+        )
+        events: list[Event] = [event async for event in agent.stream("Double 2")]
+
+    completed = next(event for event in events if event.event_type == "agent.completed")
+    assert mock_instance.generate.await_count == 0
+    assert mock_instance.stream_iter.call_count == 2
     assert completed.output_data["output"] == "The result is 4."
     assert completed.output_data["tool_calls"][0]["name"] == "double"

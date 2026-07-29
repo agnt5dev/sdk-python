@@ -47,6 +47,8 @@ except ImportError:
 class LMClient(LanguageModel):
     """Language Model client using Rust SDK core."""
 
+    _STREAMING_TOOL_PROVIDERS = frozenset({"openai"})
+
     def __init__(
         self,
         provider: Optional[str] = None,
@@ -67,6 +69,15 @@ class LMClient(LanguageModel):
             default_provider=provider,
         )
         self._rust_lm = RustLanguageModel(config=config)
+
+    @classmethod
+    def supports_streaming_tools_for_provider(cls, provider: Optional[str]) -> bool:
+        """Return whether the Rust provider preserves tool calls while streaming."""
+        return bool(provider and provider.lower() in cls._STREAMING_TOOL_PROVIDERS)
+
+    @property
+    def supports_streaming_tools(self) -> bool:
+        return self.supports_streaming_tools_for_provider(self._provider)
 
     def _prepare_model_name(self, model: str) -> str:
         """Add provider prefix if needed."""
@@ -260,6 +271,7 @@ class LMClient(LanguageModel):
                     end_time_ns = time.time_ns()
                     latency_ms = (end_time_ns - start_time_ns) // 1_000_000
                     usage = chunk.usage
+                    tool_calls = getattr(chunk, "tool_calls", None)
                     yield LMCompleted(
                         name=model,
                         correlation_id=correlation_id,
@@ -273,6 +285,7 @@ class LMClient(LanguageModel):
                         finish_reason=chunk.finish_reason,
                         output_data={
                             "text": chunk.text,
+                            "tool_calls": tool_calls,
                             "model": chunk.model,
                             "timestamp": time.time_ns() // 1_000_000,
                         },
