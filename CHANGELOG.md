@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-07-30
+
+### Fixed
+
+- Update the native extension to `agnt5-sdk-core` 0.1.6 so Python receives
+  Gemini tool-call parsing and expanded Amazon Bedrock provider support.
+
 ## [0.9.5] - 2026-07-29
 
 ### Changed
@@ -59,7 +66,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/agnt5dev/sdk-python/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/agnt5dev/sdk-python/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/agnt5dev/sdk-python/compare/v0.9.2...v0.9.3
