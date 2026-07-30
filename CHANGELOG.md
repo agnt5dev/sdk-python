@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-07-29
+
+### Changed
+
+- Update the native extension to `agnt5-sdk-core` 0.1.5 so Python remains
+  aligned with the shared agent terminal-output contract.
+
 ## [0.9.4] - 2026-07-29
 
 ### Fixed
@@ -52,7 +59,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/agnt5dev/sdk-python/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/agnt5dev/sdk-python/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/agnt5dev/sdk-python/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/agnt5dev/sdk-python/compare/v0.9.1...v0.9.2
