@@ -1,14 +1,16 @@
-"""Workerless HTTP adapter for Python ASGI applications."""
+"""Workerless HTTP adapter for Python ASGI and WSGI applications."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import inspect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -16,8 +18,10 @@ import httpx
 
 from ._ids import generate_cid
 from ._serialization import deserialize, serialize
+from .agent import AgentContext, AgentRegistry
 from .context import runtime_context_from_metadata, set_current_context
 from .function import FunctionContext, FunctionRegistry
+from .tool import ToolRegistry
 from .workflow import WorkflowRegistry
 
 logger = logging.getLogger(__name__)
@@ -114,6 +118,8 @@ class WorkerlessContext:
         self.component_name = component_name
         self.metadata = dict(metadata or {})
         self.runtime = runtime_context_from_metadata(self.metadata)
+        self._runtime_context = None
+        self._trace_metadata = self.metadata
         self.logger = logging.getLogger(f"agnt5.workerless.{component_name}")
         self._state: dict[str, Any] = {}
         self._checkpoints = dict(checkpoints or {})
@@ -125,6 +131,8 @@ class WorkerlessContext:
         self._signal_responses = _signal_responses_from_metadata(self.metadata)
         self.correlation_id = generate_cid()
         self.parent_correlation_id = ""
+        self._correlation_id = self.correlation_id
+        self._parent_correlation_id = self.parent_correlation_id
 
     async def get(self, key: str, default: Any = None) -> Any:
         return self._state.get(key, default)
@@ -230,6 +238,27 @@ class WorkerlessContext:
         step_key: str | None = None,
         data_type: str | None = None,
     ) -> None:
+        self._append_event(
+            event,
+            data,
+            metadata=metadata,
+            correlation_id=correlation_id,
+            parent_event_id=parent_event_id,
+            step_key=step_key,
+            data_type=data_type,
+        )
+
+    def _append_event(
+        self,
+        event: str | dict[str, Any] | Any,
+        data: Any = None,
+        *,
+        metadata: dict[str, str] | None = None,
+        correlation_id: str | None = None,
+        parent_event_id: str | None = None,
+        step_key: str | None = None,
+        data_type: str | None = None,
+    ) -> None:
         if isinstance(event, str):
             payload: dict[str, Any] = {"event_type": event, "data": data}
         elif isinstance(event, dict):
@@ -261,12 +290,66 @@ class WorkerlessContext:
     def checkpoint_snapshot(self) -> dict[str, Any]:
         return dict(self._checkpoints)
 
+    def set_checkpoint(self, key: str, value: Any) -> None:
+        self._checkpoints[key] = value
+
     def events_snapshot(self) -> list[dict[str, Any]]:
         return list(self._events)
 
 
+class _WorkerlessFunctionContext(FunctionContext):
+    """Normal SDK function/tool context that returns emitted events in the HTTP response."""
+
+    def __init__(self, parent: WorkerlessContext) -> None:
+        super().__init__(
+            run_id=parent.run_id,
+            correlation_id=parent.correlation_id,
+            parent_correlation_id=parent.parent_correlation_id,
+            attempt=parent.attempt,
+            runtime_context=None,
+            trace_metadata=parent.metadata,
+        )
+        self._workerless_parent = parent
+
+    def emit(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+    async def emit_async(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+
+class _WorkerlessAgentContext(AgentContext):
+    """Agent context that keeps conversation state inside the invoke checkpoint."""
+
+    def __init__(self, parent: WorkerlessContext, agent_name: str, session_id: str) -> None:
+        super().__init__(
+            run_id=parent.run_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_context=parent,  # type: ignore[arg-type]
+            attempt=parent.attempt,
+            runtime_context=None,
+            correlation_id=parent.correlation_id,
+            parent_correlation_id=parent.parent_correlation_id,
+            trace_metadata=parent.metadata,
+        )
+        self._memo = None
+        self.saved_messages: list[Any] = []
+
+    async def get_conversation_history(self) -> list[Any]:
+        return []
+
+    async def save_conversation_history(self, messages: list[Any]) -> None:
+        self.saved_messages = list(messages)
+
+    def emit(self, event: Any) -> Any:
+        return event
+
+
 class ServerlessApp:
-    """ASGI app implementing the AGNT5 workerless HTTP protocol."""
+    """ASGI app and WSGI callable implementing the AGNT5 workerless protocol."""
 
     def __init__(
         self,
@@ -275,6 +358,8 @@ class ServerlessApp:
         service_version: str | None = None,
         functions: list[Any] | None = None,
         workflows: list[Any] | None = None,
+        tools: list[Any] | None = None,
+        agents: list[Any] | None = None,
         signing_secret: SigningSecretResolver | None = None,
         enabled: EnabledResolver = True,
     ) -> None:
@@ -282,13 +367,23 @@ class ServerlessApp:
         self.service_version = service_version
         self.signing_secret = signing_secret
         self.enabled = enabled
-        self.components = _collect_components(functions=functions, workflows=workflows)
+        self.components = _collect_components(
+            functions=functions,
+            workflows=workflows,
+            tools=tools,
+            agents=agents,
+        )
         self._manifest = _build_manifest(service_name, service_version, self.components)
 
     def manifest(self) -> dict[str, Any]:
         return dict(self._manifest)
 
-    async def __call__(self, scope: dict[str, Any], receive: Callable[[], Any], send: Callable[[dict[str, Any]], Any]) -> None:
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Any],
+        send: Callable[[dict[str, Any]], Any],
+    ) -> None:
         if scope.get("type") != "http":
             raise RuntimeError("agnt5.serverless only supports ASGI HTTP scopes")
 
@@ -304,9 +399,11 @@ class ServerlessApp:
 
     async def handle_starlette_request(self, request: Any) -> Any:
         try:
-            from starlette.responses import Response
+            from starlette.responses import Response  # pyright: ignore[reportMissingImports]
         except ImportError as exc:  # pragma: no cover - exercised only without Starlette installed.
-            raise ImportError("Install FastAPI or Starlette to use handle_starlette_request().") from exc
+            raise ImportError(
+                "Install FastAPI or Starlette to use handle_starlette_request()."
+            ) from exc
 
         status, payload, headers = await self.handle_http(
             method=request.method,
@@ -322,9 +419,9 @@ class ServerlessApp:
             headers=headers,
         )
 
-    def mount_fastapi(self, app: Any) -> None:
+    def mount_starlette(self, app: Any) -> None:
         if not hasattr(app, "add_route"):
-            raise TypeError("mount_fastapi() expects a FastAPI or Starlette application")
+            raise TypeError("mount_starlette() expects a FastAPI or Starlette application")
 
         async def manifest_route(request: Any) -> Any:
             return await self.handle_starlette_request(request)
@@ -344,6 +441,119 @@ class ServerlessApp:
             methods=["POST"],
             include_in_schema=False,
         )
+
+    def mount_fastapi(self, app: Any) -> None:
+        """Mount the protocol routes on a FastAPI application."""
+        if not hasattr(app, "add_route"):
+            raise TypeError("mount_fastapi() expects a FastAPI or Starlette application")
+        self.mount_starlette(app)
+
+    def mount_flask(self, app: Any) -> None:
+        """Mount the protocol routes on a Flask application."""
+        if not hasattr(app, "add_url_rule"):
+            raise TypeError("mount_flask() expects a Flask application")
+        try:
+            from flask import Response, request  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:  # pragma: no cover - exercised only without Flask installed.
+            raise ImportError("Install Flask to use mount_flask().") from exc
+
+        def handle_request() -> Any:
+            status, payload, headers = _run_wsgi_awaitable(
+                self.handle_http(
+                    method=request.method,
+                    path=request.path,
+                    headers={key.lower(): value for key, value in request.headers.items()},
+                    body=request.get_data(cache=False),
+                    url=request.url,
+                )
+            )
+            return Response(
+                response=serialize(payload),
+                status=status,
+                content_type="application/json",
+                headers=headers,
+            )
+
+        app.add_url_rule(
+            DEFAULT_MANIFEST_PATH,
+            endpoint="agnt5_workerless_manifest",
+            view_func=handle_request,
+            methods=["GET"],
+        )
+        app.add_url_rule(
+            INVOKE_PATH,
+            endpoint="agnt5_workerless_invoke",
+            view_func=handle_request,
+            methods=["POST"],
+        )
+
+    async def handle_django_request(self, request: Any) -> Any:
+        """Handle one Django request using an async Django view."""
+        try:
+            from django.http import HttpResponse  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:  # pragma: no cover - exercised only without Django installed.
+            raise ImportError("Install Django to use handle_django_request().") from exc
+
+        status, payload, headers = await self.handle_http(
+            method=request.method,
+            path=request.path,
+            headers={key.lower(): value for key, value in request.headers.items()},
+            body=request.body,
+            url=request.build_absolute_uri(),
+        )
+        response = HttpResponse(
+            content=serialize(payload),
+            status=status,
+            content_type="application/json",
+        )
+        for key, value in headers.items():
+            response[key] = value
+        return response
+
+    def django_urlpatterns(self) -> list[Any]:
+        """Return Django URL patterns for the protocol routes."""
+        try:
+            from django.urls import path  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:  # pragma: no cover - exercised only without Django installed.
+            raise ImportError("Install Django to use django_urlpatterns().") from exc
+
+        return [
+            path(
+                DEFAULT_MANIFEST_PATH.lstrip("/"),
+                self.handle_django_request,
+                name="agnt5-workerless-manifest",
+            ),
+            path(
+                INVOKE_PATH.lstrip("/"),
+                self.handle_django_request,
+                name="agnt5-workerless-invoke",
+            ),
+        ]
+
+    def wsgi_app(self, environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
+        """Serve one request using the standard WSGI calling convention."""
+        body = _read_wsgi_body(environ)
+        status, payload, headers = _run_wsgi_awaitable(
+            self.handle_http(
+                method=str(environ.get("REQUEST_METHOD", "")),
+                path=str(environ.get("PATH_INFO", "")),
+                headers=_headers_from_wsgi_environ(environ),
+                body=body,
+                url=_url_from_wsgi_environ(environ),
+            )
+        )
+        response_body = serialize(payload)
+        response_headers = [
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(response_body))),
+        ]
+        response_headers.extend((key, value) for key, value in headers.items())
+        try:
+            reason = HTTPStatus(status).phrase
+        except ValueError:
+            reason = "Unknown"
+        start_response(f"{status} {reason}", response_headers)
+        return [response_body]
 
     async def handle_http(
         self,
@@ -386,12 +596,20 @@ class ServerlessApp:
 
         protocol_version = payload.get("protocol_version")
         if protocol_version and protocol_version != PROTOCOL_VERSION:
-            return _failed("WORKERLESS_PROTOCOL_MISMATCH", f"unsupported protocol_version {protocol_version}", 400)
+            return _failed(
+                "WORKERLESS_PROTOCOL_MISMATCH",
+                f"unsupported protocol_version {protocol_version}",
+                400,
+            )
 
         component_type = _normalize_component_type(payload.get("component_type"))
         component_name = str(payload.get("component_name") or "").strip()
         if not component_type or not component_name:
-            return _failed("WORKERLESS_COMPONENT_REQUIRED", "component_type and component_name are required", 400)
+            return _failed(
+                "WORKERLESS_COMPONENT_REQUIRED",
+                "component_type and component_name are required",
+                400,
+            )
 
         component = next(
             (
@@ -412,7 +630,11 @@ class ServerlessApp:
         if input_status:
             return input_status
 
-        run_id = str(payload.get("run_id") or headers.get("x-agnt5-run-id") or f"workerless-{int(time.time() * 1000)}")
+        run_id = str(
+            payload.get("run_id")
+            or headers.get("x-agnt5-run-id")
+            or f"workerless-{int(time.time() * 1000)}"
+        )
         metadata = _string_map(payload.get("metadata"))
         ctx = WorkerlessContext(
             invocation_id=f"workerless-{run_id}",
@@ -421,7 +643,9 @@ class ServerlessApp:
             component_name=component_name,
             checkpoints=_checkpoint_storage_from_payload(payload.get("checkpoint")),
             deadline_ms=_optional_int((payload.get("budget") or {}).get("deadline_ms")),
-            yield_before_timeout_ms=_safe_int((payload.get("budget") or {}).get("yield_before_timeout_ms"), 1000),
+            yield_before_timeout_ms=_safe_int(
+                (payload.get("budget") or {}).get("yield_before_timeout_ms"), 1000
+            ),
             metadata=metadata,
         )
 
@@ -490,6 +714,8 @@ def serve(
     service_version: str | None = None,
     functions: list[Any] | None = None,
     workflows: list[Any] | None = None,
+    tools: list[Any] | None = None,
+    agents: list[Any] | None = None,
     signing_secret: SigningSecretResolver | None = None,
     enabled: EnabledResolver = True,
 ) -> ServerlessApp:
@@ -498,6 +724,8 @@ def serve(
         service_version=service_version,
         functions=functions,
         workflows=workflows,
+        tools=tools,
+        agents=agents,
         signing_secret=signing_secret,
         enabled=enabled,
     )
@@ -507,18 +735,44 @@ def _collect_components(
     *,
     functions: list[Any] | None,
     workflows: list[Any] | None,
+    tools: list[Any] | None,
+    agents: list[Any] | None,
 ) -> list[WorkerlessComponent]:
     collected: list[WorkerlessComponent] = []
 
-    function_configs = [_component_config(item) for item in functions] if functions is not None else list(FunctionRegistry.all().values())
-    workflow_configs = [_component_config(item) for item in workflows] if workflows is not None else list(WorkflowRegistry.all().values())
+    function_configs = (
+        [_component_config(item) for item in functions]
+        if functions is not None
+        else list(FunctionRegistry.all().values())
+    )
+    workflow_configs = (
+        [_component_config(item) for item in workflows]
+        if workflows is not None
+        else list(WorkflowRegistry.all().values())
+    )
+    tool_configs = list(tools) if tools is not None else list(ToolRegistry.all().values())
+    agent_configs = list(agents) if agents is not None else list(AgentRegistry.all().values())
 
     for config in function_configs:
         if config is not None:
-            collected.append(WorkerlessComponent(name=config.name, component_type="function", config=config))
+            collected.append(
+                WorkerlessComponent(name=config.name, component_type="function", config=config)
+            )
     for config in workflow_configs:
         if config is not None:
-            collected.append(WorkerlessComponent(name=config.name, component_type="workflow", config=config))
+            collected.append(
+                WorkerlessComponent(name=config.name, component_type="workflow", config=config)
+            )
+    for config in tool_configs:
+        if config is not None:
+            collected.append(
+                WorkerlessComponent(name=config.name, component_type="tool", config=config)
+            )
+    for config in agent_configs:
+        if config is not None:
+            collected.append(
+                WorkerlessComponent(name=config.name, component_type="agent", config=config)
+            )
     return collected
 
 
@@ -556,8 +810,18 @@ def _manifest_component(component: WorkerlessComponent) -> dict[str, Any]:
         payload["input_schema"] = config.input_schema
     if getattr(config, "output_schema", None):
         payload["output_schema"] = config.output_schema
-    if getattr(config, "metadata", None):
-        payload["metadata"] = config.metadata
+    metadata = dict(getattr(config, "metadata", None) or {})
+    if component.component_type == "tool":
+        metadata.update(
+            {
+                "description": getattr(config, "description", ""),
+                "requires_confirmation": bool(getattr(config, "confirmation", False)),
+            }
+        )
+    elif component.component_type == "agent":
+        metadata["model"] = getattr(config, "model_name", getattr(config, "model", ""))
+    if metadata:
+        payload["metadata"] = metadata
     triggers = getattr(config, "triggers", None)
     if triggers:
         payload["triggers"] = [_trigger_payload(trigger) for trigger in triggers]
@@ -586,19 +850,71 @@ def _retry_payload(retry_policy: Any) -> dict[str, Any]:
     }
 
 
-async def _invoke_component(component: WorkerlessComponent, ctx: WorkerlessContext, input_value: Any) -> Any:
+async def _invoke_component(
+    component: WorkerlessComponent, ctx: WorkerlessContext, input_value: Any
+) -> Any:
     config = component.config
     if component.component_type == "function":
-        function_ctx = FunctionContext(
-            run_id=ctx.run_id,
-            correlation_id=ctx.correlation_id,
-            parent_correlation_id=ctx.parent_correlation_id,
-            attempt=ctx.attempt,
-            runtime_context=None,
-            trace_metadata=ctx.metadata,
-        )
+        function_ctx = _WorkerlessFunctionContext(ctx)
         return await _call_handler(config.handler, function_ctx, input_value)
+    if component.component_type == "tool":
+        arguments = input_value if isinstance(input_value, dict) else {}
+        return await config.invoke(_WorkerlessFunctionContext(ctx), **arguments)
+    if component.component_type == "agent":
+        return await _invoke_agent(config, ctx, input_value)
     return await _call_handler(config.handler, ctx, input_value)
+
+
+async def _invoke_agent(agent: Any, ctx: WorkerlessContext, input_value: Any) -> str:
+    session_id = _agent_session_id(input_value, ctx.metadata, ctx.run_id)
+    checkpoint_history = _agent_history_from_checkpoint(ctx.checkpoint_snapshot(), session_id)
+    history = (
+        checkpoint_history
+        if checkpoint_history is not None
+        else _agent_history_from_input(input_value)
+    )
+    user_message = _agent_user_message(input_value)
+    agent_ctx = _WorkerlessAgentContext(ctx, agent.name, session_id)
+    output: str | None = None
+
+    async for event in agent.stream(user_message, context=agent_ctx, history=history):
+        await ctx.emit(event)
+        if getattr(event, "event_type", "") != "agent.completed":
+            continue
+        output_data = getattr(event, "output_data", None)
+        if isinstance(output_data, dict):
+            output = str(output_data.get("output", ""))
+
+    if output is None:
+        raise RuntimeError(f"Agent '{agent.name}' completed without producing a result")
+
+    updated_messages = _normalize_agent_messages(agent_ctx.saved_messages)
+    if not updated_messages:
+        updated_messages = [
+            *history,
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": output},
+        ]
+    ctx.set_checkpoint(
+        _agent_session_checkpoint_key(session_id),
+        {"messages": updated_messages, "updated_at_ms": int(time.time() * 1000)},
+    )
+    await ctx.emit(
+        {
+            "event_type": "session.created",
+            "data": {
+                "session_id": session_id,
+                "agent_name": agent.name,
+                "turn_count": len(updated_messages),
+            },
+            "metadata": {
+                "session_id": session_id,
+                "agent_name": agent.name,
+                "session_type": "agent",
+            },
+        }
+    )
+    return output
 
 
 async def _call_handler(handler: Callable[..., Any], ctx: Any, input_value: Any) -> Any:
@@ -627,6 +943,75 @@ def _handler_wants_context(handler: Callable[..., Any]) -> bool:
     return bool(parameters and parameters[0].name == "ctx")
 
 
+def _agent_session_id(input_value: Any, metadata: dict[str, str], run_id: str) -> str:
+    if isinstance(input_value, dict):
+        session_id = _nonempty_string(input_value.get("session_id"))
+        if session_id:
+            return session_id
+    return _nonempty_string(metadata.get("session_id")) or run_id
+
+
+def _agent_user_message(input_value: Any) -> str:
+    if isinstance(input_value, str):
+        return input_value.strip()
+    if isinstance(input_value, dict):
+        for key in ("prompt", "message", "input"):
+            message = _nonempty_string(input_value.get(key))
+            if message:
+                return message
+    if input_value is None:
+        return ""
+    try:
+        return serialize(input_value).decode("utf-8")
+    except Exception:
+        return str(input_value)
+
+
+def _agent_history_from_input(input_value: Any) -> list[dict[str, str]]:
+    if not isinstance(input_value, dict):
+        return []
+    return _normalize_agent_messages(input_value.get("history"))
+
+
+def _agent_history_from_checkpoint(
+    storage: dict[str, Any],
+    session_id: str,
+) -> list[dict[str, str]] | None:
+    checkpoint = storage.get(_agent_session_checkpoint_key(session_id))
+    if not isinstance(checkpoint, dict):
+        return None
+    return _normalize_agent_messages(checkpoint.get("messages"))
+
+
+def _agent_session_checkpoint_key(session_id: str) -> str:
+    return f"agent_session:{session_id}"
+
+
+def _normalize_agent_messages(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            raw_role = item.get("role")
+            raw_content = item.get("content")
+        else:
+            raw_role = getattr(item, "role", None)
+            raw_content = getattr(item, "content", None)
+        role_value = getattr(raw_role, "value", raw_role)
+        role = _nonempty_string(role_value) or "user"
+        content = str(raw_content or "")
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _normalize_component_type(value: Any) -> str | None:
     candidate = str(value or "").strip().lower()
     if candidate in {"function", "workflow", "tool", "agent"}:
@@ -634,33 +1019,57 @@ def _normalize_component_type(value: Any) -> str | None:
     return None
 
 
-async def _resolve_input(payload: dict[str, Any]) -> tuple[tuple[int, dict[str, Any], dict[str, str]] | None, Any]:
+async def _resolve_input(
+    payload: dict[str, Any],
+) -> tuple[tuple[int, dict[str, Any], dict[str, str]] | None, Any]:
     has_input = "input" in payload
     input_ref = payload.get("input_ref")
     if has_input and input_ref:
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless invoke payload must not include both input and input_ref", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID",
+            "workerless invoke payload must not include both input and input_ref",
+            400,
+        ), None
     if not input_ref:
         return None, payload.get("input", {})
     if not isinstance(input_ref, dict):
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless input_ref must be an object", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID", "workerless input_ref must be an object", 400
+        ), None
     if input_ref.get("kind") != INPUT_REF_KIND:
-        return _failed("WORKERLESS_INPUT_REF_UNSUPPORTED", "workerless input_ref kind is unsupported", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_UNSUPPORTED", "workerless input_ref kind is unsupported", 400
+        ), None
     if str(input_ref.get("method") or "GET").upper() != "GET":
-        return _failed("WORKERLESS_INPUT_REF_UNSUPPORTED", "workerless input_ref method is unsupported", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_UNSUPPORTED", "workerless input_ref method is unsupported", 400
+        ), None
     url = str(input_ref.get("url") or "")
     if not url.startswith(("http://", "https://")):
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless input_ref url must be http or https", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID", "workerless input_ref url must be http or https", 400
+        ), None
     size_bytes = _optional_int(input_ref.get("size_bytes"))
     if size_bytes is None:
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless input_ref size_bytes is required", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID", "workerless input_ref size_bytes is required", 400
+        ), None
     if size_bytes > MAX_INPUT_REF_BYTES:
-        return _failed("WORKERLESS_INPUT_REF_TOO_LARGE", f"workerless input_ref exceeds {MAX_INPUT_REF_BYTES} bytes", 413), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_TOO_LARGE",
+            f"workerless input_ref exceeds {MAX_INPUT_REF_BYTES} bytes",
+            413,
+        ), None
     sha256 = str(input_ref.get("sha256") or "")
     if not sha256:
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless input_ref sha256 is required", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID", "workerless input_ref sha256 is required", 400
+        ), None
     expires_at_ms = _optional_int(input_ref.get("expires_at_ms"))
     if expires_at_ms is not None and expires_at_ms < int(time.time() * 1000):
-        return _failed("WORKERLESS_INPUT_REF_EXPIRED", "workerless input_ref has expired", 410), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_EXPIRED", "workerless input_ref has expired", 410
+        ), None
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -668,15 +1077,29 @@ async def _resolve_input(payload: dict[str, Any]) -> tuple[tuple[int, dict[str, 
             response.raise_for_status()
         body = response.content
     except Exception as exc:
-        return _failed("WORKERLESS_INPUT_REF_FETCH_FAILED", f"workerless input_ref could not be fetched: {exc}", 502), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_FETCH_FAILED",
+            f"workerless input_ref could not be fetched: {exc}",
+            502,
+        ), None
     if len(body) != size_bytes:
-        return _failed("WORKERLESS_INPUT_REF_INVALID", "workerless input_ref size_bytes did not match fetched payload", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID",
+            "workerless input_ref size_bytes did not match fetched payload",
+            400,
+        ), None
     if hashlib.sha256(body).hexdigest() != sha256:
-        return _failed("WORKERLESS_INPUT_REF_CHECKSUM_MISMATCH", "workerless input_ref sha256 did not match fetched payload", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_CHECKSUM_MISMATCH",
+            "workerless input_ref sha256 did not match fetched payload",
+            400,
+        ), None
     try:
         return None, deserialize(body)
     except Exception as exc:
-        return _failed("WORKERLESS_INPUT_REF_INVALID", f"workerless input_ref payload must be JSON: {exc}", 400), None
+        return _failed(
+            "WORKERLESS_INPUT_REF_INVALID", f"workerless input_ref payload must be JSON: {exc}", 400
+        ), None
 
 
 async def _completed_response(
@@ -688,12 +1111,18 @@ async def _completed_response(
     if not upload:
         return None, inline_body
     if not isinstance(upload, dict):
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_INVALID", "workerless output_upload must be an object", 400), {}
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_INVALID", "workerless output_upload must be an object", 400
+        ), {}
     threshold_bytes = _optional_int(upload.get("threshold_bytes"))
     try:
         output_bytes = serialize(output)
     except Exception as exc:
-        return _failed("WORKERLESS_OUTPUT_SERIALIZATION_FAILED", f"workerless output could not be serialized: {exc}", 500), {}
+        return _failed(
+            "WORKERLESS_OUTPUT_SERIALIZATION_FAILED",
+            f"workerless output could not be serialized: {exc}",
+            500,
+        ), {}
     if threshold_bytes is None or threshold_bytes < 0 or len(output_bytes) <= threshold_bytes:
         return None, inline_body
 
@@ -702,15 +1131,25 @@ async def _completed_response(
         return validation_error, {}
     max_bytes = _safe_int(upload.get("max_bytes"), MAX_OUTPUT_REF_BYTES)
     if len(output_bytes) > max_bytes:
-        return _failed("WORKERLESS_PAYLOAD_TOO_LARGE", f"workerless output payload exceeds {max_bytes} bytes", 413), {}
+        return _failed(
+            "WORKERLESS_PAYLOAD_TOO_LARGE",
+            f"workerless output payload exceeds {max_bytes} bytes",
+            413,
+        ), {}
 
     content_type = str(upload.get("content_type") or "application/json")
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.put(str(upload["url"]), content=output_bytes, headers={"content-type": content_type})
+            response = await client.put(
+                str(upload["url"]), content=output_bytes, headers={"content-type": content_type}
+            )
             response.raise_for_status()
     except Exception as exc:
-        return _failed("WORKERLESS_OUTPUT_REF_UPLOAD_FAILED", f"workerless output_ref upload failed: {exc}", 502), {}
+        return _failed(
+            "WORKERLESS_OUTPUT_REF_UPLOAD_FAILED",
+            f"workerless output_ref upload failed: {exc}",
+            502,
+        ), {}
 
     return None, {
         "status": "completed",
@@ -725,19 +1164,37 @@ async def _completed_response(
     }
 
 
-def _validate_output_upload(upload: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, str]] | None:
+def _validate_output_upload(
+    upload: dict[str, Any],
+) -> tuple[int, dict[str, Any], dict[str, str]] | None:
     if upload.get("kind") != OUTPUT_UPLOAD_KIND:
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_UNSUPPORTED", "workerless output_upload kind is unsupported", 400)
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_UNSUPPORTED",
+            "workerless output_upload kind is unsupported",
+            400,
+        )
     if str(upload.get("method") or "PUT").upper() != "PUT":
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_UNSUPPORTED", "workerless output_upload method is unsupported", 400)
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_UNSUPPORTED",
+            "workerless output_upload method is unsupported",
+            400,
+        )
     url = str(upload.get("url") or "")
     if not url.startswith(("http://", "https://")):
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_INVALID", "workerless output_upload url must be http or https", 400)
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_INVALID",
+            "workerless output_upload url must be http or https",
+            400,
+        )
     if not upload.get("ref"):
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_INVALID", "workerless output_upload ref is required", 400)
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_INVALID", "workerless output_upload ref is required", 400
+        )
     expires_at_ms = _optional_int(upload.get("expires_at_ms"))
     if expires_at_ms is not None and expires_at_ms < int(time.time() * 1000):
-        return _failed("WORKERLESS_OUTPUT_UPLOAD_EXPIRED", "workerless output_upload has expired", 410)
+        return _failed(
+            "WORKERLESS_OUTPUT_UPLOAD_EXPIRED", "workerless output_upload has expired", 410
+        )
     return None
 
 
@@ -755,15 +1212,29 @@ async def _verify_signature(
     timestamp = headers.get("x-agnt5-timestamp")
     attempt_id = headers.get("x-agnt5-attempt-id")
     if not signature or not timestamp or not attempt_id:
-        return _failed("WORKERLESS_SIGNATURE_MISSING", "workerless invoke signature headers are required", 401)
+        return _failed(
+            "WORKERLESS_SIGNATURE_MISSING", "workerless invoke signature headers are required", 401
+        )
     if signature_version != SIGNATURE_VERSION:
-        return _failed("WORKERLESS_SIGNATURE_VERSION_UNSUPPORTED", "workerless invoke signature version is unsupported", 401)
+        return _failed(
+            "WORKERLESS_SIGNATURE_VERSION_UNSUPPORTED",
+            "workerless invoke signature version is unsupported",
+            401,
+        )
     try:
         timestamp_ms = int(timestamp)
     except ValueError:
-        return _failed("WORKERLESS_SIGNATURE_TIMESTAMP_INVALID", "workerless invoke signature timestamp is invalid", 401)
+        return _failed(
+            "WORKERLESS_SIGNATURE_TIMESTAMP_INVALID",
+            "workerless invoke signature timestamp is invalid",
+            401,
+        )
     if abs(int(time.time() * 1000) - timestamp_ms) > SIGNATURE_MAX_SKEW_MS:
-        return _failed("WORKERLESS_SIGNATURE_EXPIRED", "workerless invoke signature timestamp is outside the allowed window", 401)
+        return _failed(
+            "WORKERLESS_SIGNATURE_EXPIRED",
+            "workerless invoke signature timestamp is outside the allowed window",
+            401,
+        )
 
     digest = hmac.new(
         secret.encode("utf-8"),
@@ -772,7 +1243,9 @@ async def _verify_signature(
     ).hexdigest()
     expected = f"sha256={digest}"
     if not hmac.compare_digest(signature, expected):
-        return _failed("WORKERLESS_SIGNATURE_INVALID", "workerless invoke signature is invalid", 401)
+        return _failed(
+            "WORKERLESS_SIGNATURE_INVALID", "workerless invoke signature is invalid", 401
+        )
     return None
 
 
@@ -784,7 +1257,8 @@ async def _resolve_signing_secret(
         return None
     if isinstance(resolver, str):
         return resolver
-    result = resolver(headers) if _callable_accepts_arg(resolver) else resolver()
+    resolver_fn: Callable[..., Any] = resolver
+    result = resolver_fn(headers) if _callable_accepts_arg(resolver_fn) else resolver_fn()
     if inspect.isawaitable(result):
         result = await result
     return str(result) if result else None
@@ -793,7 +1267,8 @@ async def _resolve_signing_secret(
 async def _resolve_enabled(enabled: EnabledResolver, headers: HeaderMap) -> bool:
     if isinstance(enabled, bool):
         return enabled
-    result = enabled(headers) if _callable_accepts_arg(enabled) else enabled()
+    enabled_fn: Callable[..., Any] = enabled
+    result = enabled_fn(headers) if _callable_accepts_arg(enabled_fn) else enabled_fn()
     if inspect.isawaitable(result):
         result = await result
     return bool(result)
@@ -811,13 +1286,43 @@ def _checkpoint_storage_from_payload(checkpoint: Any) -> dict[str, Any]:
     if not isinstance(checkpoint, dict):
         return {}
     steps = checkpoint.get("steps")
-    return dict(steps) if isinstance(steps, dict) else {}
+    storage = dict(steps) if isinstance(steps, dict) else {}
+    agent_sessions = checkpoint.get("agent_sessions")
+    if isinstance(agent_sessions, dict):
+        for session_id, value in agent_sessions.items():
+            normalized_id = _nonempty_string(session_id)
+            if normalized_id and isinstance(value, dict):
+                storage[_agent_session_checkpoint_key(normalized_id)] = {
+                    "messages": _normalize_agent_messages(value.get("messages")),
+                    "updated_at_ms": _optional_int(value.get("updated_at_ms")),
+                }
+    return storage
 
 
 def _checkpoint_payload_from_storage(storage: dict[str, Any]) -> dict[str, Any] | None:
     if not storage:
         return None
-    return {"steps": dict(storage)}
+    steps: dict[str, Any] = {}
+    agent_sessions: dict[str, Any] = {}
+    for key, value in storage.items():
+        if key.startswith("agent_session:") and isinstance(value, dict):
+            session_id = key.removeprefix("agent_session:")
+            if session_id:
+                checkpoint: dict[str, Any] = {
+                    "messages": _normalize_agent_messages(value.get("messages")),
+                }
+                updated_at_ms = _optional_int(value.get("updated_at_ms"))
+                if updated_at_ms is not None:
+                    checkpoint["updated_at_ms"] = updated_at_ms
+                agent_sessions[session_id] = checkpoint
+        else:
+            steps[key] = value
+    payload: dict[str, Any] = {}
+    if steps:
+        payload["steps"] = steps
+    if agent_sessions:
+        payload["agent_sessions"] = agent_sessions
+    return payload or None
 
 
 def _with_events(body: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -880,6 +1385,58 @@ def _url_from_scope(scope: dict[str, Any]) -> str:
     query = scope.get("query_string", b"")
     query_string = query.decode("latin-1") if isinstance(query, bytes) else urlencode(query)
     return f"{scheme}://{host}{path}" + (f"?{query_string}" if query_string else "")
+
+
+def _read_wsgi_body(environ: dict[str, Any]) -> bytes:
+    stream = environ.get("wsgi.input")
+    if stream is None or not hasattr(stream, "read"):
+        return b""
+    content_length = _optional_int(environ.get("CONTENT_LENGTH"))
+    if content_length is None:
+        if not environ.get("wsgi.input_terminated"):
+            return b""
+        body = stream.read()
+    else:
+        body = stream.read(max(content_length, 0))
+    if isinstance(body, bytes):
+        return body
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    return bytes(body or b"")
+
+
+def _headers_from_wsgi_environ(environ: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for key, value in environ.items():
+        if key.startswith("HTTP_"):
+            header_name = key.removeprefix("HTTP_").replace("_", "-").lower()
+            headers[header_name] = str(value)
+        elif key in {"CONTENT_TYPE", "CONTENT_LENGTH"} and value not in {None, ""}:
+            headers[key.replace("_", "-").lower()] = str(value)
+    return headers
+
+
+def _url_from_wsgi_environ(environ: dict[str, Any]) -> str:
+    scheme = str(environ.get("wsgi.url_scheme") or "http")
+    host = str(environ.get("HTTP_HOST") or environ.get("SERVER_NAME") or "127.0.0.1")
+    port = str(environ.get("SERVER_PORT") or "")
+    if "HTTP_HOST" not in environ and port and port not in {"80", "443"}:
+        host = f"{host}:{port}"
+    path = f"{environ.get('SCRIPT_NAME', '')}{environ.get('PATH_INFO', '')}"
+    query = str(environ.get("QUERY_STRING") or "")
+    return f"{scheme}://{host}{path}" + (f"?{query}" if query else "")
+
+
+def _run_wsgi_awaitable(awaitable: Coroutine[Any, Any, Any]) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+    raise RuntimeError(
+        "ServerlessApp.wsgi_app() cannot run on a thread with an active asyncio event loop; use the ASGI app instead"
+    )
 
 
 def _string_map(value: Any) -> dict[str, str]:

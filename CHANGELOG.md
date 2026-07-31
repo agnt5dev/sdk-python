@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-07-31
+
+### Added
+
+- Expose explicitly selected functions, workflows, tools, and agents through
+  Python serverless endpoints.
+- Add raw WSGI, Starlette, Flask, and Django adapters alongside the existing
+  ASGI and FastAPI integrations.
+- Checkpoint agent session history and return function, tool, and agent events
+  through workerless responses.
+
+### Fixed
+
+- Preserve registry fallback when component lists are omitted while honoring
+  explicit empty lists as exposing no components.
+
 ## [0.9.6] - 2026-07-30
 
 ### Fixed
@@ -66,7 +82,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/agnt5dev/sdk-python/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/agnt5dev/sdk-python/compare/v0.9.3...v0.9.4
