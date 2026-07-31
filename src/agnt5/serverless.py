@@ -16,8 +16,10 @@ import httpx
 
 from ._ids import generate_cid
 from ._serialization import deserialize, serialize
+from .agent import AgentContext, AgentRegistry
 from .context import runtime_context_from_metadata, set_current_context
 from .function import FunctionContext, FunctionRegistry
+from .tool import ToolRegistry
 from .workflow import WorkflowRegistry
 
 logger = logging.getLogger(__name__)
@@ -114,6 +116,8 @@ class WorkerlessContext:
         self.component_name = component_name
         self.metadata = dict(metadata or {})
         self.runtime = runtime_context_from_metadata(self.metadata)
+        self._runtime_context = None
+        self._trace_metadata = self.metadata
         self.logger = logging.getLogger(f"agnt5.workerless.{component_name}")
         self._state: dict[str, Any] = {}
         self._checkpoints = dict(checkpoints or {})
@@ -125,6 +129,8 @@ class WorkerlessContext:
         self._signal_responses = _signal_responses_from_metadata(self.metadata)
         self.correlation_id = generate_cid()
         self.parent_correlation_id = ""
+        self._correlation_id = self.correlation_id
+        self._parent_correlation_id = self.parent_correlation_id
 
     async def get(self, key: str, default: Any = None) -> Any:
         return self._state.get(key, default)
@@ -230,6 +236,27 @@ class WorkerlessContext:
         step_key: str | None = None,
         data_type: str | None = None,
     ) -> None:
+        self._append_event(
+            event,
+            data,
+            metadata=metadata,
+            correlation_id=correlation_id,
+            parent_event_id=parent_event_id,
+            step_key=step_key,
+            data_type=data_type,
+        )
+
+    def _append_event(
+        self,
+        event: str | dict[str, Any] | Any,
+        data: Any = None,
+        *,
+        metadata: dict[str, str] | None = None,
+        correlation_id: str | None = None,
+        parent_event_id: str | None = None,
+        step_key: str | None = None,
+        data_type: str | None = None,
+    ) -> None:
         if isinstance(event, str):
             payload: dict[str, Any] = {"event_type": event, "data": data}
         elif isinstance(event, dict):
@@ -261,8 +288,62 @@ class WorkerlessContext:
     def checkpoint_snapshot(self) -> dict[str, Any]:
         return dict(self._checkpoints)
 
+    def set_checkpoint(self, key: str, value: Any) -> None:
+        self._checkpoints[key] = value
+
     def events_snapshot(self) -> list[dict[str, Any]]:
         return list(self._events)
+
+
+class _WorkerlessFunctionContext(FunctionContext):
+    """Normal SDK function/tool context that returns emitted events in the HTTP response."""
+
+    def __init__(self, parent: WorkerlessContext) -> None:
+        super().__init__(
+            run_id=parent.run_id,
+            correlation_id=parent.correlation_id,
+            parent_correlation_id=parent.parent_correlation_id,
+            attempt=parent.attempt,
+            runtime_context=None,
+            trace_metadata=parent.metadata,
+        )
+        self._workerless_parent = parent
+
+    def emit(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+    async def emit_async(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+
+class _WorkerlessAgentContext(AgentContext):
+    """Agent context that keeps conversation state inside the invoke checkpoint."""
+
+    def __init__(self, parent: WorkerlessContext, agent_name: str, session_id: str) -> None:
+        super().__init__(
+            run_id=parent.run_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_context=parent,  # type: ignore[arg-type]
+            attempt=parent.attempt,
+            runtime_context=None,
+            correlation_id=parent.correlation_id,
+            parent_correlation_id=parent.parent_correlation_id,
+            trace_metadata=parent.metadata,
+        )
+        self._memo = None
+        self.saved_messages: list[Any] = []
+
+    async def get_conversation_history(self) -> list[Any]:
+        return []
+
+    async def save_conversation_history(self, messages: list[Any]) -> None:
+        self.saved_messages = list(messages)
+
+    def emit(self, event: Any) -> Any:
+        return event
 
 
 class ServerlessApp:
@@ -275,6 +356,8 @@ class ServerlessApp:
         service_version: str | None = None,
         functions: list[Any] | None = None,
         workflows: list[Any] | None = None,
+        tools: list[Any] | None = None,
+        agents: list[Any] | None = None,
         signing_secret: SigningSecretResolver | None = None,
         enabled: EnabledResolver = True,
     ) -> None:
@@ -282,7 +365,12 @@ class ServerlessApp:
         self.service_version = service_version
         self.signing_secret = signing_secret
         self.enabled = enabled
-        self.components = _collect_components(functions=functions, workflows=workflows)
+        self.components = _collect_components(
+            functions=functions,
+            workflows=workflows,
+            tools=tools,
+            agents=agents,
+        )
         self._manifest = _build_manifest(service_name, service_version, self.components)
 
     def manifest(self) -> dict[str, Any]:
@@ -304,7 +392,7 @@ class ServerlessApp:
 
     async def handle_starlette_request(self, request: Any) -> Any:
         try:
-            from starlette.responses import Response
+            from starlette.responses import Response  # pyright: ignore[reportMissingImports]
         except ImportError as exc:  # pragma: no cover - exercised only without Starlette installed.
             raise ImportError("Install FastAPI or Starlette to use handle_starlette_request().") from exc
 
@@ -490,6 +578,8 @@ def serve(
     service_version: str | None = None,
     functions: list[Any] | None = None,
     workflows: list[Any] | None = None,
+    tools: list[Any] | None = None,
+    agents: list[Any] | None = None,
     signing_secret: SigningSecretResolver | None = None,
     enabled: EnabledResolver = True,
 ) -> ServerlessApp:
@@ -498,6 +588,8 @@ def serve(
         service_version=service_version,
         functions=functions,
         workflows=workflows,
+        tools=tools,
+        agents=agents,
         signing_secret=signing_secret,
         enabled=enabled,
     )
@@ -507,11 +599,15 @@ def _collect_components(
     *,
     functions: list[Any] | None,
     workflows: list[Any] | None,
+    tools: list[Any] | None,
+    agents: list[Any] | None,
 ) -> list[WorkerlessComponent]:
     collected: list[WorkerlessComponent] = []
 
     function_configs = [_component_config(item) for item in functions] if functions is not None else list(FunctionRegistry.all().values())
     workflow_configs = [_component_config(item) for item in workflows] if workflows is not None else list(WorkflowRegistry.all().values())
+    tool_configs = list(tools) if tools is not None else list(ToolRegistry.all().values())
+    agent_configs = list(agents) if agents is not None else list(AgentRegistry.all().values())
 
     for config in function_configs:
         if config is not None:
@@ -519,6 +615,12 @@ def _collect_components(
     for config in workflow_configs:
         if config is not None:
             collected.append(WorkerlessComponent(name=config.name, component_type="workflow", config=config))
+    for config in tool_configs:
+        if config is not None:
+            collected.append(WorkerlessComponent(name=config.name, component_type="tool", config=config))
+    for config in agent_configs:
+        if config is not None:
+            collected.append(WorkerlessComponent(name=config.name, component_type="agent", config=config))
     return collected
 
 
@@ -556,8 +658,18 @@ def _manifest_component(component: WorkerlessComponent) -> dict[str, Any]:
         payload["input_schema"] = config.input_schema
     if getattr(config, "output_schema", None):
         payload["output_schema"] = config.output_schema
-    if getattr(config, "metadata", None):
-        payload["metadata"] = config.metadata
+    metadata = dict(getattr(config, "metadata", None) or {})
+    if component.component_type == "tool":
+        metadata.update(
+            {
+                "description": getattr(config, "description", ""),
+                "requires_confirmation": bool(getattr(config, "confirmation", False)),
+            }
+        )
+    elif component.component_type == "agent":
+        metadata["model"] = getattr(config, "model_name", getattr(config, "model", ""))
+    if metadata:
+        payload["metadata"] = metadata
     triggers = getattr(config, "triggers", None)
     if triggers:
         payload["triggers"] = [_trigger_payload(trigger) for trigger in triggers]
@@ -589,16 +701,62 @@ def _retry_payload(retry_policy: Any) -> dict[str, Any]:
 async def _invoke_component(component: WorkerlessComponent, ctx: WorkerlessContext, input_value: Any) -> Any:
     config = component.config
     if component.component_type == "function":
-        function_ctx = FunctionContext(
-            run_id=ctx.run_id,
-            correlation_id=ctx.correlation_id,
-            parent_correlation_id=ctx.parent_correlation_id,
-            attempt=ctx.attempt,
-            runtime_context=None,
-            trace_metadata=ctx.metadata,
-        )
+        function_ctx = _WorkerlessFunctionContext(ctx)
         return await _call_handler(config.handler, function_ctx, input_value)
+    if component.component_type == "tool":
+        arguments = input_value if isinstance(input_value, dict) else {}
+        return await config.invoke(_WorkerlessFunctionContext(ctx), **arguments)
+    if component.component_type == "agent":
+        return await _invoke_agent(config, ctx, input_value)
     return await _call_handler(config.handler, ctx, input_value)
+
+
+async def _invoke_agent(agent: Any, ctx: WorkerlessContext, input_value: Any) -> str:
+    session_id = _agent_session_id(input_value, ctx.metadata, ctx.run_id)
+    checkpoint_history = _agent_history_from_checkpoint(ctx.checkpoint_snapshot(), session_id)
+    history = checkpoint_history if checkpoint_history is not None else _agent_history_from_input(input_value)
+    user_message = _agent_user_message(input_value)
+    agent_ctx = _WorkerlessAgentContext(ctx, agent.name, session_id)
+    output: str | None = None
+
+    async for event in agent.stream(user_message, context=agent_ctx, history=history):
+        await ctx.emit(event)
+        if getattr(event, "event_type", "") != "agent.completed":
+            continue
+        output_data = getattr(event, "output_data", None)
+        if isinstance(output_data, dict):
+            output = str(output_data.get("output", ""))
+
+    if output is None:
+        raise RuntimeError(f"Agent '{agent.name}' completed without producing a result")
+
+    updated_messages = _normalize_agent_messages(agent_ctx.saved_messages)
+    if not updated_messages:
+        updated_messages = [
+            *history,
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": output},
+        ]
+    ctx.set_checkpoint(
+        _agent_session_checkpoint_key(session_id),
+        {"messages": updated_messages, "updated_at_ms": int(time.time() * 1000)},
+    )
+    await ctx.emit(
+        {
+            "event_type": "session.created",
+            "data": {
+                "session_id": session_id,
+                "agent_name": agent.name,
+                "turn_count": len(updated_messages),
+            },
+            "metadata": {
+                "session_id": session_id,
+                "agent_name": agent.name,
+                "session_type": "agent",
+            },
+        }
+    )
+    return output
 
 
 async def _call_handler(handler: Callable[..., Any], ctx: Any, input_value: Any) -> Any:
@@ -625,6 +783,75 @@ def _handler_wants_context(handler: Callable[..., Any]) -> bool:
     except (TypeError, ValueError):
         return True
     return bool(parameters and parameters[0].name == "ctx")
+
+
+def _agent_session_id(input_value: Any, metadata: dict[str, str], run_id: str) -> str:
+    if isinstance(input_value, dict):
+        session_id = _nonempty_string(input_value.get("session_id"))
+        if session_id:
+            return session_id
+    return _nonempty_string(metadata.get("session_id")) or run_id
+
+
+def _agent_user_message(input_value: Any) -> str:
+    if isinstance(input_value, str):
+        return input_value.strip()
+    if isinstance(input_value, dict):
+        for key in ("prompt", "message", "input"):
+            message = _nonempty_string(input_value.get(key))
+            if message:
+                return message
+    if input_value is None:
+        return ""
+    try:
+        return serialize(input_value).decode("utf-8")
+    except Exception:
+        return str(input_value)
+
+
+def _agent_history_from_input(input_value: Any) -> list[dict[str, str]]:
+    if not isinstance(input_value, dict):
+        return []
+    return _normalize_agent_messages(input_value.get("history"))
+
+
+def _agent_history_from_checkpoint(
+    storage: dict[str, Any],
+    session_id: str,
+) -> list[dict[str, str]] | None:
+    checkpoint = storage.get(_agent_session_checkpoint_key(session_id))
+    if not isinstance(checkpoint, dict):
+        return None
+    return _normalize_agent_messages(checkpoint.get("messages"))
+
+
+def _agent_session_checkpoint_key(session_id: str) -> str:
+    return f"agent_session:{session_id}"
+
+
+def _normalize_agent_messages(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            raw_role = item.get("role")
+            raw_content = item.get("content")
+        else:
+            raw_role = getattr(item, "role", None)
+            raw_content = getattr(item, "content", None)
+        role_value = getattr(raw_role, "value", raw_role)
+        role = _nonempty_string(role_value) or "user"
+        content = str(raw_content or "")
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _normalize_component_type(value: Any) -> str | None:
@@ -784,7 +1011,8 @@ async def _resolve_signing_secret(
         return None
     if isinstance(resolver, str):
         return resolver
-    result = resolver(headers) if _callable_accepts_arg(resolver) else resolver()
+    resolver_fn: Callable[..., Any] = resolver
+    result = resolver_fn(headers) if _callable_accepts_arg(resolver_fn) else resolver_fn()
     if inspect.isawaitable(result):
         result = await result
     return str(result) if result else None
@@ -793,7 +1021,8 @@ async def _resolve_signing_secret(
 async def _resolve_enabled(enabled: EnabledResolver, headers: HeaderMap) -> bool:
     if isinstance(enabled, bool):
         return enabled
-    result = enabled(headers) if _callable_accepts_arg(enabled) else enabled()
+    enabled_fn: Callable[..., Any] = enabled
+    result = enabled_fn(headers) if _callable_accepts_arg(enabled_fn) else enabled_fn()
     if inspect.isawaitable(result):
         result = await result
     return bool(result)
@@ -811,13 +1040,43 @@ def _checkpoint_storage_from_payload(checkpoint: Any) -> dict[str, Any]:
     if not isinstance(checkpoint, dict):
         return {}
     steps = checkpoint.get("steps")
-    return dict(steps) if isinstance(steps, dict) else {}
+    storage = dict(steps) if isinstance(steps, dict) else {}
+    agent_sessions = checkpoint.get("agent_sessions")
+    if isinstance(agent_sessions, dict):
+        for session_id, value in agent_sessions.items():
+            normalized_id = _nonempty_string(session_id)
+            if normalized_id and isinstance(value, dict):
+                storage[_agent_session_checkpoint_key(normalized_id)] = {
+                    "messages": _normalize_agent_messages(value.get("messages")),
+                    "updated_at_ms": _optional_int(value.get("updated_at_ms")),
+                }
+    return storage
 
 
 def _checkpoint_payload_from_storage(storage: dict[str, Any]) -> dict[str, Any] | None:
     if not storage:
         return None
-    return {"steps": dict(storage)}
+    steps: dict[str, Any] = {}
+    agent_sessions: dict[str, Any] = {}
+    for key, value in storage.items():
+        if key.startswith("agent_session:") and isinstance(value, dict):
+            session_id = key.removeprefix("agent_session:")
+            if session_id:
+                checkpoint: dict[str, Any] = {
+                    "messages": _normalize_agent_messages(value.get("messages")),
+                }
+                updated_at_ms = _optional_int(value.get("updated_at_ms"))
+                if updated_at_ms is not None:
+                    checkpoint["updated_at_ms"] = updated_at_ms
+                agent_sessions[session_id] = checkpoint
+        else:
+            steps[key] = value
+    payload: dict[str, Any] = {}
+    if steps:
+        payload["steps"] = steps
+    if agent_sessions:
+        payload["agent_sessions"] = agent_sessions
+    return payload or None
 
 
 def _with_events(body: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:

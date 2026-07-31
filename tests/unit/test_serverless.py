@@ -8,17 +8,96 @@ from typing import Any
 
 import pytest
 
-from agnt5 import FunctionRegistry, WorkflowRegistry, function, workflow
+from agnt5 import (
+    Agent,
+    AgentRegistry,
+    FunctionRegistry,
+    ToolRegistry,
+    WorkflowRegistry,
+    function,
+    tool,
+    workflow,
+)
+from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel
+from agnt5.lm.events import LMCompleted, LMContentBlockDelta
 from agnt5.serverless import serve
+
+
+class FakeAgentCompleted:
+    event_type = "agent.completed"
+
+    def __init__(self, output: str) -> None:
+        self.output_data = {"output": output, "tool_calls": []}
+
+    def to_response_fields(self) -> dict[str, Any]:
+        return {
+            "event_type": self.event_type,
+            "output_data": json.dumps(self.output_data),
+        }
+
+
+class FakeAgent:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.model_name = "test-model"
+
+    async def stream(self, user_message, context=None, history=None):
+        prior_users = [
+            str(message.get("content", ""))
+            for message in history or []
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        output = "seen:" + "|".join([*prior_users, user_message])
+        yield FakeAgentCompleted(output)
+
+
+class ServerlessTestModel(LanguageModel):
+    async def generate(self, request: GenerateRequest) -> GenerateResponse:
+        return GenerateResponse(text=self._response_text(request))
+
+    async def stream(self, request: GenerateRequest):
+        text = self._response_text(request)
+        yield LMContentBlockDelta(
+            name="serverless-test-model",
+            correlation_id="serverless-test-correlation",
+            parent_correlation_id="",
+            content=text,
+            block_type="text",
+            index=0,
+        )
+        yield LMCompleted(
+            name="serverless-test-model",
+            correlation_id="serverless-test-correlation",
+            parent_correlation_id="",
+            model="serverless-test-model",
+            provider="test",
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            output_data={"text": text},
+        )
+
+    @staticmethod
+    def _response_text(request: GenerateRequest) -> str:
+        user_messages = [
+            message.content
+            for message in request.messages
+            if getattr(message.role, "value", message.role) == "user"
+        ]
+        return "actual:" + "|".join(user_messages)
 
 
 @pytest.fixture(autouse=True)
 def clear_registries():
     FunctionRegistry.clear()
     WorkflowRegistry.clear()
+    ToolRegistry.clear()
+    AgentRegistry.clear()
     yield
     FunctionRegistry.clear()
     WorkflowRegistry.clear()
+    ToolRegistry.clear()
+    AgentRegistry.clear()
 
 
 @pytest.mark.asyncio
@@ -77,6 +156,158 @@ async def test_serverless_invokes_python_workflow() -> None:
     assert status == 200
     assert body["status"] == "completed"
     assert body["output"] == {"message": "hello Ada"}
+
+
+@pytest.mark.asyncio
+async def test_serverless_exposes_and_invokes_selected_tools() -> None:
+    @tool(description="Double a number")
+    async def selected_tool(ctx, value: int) -> dict[str, int]:
+        ctx.emit({"event_type": "tool.custom", "data": {"value": value}})
+        return {"value": value * 2}
+
+    @tool(description="Must stay private")
+    async def hidden_tool(ctx) -> dict[str, bool]:
+        return {"hidden": True}
+
+    app = serve(tools=[selected_tool], agents=[])
+    manifest_status, manifest, _headers = await call_asgi(app, "GET", "/.well-known/agnt5")
+
+    assert manifest_status == 200
+    assert manifest["components"] == [
+        {
+            "name": "selected_tool",
+            "type": "tool",
+            "component_type": "tool",
+            "input_schema": selected_tool.input_schema,
+            "output_schema": selected_tool.output_schema,
+            "metadata": {
+                "description": "Double a number",
+                "requires_confirmation": False,
+            },
+        }
+    ]
+
+    status, body, _headers = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "python-workerless-tool",
+            "component_type": "tool",
+            "component_name": "selected_tool",
+            "input": {"value": 4},
+        },
+    )
+
+    assert status == 200
+    assert body["output"] == {"value": 8}
+    assert any(event["event_type"] == "tool.custom" for event in body["events"])
+    hidden_status, hidden, _headers = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "python-workerless-hidden-tool",
+            "component_type": "tool",
+            "component_name": hidden_tool.name,
+            "input": {},
+        },
+    )
+    assert hidden_status == 404
+    assert hidden["error"]["code"] == "WORKERLESS_COMPONENT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_serverless_agent_checkpoint_resume() -> None:
+    selected_agent = FakeAgent("selected-agent")
+    hidden_agent = FakeAgent("hidden-agent")
+    AgentRegistry.register(selected_agent)
+    AgentRegistry.register(hidden_agent)
+    app = serve(tools=[], agents=[selected_agent])
+
+    manifest_status, manifest, _headers = await call_asgi(app, "GET", "/.well-known/agnt5")
+    assert manifest_status == 200
+    assert manifest["components"] == [
+        {
+            "name": "selected-agent",
+            "type": "agent",
+            "component_type": "agent",
+            "metadata": {"model": "test-model"},
+        }
+    ]
+
+    first_status, first, _headers = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "python-workerless-agent",
+            "component_type": "agent",
+            "component_name": "selected-agent",
+            "input": {"message": "hello", "session_id": "session-1"},
+        },
+    )
+
+    assert first_status == 200
+    assert first["output"] == "seen:hello"
+    assert first["checkpoint"]["agent_sessions"]["session-1"]["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "seen:hello"},
+    ]
+    assert any(event["event_type"] == "agent.completed" for event in first["events"])
+    assert any(event["event_type"] == "session.created" for event in first["events"])
+
+    second_status, second, _headers = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "python-workerless-agent",
+            "component_type": "agent",
+            "component_name": "selected-agent",
+            "input": {"message": "again", "session_id": "session-1"},
+            "checkpoint": first["checkpoint"],
+        },
+    )
+
+    assert second_status == 200
+    assert second["output"] == "seen:hello|again"
+    assert len(second["checkpoint"]["agent_sessions"]["session-1"]["messages"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_serverless_invokes_sdk_agent_without_platform_session_io() -> None:
+    agent = Agent(
+        name="actual-agent",
+        model=ServerlessTestModel(),
+        model_name="serverless-test-model",
+        instructions="Answer briefly.",
+    )
+    app = serve(functions=[], workflows=[], tools=[], agents=[agent])
+
+    status, body, _headers = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "python-workerless-actual-agent",
+            "component_type": "agent",
+            "component_name": "actual-agent",
+            "input": {"message": "hello", "session_id": "actual-session"},
+        },
+    )
+
+    assert status == 200
+    assert body["output"] == "actual:hello"
+    assert body["checkpoint"]["agent_sessions"]["actual-session"]["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "actual:hello"},
+    ]
 
 
 @pytest.mark.asyncio
