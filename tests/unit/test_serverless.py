@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import io
 import json
 import time
 from typing import Any
@@ -156,6 +158,137 @@ async def test_serverless_invokes_python_workflow() -> None:
     assert status == 200
     assert body["status"] == "completed"
     assert body["output"] == {"message": "hello Ada"}
+
+
+def test_serverless_wsgi_app_serves_manifest_and_signed_invoke() -> None:
+    @workflow
+    async def hello(ctx, name: str = "world") -> dict[str, str]:
+        return {"message": f"hello {name}"}
+
+    app = serve(
+        service_name="python-wsgi",
+        service_version="wsgi-test",
+        signing_secret="wsgi-signing-secret",
+    )
+
+    manifest_status, manifest, _headers = call_wsgi(app, "GET", "/.well-known/agnt5")
+    assert manifest_status == 200
+    assert manifest["service_name"] == "python-wsgi"
+    assert manifest["service_version"] == "wsgi-test"
+
+    payload = {
+        "protocol_version": "workerless.v1",
+        "run_id": "python-wsgi-hello",
+        "component_type": "workflow",
+        "component_name": "hello",
+        "input": {"name": "WSGI"},
+    }
+    unsigned_status, unsigned, _headers = call_wsgi(app, "POST", "/agnt5/invoke", payload)
+    assert unsigned_status == 401
+    assert unsigned["error"]["code"] == "WORKERLESS_SIGNATURE_MISSING"
+
+    status, body, _headers = call_wsgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        payload,
+        signed_headers("wsgi-signing-secret", payload),
+    )
+    assert status == 200
+    assert body["status"] == "completed"
+    assert body["output"] == {"message": "hello WSGI"}
+
+
+def test_serverless_mount_starlette_registers_protocol_routes() -> None:
+    routes: list[tuple[str, list[str], bool]] = []
+
+    class FakeStarlette:
+        def add_route(self, path, _handler, *, methods, include_in_schema):
+            routes.append((path, methods, include_in_schema))
+
+    app = serve(workflows=[])
+    app.mount_starlette(FakeStarlette())
+
+    assert routes == [
+        ("/.well-known/agnt5", ["GET"], False),
+        ("/agnt5/invoke", ["POST"], False),
+    ]
+
+
+def test_serverless_mount_flask_serves_signed_protocol() -> None:
+    flask = pytest.importorskip("flask")
+
+    @workflow
+    async def hello(ctx, name: str = "world") -> dict[str, str]:
+        return {"message": f"hello {name}"}
+
+    app = flask.Flask(__name__)
+    serverless = serve(signing_secret="flask-signing-secret")
+    serverless.mount_flask(app)
+    client = app.test_client()
+
+    manifest_response = client.get("/.well-known/agnt5")
+    assert manifest_response.status_code == 200
+    assert manifest_response.get_json()["protocol_version"] == "workerless.v1"
+
+    payload = {
+        "protocol_version": "workerless.v1",
+        "run_id": "python-flask-hello",
+        "component_type": "workflow",
+        "component_name": "hello",
+        "input": {"name": "Flask"},
+    }
+    response = client.post(
+        "/agnt5/invoke",
+        data=json.dumps(payload),
+        content_type="application/json",
+        headers=signed_headers("flask-signing-secret", payload),
+    )
+    assert response.status_code == 200
+    assert response.get_json()["output"] == {"message": "hello Flask"}
+
+
+def test_serverless_django_view_serves_signed_protocol() -> None:
+    django = pytest.importorskip("django")
+    from django.conf import settings
+    from django.test import RequestFactory
+
+    if not settings.configured:
+        settings.configure(
+            ALLOWED_HOSTS=["testserver"],
+            DEFAULT_CHARSET="utf-8",
+            SECRET_KEY="agnt5-serverless-test",
+        )
+        django.setup()
+
+    @workflow
+    async def hello(ctx, name: str = "world") -> dict[str, str]:
+        return {"message": f"hello {name}"}
+
+    serverless = serve(signing_secret="django-signing-secret")
+    patterns = serverless.django_urlpatterns()
+    assert [pattern.name for pattern in patterns] == [
+        "agnt5-workerless-manifest",
+        "agnt5-workerless-invoke",
+    ]
+
+    payload = {
+        "protocol_version": "workerless.v1",
+        "run_id": "python-django-hello",
+        "component_type": "workflow",
+        "component_name": "hello",
+        "input": {"name": "Django"},
+    }
+    request = RequestFactory().generic(
+        "POST",
+        "/agnt5/invoke",
+        data=json.dumps(payload),
+        content_type="application/json",
+        headers=signed_headers("django-signing-secret", payload),
+    )
+    response = asyncio.run(serverless.handle_django_request(request))
+    assert response.status_code == 200
+    assert json.loads(response.content)["output"] == {"message": "hello Django"}
 
 
 @pytest.mark.asyncio
@@ -325,7 +458,9 @@ async def test_serverless_verifies_signed_invokes() -> None:
         "input": {"name": "Grace"},
     }
 
-    unsigned_status, unsigned_body, _headers = await call_asgi(app, "POST", "/agnt5/invoke", payload)
+    unsigned_status, unsigned_body, _headers = await call_asgi(
+        app, "POST", "/agnt5/invoke", payload
+    )
     assert unsigned_status == 401
     assert unsigned_body["error"]["code"] == "WORKERLESS_SIGNATURE_MISSING"
 
@@ -394,7 +529,10 @@ async def test_serverless_budget_suspension_and_checkpoint_resume() -> None:
             "attempt": 1,
             "input": {"title": "AGNT5"},
             "checkpoint": suspended["checkpoint"],
-            "budget": {"deadline_ms": int(time.time() * 1000) + 60_000, "yield_before_timeout_ms": 0},
+            "budget": {
+                "deadline_ms": int(time.time() * 1000) + 60_000,
+                "yield_before_timeout_ms": 0,
+            },
         },
     )
 
@@ -443,12 +581,52 @@ async def call_asgi(
     await app(scope, receive, send)
 
     start = next(message for message in sent if message["type"] == "http.response.start")
-    body_parts = [message.get("body", b"") for message in sent if message["type"] == "http.response.body"]
+    body_parts = [
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    ]
     response_headers = {
-        key.decode("latin-1"): value.decode("latin-1")
-        for key, value in start.get("headers", [])
+        key.decode("latin-1"): value.decode("latin-1") for key, value in start.get("headers", [])
     }
     return start["status"], json.loads(b"".join(body_parts).decode("utf-8")), response_headers
+
+
+def call_wsgi(
+    app,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any], dict[str, str]]:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+    environ: dict[str, Any] = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "SCRIPT_NAME": "",
+        "QUERY_STRING": "",
+        "SERVER_NAME": "127.0.0.1",
+        "SERVER_PORT": "8787",
+        "HTTP_HOST": "127.0.0.1:8787",
+        "wsgi.url_scheme": "http",
+        "wsgi.input": io.BytesIO(body),
+        "CONTENT_LENGTH": str(len(body)),
+    }
+    for key, value in (headers or {}).items():
+        normalized = key.upper().replace("-", "_")
+        if normalized == "CONTENT_TYPE":
+            environ["CONTENT_TYPE"] = value
+        else:
+            environ[f"HTTP_{normalized}"] = value
+
+    response_status = ""
+    response_headers: dict[str, str] = {}
+
+    def start_response(status: str, values: list[tuple[str, str]], _exc_info=None) -> None:
+        nonlocal response_status, response_headers
+        response_status = status
+        response_headers = {key.lower(): value for key, value in values}
+
+    response_body = b"".join(app.wsgi_app(environ, start_response))
+    return int(response_status.split(" ", 1)[0]), json.loads(response_body), response_headers
 
 
 def signed_headers(secret: str, payload: dict[str, Any]) -> dict[str, str]:
