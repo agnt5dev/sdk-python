@@ -6,7 +6,7 @@ import hmac
 import io
 import json
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -354,8 +354,8 @@ async def test_serverless_exposes_and_invokes_selected_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_serverless_agent_checkpoint_resume() -> None:
-    selected_agent = FakeAgent("selected-agent")
-    hidden_agent = FakeAgent("hidden-agent")
+    selected_agent = cast(Agent, FakeAgent("selected-agent"))
+    hidden_agent = cast(Agent, FakeAgent("hidden-agent"))
     AgentRegistry.register(selected_agent)
     AgentRegistry.register(hidden_agent)
     app = serve(tools=[], agents=[selected_agent])
