@@ -81,9 +81,7 @@ def _resolve_session_user_ids(request: Any, input_dict: Any) -> tuple[str, str |
     """Resolve durable execution scope IDs from request metadata, payload, then run ID."""
     payload = input_dict if isinstance(input_dict, dict) else {}
     session_id = (
-        getattr(request, "session_id", None)
-        or payload.get("session_id")
-        or request.invocation_id
+        getattr(request, "session_id", None) or payload.get("session_id") or request.invocation_id
     )
     user_id = getattr(request, "user_id", None) or payload.get("user_id") or None
     return session_id, user_id
@@ -108,11 +106,7 @@ def _normalize_hosted_agent_stream_event(event: Any) -> Any:
     if lifecycle is None:
         return event
 
-    family = (
-        "thinking"
-        if getattr(event, "block_type", "text") == "thinking"
-        else "message"
-    )
+    family = "thinking" if getattr(event, "block_type", "text") == "thinking" else "message"
     object.__setattr__(event, "event_type", f"lm.{family}.{lifecycle}")
     return event
 
@@ -343,10 +337,6 @@ class ExecutorMixin:
             ctx.parent_correlation_id = run_correlation_id
 
             trace_id = _trace_id_from_request(req)
-            logger.info(
-                f"run.started | run_id={req.invocation_id} component={config.name} "
-                f"type=function trace_id={trace_id} input={_truncate_input(input_dict)}"
-            )
 
             # Execute function with error handling for proper event emission
             try:
@@ -360,7 +350,9 @@ class ExecutorMixin:
                 if inspect.iscoroutine(result):
                     if hasattr(config, "timeout_ms") and config.timeout_ms is not None:
                         try:
-                            result = await asyncio.wait_for(result, timeout=config.timeout_ms / 1000.0)
+                            result = await asyncio.wait_for(
+                                result, timeout=config.timeout_ms / 1000.0
+                            )
                         except asyncio.TimeoutError:
                             raise asyncio.TimeoutError(
                                 f"Function '{config.name}' timed out after {config.timeout_ms}ms"
@@ -389,11 +381,16 @@ class ExecutorMixin:
                 # Calculate function duration even on failure
                 end_time_ns = time.time_ns()
                 duration_ms = (end_time_ns - start_time_ns) // 1_000_000
-                error_code = "TIMEOUT" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else type(e).__name__
+                error_code = (
+                    "TIMEOUT"
+                    if isinstance(e, (asyncio.TimeoutError, TimeoutError))
+                    else type(e).__name__
+                )
                 error_msg = f"{type(e).__name__}: {str(e)}"
 
                 # Emit function.failed (child of run)
                 from ..events import Failed
+
                 fn_failed_event = Failed(
                     name=config.name,
                     correlation_id=fn_correlation_id,
@@ -414,7 +411,7 @@ class ExecutorMixin:
                     error_code=error_code,
                     error_message=error_msg,
                 )
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={req.invocation_id} component={config.name} "
                     f"type=function trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
@@ -464,11 +461,6 @@ class ExecutorMixin:
             if pull_response is None:
                 await ctx.emit_async(run_completed_event)
 
-            logger.info(
-                f"run.completed | run_id={req.invocation_id} component={config.name} "
-                f"type=function trace_id={trace_id} duration_ms={duration_ms}"
-            )
-
             return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Function")
@@ -489,12 +481,14 @@ class ExecutorMixin:
                 ctx.emit(chunk)
             else:
                 if first_chunk:
-                    ctx.emit(OutputStart(
-                        name="output",
-                        correlation_id=ctx.correlation_id,
-                        parent_correlation_id=ctx.parent_correlation_id,
-                        index=0,
-                    ))
+                    ctx.emit(
+                        OutputStart(
+                            name="output",
+                            correlation_id=ctx.correlation_id,
+                            parent_correlation_id=ctx.parent_correlation_id,
+                            index=0,
+                        )
+                    )
                     sequence += 1
                     first_chunk = False
 
@@ -507,22 +501,26 @@ class ExecutorMixin:
                 else:
                     chunk_content = serialize(chunk).decode("utf-8")
 
-                ctx.emit(OutputDelta(
-                    name="output",
-                    correlation_id=ctx.correlation_id,
-                    parent_correlation_id=ctx.parent_correlation_id,
-                    content=chunk_content,
-                    index=0,
-                ))
+                ctx.emit(
+                    OutputDelta(
+                        name="output",
+                        correlation_id=ctx.correlation_id,
+                        parent_correlation_id=ctx.parent_correlation_id,
+                        content=chunk_content,
+                        index=0,
+                    )
+                )
             sequence += 1
 
         if not has_typed_events and not first_chunk:
-            ctx.emit(OutputStop(
-                name="output",
-                correlation_id=ctx.correlation_id,
-                parent_correlation_id=ctx.parent_correlation_id,
-                index=0,
-            ))
+            ctx.emit(
+                OutputStop(
+                    name="output",
+                    correlation_id=ctx.correlation_id,
+                    parent_correlation_id=ctx.parent_correlation_id,
+                    index=0,
+                )
+            )
 
         logger.debug(f"Streaming function queued {sequence + 1} events")
         run_completed_event = Completed(
@@ -588,10 +586,6 @@ class ExecutorMixin:
             ctx.emit(run_started_event)
 
             trace_id = _trace_id_from_request(req)
-            logger.info(
-                f"run.started | run_id={req.invocation_id} component={tool.name} "
-                f"type=tool trace_id={trace_id} input={_truncate_input(input_dict)}"
-            )
 
             # Emit tool.started (child of run)
             start_time_ns = time.time_ns()
@@ -654,7 +648,7 @@ class ExecutorMixin:
                     f"tool={tool.name}, correlation_id={run_correlation_id}"
                 )
 
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={req.invocation_id} component={tool.name} "
                     f"type=tool trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
@@ -699,11 +693,6 @@ class ExecutorMixin:
             logger.debug(
                 f"[_execute_tool] Emitting run.completed event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
-            )
-
-            logger.info(
-                f"run.completed | run_id={req.invocation_id} component={tool.name} "
-                f"type=tool trace_id={trace_id} duration_ms={duration_ms}"
             )
 
             pull_response = _pull_terminal_response(
@@ -772,10 +761,6 @@ class ExecutorMixin:
             ctx.emit(run_started_event)
 
             trace_id = _trace_id_from_request(req)
-            logger.info(
-                f"run.started | run_id={req.invocation_id} component={entity_type.name} "
-                f"type=entity trace_id={trace_id} input={_truncate_input({{'key': entity_key, 'method': method_name, **input_dict}})}"
-            )
 
             # Emit entity.started (child of run)
             start_time_ns = time.time_ns()
@@ -843,7 +828,7 @@ class ExecutorMixin:
                     f"entity={entity_type.name}, correlation_id={run_correlation_id}"
                 )
 
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={req.invocation_id} component={entity_type.name} "
                     f"type=entity trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
@@ -888,11 +873,6 @@ class ExecutorMixin:
             logger.debug(
                 f"[_execute_entity] Emitting run.completed event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
-            )
-
-            logger.info(
-                f"run.completed | run_id={req.invocation_id} component={entity_type.name} "
-                f"type=entity trace_id={trace_id} duration_ms={duration_ms}"
             )
 
             pull_response = _pull_terminal_response(
@@ -951,13 +931,10 @@ class ExecutorMixin:
                 parent_correlation_id=generate_cid(),
                 trace_metadata=getattr(req, "metadata", None),
             )
-            context._session_history_managed = bool(
-                input_dict.get("session_history_managed")
-            )
+            context._session_history_managed = bool(input_dict.get("session_history_managed"))
             return context
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
-
             user_message = input_dict.get("message", "")
             if not user_message:
                 raise ValueError(_agent_missing_message_error(input_dict))
@@ -981,10 +958,6 @@ class ExecutorMixin:
             ctx.emit(run_started_event)
 
             trace_id = _trace_id_from_request(req)
-            logger.info(
-                f"run.started | run_id={req.invocation_id} component={agent.name} "
-                f"type=agent trace_id={trace_id} input={_truncate_input(input_dict)}"
-            )
 
             # Emit agent.started (child of run)
             start_time_ns = time.time_ns()
@@ -1029,7 +1002,9 @@ class ExecutorMixin:
                             if isinstance(event, (AgentStarted, AgentCompleted, AgentFailed)):
                                 # Extract final results from AgentCompleted
                                 if isinstance(event, AgentCompleted):
-                                    if hasattr(event, 'output_data') and isinstance(event.output_data, dict):
+                                    if hasattr(event, "output_data") and isinstance(
+                                        event.output_data, dict
+                                    ):
                                         final_output = event.output_data.get("output", "")
                                         final_tool_calls = event.output_data.get("tool_calls", [])
                                         handoff_to = event.output_data.get("handoff_to")
@@ -1071,7 +1046,9 @@ class ExecutorMixin:
                             sequence += 1
 
                             # Check for completion event to extract final results
-                            if hasattr(event, 'output_data') and isinstance(event.output_data, dict):
+                            if hasattr(event, "output_data") and isinstance(
+                                event.output_data, dict
+                            ):
                                 if event.output_data.get("output"):
                                     final_output = event.output_data.get("output", "")
                                     final_tool_calls = event.output_data.get("tool_calls", [])
@@ -1115,6 +1092,7 @@ class ExecutorMixin:
                     # Emit session.created so the session projection materializes
                     # this session for GET /v1/sessions/{id} queries.
                     from ..events import Event as _BaseEvent
+
                     session_event = _BaseEvent(
                         name=agent.name,
                         correlation_id=run_correlation_id,
@@ -1128,10 +1106,6 @@ class ExecutorMixin:
                     }
                     ctx.emit(session_event)
 
-                    logger.info(
-                        f"run.completed | run_id={req.invocation_id} component={agent.name} "
-                        f"type=agent trace_id={trace_id} duration_ms={duration_ms}"
-                    )
                     logger.debug(f"Agent streaming queued {sequence + 1} events")
                     return pull_response
 
@@ -1151,7 +1125,10 @@ class ExecutorMixin:
                     correlation_id=agent_correlation_id,
                     parent_correlation_id=run_correlation_id,
                     component_type=ComponentType.AGENT,
-                    output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
+                    output_data={
+                        "output": agent_result.output,
+                        "tool_calls": agent_result.tool_calls,
+                    },
                     duration_ms=duration_ms,
                 )
                 logger.debug(
@@ -1166,7 +1143,10 @@ class ExecutorMixin:
                     correlation_id=run_correlation_id,
                     parent_correlation_id=ctx.parent_correlation_id,
                     component_type=ComponentType.RUN,
-                    output_data={"output": agent_result.output, "tool_calls": agent_result.tool_calls},
+                    output_data={
+                        "output": agent_result.output,
+                        "tool_calls": agent_result.tool_calls,
+                    },
                 )
                 logger.debug(
                     f"[_execute_agent] Emitting run.completed event: "
@@ -1183,14 +1163,10 @@ class ExecutorMixin:
                 if pull_response is None:
                     ctx.emit(run_completed_event)
 
-                logger.info(
-                    f"run.completed | run_id={req.invocation_id} component={agent.name} "
-                    f"type=agent trace_id={trace_id} duration_ms={duration_ms}"
-                )
-
                 # Emit session.created so the session projection materializes
                 # this session for GET /v1/sessions/{id} queries.
                 from ..events import Event as _BaseEvent
+
                 session_event = _BaseEvent(
                     name=agent.name,
                     correlation_id=run_correlation_id,
@@ -1242,7 +1218,7 @@ class ExecutorMixin:
                     f"agent={agent.name}, correlation_id={run_correlation_id}"
                 )
 
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={req.invocation_id} component={agent.name} "
                     f"type=agent trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
@@ -1324,10 +1300,6 @@ class ExecutorMixin:
             ctx.emit(run_started_event)
 
             trace_id = _trace_id_from_request(req)
-            logger.info(
-                f"run.started | run_id={req.invocation_id} component={config.name} "
-                f"type=scorer trace_id={trace_id} input={_truncate_input(input_dict)}"
-            )
 
             # Emit scorer.started (child of run)
             start_time_ns = time.time_ns()
@@ -1401,7 +1373,7 @@ class ExecutorMixin:
                     f"scorer={config.name}, correlation_id={run_correlation_id}"
                 )
 
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={req.invocation_id} component={config.name} "
                     f"type=scorer trace_id={trace_id} duration_ms={duration_ms} error={error_msg}"
                 )
@@ -1455,11 +1427,6 @@ class ExecutorMixin:
             logger.debug(
                 f"[_execute_scorer] Emitting run.completed event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
-            )
-
-            logger.info(
-                f"run.completed | run_id={req.invocation_id} component={config.name} "
-                f"type=scorer trace_id={trace_id} duration_ms={duration_ms}"
             )
 
             pull_response = _pull_terminal_response(
@@ -1521,14 +1488,16 @@ class ExecutorMixin:
             resumed_step_correlation_id = None
             resumed_step_name = None
 
-            if hasattr(request, 'metadata') and request.metadata:
+            if hasattr(request, "metadata") and request.metadata:
                 # Parse completed steps for replay
                 if "completed_steps" in request.metadata:
                     completed_steps_json = request.metadata["completed_steps"]
                     if completed_steps_json:
                         try:
                             completed_steps = json.loads(completed_steps_json)
-                            logger.debug(f"Replaying workflow with {len(completed_steps)} cached steps")
+                            logger.debug(
+                                f"Replaying workflow with {len(completed_steps)} cached steps"
+                            )
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse completed_steps from metadata")
                 elif "step_events" in request.metadata:
@@ -1540,7 +1509,9 @@ class ExecutorMixin:
                                 if "step_name" in event and "result" in event:
                                     completed_steps[event["step_name"]] = event["result"]
                             step_events = step_events_list
-                            logger.debug(f"Resuming workflow with {len(completed_steps)} completed steps")
+                            logger.debug(
+                                f"Resuming workflow with {len(completed_steps)} completed steps"
+                            )
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse step_events from metadata")
 
@@ -1563,7 +1534,9 @@ class ExecutorMixin:
                 # This ensures the same correlation ID is used after resume
                 if "workflow_correlation_id" in request.metadata:
                     resumed_workflow_correlation_id = request.metadata["workflow_correlation_id"]
-                    logger.debug(f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}")
+                    logger.debug(
+                        f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}"
+                    )
 
                 # Restore step correlation info for proper event pairing on resume
                 if "step_correlation_id" in request.metadata:
@@ -1581,8 +1554,8 @@ class ExecutorMixin:
                 logger.debug(f"Using workflow session: {session_id}")
             else:
                 logger.debug(f"Using invocation_id as ephemeral workflow session: {session_id}")
-            is_streaming = getattr(request, 'is_streaming', False)
-            component_name = getattr(request, 'component_name', None)
+            is_streaming = getattr(request, "is_streaming", False)
+            component_name = getattr(request, "component_name", None)
 
             # Create WorkflowEntity for state management
             workflow_entity = WorkflowEntity(
@@ -1603,7 +1576,7 @@ class ExecutorMixin:
 
             # Inject user response if resuming from pause
             if user_response:
-                if hasattr(request, 'metadata') and request.metadata:
+                if hasattr(request, "metadata") and request.metadata:
                     pause_index_str = request.metadata.get("pause_index", "0")
                     try:
                         workflow_entity._pause_index = int(pause_index_str)
@@ -1621,7 +1594,7 @@ class ExecutorMixin:
 
             if initial_state:
                 state_adapter = _get_state_adapter()
-                if hasattr(state_adapter, '_standalone_states'):
+                if hasattr(state_adapter, "_standalone_states"):
                     state_adapter._standalone_states[workflow_entity._state_key] = initial_state
                 workflow_entity._state = WorkflowState(initial_state.copy(), workflow_entity)
                 logger.debug(f"Initialized workflow entity state with {len(initial_state)} keys")
@@ -1675,7 +1648,7 @@ class ExecutorMixin:
                     parent_correlation_id=None,  # Run events are top-level
                     component_type=ComponentType.RUN,
                     input_data=input_dict,
-                    attempt=getattr(request, 'attempt', 0),
+                    attempt=getattr(request, "attempt", 0),
                 )
                 logger.debug(
                     f"[_execute_workflow] Emitting run.started event: "
@@ -1684,10 +1657,6 @@ class ExecutorMixin:
                 ctx.emit(run_started_event)
 
                 wf_trace_id = _trace_id_from_request(request)
-                logger.info(
-                    f"run.started | run_id={request.invocation_id} component={config.name} "
-                    f"type=workflow trace_id={wf_trace_id} input={_truncate_input(input_dict)}"
-                )
 
                 # Emit workflow.started event (child of run)
                 workflow_started_event = Started(
@@ -1696,7 +1665,7 @@ class ExecutorMixin:
                     parent_correlation_id=run_correlation_id,
                     component_type=ComponentType.WORKFLOW,
                     input_data=input_dict,
-                    attempt=getattr(request, 'attempt', 0),
+                    attempt=getattr(request, "attempt", 0),
                 )
                 logger.debug(
                     f"[_execute_workflow] Emitting workflow.started event: "
@@ -1727,11 +1696,13 @@ class ExecutorMixin:
                 workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
                 error_msg = f"{type(workflow_error).__name__}: {str(workflow_error)}"
 
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={request.invocation_id} component={config.name} "
                     f"type=workflow trace_id={wf_trace_id} duration_ms={workflow_duration_ms} error={error_msg}"
                 )
-                logger.error(f"Workflow failed after {workflow_duration_ms}ms: {error_msg}", exc_info=True)
+                logger.error(
+                    f"Workflow failed after {workflow_duration_ms}ms: {error_msg}", exc_info=True
+                )
 
                 # Emit workflow.failed (child of run)
                 workflow_failed_event = Failed(
@@ -1777,19 +1748,19 @@ class ExecutorMixin:
             end_time_ns = time.time_ns()
             workflow_duration_ms = (end_time_ns - start_time_ns) // 1_000_000
 
-            logger.info(
-                f"run.completed | run_id={request.invocation_id} component={config.name} "
-                f"type=workflow trace_id={wf_trace_id} duration_ms={workflow_duration_ms}"
-            )
-
             # Persist workflow entity state
-            if hasattr(ctx, '_workflow_entity') and ctx._workflow_entity._state is not None:
+            if hasattr(ctx, "_workflow_entity") and ctx._workflow_entity._state is not None:
                 if ctx._workflow_entity._state.has_unpersisted_changes():
                     try:
                         await ctx._workflow_entity._persist_state()
-                        logger.debug(f"Persisted WorkflowEntity state for run {request.invocation_id}")
+                        logger.debug(
+                            f"Persisted WorkflowEntity state for run {request.invocation_id}"
+                        )
                     except Exception as persist_error:
-                        logger.error(f"Failed to persist WorkflowEntity state: {persist_error}", exc_info=True)
+                        logger.error(
+                            f"Failed to persist WorkflowEntity state: {persist_error}",
+                            exc_info=True,
+                        )
                         raise RuntimeError(
                             f"STATE_PERSISTENCE_FAILED: {persist_error}"
                         ) from persist_error
@@ -1870,7 +1841,7 @@ class ExecutorMixin:
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
-            stack_trace = ''.join(_traceback.format_exception(type(e), e, e.__traceback__))
+            stack_trace = "".join(_traceback.format_exception(type(e), e, e.__traceback__))
             logger.error(f"Workflow execution failed: {error_msg}", exc_info=True)
 
             # If we have a context, emit events through the queue
@@ -1892,7 +1863,7 @@ class ExecutorMixin:
                 )
 
                 outer_trace_id = _trace_id_from_request(request)
-                logger.info(
+                logger.error(
                     f"run.failed | run_id={request.invocation_id} component={config.name} "
                     f"type=workflow trace_id={outer_trace_id} duration_ms={workflow_duration_ms} error={error_msg}"
                 )
@@ -1923,7 +1894,7 @@ class ExecutorMixin:
                 event_type="run.failed",
                 content_index=0,
                 sequence=0,
-                attempt=getattr(request, 'attempt', 0),
+                attempt=getattr(request, "attempt", 0),
             )
 
         finally:
@@ -1932,4 +1903,5 @@ class ExecutorMixin:
                 _entity_state_adapter_ctx.reset(state_adapter_token)
             if token is not None:
                 from ..context import _current_context
+
                 _current_context.reset(token)
