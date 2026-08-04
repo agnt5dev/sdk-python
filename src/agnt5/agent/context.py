@@ -352,6 +352,8 @@ class AgentContext(Context):
         Returns:
             List of Message objects from conversation history
         """
+        if getattr(self, "_session_history_managed", False):
+            return []
         if self._storage_mode == "workflow":
             return await self._load_from_workflow_state()
         else:
@@ -518,6 +520,8 @@ class AgentContext(Context):
         Args:
             messages: List of Message objects to persist
         """
+        if getattr(self, "_session_history_managed", False):
+            return
         if self._storage_mode == "workflow":
             await self._save_to_workflow_state(messages)
         else:

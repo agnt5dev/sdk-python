@@ -20,14 +20,15 @@ Run with:
 import pytest
 
 from agnt5 import lm
-from agnt5.events import EventType
 from agnt5.lm import (
     GenerateRequest,
     GenerationConfig,
     Message,
     ToolChoice,
     ToolDefinition,
-    _LanguageModel,
+)
+from agnt5.lm import (
+    LMClient as _LanguageModel,
 )
 
 from .conftest import skip_without_mistral
@@ -141,9 +142,9 @@ async def test_stream_basic(streaming_prompt):
         prompt=streaming_prompt,
     ):
         chunks.append(event)
-        if event.event_type == EventType.LM_MESSAGE_DELTA:
-            if event.data:
-                full_text += event.data
+        if event.event_type == "lm.content_block.delta":
+            if event.content:
+                full_text += event.content
 
     # Should receive multiple chunks
     assert len(chunks) > 0

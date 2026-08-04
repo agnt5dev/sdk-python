@@ -193,13 +193,15 @@ class ExecutorMixin:
         try:
             input_dict = deserialize(request.input_data) if request.input_data else {}
             input_dict = _ensure_input_dict(input_dict)
+            # AgentContext resolves its state adapter during construction, so
+            # the worker-scoped adapter must already be visible to the factory.
+            state_adapter_token = _entity_state_adapter_ctx.set(
+                getattr(self, "_entity_state_adapter", None)
+            )
             ctx = context_factory(input_dict, request)
             token = set_current_context(ctx)
             span_token = _set_current_span_from_runtime_context(
                 getattr(request, "runtime_context", None)
-            )
-            state_adapter_token = _entity_state_adapter_ctx.set(
-                getattr(self, "_entity_state_adapter", None)
             )
 
             record_worker_memory(
@@ -937,7 +939,7 @@ class ExecutorMixin:
                 logger.debug(f"Using invocation_id as ephemeral agent session: {session_id}")
 
             correlation_id = generate_cid()
-            return AgentContext(
+            context = AgentContext(
                 run_id=req.invocation_id,
                 agent_name=agent.name,
                 session_id=session_id,
@@ -949,6 +951,10 @@ class ExecutorMixin:
                 parent_correlation_id=generate_cid(),
                 trace_metadata=getattr(req, "metadata", None),
             )
+            context._session_history_managed = bool(
+                input_dict.get("session_history_managed")
+            )
+            return context
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
 

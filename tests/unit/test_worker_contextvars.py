@@ -28,6 +28,7 @@ async def test_execute_with_context_resets_span_and_state_adapter_contextvars():
     initial_adapter = _entity_state_adapter_ctx.get()
 
     def create_context(input_dict, req):
+        assert _entity_state_adapter_ctx.get() is executor_mixin._entity_state_adapter
         return SimpleNamespace(input=input_dict, request=req)
 
     async def execute(ctx, input_dict, req):

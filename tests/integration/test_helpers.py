@@ -20,8 +20,9 @@ def fetch_run_events(client: Client, run_id: str, max_retries: int = 3) -> List[
     """
     Fetch journal events for a run using SDK client.
 
-    Retries with backoff to allow events to be persisted.
-    Events are sorted by timestamp_ns for correct chronological order.
+    Retries with backoff to allow events to be persisted. The gateway returns
+    events in journal-offset order, which is authoritative across processes;
+    worker wall-clock timestamps may be skewed relative to the gateway.
 
     Args:
         client: AGNT5 SDK client
@@ -38,12 +39,7 @@ def fetch_run_events(client: Client, run_id: str, max_retries: int = 3) -> List[
         events_response = client.get_events(run_id)
 
         if len(events_response) > 0:
-            # Sort events by timestamp_ns for correct chronological order
-            sorted_events = sorted(
-                events_response.items,
-                key=lambda e: e.timestamp_ns or 0
-            )
-            return [event.event_type for event in sorted_events]
+            return [event.event_type for event in events_response.items]
 
         # If empty and this isn't the last attempt, retry
         if attempt < max_retries - 1:
@@ -80,7 +76,7 @@ def verify_journal_events(
     Example:
         response = client.run("add", {"a": 5, "b": 3})
         verify_journal_events(client, response.run_id, [
-            "run.enqueued",
+            "run.queued",
             "run.started",
             "function.started",
             "function.completed",
@@ -97,7 +93,12 @@ def verify_journal_events(
     return run_id, event_types
 
 
-def assert_events_match(actual_events: List[str], expected_events: List[str], match_order: bool = False, allow_extra: bool = True):
+def assert_events_match(
+    actual_events: List[str],
+    expected_events: List[str],
+    match_order: bool = False,
+    allow_extra: bool = True,
+):
     """
     Assert that actual events match expected events.
 
@@ -126,7 +127,10 @@ def assert_events_match(actual_events: List[str], expected_events: List[str], ma
             # Verify expected events appear in order (subsequence check)
             expected_idx = 0
             for actual_event in actual_events:
-                if expected_idx < len(expected_events) and actual_event == expected_events[expected_idx]:
+                if (
+                    expected_idx < len(expected_events)
+                    and actual_event == expected_events[expected_idx]
+                ):
                     expected_idx += 1
 
             if expected_idx != len(expected_events):
@@ -140,9 +144,7 @@ def assert_events_match(actual_events: List[str], expected_events: List[str], ma
             # Verify exact order and no extra events
             if actual_events != expected_events:
                 raise AssertionError(
-                    f"Event order mismatch:\n"
-                    f"Expected: {expected_events}\n"
-                    f"Actual:   {actual_events}"
+                    f"Event order mismatch:\nExpected: {expected_events}\nActual:   {actual_events}"
                 )
     else:
         # Just verify all expected events are present
@@ -166,5 +168,3 @@ def print_journal_events(run_id: str, event_types: List[str]):
     print(f"\n✅ Journal events verified for run {run_id}:")
     for event_type in event_types:
         print(f"   • {event_type}")
-
-

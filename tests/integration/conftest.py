@@ -3,14 +3,14 @@ Pytest configuration for AGNT5 Python SDK integration tests.
 
 Supports two test modes:
 1. EMBEDDED (default) - Starts dev-server binary as subprocess
-2. HOSTED - Connects to external platform via AGNT5_PLATFORM_URL
+2. HOSTED - Connects to an external runtime via AGNT5_GATEWAY_URL
 
 Usage:
     # Embedded mode (default)
     pytest tests/integration/
 
     # Hosted mode (external platform)
-    AGNT5_PLATFORM_URL=http://localhost:34181 pytest tests/integration/ --hosted
+    AGNT5_GATEWAY_URL=http://localhost:34183 pytest tests/integration/ --hosted
 """
 
 import logging
@@ -111,17 +111,18 @@ def wait_for_health(url: str, timeout: int = 30) -> None:
     Raises:
         TimeoutError: If health check fails within timeout
     """
-    health_url = f"{url}/v1/health"
+    health_urls = [f"{url}/readyz", f"{url}/v1/health"]
     start = time.time()
 
     logger.info(f"📡 Waiting for platform at {url}...")
 
     while time.time() - start < timeout:
         try:
-            response = httpx.get(health_url, timeout=2)
-            if response.status_code == 200:
-                logger.info("✅ Platform is healthy")
-                return
+            for health_url in health_urls:
+                response = httpx.get(health_url, timeout=2)
+                if response.status_code == 200:
+                    logger.info("✅ Platform is healthy")
+                    return
         except httpx.RequestError:
             pass
         time.sleep(0.5)
@@ -202,8 +203,9 @@ def setup_hosted_mode() -> Dict:
     Connect to external platform via environment variables (hosted mode).
 
     Requires:
-        AGNT5_PLATFORM_URL: Gateway URL (e.g., http://localhost:34181)
-        AGNT5_COORDINATOR_URL: Optional, defaults to gateway with port 34186
+        AGNT5_GATEWAY_URL: Runtime gateway URL (e.g., http://localhost:34183)
+        AGNT5_PLATFORM_URL: Deprecated alias for AGNT5_GATEWAY_URL
+        AGNT5_COORDINATOR_URL: Optional, defaults to the runtime gRPC port 34182
 
     Returns:
         dict: {
@@ -219,23 +221,23 @@ def setup_hosted_mode() -> Dict:
     logger.info("\n🌐 Setting up HOSTED mode (external platform)")
 
     # 1. Get gateway URL from environment
-    gateway_url = os.getenv("AGNT5_PLATFORM_URL")
+    gateway_url = os.getenv("AGNT5_GATEWAY_URL") or os.getenv("AGNT5_PLATFORM_URL")
     if not gateway_url:
         raise ValueError(
-            "❌ AGNT5_PLATFORM_URL environment variable required for hosted mode!\n\n"
+            "❌ AGNT5_GATEWAY_URL environment variable required for hosted mode!\n\n"
             "Example:\n"
-            "  export AGNT5_PLATFORM_URL=http://localhost:34181\n"
+            "  export AGNT5_GATEWAY_URL=http://localhost:34183\n"
             "  pytest tests/integration/ --hosted"
         )
 
     # 2. Derive coordinator URL if not provided
     coordinator_url = os.getenv("AGNT5_COORDINATOR_URL")
     if not coordinator_url:
-        # Replace gateway port (34181) with coordinator port (34186)
-        coordinator_url = gateway_url.replace(":34181", ":34186")
+        # Replace the control-plane HTTP port with the unified runtime gRPC port.
+        coordinator_url = gateway_url.replace(":34183", ":34182").replace(":34181", ":34182")
         # If no port specified, append coordinator port
-        if ":34181" not in gateway_url and "://" in gateway_url:
-            coordinator_url = f"{gateway_url.rstrip('/')}:34186"
+        if not any(port in gateway_url for port in (":34181", ":34183")) and "://" in gateway_url:
+            coordinator_url = f"{gateway_url.rstrip('/')}:34182"
 
     logger.info(f"📡 Gateway: {gateway_url}")
     logger.info(f"📡 Coordinator: {coordinator_url}")
@@ -377,12 +379,12 @@ def worker_process(platform):
     env["AGNT5_COORDINATOR_ENDPOINT"] = coordinator_url
 
     process = subprocess.Popen(
-        ["uv", "run", "python", str(worker_script)],
+        ["uv", "run", "python", "-m", "integration.test_worker_app"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        cwd=worker_script.parent,
+        cwd=worker_script.parent.parent,
     )
 
     logger.info(f"   Worker PID: {process.pid}")
@@ -416,15 +418,26 @@ def worker_process(platform):
         # Check if worker registered via components endpoint
         # Wait for the 'add' function specifically (from test fixtures)
         try:
+            headers = {}
+            if api_key := os.environ.get("AGNT5_API_KEY"):
+                headers["X-API-KEY"] = api_key
+            if deployment_id := os.environ.get("AGNT5_DEPLOYMENT_ID"):
+                headers["X-DEPLOYMENT-ID"] = deployment_id
             response = httpx.get(
                 f"{platform['gateway_url']}/v1/components",
+                headers=headers,
                 timeout=1,
             )
             if response.status_code == 200:
-                components = response.json()
+                payload = response.json()
+                components = (
+                    payload.get("components", payload) if isinstance(payload, dict) else payload
+                )
                 component_names = [c.get("name") for c in components]
                 if "add" in component_names:
-                    logger.info(f"✅ Worker registered ({len(components)} components: {component_names})")
+                    logger.info(
+                        f"✅ Worker registered ({len(components)} components: {component_names})"
+                    )
                     break
         except Exception as e:
             # Log connection errors to help debug platform issues
@@ -490,7 +503,12 @@ def client(platform):
         )
 
     gateway_url = platform["gateway_url"]
-    client = Client(gateway_url=gateway_url, api_key=api_key, timeout=60)
+    client = Client(
+        gateway_url=gateway_url,
+        api_key=api_key,
+        deployment_id=os.environ.get("AGNT5_DEPLOYMENT_ID"),
+        timeout=60,
+    )
 
     logger.info(f"✅ Client created: {gateway_url} (timeout=60s, auth=X-API-KEY)")
 
@@ -553,12 +571,12 @@ def restart_worker(worker_process, platform) -> subprocess.Popen:
     env["AGNT5_COORDINATOR_ENDPOINT"] = coordinator_url
 
     process = subprocess.Popen(
-        ["uv", "run", "python", str(worker_script)],
+        ["uv", "run", "python", "-m", "integration.test_worker_app"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        cwd=worker_script.parent,
+        cwd=worker_script.parent.parent,
     )
 
     # Wait for registration

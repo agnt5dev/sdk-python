@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-08-04
+
+### Fixed
+
+- Let the runtime own gateway-managed agent session history so workers do not
+  reload or persist the same conversation through legacy entity storage.
+- Exclude the unresolved assistant tool call that triggered an agent handoff
+  before passing conversation history to the target agent.
+- Make the worker entity-state adapter available while constructing execution
+  contexts.
+
+### Changed
+
+- Align API compatibility and integration tests with the current LM streaming
+  event shape, runtime endpoints, journal event names, and package imports.
+
 ## [0.9.7] - 2026-07-31
 
 ### Added
@@ -82,7 +98,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/agnt5dev/sdk-python/compare/v0.9.4...v0.9.5
