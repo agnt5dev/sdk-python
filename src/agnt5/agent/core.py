@@ -108,6 +108,23 @@ def _serialize_span_data(value: Any) -> str:
     return truncate_span_attribute_value(_serialize_tool_result(value))
 
 
+def _resolved_handoff_history(history: Sequence[Any]) -> List[Any]:
+    """Exclude the unresolved assistant tool call that triggered a handoff."""
+    resolved = list(history)
+    if not resolved:
+        return resolved
+    last = resolved[-1]
+    if isinstance(last, Message):
+        has_active_tool_call = bool(last.tool_calls)
+    elif isinstance(last, dict):
+        has_active_tool_call = bool(last.get("tool_calls") or last.get("toolCalls"))
+    else:
+        has_active_tool_call = False
+    if has_active_tool_call:
+        resolved.pop()
+    return resolved
+
+
 @dataclass
 class _StreamedLMResponse:
     """Result from streaming LLM call - contains collected text and any tool calls."""
@@ -485,7 +502,9 @@ class Agent:
             history = None
             if pass_history and ctx:
                 if hasattr(ctx, '_agent_data') and "_current_conversation" in ctx._agent_data:
-                    history = ctx._agent_data["_current_conversation"]
+                    history = _resolved_handoff_history(
+                        ctx._agent_data["_current_conversation"]
+                    )
 
             # Run target agent (using run for non-streaming invocation)
             result = await target_agent.run(

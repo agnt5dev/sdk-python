@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Import test fixtures to register components
 logger.info("Loading test fixtures...")
-from fixtures import function_fixtures  # noqa: F401
+from .fixtures import function_fixtures  # noqa: F401
 
 logger.info("Test fixtures loaded successfully")
 

@@ -64,6 +64,7 @@ class MockLanguageModel(LanguageModel):
 
     async def stream(self, request: GenerateRequest):
         """Mock stream that yields proper Event objects."""
+        self.requests.append(request)
         # Get response for this call (use same logic as generate)
         response_text = self.responses[min(self.call_count, len(self.responses) - 1)]
         self.call_count += 1
@@ -748,6 +749,8 @@ async def test_agent_handoff():
     # Should have handed off to target
     assert result.handoff_to == "target"
     assert result.output == "I am the target agent"
+    assert target_lm.requests
+    assert all(not message.tool_calls for message in target_lm.requests[0].messages)
 
 
 def test_handoff_configuration():
@@ -871,6 +874,22 @@ def test_agent_registry_operations():
 
 
 # Test AgentContext
+
+
+@pytest.mark.asyncio
+async def test_gateway_managed_agent_context_uses_explicit_history_only():
+    ctx = AgentContext(run_id="run-1", agent_name="managed", session_id="session-1")
+    ctx._session_history_managed = True
+    ctx._load_from_runs_api = AsyncMock(side_effect=AssertionError("must not reload history"))
+    ctx._load_from_entity_storage = AsyncMock(
+        side_effect=AssertionError("must not reload legacy history")
+    )
+
+    assert await ctx.get_conversation_history() == []
+    await ctx.save_conversation_history([Message.user("hello")])
+
+    ctx._load_from_runs_api.assert_not_awaited()
+    ctx._load_from_entity_storage.assert_not_awaited()
 
 
 def test_agent_context_creation():

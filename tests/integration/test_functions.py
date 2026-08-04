@@ -5,7 +5,8 @@ Tests basic function execution using fixtures and verifies journal events.
 """
 
 import pytest
-from test_helpers import print_journal_events, verify_journal_events
+
+from .test_helpers import print_journal_events, verify_journal_events
 
 
 @pytest.mark.integration
@@ -35,7 +36,7 @@ def test_add_journal_events(client, worker_process, platform):
         client,
         response.run_id,
         expected_events=[
-            "run.enqueued",
+            "run.queued",
             "run.assigned",
             "run.started",
             "function.started",
@@ -71,7 +72,7 @@ def test_missing_parameters(client, worker_process, platform):
         client,
         response.run_id,
         expected_events=[
-            "run.enqueued",
+            "run.queued",
             "run.assigned",
             "run.started",
             "function.started",
@@ -98,7 +99,7 @@ def test_invalid_parameter_type(client, worker_process, platform):
         client,
         response.run_id,
         expected_events=[
-            "run.enqueued",
+            "run.queued",
             "run.assigned",
             "run.started",
             "function.started",
