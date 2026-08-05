@@ -18,6 +18,8 @@ static TELEMETRY_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 // Note: Span export has been removed. Spans are no longer sent to the journal.
 // Trace correlation is done via runs.trace_id lookup if needed.
 
+#[cfg(feature = "durable-activation-v1")]
+mod activation_client;
 mod adk;
 mod chat;
 mod checkpoint_client;
@@ -908,6 +910,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Checkpoint client for step-level memoization
     checkpoint_client::register_checkpoint_client(m)?;
+
+    #[cfg(feature = "durable-activation-v1")]
+    activation_client::register_activation_client(m)?;
 
     // Semantic memory
     memory::register_memory(m)?;

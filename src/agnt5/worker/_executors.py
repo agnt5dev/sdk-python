@@ -95,6 +95,20 @@ def _agent_missing_message_error(input_dict: dict) -> str:
     )
 
 
+def _resolve_activation_client(executor: Any, metadata: dict[str, str] | None) -> Any | None:
+    resolver = getattr(executor, "_activation_client_for_metadata", None)
+    if callable(resolver):
+        return resolver(metadata)
+    if (metadata or {}).get("durable_activation_v1") == "true":
+        from ..exceptions import ActivationError, ActivationErrorCode
+
+        raise ActivationError(
+            ActivationErrorCode.DURABILITY_UNAVAILABLE,
+            "runtime negotiated durable_activation_v1 but the executor has no activation client",
+        )
+    return None
+
+
 def _normalize_hosted_agent_stream_event(event: Any) -> Any:
     """Translate Python content blocks to the shared hosted LM stream contract."""
     event_type = getattr(event, "event_type", "")
@@ -1611,6 +1625,9 @@ class ExecutorMixin:
                 is_streaming=is_streaming,
                 worker=self._rust_worker,
                 trace_metadata=getattr(request, "metadata", None),
+                activation_client=_resolve_activation_client(
+                    self, getattr(request, "metadata", None)
+                ),
             )
 
             # Set context in contextvar

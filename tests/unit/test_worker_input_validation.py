@@ -152,6 +152,29 @@ async def test_pull_workflow_pause_returns_terminal_without_queueing_workflow_te
     assert response.metadata["workflow_correlation_id"]
 
 
+@pytest.mark.asyncio
+async def test_negotiated_activation_without_native_client_fails_before_workflow_code():
+    executor = _DummyExecutor()
+    handler_called = False
+
+    async def handler(ctx):
+        nonlocal handler_called
+        handler_called = True
+
+    request = _request({})
+    request.metadata = {"durable_activation_v1": "true"}
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="durable_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is not None
+    assert response.success is False
+    assert "executor has no activation client" in response.error_message
+    assert handler_called is False
+
+
 def test_agent_missing_message_error_lists_received_keys():
     message = _agent_missing_message_error({"state": "Alabama"})
 

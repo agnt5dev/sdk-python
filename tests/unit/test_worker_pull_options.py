@@ -63,6 +63,7 @@ def clear_worker_env(monkeypatch):
         "AGNT5_MIN_SLOTS",
         "AGNT5_MAX_SLOTS",
         "AGNT5_CLAIM_TIMEOUT_MS",
+        "AGNT5_ACTIVATION_ARTIFACT_SHA256",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -90,6 +91,17 @@ def test_worker_pull_options_configure_sdk_core_environment(fake_native_core):
     assert worker_core.os.environ["AGNT5_MIN_SLOTS"] == "2"
     assert worker_core.os.environ["AGNT5_MAX_SLOTS"] == "10"
     assert worker_core.os.environ["AGNT5_CLAIM_TIMEOUT_MS"] == "120000"
+
+
+def test_worker_configures_durable_activation_artifact_identity(fake_native_core):
+    digest = "61" * 32
+    worker = Worker(
+        service_name="py-worker",
+        activation_artifact_sha256=digest,
+    )
+
+    assert worker.metadata["activation_artifact_sha256"] == digest
+    assert worker_core.os.environ["AGNT5_ACTIVATION_ARTIFACT_SHA256"] == digest
 
 
 def test_parked_polling_implies_pull_mode(fake_native_core):

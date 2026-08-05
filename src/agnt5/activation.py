@@ -19,6 +19,7 @@ _DEFINITION_DOMAIN = b"agnt5.activation.definition.v1\0"
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
+_NATIVE_ACTIVATION_ERROR_PREFIX = "AGNT5_ACTIVATION_ERROR:"
 
 T = TypeVar("T")
 
@@ -140,6 +141,132 @@ class ActivationTransport(Protocol):
         retryable: bool,
         external_outcome_certainty: str,
     ) -> ActivationFailureReceipt: ...
+
+
+def _native_activation_error(error: Exception) -> ActivationError:
+    if isinstance(error, ActivationError):
+        return error
+    message = str(error)
+    marker = message.find(_NATIVE_ACTIVATION_ERROR_PREFIX)
+    if marker >= 0:
+        try:
+            detail = json.loads(message[marker + len(_NATIVE_ACTIVATION_ERROR_PREFIX) :])
+            try:
+                code = ActivationErrorCode(detail.get("code", ""))
+            except ValueError:
+                code = ActivationErrorCode.UNKNOWN_OUTCOME
+            return ActivationError(
+                code,
+                detail.get("message") or message,
+                activation_id=detail.get("activationId") or "",
+                attempt=int(detail.get("attempt") or 0),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return ActivationError(ActivationErrorCode.UNKNOWN_OUTCOME, message)
+
+
+class NativeActivationTransport:
+    """Typed Python adapter over the feature-gated PyO3 activation client."""
+
+    def __init__(self, native_client: Any) -> None:
+        self._native_client = native_client
+
+    async def begin(self, request: BeginActivationRequest) -> ActivationDecision:
+        try:
+            response = await self._native_client.begin_activation(
+                request.project_id,
+                request.run_id,
+                request.parent_activation_id,
+                int(request.kind),
+                request.stable_key,
+                list(request.input_digest),
+                list(request.definition_digest),
+                int(request.recovery_policy),
+                request.worker_session_id,
+                list(request.run_authority),
+                list(request.lease_authority),
+            )
+        except Exception as error:
+            raise _native_activation_error(error) from error
+        return ActivationDecision(
+            kind=ActivationDecisionKind(response.kind),
+            activation_id=response.activation_id,
+            attempt=int(response.attempt),
+            accepted_journal_offset=int(response.accepted_journal_offset),
+            fence_token=bytes(response.fence_token),
+            replay_output=(
+                bytes(response.replay_output) if response.replay_output is not None else None
+            ),
+            message=response.message,
+        )
+
+    async def complete(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        activation_id: str,
+        attempt: int,
+        fence_token: bytes,
+        output: bytes,
+        output_digest: bytes,
+        latency_ms: int,
+    ) -> ActivationCompletionReceipt:
+        try:
+            response = await self._native_client.complete_activation(
+                project_id,
+                run_id,
+                activation_id,
+                attempt,
+                list(fence_token),
+                list(output),
+                list(output_digest),
+                latency_ms,
+            )
+        except Exception as error:
+            raise _native_activation_error(error) from error
+        return ActivationCompletionReceipt(
+            activation_id=response.activation_id,
+            attempt=int(response.attempt),
+            accepted_journal_offset=int(response.accepted_journal_offset),
+            replayed=bool(response.replayed),
+        )
+
+    async def fail(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        activation_id: str,
+        attempt: int,
+        fence_token: bytes,
+        error_code: str,
+        error_data: bytes,
+        retryable: bool,
+        external_outcome_certainty: str,
+    ) -> ActivationFailureReceipt:
+        try:
+            response = await self._native_client.fail_activation(
+                project_id,
+                run_id,
+                activation_id,
+                attempt,
+                list(fence_token),
+                error_code,
+                list(error_data),
+                retryable,
+                external_outcome_certainty,
+            )
+        except Exception as error:
+            raise _native_activation_error(error) from error
+        return ActivationFailureReceipt(
+            activation_id=response.activation_id,
+            attempt=int(response.attempt),
+            accepted_journal_offset=int(response.accepted_journal_offset),
+            status=response.status,
+            replayed=bool(response.replayed),
+        )
 
 
 @dataclass(frozen=True)

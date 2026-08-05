@@ -49,6 +49,9 @@ uuid = { version = "1.18.1", features = ["v4"] }
 default = ["wasm-sandbox", "libsql-memory"]
 libsql-memory = ["agnt5-sdk-core/libsql-memory"]
 wasm-sandbox = ["agnt5-sdk-core/wasm-sandbox"]
+# Kept opt-in until an sdk-core release containing durable activation V1 is
+# published. Monorepo E2E builds use the sibling sdk-core checkout.
+durable-activation-v1 = []
 
 [build-dependencies]
 pyo3-build-config = "0.27"

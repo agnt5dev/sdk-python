@@ -14,12 +14,30 @@ from agnt5.activation import (
     ActivationKind,
     ActivationRecoveryPolicy,
     BeginActivationRequest,
+    NativeActivationTransport,
     UInt64,
     activation_id,
     canonical_activation_value,
     stable_step_key,
 )
 from agnt5.exceptions import ActivationError, ActivationErrorCode
+
+
+@pytest.mark.asyncio
+async def test_native_transport_maps_structured_errors_to_activation_errors():
+    class NativeClient:
+        async def begin_activation(self, *_args):
+            raise RuntimeError(
+                'AGNT5_ACTIVATION_ERROR:{"code":"STALE_AUTHORITY",'
+                '"message":"lease was replaced","activationId":"actv1_test","attempt":2}'
+            )
+
+    transport = NativeActivationTransport(NativeClient())
+    with pytest.raises(ActivationError) as caught:
+        await transport.begin(activation_request())
+    assert caught.value.code is ActivationErrorCode.STALE_AUTHORITY
+    assert caught.value.activation_id == "actv1_test"
+    assert caught.value.attempt == 2
 
 
 def test_canonical_activation_values_match_frozen_vectors():
