@@ -12,7 +12,15 @@ from agnt5.activation import (
 )
 from agnt5.events import Completed, Failed, Started
 from agnt5.exceptions import ActivationError, ActivationErrorCode
+from agnt5.function import FunctionContext, FunctionRegistry, function
 from agnt5.workflow import WorkflowContext, WorkflowEntity
+
+
+@pytest.fixture(autouse=True)
+def clear_function_registry():
+    FunctionRegistry.clear()
+    yield
+    FunctionRegistry.clear()
 
 
 class WorkflowActivationTransport:
@@ -161,3 +169,66 @@ async def test_checkpoint_form_waits_for_failure_receipt_before_raising_user_err
     assert transport.fail_requests[0]["external_outcome_certainty"] == "UNKNOWN"
     assert not entity.has_completed_step("step:load:0")
     assert [type(event) for event in events] == [Started, Failed]
+
+
+@pytest.mark.asyncio
+async def test_function_form_uses_same_activation_boundary_and_explicit_key():
+    transport = WorkflowActivationTransport()
+    context, entity, events = activation_context(transport)
+    executed = False
+
+    @function
+    async def load(ctx: FunctionContext, item: str):
+        nonlocal executed
+        executed = True
+        assert ctx._trace_metadata["project_id"] == "project-1"
+        assert not entity.has_completed_step("step:load:item-42")
+        return {"item": item}
+
+    result = await context.step(load, "record", key="item-42")
+
+    assert executed
+    assert result == {"item": "record"}
+    assert transport.begin_requests[0].stable_key == "step:load:item-42"
+    assert entity.get_completed_step("step:load:item-42") == {"item": "record"}
+    assert [type(event) for event in events] == [Started, Started, Completed, Completed]
+    assert events[0].component_type.value == "workflow"
+    assert events[1].component_type.value == "function"
+
+
+@pytest.mark.asyncio
+async def test_function_form_replay_skips_registered_function():
+    transport = WorkflowActivationTransport()
+    transport.replay_output = b'{"cached":true}'
+    context, entity, events = activation_context(transport)
+
+    @function
+    async def load(_ctx: FunctionContext):
+        raise AssertionError("registered function ran on REPLAY")
+
+    result = await context.step(load)
+
+    assert result == {"cached": True}
+    assert entity.get_completed_step("step:load:0") == {"cached": True}
+    assert [type(event) for event in events] == [Started, Completed]
+
+
+@pytest.mark.asyncio
+async def test_function_form_does_not_memoize_when_completion_ack_is_lost():
+    transport = WorkflowActivationTransport()
+    transport.complete_error = ActivationError(
+        ActivationErrorCode.UNKNOWN_OUTCOME,
+        "completion acknowledgement was lost",
+    )
+    context, entity, events = activation_context(transport)
+
+    @function
+    async def load(_ctx: FunctionContext):
+        return "value"
+
+    with pytest.raises(ActivationError) as caught:
+        await context.step(load)
+
+    assert caught.value.code is ActivationErrorCode.UNKNOWN_OUTCOME
+    assert not entity.has_completed_step("step:load:0")
+    assert [type(event) for event in events] == [Started, Started, Completed]

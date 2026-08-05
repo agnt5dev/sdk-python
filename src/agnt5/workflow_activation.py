@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
 from ._ids import generate_cid
 from ._serialization import deserialize, serialize
+from ._telemetry import truncate_span_attribute_value
 from .activation import (
     ActivationCompletionReceipt,
     ActivationDecision,
@@ -24,6 +25,7 @@ from .activation import (
 )
 from .events import Completed, ComponentType, Failed, OperationType, Started
 from .exceptions import ActivationError, ActivationErrorCode
+from .function import FunctionContext, FunctionRegistry
 
 if TYPE_CHECKING:
     from .workflow import WorkflowContext
@@ -58,6 +60,123 @@ async def execute_checkpoint_callable(
         )
 
 
+async def execute_function_callable(
+    context: WorkflowContext,
+    handler_name: str,
+    step_name: str,
+    step_key: str,
+    step_correlation_id: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Execute the language-local @function body and its nested lifecycle events."""
+
+    from ._serialization import serialize_to_str
+    from .context import _current_context, set_current_context
+    from .tracing import create_span
+
+    func_config = FunctionRegistry.get(handler_name)
+    if func_config is None:
+        raise ValueError(f"Function '{handler_name}' not found in registry")
+    input_repr = (
+        truncate_span_attribute_value(serialize_to_str({"args": args, "kwargs": kwargs}))
+        if args or kwargs
+        else "{}"
+    )
+    with create_span(
+        f"workflow.task.{handler_name}",
+        "function",
+        context._runtime_context,
+        {
+            "step_name": step_name,
+            "handler_name": handler_name,
+            "run_id": context.run_id,
+            "input.data": input_repr,
+        },
+    ) as span:
+        func_correlation_id = generate_cid()
+        func_context = FunctionContext(
+            run_id=context.run_id,
+            correlation_id=func_correlation_id,
+            parent_correlation_id=step_correlation_id,
+            runtime_context=context._runtime_context,
+            worker=context._worker,
+            trace_metadata=context._trace_metadata,
+            memo_namespace=context.allocate_memo_child_scope("step", step_key),
+        )
+        if len(args) == 1 and isinstance(args[0], dict):
+            function_input = args[0]
+        elif kwargs.get("input") and isinstance(kwargs.get("input"), dict):
+            function_input = kwargs["input"]
+        elif kwargs:
+            function_input = dict(kwargs)
+        else:
+            function_input = {"args": list(args)} if args else {}
+        context.emit(
+            Started(
+                name=handler_name,
+                correlation_id=func_correlation_id,
+                parent_correlation_id=step_correlation_id,
+                component_type=ComponentType.FUNCTION,
+                input_data=function_input,
+                attempt=0,
+            )
+        )
+        function_started_at = time.time_ns()
+        context_token = set_current_context(func_context)
+        call_kwargs = dict(kwargs)
+        try:
+            try:
+                if not args and "input" in call_kwargs:
+                    input_data = call_kwargs.pop("input")
+                    handler_result = func_config.handler(func_context, input_data, **call_kwargs)
+                else:
+                    handler_result = func_config.handler(func_context, *args, **call_kwargs)
+                if inspect.isasyncgen(handler_result):
+                    result = await context._consume_streaming_result(handler_result, step_name)
+                elif inspect.iscoroutine(handler_result):
+                    result = await handler_result
+                else:
+                    result = handler_result
+            finally:
+                _current_context.reset(context_token)
+
+            try:
+                span.set_attribute(
+                    "output.data",
+                    truncate_span_attribute_value(serialize_to_str(result)),
+                )
+            except (TypeError, ValueError):
+                span.set_attribute("output.data", truncate_span_attribute_value(repr(result)))
+            context.emit(
+                Completed(
+                    name=handler_name,
+                    correlation_id=func_correlation_id,
+                    parent_correlation_id=step_correlation_id,
+                    component_type=ComponentType.FUNCTION,
+                    output_data=result if isinstance(result, dict) else {"result": result},
+                    duration_ms=(time.time_ns() - function_started_at) // 1_000_000,
+                )
+            )
+            return result
+        except Exception as error:
+            context.emit(
+                Failed(
+                    name=handler_name,
+                    correlation_id=func_correlation_id,
+                    parent_correlation_id=step_correlation_id,
+                    component_type=ComponentType.FUNCTION,
+                    error_code=type(error).__name__,
+                    error_message=str(error),
+                    duration_ms=(time.time_ns() - function_started_at) // 1_000_000,
+                )
+            )
+            span.set_attribute("error", "true")
+            span.set_attribute("error.message", str(error))
+            span.set_attribute("error.type", type(error).__name__)
+            raise
+
+
 async def run_durable_step(
     context: WorkflowContext,
     *,
@@ -65,7 +184,7 @@ async def run_durable_step(
     step_key: str,
     handler_name: str,
     input_value: Any,
-    execute: Callable[[], Awaitable[T]],
+    execute: Callable[[str], Awaitable[T]],
 ) -> T:
     """Run one step through the journal-authoritative activation protocol."""
 
@@ -204,7 +323,7 @@ async def run_durable_step(
     try:
         result, _receipt = await context._activation_client.run(
             request,
-            execute,
+            lambda: execute(step_correlation_id),
             encode_output=serialize,
             decode_output=deserialize,
             latency_ms=lambda: int((time.monotonic() - started_at) * 1000),

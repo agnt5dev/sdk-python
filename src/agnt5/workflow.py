@@ -424,6 +424,7 @@ class WorkflowContext(Context):
         name_or_handler: Union[str, Callable, Awaitable[T]],
         func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T], Any] = None,
         *args: Any,
+        key: Optional[str] = None,
         **kwargs: Any,
     ) -> T:
         """
@@ -468,6 +469,7 @@ class WorkflowContext(Context):
             name_or_handler: Step name (str), @function reference, or awaitable
             func_or_awaitable: Function/awaitable when name is provided, or first arg
             *args: Additional arguments for the function
+            key: Stable key required for reordered, repeated, or concurrent step work
             **kwargs: Keyword arguments for the function
 
         Returns:
@@ -499,16 +501,22 @@ class WorkflowContext(Context):
         # Determine which calling pattern is being used
         if callable(name_or_handler) and hasattr(name_or_handler, "_agnt5_config"):
             # Pattern 1: step(handler, *args, **kwargs) - @function call
-            return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+            return await self._step_function(
+                name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+            )
         elif isinstance(name_or_handler, str):
             # Check if it's a registered function name (legacy pattern)
             from .function import FunctionRegistry
             if FunctionRegistry.get(name_or_handler) is not None:
                 # Pattern 4: Legacy string-based function call
-                return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+                return await self._step_function(
+                    name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+                )
             elif func_or_awaitable is not None:
                 # Pattern 2/3: step("name", awaitable) or step("name", callable, *args)
-                return await self._step_checkpoint(name_or_handler, func_or_awaitable, *args, **kwargs)
+                return await self._step_checkpoint(
+                    name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+                )
             else:
                 # String without second arg and not a registered function
                 raise ValueError(
@@ -519,7 +527,7 @@ class WorkflowContext(Context):
         elif inspect.iscoroutine(name_or_handler) or inspect.isawaitable(name_or_handler):
             # Awaitable passed directly - auto-generate name
             coro_name = getattr(name_or_handler, '__name__', 'awaitable')
-            return await self._step_checkpoint(coro_name, name_or_handler)
+            return await self._step_checkpoint(coro_name, name_or_handler, activation_key=key)
         elif callable(name_or_handler):
             # Callable without @function decorator
             raise ValueError(
@@ -538,6 +546,7 @@ class WorkflowContext(Context):
         handler: Union[str, Callable],
         first_arg: Any = None,
         *args: Any,
+        activation_key: Optional[str] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -563,9 +572,33 @@ class WorkflowContext(Context):
         else:
             handler_name = handler
 
-        # Generate unique step name for durability
+        # Generate unique step name for lifecycle display and a stable activation key.
+        from .activation import stable_step_key
+
         step_name = f"{handler_name}_{self._step_counter}"
+        step_key = stable_step_key(handler_name, self._step_counter, activation_key)
         self._step_counter += 1
+
+        if self._activation_client is not None:
+            from .workflow_activation import execute_function_callable, run_durable_step
+
+            input_value = {"args": list(args), "kwargs": kwargs}
+            return await run_durable_step(
+                self,
+                name=step_name,
+                step_key=step_key,
+                handler_name=handler_name,
+                input_value=input_value,
+                execute=lambda step_correlation_id: execute_function_callable(
+                    self,
+                    handler_name,
+                    step_name,
+                    step_key,
+                    step_correlation_id,
+                    args,
+                    kwargs,
+                ),
+            )
 
         # Generate unique event_id for this step (for hierarchy tracking)
         step_event_id = str(uuid.uuid4())
@@ -1165,6 +1198,7 @@ class WorkflowContext(Context):
         name: str,
         func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T]],
         *args: Any,
+        activation_key: Optional[str] = None,
         **kwargs: Any,
     ) -> T:
         """
@@ -1193,7 +1227,7 @@ class WorkflowContext(Context):
         from .activation import stable_step_key
 
         # Generate step key for platform memoization
-        step_key = stable_step_key(name, self._step_counter)
+        step_key = stable_step_key(name, self._step_counter, activation_key)
         self._step_counter += 1
 
         if self._activation_client is not None:
@@ -1206,7 +1240,7 @@ class WorkflowContext(Context):
                 step_key=step_key,
                 handler_name="checkpoint",
                 input_value=input_value,
-                execute=lambda: execute_checkpoint_callable(
+                execute=lambda _step_correlation_id: execute_checkpoint_callable(
                     self, name, step_key, func_or_awaitable, args, kwargs
                 ),
             )
