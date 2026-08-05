@@ -173,6 +173,13 @@ class ActivationClient:
         encode_output: Callable[[T], bytes],
         decode_output: Callable[[bytes], T],
         latency_ms: Callable[[], int],
+        on_admitted: Callable[[ActivationDecision], None] | None = None,
+        on_completed: Callable[
+            [ActivationDecision, ActivationDecision | ActivationCompletionReceipt], None
+        ]
+        | None = None,
+        on_failed: Callable[[ActivationDecision, ActivationFailureReceipt, Exception], None]
+        | None = None,
     ) -> tuple[T, ActivationDecision | ActivationCompletionReceipt]:
         """Execute or replay one activation, returning only after durable acceptance."""
 
@@ -199,7 +206,12 @@ class ActivationClient:
                     activation_id=decision.activation_id,
                     attempt=decision.attempt,
                 )
-            return decode_output(decision.replay_output), decision
+            if on_admitted is not None:
+                on_admitted(decision)
+            result = decode_output(decision.replay_output)
+            if on_completed is not None:
+                on_completed(decision, decision)
+            return result, decision
         if decision.kind is not ActivationDecisionKind.EXECUTE:
             raise _decision_error(decision)
         if decision.attempt <= 0 or not decision.fence_token:
@@ -209,6 +221,8 @@ class ActivationClient:
                 activation_id=decision.activation_id,
                 attempt=decision.attempt,
             )
+        if on_admitted is not None:
+            on_admitted(decision)
 
         try:
             result = await execute()
@@ -218,7 +232,7 @@ class ActivationClient:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            await self._transport.fail(
+            receipt = await self._transport.fail(
                 project_id=request.project_id,
                 run_id=request.run_id,
                 activation_id=decision.activation_id,
@@ -229,6 +243,18 @@ class ActivationClient:
                 retryable=False,
                 external_outcome_certainty="UNKNOWN",
             )
+            if (
+                receipt.activation_id != decision.activation_id
+                or receipt.attempt != decision.attempt
+            ):
+                raise ActivationError(
+                    ActivationErrorCode.UNKNOWN_OUTCOME,
+                    "runtime returned a failure receipt for different activation authority",
+                    activation_id=decision.activation_id,
+                    attempt=decision.attempt,
+                ) from user_error
+            if on_failed is not None:
+                on_failed(decision, receipt, user_error)
             raise
 
         output = encode_output(result)
@@ -249,6 +275,8 @@ class ActivationClient:
                 activation_id=decision.activation_id,
                 attempt=decision.attempt,
             )
+        if on_completed is not None:
+            on_completed(decision, receipt)
         return result, receipt
 
 
@@ -333,6 +361,32 @@ def stable_step_key(name: str, ordinal: int, explicit_key: str | None = None) ->
             "sequential step ordinal cannot be negative",
         )
     return f"step:{name}:{ordinal}"
+
+
+def decode_sha256(value: str) -> bytes:
+    """Decode a hexadecimal or padded/unpadded Base64 SHA-256 value."""
+
+    if not value:
+        raise ActivationError(
+            ActivationErrorCode.DURABILITY_UNAVAILABLE,
+            "activation artifact SHA-256 is unavailable",
+        )
+    decoders = (
+        lambda candidate: bytes.fromhex(candidate),
+        lambda candidate: base64.b64decode(candidate, validate=True),
+        lambda candidate: base64.urlsafe_b64decode(candidate + "=" * (-len(candidate) % 4)),
+    )
+    for decoder in decoders:
+        try:
+            decoded = decoder(value)
+        except (ValueError, base64.binascii.Error):
+            continue
+        if len(decoded) == 32:
+            return decoded
+    raise ActivationError(
+        ActivationErrorCode.INVALID_ARGUMENT,
+        "activation artifact SHA-256 must encode exactly 32 bytes",
+    )
 
 
 def _canonical_value(value: Any) -> list[Any]:

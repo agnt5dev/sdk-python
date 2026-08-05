@@ -72,6 +72,7 @@ class WorkflowContext(Context):
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         checkpoint_client: Optional[Any] = None,
+        activation_client: Optional[Any] = None,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
@@ -88,7 +89,8 @@ class WorkflowContext(Context):
             user_id: User identifier for user-scoped memory (optional)
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
-            checkpoint_client: Optional CheckpointClient for platform-side memoization
+            checkpoint_client: Optional CheckpointClient for legacy platform-side memoization
+            activation_client: Optional durable-activation client negotiated by the worker
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             worker: PyWorker instance for event queueing
             correlation_id: Unique identifier for this workflow execution
@@ -110,6 +112,7 @@ class WorkflowContext(Context):
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
         self._checkpoint_client = checkpoint_client
+        self._activation_client = activation_client
         self._delta_sequence: int = 0  # Sequence for delta events (separate from checkpoint sequence)
 
         # Memory scoping identifiers (use private attrs since properties are read-only)
@@ -1187,9 +1190,26 @@ class WorkflowContext(Context):
         import json
         import time
 
+        from .activation import stable_step_key
+
         # Generate step key for platform memoization
-        step_key = f"step:{name}:{self._step_counter}"
+        step_key = stable_step_key(name, self._step_counter)
         self._step_counter += 1
+
+        if self._activation_client is not None:
+            from .workflow_activation import execute_checkpoint_callable, run_durable_step
+
+            input_value = {"args": list(args), "kwargs": kwargs} if callable(func_or_awaitable) else None
+            return await run_durable_step(
+                self,
+                name=name,
+                step_key=step_key,
+                handler_name="checkpoint",
+                input_value=input_value,
+                execute=lambda: execute_checkpoint_callable(
+                    self, name, step_key, func_or_awaitable, args, kwargs
+                ),
+            )
 
         # Generate identifiers for this step and its event correlation.
         step_event_id = str(uuid.uuid4())
