@@ -35,6 +35,31 @@ def transient_delta() -> OutputDelta:
     )
 
 
+def test_event_metadata_cannot_override_execution_authority() -> None:
+    emitter = EventEmitter(
+        run_id="run-1",
+        base_metadata={
+            "dispatch_mode": "pull",
+            "worker_id": "worker-1",
+            "worker_session_id": "session-1",
+            "lease_id": "lease-1",
+            "lease_attempt": "1",
+        },
+    )
+
+    metadata = emitter._event_metadata(
+        {
+            "lease_id": "forged-lease",
+            "worker_id": "forged-worker",
+            "custom": "preserved",
+        }
+    )
+
+    assert metadata["lease_id"] == "lease-1"
+    assert metadata["worker_id"] == "worker-1"
+    assert metadata["custom"] == "preserved"
+
+
 def test_sync_checkpoint_failure_propagates_without_queue_fallback() -> None:
     worker = MagicMock()
     worker.emit_event_sync.side_effect = RuntimeError("journal unavailable")

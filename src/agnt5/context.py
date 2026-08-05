@@ -295,16 +295,32 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            # Pass trace metadata, experiment_id, and project/deployment IDs as base_metadata
-            # so every checkpoint event carries them back to the engine.
+            # Pass trace metadata, execution authority, and project/deployment
+            # IDs as base_metadata so every checkpoint event carries them back
+            # to the engine. The runtime validates the lease fields before it
+            # accepts worker-authored lifecycle mutations.
             # The current engine cache key is still (tenant_id, run_id), where
             # tenant_id is a legacy alias for project identity on worker/runtime
             # paths. Events must therefore preserve the same value stamped on
             # run.queued during the migration window.
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id",
-                            "attempt", "max_attempts", "component_name", "component_type"):
+                for key in (
+                    "traceparent",
+                    "tracestate",
+                    "experiment_id",
+                    "tenant_id",
+                    "deployment_id",
+                    "attempt",
+                    "max_attempts",
+                    "component_name",
+                    "component_type",
+                    "dispatch_mode",
+                    "worker_id",
+                    "worker_session_id",
+                    "lease_id",
+                    "lease_attempt",
+                ):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(

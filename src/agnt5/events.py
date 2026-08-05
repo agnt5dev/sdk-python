@@ -122,6 +122,14 @@ _TERMINAL_EVENT_TYPES = frozenset({
     "workflow.paused",
 })
 
+_EXECUTION_AUTHORITY_METADATA_KEYS = (
+    "dispatch_mode",
+    "worker_id",
+    "worker_session_id",
+    "lease_id",
+    "lease_attempt",
+)
+
 
 def is_terminal_event(event_type: str) -> bool:
     """True only for events the gateway tail-stream waits for."""
@@ -694,6 +702,19 @@ class EventEmitter:
         """Set the worker for queueing events."""
         self._worker = worker
 
+    def _event_metadata(
+        self, event_metadata: Optional[dict[str, str]]
+    ) -> dict[str, str]:
+        merged = dict(self._base_metadata)
+        if event_metadata:
+            merged.update(event_metadata)
+        # Authority is transport-authored dispatch state. User event metadata
+        # may add observability fields but cannot replace the current fence.
+        for key in _EXECUTION_AUTHORITY_METADATA_KEYS:
+            if key in self._base_metadata:
+                merged[key] = self._base_metadata[key]
+        return merged
+
     def emit(self, event: Event) -> EventEnvelope:
         """Emit a typed event to the platform.
 
@@ -843,9 +864,7 @@ class EventEmitter:
         ):
             for event in events:
                 event_data = event.to_dict()
-                merged_metadata = dict(self._base_metadata)
-                if event.metadata:
-                    merged_metadata.update(event.metadata)
+                merged_metadata = self._event_metadata(event.metadata)
                 merged_metadata.update(
                     guardrail_subject_metadata(event.event_type, event_data, self._run_id)
                 )
@@ -878,9 +897,7 @@ class EventEmitter:
         batch_tuples = []
         for event in events:
             event_data = event.to_dict()
-            merged_metadata = dict(self._base_metadata)
-            if event.metadata:
-                merged_metadata.update(event.metadata)
+            merged_metadata = self._event_metadata(event.metadata)
             merged_metadata.update(
                 guardrail_subject_metadata(event.event_type, event_data, self._run_id)
             )
@@ -934,9 +951,7 @@ class EventEmitter:
             return
 
         try:
-            merged_metadata = dict(self._base_metadata)
-            if envelope.metadata:
-                merged_metadata.update(envelope.metadata)
+            merged_metadata = self._event_metadata(envelope.metadata)
 
             self._sequence += 1
 
@@ -1004,9 +1019,7 @@ class EventEmitter:
             return
 
         try:
-            merged_metadata = dict(self._base_metadata)
-            if envelope.metadata:
-                merged_metadata.update(envelope.metadata)
+            merged_metadata = self._event_metadata(envelope.metadata)
 
             self._sequence += 1
 

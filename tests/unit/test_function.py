@@ -66,6 +66,25 @@ class TestFunctionDecorator:
 
         assert ctx.metadata == {"dispatch_mode": "pull"}
 
+    def test_function_context_propagates_execution_authority_to_events(self) -> None:
+        authority = {
+            "dispatch_mode": "pull",
+            "worker_id": "worker-1",
+            "worker_session_id": "session-1",
+            "lease_id": "lease-7",
+            "lease_attempt": "7",
+        }
+        ctx = FunctionContext(
+            run_id="run-1",
+            correlation_id="corr-1",
+            parent_correlation_id="parent-1",
+            trace_metadata={**authority, "workerless_signing_secret": "must-not-leak"},
+        )
+
+        emitter = ctx._get_emitter()
+
+        assert emitter._base_metadata == authority
+
     def test_function_basic(self) -> None:
         @function
         async def my_func(ctx: FunctionContext, value: str) -> str:
