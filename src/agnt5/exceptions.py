@@ -1,5 +1,6 @@
 """AGNT5 SDK exceptions and error types."""
 
+from enum import Enum
 from typing import Dict, List, Optional
 
 
@@ -54,6 +55,42 @@ class CheckpointError(AGNT5Error):
     """Raised when checkpoint operations fail."""
 
     pass
+
+
+class ActivationErrorCode(str, Enum):
+    """Stable durable-activation error codes shared by every AGNT5 SDK."""
+
+    DURABILITY_UNAVAILABLE = "DURABILITY_UNAVAILABLE"
+    NON_DETERMINISTIC_REPLAY = "NON_DETERMINISTIC_REPLAY"
+    STALE_AUTHORITY = "STALE_AUTHORITY"
+    CANCELLED = "CANCELLED"
+    CONTENDED = "CONTENDED"
+    UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
+    PAYLOAD_CONFLICT = "PAYLOAD_CONFLICT"
+    ILLEGAL_TRANSITION = "ILLEGAL_TRANSITION"
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    REFERENCE_REQUIRED = "REFERENCE_REQUIRED"
+    STATE_VERSION_CONFLICT = "STATE_VERSION_CONFLICT"
+
+
+class ActivationError(AGNT5Error):
+    """A correctness failure at the durable-activation boundary."""
+
+    def __init__(
+        self,
+        code: ActivationErrorCode,
+        message: str,
+        *,
+        activation_id: str = "",
+        attempt: int = 0,
+    ) -> None:
+        self.code = code
+        self.activation_id = activation_id
+        self.attempt = attempt
+        identity = ""
+        if activation_id:
+            identity = f" activation={activation_id} attempt={attempt}"
+        super().__init__(f"durable activation {code.value}{identity}: {message}")
 
 
 class NotImplementedError(AGNT5Error):

@@ -102,6 +102,8 @@ from .events import (
 )
 from .exceptions import (
     AGNT5Error,
+    ActivationError,
+    ActivationErrorCode,
     ConfigurationError,
     ExecutionError,
     RetryError,
@@ -449,6 +451,8 @@ __all__ = [
     "RetryPolicy",
     # Exceptions
     "AGNT5Error",
+    "ActivationError",
+    "ActivationErrorCode",
     "ConfigurationError",
     "ExecutionError",
     "RetryError",
