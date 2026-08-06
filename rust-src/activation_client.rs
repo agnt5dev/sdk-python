@@ -3,8 +3,9 @@
 use agnt5_sdk_core::client::EngineClient;
 use agnt5_sdk_core::error::{ErrorCode, SdkError};
 use agnt5_sdk_core::pb::{
-    activation_payload, ActivationExternalOutcomeCertainty, ActivationPayload, ActivationStatus,
-    ActivationUsage, BeginActivationRequest, CompleteActivationRequest, FailActivationRequest,
+    activation_payload, ActivationEvidence, ActivationExternalOutcomeCertainty, ActivationPayload,
+    ActivationStatus, ActivationUsage, BeginActivationRequest, CompleteActivationRequest,
+    FailActivationRequest,
 };
 use agnt5_sdk_core::runtime_adapter::{ActivationAdapter, ActivationDecision};
 use pyo3::prelude::*;
@@ -13,6 +14,19 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const NATIVE_ACTIVATION_ERROR_PREFIX: &str = "AGNT5_ACTIVATION_ERROR:";
+
+fn inline_evidence(entries: Vec<(String, Vec<u8>, Vec<u8>)>) -> Vec<ActivationEvidence> {
+    entries
+        .into_iter()
+        .map(|(evidence_type, payload, sha256)| ActivationEvidence {
+            evidence_type,
+            payload: Some(ActivationPayload {
+                value: Some(activation_payload::Value::InlineData(payload)),
+            }),
+            sha256,
+        })
+        .collect()
+}
 
 fn activation_error_code(code: ErrorCode) -> &'static str {
     match code {
@@ -311,7 +325,13 @@ impl PyActivationClient {
         fence_token: Vec<u8>,
         output: Vec<u8>,
         output_digest: Vec<u8>,
+        tokens_in: i64,
+        tokens_out: i64,
+        cost_usd: f64,
         latency_ms: i64,
+        provider: String,
+        model: String,
+        evidence: Vec<(String, Vec<u8>, Vec<u8>)>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
@@ -331,10 +351,14 @@ impl PyActivationClient {
                     state_mutations: Vec::new(),
                     outbox_intents: Vec::new(),
                     usage: Some(ActivationUsage {
+                        tokens_in,
+                        tokens_out,
+                        cost_usd,
                         latency_ms,
-                        ..Default::default()
+                        provider,
+                        model,
                     }),
-                    evidence: Vec::new(),
+                    evidence: inline_evidence(evidence),
                 })
                 .await
                 .map_err(activation_error)?;
@@ -360,6 +384,7 @@ impl PyActivationClient {
         error_data: Vec<u8>,
         retryable: bool,
         external_outcome_certainty: String,
+        evidence: Vec<(String, Vec<u8>, Vec<u8>)>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if external_outcome_certainty != "UNKNOWN" {
             return Err(bridge_error(
@@ -386,7 +411,7 @@ impl PyActivationClient {
                     }),
                     retryable,
                     external_outcome_certainty: ActivationExternalOutcomeCertainty::Unknown as i32,
-                    evidence: Vec::new(),
+                    evidence: inline_evidence(evidence),
                 })
                 .await
                 .map_err(activation_error)?;

@@ -17,6 +17,7 @@ from ..activation import (
     ActivationDecision,
     ActivationKind,
     ActivationRecoveryPolicy,
+    ActivationUsage,
     _reset_current_activation,
     _set_current_activation,
     activation_request_from_context,
@@ -317,6 +318,16 @@ class LMClient(LanguageModel):
                 ActivationRecoveryPolicy.DURABLE_STEPS,
             },
             failure_external_outcome_certainty="UNKNOWN",
+            completion_usage=lambda response: ActivationUsage(
+                tokens_in=response.usage.prompt_tokens if response.usage else 0,
+                tokens_out=response.usage.completion_tokens if response.usage else 0,
+                provider=(
+                    request.model.split("/", 1)[0]
+                    if "/" in request.model
+                    else (self._provider or "")
+                ),
+                model=request.model,
+            ),
         )
         return result
 

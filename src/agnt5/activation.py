@@ -8,7 +8,7 @@ import json
 import math
 import struct
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
@@ -121,6 +121,35 @@ class ActivationExecution:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class ActivationUsage:
+    """Bounded accounting committed with an accepted activation."""
+
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    latency_ms: int = 0
+    provider: str = ""
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class ActivationEvidence:
+    """Bounded immutable evidence committed with a terminal activation."""
+
+    evidence_type: str
+    payload: bytes
+    sha256: bytes
+
+    @classmethod
+    def inline(cls, evidence_type: str, payload: bytes) -> "ActivationEvidence":
+        return cls(
+            evidence_type=evidence_type,
+            payload=bytes(payload),
+            sha256=hashlib.sha256(payload).digest(),
+        )
+
+
 _current_activation: ContextVar[ActivationExecution | None] = ContextVar(
     "agnt5_current_activation",
     default=None,
@@ -162,7 +191,8 @@ class ActivationTransport(Protocol):
         fence_token: bytes,
         output: bytes,
         output_digest: bytes,
-        latency_ms: int,
+        usage: ActivationUsage,
+        evidence: tuple[ActivationEvidence, ...],
     ) -> ActivationCompletionReceipt: ...
 
     async def fail(
@@ -177,6 +207,7 @@ class ActivationTransport(Protocol):
         error_data: bytes,
         retryable: bool,
         external_outcome_certainty: str,
+        evidence: tuple[ActivationEvidence, ...],
     ) -> ActivationFailureReceipt: ...
 
 
@@ -248,7 +279,8 @@ class NativeActivationTransport:
         fence_token: bytes,
         output: bytes,
         output_digest: bytes,
-        latency_ms: int,
+        usage: ActivationUsage,
+        evidence: tuple[ActivationEvidence, ...],
     ) -> ActivationCompletionReceipt:
         try:
             response = await self._native_client.complete_activation(
@@ -259,7 +291,16 @@ class NativeActivationTransport:
                 list(fence_token),
                 list(output),
                 list(output_digest),
-                latency_ms,
+                usage.tokens_in,
+                usage.tokens_out,
+                usage.cost_usd,
+                usage.latency_ms,
+                usage.provider,
+                usage.model,
+                [
+                    (item.evidence_type, list(item.payload), list(item.sha256))
+                    for item in evidence
+                ],
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -282,6 +323,7 @@ class NativeActivationTransport:
         error_data: bytes,
         retryable: bool,
         external_outcome_certainty: str,
+        evidence: tuple[ActivationEvidence, ...],
     ) -> ActivationFailureReceipt:
         try:
             response = await self._native_client.fail_activation(
@@ -294,6 +336,10 @@ class NativeActivationTransport:
                 list(error_data),
                 retryable,
                 external_outcome_certainty,
+                [
+                    (item.evidence_type, list(item.payload), list(item.sha256))
+                    for item in evidence
+                ],
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -376,6 +422,9 @@ class ActivationClient:
         failure_error_code: str = "STEP_FAILED",
         failure_retryable: bool = False,
         failure_external_outcome_certainty: str = "UNKNOWN",
+        completion_usage: Callable[[T], ActivationUsage] | None = None,
+        completion_evidence: Callable[[T], tuple[ActivationEvidence, ...]] | None = None,
+        failure_evidence: Callable[[Exception], tuple[ActivationEvidence, ...]] | None = None,
     ) -> tuple[T, ActivationDecision | ActivationCompletionReceipt]:
         """Execute or replay one activation, returning only after durable acceptance."""
 
@@ -417,6 +466,7 @@ class ActivationClient:
                 error_data=error_data,
                 retryable=failure_retryable,
                 external_outcome_certainty=failure_external_outcome_certainty,
+                evidence=failure_evidence(user_error) if failure_evidence is not None else (),
             )
             if (
                 receipt.activation_id != decision.activation_id
@@ -433,6 +483,8 @@ class ActivationClient:
             raise
 
         output = encode_output(result)
+        usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
+        usage = replace(usage, latency_ms=latency_ms())
         receipt = await self._transport.complete(
             project_id=request.project_id,
             run_id=request.run_id,
@@ -441,7 +493,8 @@ class ActivationClient:
             fence_token=decision.fence_token,
             output=output,
             output_digest=hashlib.sha256(output).digest(),
-            latency_ms=latency_ms(),
+            usage=usage,
+            evidence=completion_evidence(result) if completion_evidence is not None else (),
         )
         if receipt.activation_id != decision.activation_id or receipt.attempt != decision.attempt:
             raise ActivationError(

@@ -11,8 +11,10 @@ from agnt5.activation import (
     ActivationDecision,
     ActivationDecisionKind,
     ActivationDefinition,
+    ActivationEvidence,
     ActivationKind,
     ActivationRecoveryPolicy,
+    ActivationUsage,
     BeginActivationRequest,
     NativeActivationTransport,
     UInt64,
@@ -175,12 +177,26 @@ async def test_activation_client_executes_only_after_admission_and_completion_ac
         encode_output=lambda value: b'{"value":42}',
         decode_output=lambda value: value,
         latency_ms=lambda: int((time.monotonic() - started) * 1000),
+        completion_usage=lambda _value: ActivationUsage(
+            tokens_in=3,
+            tokens_out=2,
+            provider="openai",
+            model="openai/gpt-test",
+        ),
+        completion_evidence=lambda _value: (
+            ActivationEvidence.inline("provider_terminal", b'{"finish_reason":"stop"}'),
+        ),
     )
 
     assert called
     assert result == {"value": 42}
     assert receipt.accepted_journal_offset == 12
     assert transport.complete_calls[0]["output_digest"] == hashlib.sha256(b'{"value":42}').digest()
+    assert transport.complete_calls[0]["usage"].tokens_in == 3
+    assert transport.complete_calls[0]["usage"].tokens_out == 2
+    assert transport.complete_calls[0]["evidence"][0].sha256 == hashlib.sha256(
+        b'{"finish_reason":"stop"}'
+    ).digest()
 
 
 @pytest.mark.asyncio

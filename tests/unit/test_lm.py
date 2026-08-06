@@ -277,6 +277,11 @@ async def test_model_final_is_committed_through_a_durable_activation(mock_rust_g
             assert transport.begin_requests[0].kind is ActivationKind.MODEL
             assert transport.begin_requests[0].stable_key == "model:openai/gpt-4o-mini:0"
             assert len(transport.complete_requests) == 1
+            usage = transport.complete_requests[0]["usage"]
+            assert usage.tokens_in == mock_rust_generate.usage.prompt_tokens
+            assert usage.tokens_out == mock_rust_generate.usage.completion_tokens
+            assert usage.provider == "openai"
+            assert usage.model == "openai/gpt-4o-mini"
             assert mock_instance.generate.await_count == 1
             assert ctx.activation is None
     finally:
