@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ from .._ids import generate_cid
 from .._serialization import deserialize, serialize
 from ..activation import (
     ActivationDecision,
+    ActivationDecisionKind,
+    ActivationEvidence,
     ActivationKind,
     ActivationRecoveryPolicy,
     ActivationUsage,
@@ -43,6 +46,10 @@ from .types import (
 logger = logging.getLogger(__name__)
 _model_activation_execute: ContextVar[bool] = ContextVar(
     "agnt5_model_activation_execute",
+    default=False,
+)
+_model_stream_activation_execute: ContextVar[bool] = ContextVar(
+    "agnt5_model_stream_activation_execute",
     default=False,
 )
 
@@ -129,6 +136,20 @@ def _model_activation_input(request: GenerateRequest) -> Dict[str, Any]:
         },
         "response_schema": request.response_schema,
     }
+
+
+def _model_terminal_evidence(response: GenerateResponse) -> tuple[ActivationEvidence, ...]:
+    payload = json.dumps(
+        {
+            "schema": "agnt5.model_provider_terminal.v1",
+            "classification": "accepted_final",
+            "finish_reason": response.finish_reason,
+            "response_id": response.response_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return (ActivationEvidence.inline("model_provider_terminal_v1", payload),)
 
 
 class LMClient(LanguageModel):
@@ -328,6 +349,7 @@ class LMClient(LanguageModel):
                 ),
                 model=request.model,
             ),
+            completion_evidence=_model_terminal_evidence,
         )
         return result
 
@@ -394,6 +416,17 @@ class LMClient(LanguageModel):
     async def stream(self, request: GenerateRequest) -> AsyncGenerator[Event, None]:
         """Stream completion from LLM as Event objects."""
         current_ctx = get_current_context()
+        if (
+            current_ctx
+            and not _model_stream_activation_execute.get()
+            and (getattr(current_ctx, "_trace_metadata", None) or {}).get(
+                "durable_activation_v1"
+            )
+            == "true"
+        ):
+            async for event in self._stream_durable(request, current_ctx):
+                yield event
+            return
 
         prompt = self._build_prompt_messages(request)
         model = self._prepare_model_name(request.model)
@@ -468,13 +501,13 @@ class LMClient(LanguageModel):
                         duration_ms=latency_ms,
                     )
 
-                    if current_ctx:
+                    if current_ctx and not _model_stream_activation_execute.get():
                         self._emit_completed(
                             current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id
                         )
 
         except Exception as e:
-            if current_ctx:
+            if current_ctx and not _model_stream_activation_execute.get():
                 end_time_ns = time.time_ns()
                 latency_ms = (end_time_ns - start_time_ns) // 1_000_000
                 self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
@@ -489,6 +522,225 @@ class LMClient(LanguageModel):
                 error_message=str(e),
             )
             raise
+
+    async def _stream_durable(
+        self,
+        request: GenerateRequest,
+        context: Any,
+    ) -> AsyncGenerator[Event, None]:
+        activation_client = getattr(context, "_activation_client", None)
+        if activation_client is None:
+            from ..exceptions import ActivationError, ActivationErrorCode
+
+            raise ActivationError(
+                ActivationErrorCode.DURABILITY_UNAVAILABLE,
+                "runtime negotiated durable_activation_v1 but no activation client is available",
+            )
+        policy = _model_recovery_policy(request.config.recovery_policy)
+        model = self._prepare_model_name(request.model)
+        activation_request = activation_request_from_context(
+            context,
+            kind=ActivationKind.MODEL,
+            stable_key=context.allocate_activation_key("model", model),
+            input_value=_model_activation_input(request),
+            recovery_policy=policy,
+        )
+        decision = await activation_client.begin(activation_request)
+        if decision.kind is ActivationDecisionKind.REPLAY:
+            if decision.replay_output is None:
+                from ..exceptions import ActivationError, ActivationErrorCode
+
+                raise ActivationError(
+                    ActivationErrorCode.UNKNOWN_OUTCOME,
+                    "REPLAY receipt is missing its canonical output",
+                    activation_id=decision.activation_id,
+                    attempt=decision.attempt,
+                )
+            replayed = GenerateResponse.from_dict(deserialize(decision.replay_output))
+            correlation_id = generate_cid()
+            parent_correlation_id = context.correlation_id
+            started_event = LMContentBlockStarted(
+                name=model,
+                correlation_id=correlation_id,
+                parent_correlation_id=parent_correlation_id,
+                block_type="text",
+                index=0,
+            )
+            self._emit_started(context, model, request, time.time_ns(), correlation_id)
+            yield started_event
+            if replayed.text:
+                yield LMContentBlockDelta(
+                    name=model,
+                    correlation_id=correlation_id,
+                    parent_correlation_id=parent_correlation_id,
+                    content=replayed.text,
+                    block_type="text",
+                    index=0,
+                )
+            yield LMContentBlockCompleted(
+                name=model,
+                correlation_id=correlation_id,
+                parent_correlation_id=parent_correlation_id,
+                block_type="text",
+                index=0,
+            )
+            usage = replayed.usage
+            completed_event = LMCompleted(
+                name=model,
+                correlation_id=correlation_id,
+                parent_correlation_id=parent_correlation_id,
+                model=model,
+                provider=self._provider or "unknown",
+                input_tokens=usage.prompt_tokens if usage else 0,
+                output_tokens=usage.completion_tokens if usage else 0,
+                total_tokens=usage.total_tokens if usage else 0,
+                cached_tokens=usage.cached_tokens if usage else 0,
+                finish_reason=replayed.finish_reason,
+                output_data={
+                    "text": replayed.text,
+                    "tool_calls": replayed.tool_calls,
+                    "model": model,
+                    "replayed": True,
+                },
+                duration_ms=0,
+            )
+            self._emit_completed(
+                context,
+                model,
+                replayed,
+                0,
+                time.time_ns(),
+                correlation_id,
+            )
+            yield completed_event
+            return
+        if decision.kind is not ActivationDecisionKind.EXECUTE:
+            from ..activation import _decision_error
+
+            raise _decision_error(decision)
+
+        activation_token = _set_current_activation(decision)
+        execute_token = _model_stream_activation_execute.set(True)
+        started = time.monotonic()
+        partial_hash = hashlib.sha256()
+        partial_chunks = 0
+        partial_bytes = 0
+        terminal: LMCompleted | None = None
+        terminal_response: GenerateResponse | None = None
+        failure_event: LMFailed | None = None
+        provider_error: Exception | None = None
+        try:
+            try:
+                async for event in self.stream(request):
+                    if isinstance(event, LMContentBlockDelta) and event.content:
+                        encoded = str(event.content).encode("utf-8")
+                        partial_hash.update(encoded)
+                        partial_chunks += 1
+                        partial_bytes += len(encoded)
+                    if isinstance(event, LMCompleted):
+                        terminal = event
+                        output = event.output_data if isinstance(event.output_data, dict) else {}
+                        terminal_response = GenerateResponse(
+                            text=str(output.get("text") or ""),
+                            usage=TokenUsage(
+                                prompt_tokens=event.input_tokens,
+                                completion_tokens=event.output_tokens,
+                                total_tokens=event.total_tokens,
+                                cached_tokens=getattr(event, "cached_tokens", 0),
+                            ),
+                            finish_reason=event.finish_reason,
+                            tool_calls=output.get("tool_calls") or None,
+                        )
+                        continue
+                    if isinstance(event, LMFailed):
+                        failure_event = event
+                        continue
+                    yield event
+            except Exception as error:
+                provider_error = error
+
+            if provider_error is not None or terminal_response is None or terminal is None:
+                from ..exceptions import ActivationError, ActivationErrorCode
+
+                error = provider_error or ActivationError(
+                    ActivationErrorCode.UNKNOWN_OUTCOME,
+                    "model stream ended without a terminal provider response",
+                    activation_id=decision.activation_id,
+                    attempt=decision.attempt,
+                )
+                evidence_payload = json.dumps(
+                    {
+                        "schema": "agnt5.model_stream_interruption.v1",
+                        "attempt": decision.attempt,
+                        "partial_chunks": partial_chunks,
+                        "partial_utf8_bytes": partial_bytes,
+                        "partial_sha256": partial_hash.hexdigest(),
+                        "classification": "provider_interrupted",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                error_data = json.dumps(
+                    {"message": str(error), "type": type(error).__name__},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                await activation_client.fail(
+                    activation_request,
+                    decision,
+                    error_code="MODEL_STREAM_INTERRUPTED",
+                    error_data=error_data,
+                    retryable=policy
+                    in {
+                        ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+                        ActivationRecoveryPolicy.DURABLE_STEPS,
+                    },
+                    external_outcome_certainty="UNKNOWN",
+                    evidence=(
+                        ActivationEvidence.inline(
+                            "model_stream_interruption_v1",
+                            evidence_payload,
+                        ),
+                    ),
+                )
+                self._emit_failed(
+                    context,
+                    model,
+                    error,
+                    int((time.monotonic() - started) * 1000),
+                    time.time_ns(),
+                    failure_event.correlation_id if failure_event else generate_cid(),
+                )
+                if failure_event is not None:
+                    yield failure_event
+                raise error
+
+            usage = terminal_response.usage
+            await activation_client.complete(
+                activation_request,
+                decision,
+                output=serialize(terminal_response.to_dict()),
+                usage=ActivationUsage(
+                    tokens_in=usage.prompt_tokens if usage else 0,
+                    tokens_out=usage.completion_tokens if usage else 0,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    provider=self._provider or "",
+                    model=model,
+                ),
+                evidence=_model_terminal_evidence(terminal_response),
+            )
+            self._emit_completed(
+                context,
+                model,
+                terminal_response,
+                int((time.monotonic() - started) * 1000),
+                time.time_ns(),
+                terminal.correlation_id,
+            )
+            yield terminal
+        finally:
+            _model_stream_activation_execute.reset(execute_token)
+            _reset_current_activation(activation_token)
 
     def _build_kwargs(self, request: GenerateRequest, model: str) -> Dict[str, Any]:
         """Build kwargs dict for Rust call."""

@@ -17,6 +17,7 @@ Test Strategy:
 - Use real API calls for integration testing (when keys available)
 """
 
+import hashlib
 import json
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,7 @@ from agnt5.activation import (
     ActivationCompletionReceipt,
     ActivationDecision,
     ActivationDecisionKind,
+    ActivationFailureReceipt,
     ActivationKind,
     activation_id,
 )
@@ -104,11 +106,19 @@ class MockAsyncStreamIterator:
         return chunk
 
 
+class InterruptedStreamIterator(MockAsyncStreamIterator):
+    async def __anext__(self):
+        if self.index >= len(self.chunks):
+            raise RuntimeError("provider stream interrupted")
+        return await super().__anext__()
+
+
 class ModelActivationTransport:
     def __init__(self, replay: GenerateResponse | None = None):
         self.replay = replay
         self.begin_requests = []
         self.complete_requests = []
+        self.fail_requests = []
 
     async def begin(self, request):
         self.begin_requests.append(request)
@@ -141,8 +151,14 @@ class ModelActivationTransport:
             accepted_journal_offset=8,
         )
 
-    async def fail(self, **_request):
-        raise AssertionError("model failure was not expected")
+    async def fail(self, **request):
+        self.fail_requests.append(request)
+        return ActivationFailureReceipt(
+            activation_id=request["activation_id"],
+            attempt=request["attempt"],
+            accepted_journal_offset=8,
+            status="UNKNOWN_OUTCOME",
+        )
 
 
 def test_lm_client_build_kwargs_for_prompt_cache_options():
@@ -282,6 +298,9 @@ async def test_model_final_is_committed_through_a_durable_activation(mock_rust_g
             assert usage.tokens_out == mock_rust_generate.usage.completion_tokens
             assert usage.provider == "openai"
             assert usage.model == "openai/gpt-4o-mini"
+            evidence = transport.complete_requests[0]["evidence"][0]
+            assert evidence.evidence_type == "model_provider_terminal_v1"
+            assert b'"classification":"accepted_final"' in evidence.payload
             assert mock_instance.generate.await_count == 1
             assert ctx.activation is None
     finally:
@@ -315,6 +334,142 @@ async def test_accepted_model_final_replays_without_provider_call():
             assert response.usage.total_tokens == 5
             mock_instance.generate.assert_not_called()
             assert transport.complete_requests == []
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_stream_terminal_is_committed_before_it_is_exposed():
+    usage = MagicMock(
+        prompt_tokens=3,
+        completion_tokens=2,
+        total_tokens=5,
+        cached_tokens=0,
+    )
+    chunks = MockAsyncStreamIterator(
+        [
+            MockChunk("content_block_start", block_type="text", index=0),
+            MockChunk("delta", text="accepted final", block_type="text", index=0),
+            MockChunk("content_block_stop", index=0),
+            MockChunk(
+                "completed",
+                text="accepted final",
+                finish_reason="stop",
+                usage=usage,
+            ),
+        ]
+    )
+    transport = ModelActivationTransport()
+    ctx = durable_lm_context(transport)
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.stream_iter = MagicMock(return_value=chunks)
+            mock_rust_class.return_value = mock_instance
+            client = LMClient(provider="openai")
+
+            events = [
+                event
+                async for event in client.stream(
+                    GenerateRequest(
+                        model="openai/gpt-4o-mini",
+                        messages=[Message.user("hello")],
+                    )
+                )
+            ]
+
+            assert events[-1].event_type == "lm.completed"
+            assert len(transport.complete_requests) == 1
+            assert transport.complete_requests[0]["usage"].tokens_in == 3
+            assert transport.complete_requests[0]["usage"].tokens_out == 2
+            assert (
+                transport.complete_requests[0]["evidence"][0].evidence_type
+                == "model_provider_terminal_v1"
+            )
+            assert transport.fail_requests == []
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_accepted_stream_final_replays_without_provider_call():
+    replay = GenerateResponse(
+        text="replayed stream final",
+        usage=TokenUsage(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        finish_reason="stop",
+    )
+    transport = ModelActivationTransport(replay)
+    ctx = durable_lm_context(transport)
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.stream_iter = MagicMock(
+                side_effect=AssertionError("provider stream called")
+            )
+            mock_rust_class.return_value = mock_instance
+            client = LMClient(provider="openai")
+
+            events = [
+                event
+                async for event in client.stream(
+                    GenerateRequest(
+                        model="openai/gpt-4o-mini",
+                        messages=[Message.user("hello")],
+                    )
+                )
+            ]
+
+            deltas = [event.content for event in events if event.event_type == "lm.content_block.delta"]
+            assert deltas == ["replayed stream final"]
+            assert events[-1].event_type == "lm.completed"
+            mock_instance.stream_iter.assert_not_called()
+            assert transport.complete_requests == []
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_records_bounded_evidence_and_no_terminal_final():
+    chunks = InterruptedStreamIterator(
+        [
+            MockChunk("content_block_start", block_type="text", index=0),
+            MockChunk("delta", text="partial", block_type="text", index=0),
+        ]
+    )
+    transport = ModelActivationTransport()
+    ctx = durable_lm_context(transport)
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.stream_iter = MagicMock(return_value=chunks)
+            mock_rust_class.return_value = mock_instance
+            client = LMClient(provider="openai")
+            events = []
+
+            with pytest.raises(RuntimeError, match="provider stream interrupted"):
+                async for event in client.stream(
+                    GenerateRequest(
+                        model="openai/gpt-4o-mini",
+                        messages=[Message.user("hello")],
+                    )
+                ):
+                    events.append(event)
+
+            assert all(event.event_type != "lm.completed" for event in events)
+            assert events[-1].event_type == "lm.failed"
+            assert transport.complete_requests == []
+            assert len(transport.fail_requests) == 1
+            failure = transport.fail_requests[0]
+            assert failure["error_code"] == "MODEL_STREAM_INTERRUPTED"
+            evidence = failure["evidence"][0]
+            assert evidence.evidence_type == "model_stream_interruption_v1"
+            assert b'"partial_chunks":1' in evidence.payload
+            assert b'"partial_utf8_bytes":7' in evidence.payload
+            assert b'"partial"' not in evidence.payload
+            assert evidence.sha256 == hashlib.sha256(evidence.payload).digest()
     finally:
         token.var.reset(token)
 

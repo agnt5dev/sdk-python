@@ -404,6 +404,71 @@ class ActivationClient:
             )
         return decision
 
+    async def complete(
+        self,
+        request: BeginActivationRequest,
+        decision: ActivationDecision,
+        *,
+        output: bytes,
+        usage: ActivationUsage,
+        evidence: tuple[ActivationEvidence, ...] = (),
+    ) -> ActivationCompletionReceipt:
+        """Commit one fenced completion and validate the returned authority."""
+
+        receipt = await self._transport.complete(
+            project_id=request.project_id,
+            run_id=request.run_id,
+            activation_id=decision.activation_id,
+            attempt=decision.attempt,
+            fence_token=decision.fence_token,
+            output=output,
+            output_digest=hashlib.sha256(output).digest(),
+            usage=usage,
+            evidence=evidence,
+        )
+        if receipt.activation_id != decision.activation_id or receipt.attempt != decision.attempt:
+            raise ActivationError(
+                ActivationErrorCode.UNKNOWN_OUTCOME,
+                "runtime returned a completion receipt for different activation authority",
+                activation_id=decision.activation_id,
+                attempt=decision.attempt,
+            )
+        return receipt
+
+    async def fail(
+        self,
+        request: BeginActivationRequest,
+        decision: ActivationDecision,
+        *,
+        error_code: str,
+        error_data: bytes,
+        retryable: bool,
+        external_outcome_certainty: str = "UNKNOWN",
+        evidence: tuple[ActivationEvidence, ...] = (),
+    ) -> ActivationFailureReceipt:
+        """Commit one fenced failure and validate the returned authority."""
+
+        receipt = await self._transport.fail(
+            project_id=request.project_id,
+            run_id=request.run_id,
+            activation_id=decision.activation_id,
+            attempt=decision.attempt,
+            fence_token=decision.fence_token,
+            error_code=error_code,
+            error_data=error_data,
+            retryable=retryable,
+            external_outcome_certainty=external_outcome_certainty,
+            evidence=evidence,
+        )
+        if receipt.activation_id != decision.activation_id or receipt.attempt != decision.attempt:
+            raise ActivationError(
+                ActivationErrorCode.UNKNOWN_OUTCOME,
+                "runtime returned a failure receipt for different activation authority",
+                activation_id=decision.activation_id,
+                attempt=decision.attempt,
+            )
+        return receipt
+
     async def run(
         self,
         request: BeginActivationRequest,
@@ -456,28 +521,15 @@ class ActivationClient:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
-            receipt = await self._transport.fail(
-                project_id=request.project_id,
-                run_id=request.run_id,
-                activation_id=decision.activation_id,
-                attempt=decision.attempt,
-                fence_token=decision.fence_token,
+            receipt = await self.fail(
+                request,
+                decision,
                 error_code=failure_error_code,
                 error_data=error_data,
                 retryable=failure_retryable,
                 external_outcome_certainty=failure_external_outcome_certainty,
                 evidence=failure_evidence(user_error) if failure_evidence is not None else (),
             )
-            if (
-                receipt.activation_id != decision.activation_id
-                or receipt.attempt != decision.attempt
-            ):
-                raise ActivationError(
-                    ActivationErrorCode.UNKNOWN_OUTCOME,
-                    "runtime returned a failure receipt for different activation authority",
-                    activation_id=decision.activation_id,
-                    attempt=decision.attempt,
-                ) from user_error
             if on_failed is not None:
                 on_failed(decision, receipt, user_error)
             raise
@@ -485,24 +537,13 @@ class ActivationClient:
         output = encode_output(result)
         usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
         usage = replace(usage, latency_ms=latency_ms())
-        receipt = await self._transport.complete(
-            project_id=request.project_id,
-            run_id=request.run_id,
-            activation_id=decision.activation_id,
-            attempt=decision.attempt,
-            fence_token=decision.fence_token,
+        receipt = await self.complete(
+            request,
+            decision,
             output=output,
-            output_digest=hashlib.sha256(output).digest(),
             usage=usage,
             evidence=completion_evidence(result) if completion_evidence is not None else (),
         )
-        if receipt.activation_id != decision.activation_id or receipt.attempt != decision.attempt:
-            raise ActivationError(
-                ActivationErrorCode.UNKNOWN_OUTCOME,
-                "runtime returned a completion receipt for different activation authority",
-                activation_id=decision.activation_id,
-                attempt=decision.attempt,
-            )
         if on_completed is not None:
             on_completed(decision, receipt)
         return result, receipt
