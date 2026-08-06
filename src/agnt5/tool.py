@@ -589,6 +589,7 @@ def tool(
     recovery_policy: ActivationRecoveryPolicy | str = (
         ActivationRecoveryPolicy.UNKNOWN_OUTCOME
     ),
+    durable: bool = True,
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as a tool with automatic schema extraction.
@@ -602,6 +603,8 @@ def tool(
         recovery_policy: Interrupted-work policy. Ordinary tools default to
             ``unknown_outcome``; explicitly idempotent or nested durable tools
             may opt into ``idempotent_retry`` or ``durable_steps``.
+        durable: Whether this callable is itself a tool activation. Delegation
+            adapters use a child activation instead.
 
     Returns:
         Decorated function that can be invoked as a tool
@@ -677,6 +680,7 @@ def tool(
             confirmation=confirmation,
             auto_schema=auto_schema,
             recovery_policy=recovery_policy,
+            durable=durable,
         )
 
         # Register tool

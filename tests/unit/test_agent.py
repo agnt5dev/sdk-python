@@ -822,15 +822,9 @@ async def test_durable_handoff_is_nested_under_one_child_activation():
     )
 
     assert result["output"] == "handled"
-    tool_request = next(request for request in client.requests if request.kind is ActivationKind.TOOL)
     child_request = next(request for request in client.requests if request.kind is ActivationKind.CHILD)
-    assert child_request.parent_activation_id == activation_id(
-        tool_request.project_id,
-        tool_request.run_id,
-        tool_request.parent_activation_id,
-        tool_request.kind,
-        tool_request.stable_key,
-    )
+    assert all(request.kind is not ActivationKind.TOOL for request in client.requests)
+    assert child_request.parent_activation_id == ""
     assert child_request.child is not None
     assert child_request.child.join_policy is ChildJoinPolicy.REQUIRED
 

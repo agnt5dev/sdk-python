@@ -469,6 +469,7 @@ class Agent:
             name=f"ask_{agent.name}",
             description=agent.instructions or f"Ask the {agent.name} agent for help",
             recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+            durable=False,
         )
         async def agent_as_tool(ctx: Context, message: str) -> str:
             """Invoke the agent with a message and return its response."""
@@ -501,6 +502,7 @@ class Agent:
             name=handoff.tool_name,
             description=handoff.description,
             recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+            durable=False,
         )
         async def transfer_tool(ctx: Context, message: str) -> Dict[str, Any]:
             """Transfer control to another agent.
