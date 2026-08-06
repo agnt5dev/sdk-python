@@ -68,6 +68,9 @@ async def run_durable_sleep(
 ) -> None:
     """Admit a timer activation and return control to the runtime as suspension."""
 
+    if context._workflow_entity.has_completed_step(timer_key):
+        return
+
     metadata, project_id, definition = _activation_definition(context)
     worker_session_id = metadata.get("worker_session_id", "") or metadata.get("worker_id", "")
     run_authority = metadata.get("run_authority", "") or context.run_id

@@ -148,6 +148,37 @@ async def test_durable_sleep_resume_completes_only_matching_timer_activation():
 
 
 @pytest.mark.asyncio
+async def test_durable_sleep_replay_skips_an_earlier_completed_timer():
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    entity.record_step_completion(
+        "sleep:first",
+        "sleep",
+        {"delay_ms": 1000, "timer_key": "sleep:first"},
+        None,
+    )
+    context._trace_metadata.update(
+        {
+            "timer_key": "sleep:second",
+            "activation_id": activation_id(
+                "project-1",
+                "run-1",
+                "",
+                ActivationKind.TIMER,
+                "sleep:second",
+            ),
+        }
+    )
+
+    await context.sleep(1, name="first")
+    await context.sleep(1, name="second")
+
+    assert entity.has_completed_step("sleep:first")
+    assert entity.has_completed_step("sleep:second")
+    assert transport.begin_requests == []
+
+
+@pytest.mark.asyncio
 async def test_sleep_zero_is_noop_and_negative_is_rejected():
     transport = WorkflowActivationTransport()
     context, _entity, _events = durable_sleep_context(transport)
