@@ -1,6 +1,8 @@
 """Worker executor input validation tests."""
 
+import ast
 import base64
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -57,6 +59,19 @@ def _assert_clear_non_object_failure(response, payload):
     assert response.success is False
     assert "Component input must be a JSON object" in response.error_message
     assert type(payload).__name__ in response.error_message
+
+
+def test_executor_mixin_never_calls_blocking_context_emit():
+    """Lifecycle and stream emission must not block the shared event loop."""
+    tree = ast.parse(inspect.getsource(ExecutorMixin))
+    blocking_calls = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "emit"
+    ]
+    assert blocking_calls == []
 
 
 @pytest.mark.asyncio

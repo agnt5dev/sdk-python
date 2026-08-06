@@ -285,7 +285,7 @@ class ExecutorMixin:
                 )
                 if pull_response is not None:
                     return pull_response
-                current_ctx.emit(failed_event)
+                await current_ctx.emit_async(failed_event)
                 return None
 
             # Fallback: if no context, return synchronous error response
@@ -524,10 +524,10 @@ class ExecutorMixin:
         async for chunk in result:
             if isinstance(chunk, Event):
                 has_typed_events = True
-                ctx.emit(chunk)
+                await ctx.emit_async(chunk)
             else:
                 if first_chunk:
-                    ctx.emit(
+                    await ctx.emit_async(
                         OutputStart(
                             name="output",
                             correlation_id=ctx.correlation_id,
@@ -547,7 +547,7 @@ class ExecutorMixin:
                 else:
                     chunk_content = serialize(chunk).decode("utf-8")
 
-                ctx.emit(
+                await ctx.emit_async(
                     OutputDelta(
                         name="output",
                         correlation_id=ctx.correlation_id,
@@ -559,7 +559,7 @@ class ExecutorMixin:
             sequence += 1
 
         if not has_typed_events and not first_chunk:
-            ctx.emit(
+            await ctx.emit_async(
                 OutputStop(
                     name="output",
                     correlation_id=ctx.correlation_id,
@@ -582,7 +582,7 @@ class ExecutorMixin:
             output_data={"emitted": sequence},
         )
         if pull_response is None:
-            ctx.emit(run_completed_event)
+            await ctx.emit_async(run_completed_event)
         return pull_response
 
     # -------------------------------------------------------------------------
@@ -630,7 +630,7 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting run.started event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_started_event)
+            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -649,7 +649,7 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting tool.started event: "
                 f"tool={tool.name}, correlation_id={tool_correlation_id}"
             )
-            ctx.emit(tool_started_event)
+            await ctx.emit_async(tool_started_event)
 
             # Execute tool with error handling for proper event emission
             try:
@@ -679,7 +679,7 @@ class ExecutorMixin:
                     f"[_execute_tool] Emitting tool.failed event: "
                     f"tool={tool.name}, error={error_msg}"
                 )
-                ctx.emit(tool_failed_event)
+                await ctx.emit_async(tool_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -707,7 +707,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
             # Calculate tool duration
@@ -727,7 +727,7 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting tool.completed event: "
                 f"tool={tool.name}, duration_ms={duration_ms}"
             )
-            ctx.emit(tool_completed_event)
+            await ctx.emit_async(tool_completed_event)
 
             # Emit run.completed via event queue (not synchronous return)
             run_completed_event = Completed(
@@ -748,7 +748,7 @@ class ExecutorMixin:
                 output_data=result,
             )
             if pull_response is None:
-                ctx.emit(run_completed_event)
+                await ctx.emit_async(run_completed_event)
             return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Tool")
@@ -805,7 +805,7 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting run.started event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_started_event)
+            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -823,7 +823,7 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting entity.started event: "
                 f"entity={entity_type.name}, key={entity_key}, method={method_name}"
             )
-            ctx.emit(entity_started_event)
+            await ctx.emit_async(entity_started_event)
 
             # Execute entity method with error handling
             try:
@@ -859,7 +859,7 @@ class ExecutorMixin:
                     f"[_execute_entity] Emitting entity.failed event: "
                     f"entity={entity_type.name}, error={error_msg}"
                 )
-                ctx.emit(entity_failed_event)
+                await ctx.emit_async(entity_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -887,7 +887,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
             # Calculate entity duration
@@ -907,7 +907,7 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting entity.completed event: "
                 f"entity={entity_type.name}, duration_ms={duration_ms}"
             )
-            ctx.emit(entity_completed_event)
+            await ctx.emit_async(entity_completed_event)
 
             # Emit run.completed via event queue
             run_completed_event = Completed(
@@ -928,7 +928,7 @@ class ExecutorMixin:
                 output_data=result,
             )
             if pull_response is None:
-                ctx.emit(run_completed_event)
+                await ctx.emit_async(run_completed_event)
             return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Entity")
@@ -1002,7 +1002,7 @@ class ExecutorMixin:
                 f"[_execute_agent] Emitting run.started event: "
                 f"agent={agent.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_started_event)
+            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -1020,7 +1020,7 @@ class ExecutorMixin:
                 f"[_execute_agent] Emitting agent.started event: "
                 f"agent={agent.name}, correlation_id={agent_correlation_id}"
             )
-            ctx.emit(agent_started_event)
+            await ctx.emit_async(agent_started_event)
 
             # Mark context as executor-managed so Agent._run_core() doesn't emit
             # duplicate agent.started/completed events
@@ -1074,7 +1074,7 @@ class ExecutorMixin:
 
                             # Hosted streams use one cross-SDK event vocabulary.
                             event = _normalize_hosted_agent_stream_event(event)
-                            ctx.emit(event)
+                            await ctx.emit_async(event)
                             if event.event_type in {
                                 "lm.message.stop",
                                 "lm.thinking.stop",
@@ -1114,7 +1114,7 @@ class ExecutorMixin:
                         output_data={"output": final_output, "tool_calls": final_tool_calls},
                         duration_ms=duration_ms,
                     )
-                    ctx.emit(agent_completed_event)
+                    await ctx.emit_async(agent_completed_event)
 
                     # Emit run.completed
                     final_result = {"output": final_output, "tool_calls": final_tool_calls}
@@ -1134,7 +1134,7 @@ class ExecutorMixin:
                         output_data=final_result,
                     )
                     if pull_response is None:
-                        ctx.emit(run_completed_event)
+                        await ctx.emit_async(run_completed_event)
 
                     # Emit session.created so the session projection materializes
                     # this session for GET /v1/sessions/{id} queries.
@@ -1151,7 +1151,7 @@ class ExecutorMixin:
                         "component_name": agent.name,
                         "session_type": "agent",
                     }
-                    ctx.emit(session_event)
+                    await ctx.emit_async(session_event)
 
                     logger.debug(f"Agent streaming queued {sequence + 1} events")
                     return pull_response
@@ -1182,7 +1182,7 @@ class ExecutorMixin:
                     f"[_execute_agent] Emitting agent.completed event: "
                     f"agent={agent.name}, duration_ms={duration_ms}"
                 )
-                ctx.emit(agent_completed_event)
+                await ctx.emit_async(agent_completed_event)
 
                 # Emit run.completed
                 run_completed_event = Completed(
@@ -1208,7 +1208,7 @@ class ExecutorMixin:
                     },
                 )
                 if pull_response is None:
-                    ctx.emit(run_completed_event)
+                    await ctx.emit_async(run_completed_event)
 
                 # Emit session.created so the session projection materializes
                 # this session for GET /v1/sessions/{id} queries.
@@ -1225,7 +1225,7 @@ class ExecutorMixin:
                     "component_name": agent.name,
                     "session_type": "agent",
                 }
-                ctx.emit(session_event)
+                await ctx.emit_async(session_event)
 
                 return pull_response
 
@@ -1249,7 +1249,7 @@ class ExecutorMixin:
                     f"[_execute_agent] Emitting agent.failed event: "
                     f"agent={agent.name}, error={error_msg}"
                 )
-                ctx.emit(agent_failed_event)
+                await ctx.emit_async(agent_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -1277,7 +1277,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Agent")
@@ -1344,7 +1344,7 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting run.started event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
-            ctx.emit(run_started_event)
+            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -1363,7 +1363,7 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting scorer.started event: "
                 f"scorer={config.name}, correlation_id={scorer_correlation_id}"
             )
-            ctx.emit(scorer_started_event)
+            await ctx.emit_async(scorer_started_event)
 
             # Execute scorer with error handling
             try:
@@ -1404,7 +1404,7 @@ class ExecutorMixin:
                     f"[_execute_scorer] Emitting scorer.failed event: "
                     f"scorer={config.name}, error={error_msg}"
                 )
-                ctx.emit(scorer_failed_event)
+                await ctx.emit_async(scorer_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -1432,7 +1432,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
             # Calculate scorer duration
@@ -1461,7 +1461,7 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting scorer.completed event: "
                 f"scorer={config.name}, duration_ms={duration_ms}"
             )
-            ctx.emit(scorer_completed_event)
+            await ctx.emit_async(scorer_completed_event)
 
             # Emit run.completed
             run_completed_event = Completed(
@@ -1482,7 +1482,7 @@ class ExecutorMixin:
                 output_data=result_dict,
             )
             if pull_response is None:
-                ctx.emit(run_completed_event)
+                await ctx.emit_async(run_completed_event)
             return pull_response
 
         return await self._execute_with_context(request, create_context, execute, "Scorer")
