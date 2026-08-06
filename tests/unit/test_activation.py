@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from agnt5 import Context
 from agnt5.activation import (
     ActivationClient,
     ActivationCompletionReceipt,
@@ -16,10 +17,12 @@ from agnt5.activation import (
     ActivationRecoveryPolicy,
     ActivationUsage,
     BeginActivationRequest,
+    ChildJoinPolicy,
     NativeActivationTransport,
     UInt64,
     activation_id,
     canonical_activation_value,
+    child_activation_request_from_context,
     stable_step_key,
 )
 from agnt5.exceptions import ActivationError, ActivationErrorCode
@@ -101,6 +104,40 @@ def test_canonical_activation_values_reject_unsafe_inputs(value):
 def test_stable_step_key_has_explicit_and_compatibility_forms():
     assert stable_step_key("load", 0) == "step:load:0"
     assert stable_step_key("load", 0, "item-42") == "step:load:item-42"
+
+
+def test_child_request_carries_stable_linkage_and_target_definition():
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="corr-1",
+        parent_correlation_id="parent-1",
+        trace_metadata={
+            "project_id": "project-1",
+            "component_name": "router",
+            "worker_session_id": "worker-1",
+            "run_authority": "run-authority",
+            "lease_authority": "lease-authority",
+            "activation_definition_version": "v1",
+            "activation_artifact_sha256": "00" * 32,
+            "activation_definition_config": '["object",[]]',
+        },
+    )
+    request = child_activation_request_from_context(
+        ctx,
+        child_name="researcher",
+        stable_key="child:researcher:0",
+        input_value={"message": "investigate"},
+        join_policy=ChildJoinPolicy.REQUIRED,
+    )
+
+    assert request.kind is ActivationKind.CHILD
+    assert request.recovery_policy is ActivationRecoveryPolicy.DURABLE_STEPS
+    assert request.child is not None
+    assert request.child.child_key == request.stable_key
+    assert request.child.child_definition_digest == request.definition_digest
+    assert request.child.child_run_id.startswith("child_")
+    assert request.child.child_session_id.startswith("session_")
+    assert request.child.join_policy is ChildJoinPolicy.REQUIRED
 
 
 class RecordingTransport:

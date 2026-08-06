@@ -6,6 +6,8 @@ following the pattern popularized by LangGraph and OpenAI Agents SDK.
 
 from typing import TYPE_CHECKING, Optional
 
+from ..activation import ChildJoinPolicy
+
 if TYPE_CHECKING:
     from .core import Agent
 
@@ -47,6 +49,7 @@ class Handoff:
         description: Optional[str] = None,
         tool_name: Optional[str] = None,
         pass_full_history: bool = True,
+        join_policy: ChildJoinPolicy = ChildJoinPolicy.REQUIRED,
     ):
         """Initialize handoff configuration.
 
@@ -55,11 +58,13 @@ class Handoff:
             description: Description shown to LLM (defaults to agent instructions)
             tool_name: Custom tool name (defaults to 'transfer_to_{agent_name}')
             pass_full_history: Whether to pass full conversation history to target agent
+            join_policy: Whether the child blocks parent success or runs detached
         """
         self.agent = agent
         self.description = description or agent.instructions or f"Transfer to {agent.name}"
         self.tool_name = tool_name or f"transfer_to_{agent.name}"
         self.pass_full_history = pass_full_history
+        self.join_policy = join_policy
 
 
 def handoff(
@@ -67,6 +72,7 @@ def handoff(
     description: Optional[str] = None,
     tool_name: Optional[str] = None,
     pass_full_history: bool = True,
+    join_policy: ChildJoinPolicy = ChildJoinPolicy.REQUIRED,
 ) -> Handoff:
     """Create a handoff configuration for agent-to-agent delegation.
 
@@ -77,6 +83,7 @@ def handoff(
         description: Description shown to LLM
         tool_name: Custom tool name
         pass_full_history: Whether to pass full conversation history
+        join_policy: Whether the child blocks parent success or runs detached
 
     Returns:
         Handoff configuration
@@ -102,4 +109,5 @@ def handoff(
         description=description,
         tool_name=tool_name,
         pass_full_history=pass_full_history,
+        join_policy=join_policy,
     )

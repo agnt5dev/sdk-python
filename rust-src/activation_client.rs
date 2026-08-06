@@ -4,8 +4,8 @@ use agnt5_sdk_core::client::EngineClient;
 use agnt5_sdk_core::error::{ErrorCode, SdkError};
 use agnt5_sdk_core::pb::{
     activation_payload, ActivationEvidence, ActivationExternalOutcomeCertainty, ActivationPayload,
-    ActivationStatus, ActivationUsage, BeginActivationRequest, CompleteActivationRequest,
-    FailActivationRequest,
+    ActivationStatus, ActivationUsage, BeginActivationRequest, ChildActivationLinkage,
+    CompleteActivationRequest, FailActivationRequest,
 };
 use agnt5_sdk_core::runtime_adapter::{ActivationAdapter, ActivationDecision};
 use pyo3::prelude::*;
@@ -289,6 +289,7 @@ impl PyActivationClient {
         worker_session_id: String,
         run_authority: Vec<u8>,
         lease_authority: Vec<u8>,
+        child: Option<(String, String, String, Vec<u8>, i32)>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
@@ -307,6 +308,21 @@ impl PyActivationClient {
                     worker_session_id,
                     run_authority,
                     lease_authority,
+                    child: child.map(
+                        |(
+                            child_key,
+                            child_run_id,
+                            child_session_id,
+                            child_definition_digest,
+                            join_policy,
+                        )| ChildActivationLinkage {
+                            child_key,
+                            child_run_id,
+                            child_session_id,
+                            child_definition_digest,
+                            join_policy,
+                        },
+                    ),
                 })
                 .await
                 .map_err(activation_error)?;

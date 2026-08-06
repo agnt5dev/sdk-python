@@ -17,6 +17,7 @@ from .exceptions import ActivationError, ActivationErrorCode
 DURABLE_ACTIVATION_V1 = "durable_activation_v1"
 _IDENTITY_DOMAIN = b"agnt5.activation.identity.v1\0"
 _DEFINITION_DOMAIN = b"agnt5.activation.definition.v1\0"
+_CHILD_DEFINITION_DOMAIN = b"agnt5.activation.child-definition.v1\0"
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
@@ -58,6 +59,13 @@ class ActivationRecoveryPolicy(IntEnum):
     FAIL = 5
 
 
+class ChildJoinPolicy(IntEnum):
+    """Whether a delegated child participates in parent terminalization."""
+
+    REQUIRED = 1
+    DETACHED = 2
+
+
 class ActivationDecisionKind(str, Enum):
     """Complete V1 begin-decision surface."""
 
@@ -67,6 +75,17 @@ class ActivationDecisionKind(str, Enum):
     CONFLICT = "CONFLICT"
     CANCELLED = "CANCELLED"
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"
+
+
+@dataclass(frozen=True)
+class ChildActivationLinkage:
+    """Immutable logical child identity persisted with activation admission."""
+
+    child_key: str
+    child_run_id: str
+    child_session_id: str
+    child_definition_digest: bytes
+    join_policy: ChildJoinPolicy
 
 
 @dataclass(frozen=True)
@@ -82,6 +101,7 @@ class BeginActivationRequest:
     worker_session_id: str
     run_authority: bytes
     lease_authority: bytes
+    child: ChildActivationLinkage | None = None
 
 
 @dataclass(frozen=True)
@@ -254,6 +274,17 @@ class NativeActivationTransport:
                 request.worker_session_id,
                 list(request.run_authority),
                 list(request.lease_authority),
+                (
+                    (
+                        request.child.child_key,
+                        request.child.child_run_id,
+                        request.child.child_session_id,
+                        list(request.child.child_definition_digest),
+                        int(request.child.join_policy),
+                    )
+                    if request.child is not None
+                    else None
+                ),
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -556,6 +587,8 @@ def activation_request_from_context(
     stable_key: str,
     input_value: Any,
     recovery_policy: ActivationRecoveryPolicy,
+    definition_digest: bytes | None = None,
+    child: ChildActivationLinkage | None = None,
 ) -> BeginActivationRequest:
     """Build one journal-bound request from negotiated worker context authority."""
 
@@ -590,24 +623,80 @@ def activation_request_from_context(
     canonical_config = metadata.get("activation_definition_config", '["object",[]]').encode(
         "utf-8"
     )
+    active = current_activation()
     return BeginActivationRequest(
         project_id=project_id,
         run_id=run_id,
-        parent_activation_id=metadata.get("parent_activation_id", ""),
+        parent_activation_id=(
+            active.activation_id
+            if active is not None
+            else metadata.get("parent_activation_id", "")
+        ),
         kind=kind,
         stable_key=stable_key,
         input_digest=hashlib.sha256(canonical_activation_value(input_value)).digest(),
-        definition_digest=activation_definition_digest(
-            decode_sha256(metadata.get("activation_artifact_sha256", "")),
-            component_name,
-            definition_version,
-            canonical_config,
+        definition_digest=(
+            bytes(definition_digest)
+            if definition_digest is not None
+            else activation_definition_digest(
+                decode_sha256(metadata.get("activation_artifact_sha256", "")),
+                component_name,
+                definition_version,
+                canonical_config,
+            )
         ),
         recovery_policy=recovery_policy,
         worker_session_id=worker_session_id,
         run_authority=run_authority.encode("utf-8"),
         lease_authority=lease_authority.encode("utf-8"),
+        child=child,
     )
+
+
+def child_activation_request_from_context(
+    context: Any,
+    *,
+    child_name: str,
+    stable_key: str,
+    input_value: Any,
+    join_policy: ChildJoinPolicy = ChildJoinPolicy.REQUIRED,
+) -> BeginActivationRequest:
+    """Build one deterministic delegated-child request from parent authority."""
+
+    if not child_name.strip() or not stable_key.strip():
+        raise ActivationError(
+            ActivationErrorCode.INVALID_ARGUMENT,
+            "child_name and stable_key are required",
+        )
+    base = activation_request_from_context(
+        context,
+        kind=ActivationKind.CHILD,
+        stable_key=stable_key,
+        input_value=input_value,
+        recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+    )
+    child_definition_digest = hashlib.sha256(
+        _CHILD_DEFINITION_DOMAIN
+        + _frame(base.definition_digest)
+        + _frame(child_name.encode("utf-8"))
+    ).digest()
+    logical_id = activation_id(
+        base.project_id,
+        base.run_id,
+        base.parent_activation_id,
+        ActivationKind.CHILD,
+        stable_key,
+    )
+    suffix = logical_id.removeprefix("actv1_")
+    metadata = dict(getattr(context, "_trace_metadata", None) or {})
+    linkage = ChildActivationLinkage(
+        child_key=stable_key,
+        child_run_id=f"child_{suffix}",
+        child_session_id=metadata.get("session_id") or f"session_{suffix}",
+        child_definition_digest=child_definition_digest,
+        join_policy=join_policy,
+    )
+    return replace(base, definition_digest=child_definition_digest, child=linkage)
 
 
 def canonical_activation_value(value: Any) -> bytes:

@@ -22,6 +22,7 @@ from .activation import (
     ActivationExecution,
     ActivationRecoveryPolicy,
     ActivationUsage,
+    ChildJoinPolicy,
     current_activation,
 )
 from .agent import (
@@ -463,6 +464,7 @@ __all__ = [
     "ActivationEvidence",
     "ActivationExecution",
     "ActivationRecoveryPolicy",
+    "ChildJoinPolicy",
     "ActivationUsage",
     "current_activation",
     "ConfigurationError",
