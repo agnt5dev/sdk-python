@@ -106,6 +106,33 @@ def test_workflow_sync_function_converted():
     assert asyncio.iscoroutinefunction(config.handler)
 
 
+@pytest.mark.asyncio
+async def test_workflow_sync_function_runs_outside_event_loop():
+    """A blocking sync workflow must not stall unrelated coroutines."""
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    @workflow(name="sync_workflow_off_event_loop")
+    def sync_workflow(ctx: WorkflowContext) -> str:
+        entered.set()
+        release.wait(timeout=1)
+        return "sync"
+
+    config = WorkflowRegistry.get("sync_workflow_off_event_loop")
+    assert config is not None
+
+    task = asyncio.create_task(config.handler(object()))
+    assert await asyncio.to_thread(entered.wait, 0.5)
+
+    # This assertion executes while the synchronous handler is still blocked,
+    # proving that it is not occupying the event-loop thread.
+    assert not task.done()
+    release.set()
+    assert await task == "sync"
+
+
 # Test Workflow Execution
 
 

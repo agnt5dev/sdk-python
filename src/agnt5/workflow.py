@@ -2542,10 +2542,13 @@ def workflow(
         if inspect.iscoroutinefunction(func):
             handler_func = cast(HandlerFunc, func)
         else:
-            # Wrap sync function in async
+            # Run synchronous workflow bodies outside the shared event-loop
+            # thread. asyncio.to_thread() also propagates contextvars, so the
+            # workflow context and tracing parent remain available to the
+            # handler without blocking unrelated workflow coroutines.
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                return func(*args, **kwargs)
+                return await asyncio.to_thread(func, *args, **kwargs)
 
             handler_func = cast(HandlerFunc, async_wrapper)
 

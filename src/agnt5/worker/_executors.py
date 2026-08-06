@@ -1496,7 +1496,8 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Execute a workflow handler with automatic replay support.
 
-        Uses ctx.emit() for ALL lifecycle events to ensure proper ordering:
+        Awaits ctx.emit_async() for lifecycle events to preserve ordering
+        without blocking the Python event-loop thread:
         - run.started -> workflow.started -> workflow.step.* -> workflow.completed -> run.completed
 
         Returns None to let the event queue handle delivery.
@@ -1703,7 +1704,7 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting run.started event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
-                ctx.emit(run_started_event)
+                await ctx.emit_async(run_started_event)
 
                 wf_trace_id = _trace_id_from_request(request)
 
@@ -1720,7 +1721,7 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting workflow.started event: "
                     f"component={config.name}, correlation_id={workflow_correlation_id}"
                 )
-                ctx.emit(workflow_started_event)
+                await ctx.emit_async(workflow_started_event)
             else:
                 logger.debug(
                     f"[_execute_workflow] Skipping run.started and workflow.started for resumed workflow: "
@@ -1767,7 +1768,7 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting workflow.failed event: "
                     f"component={config.name}, error={error_msg}"
                 )
-                ctx.emit(workflow_failed_event)
+                await ctx.emit_async(workflow_failed_event)
 
                 # Emit run.failed (parent event)
                 run_failed_event = Failed(
@@ -1790,7 +1791,7 @@ class ExecutorMixin:
                     error_code=type(workflow_error).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
             # Calculate workflow duration
@@ -1827,7 +1828,7 @@ class ExecutorMixin:
                 f"[_execute_workflow] Emitting workflow.completed event: "
                 f"component={config.name}, duration_ms={workflow_duration_ms}"
             )
-            ctx.emit(workflow_completed_event)
+            await ctx.emit_async(workflow_completed_event)
 
             # Emit run.completed via event queue (not synchronous return)
             # This ensures proper event ordering: started -> steps -> completed
@@ -1849,7 +1850,7 @@ class ExecutorMixin:
                 output_data=result,
             )
             if pull_response is None:
-                ctx.emit(run_completed_event)
+                await ctx.emit_async(run_completed_event)
             return pull_response
 
         except DurableSleepSuspension as suspension:
@@ -1885,8 +1886,8 @@ class ExecutorMixin:
 
         except WaitingForUserInputException as pause:
             # Workflow paused for user input.
-            # The workflow.paused event was already emitted via ctx.emit()
-            # and persisted through WriteCheckpoint. Also return an explicit
+            # The workflow.paused event was already emitted and durably acknowledged.
+            # Also return an explicit
             # run.paused worker response so the coordinator that owns the
             # dispatch can release its lease immediately. Relying only on the
             # journal notification is racy in HA because another coordinator
@@ -1954,7 +1955,7 @@ class ExecutorMixin:
                     error_code=type(e).__name__,
                 )
                 if pull_response is None:
-                    ctx.emit(run_failed_event)
+                    await ctx.emit_async(run_failed_event)
                 return pull_response
 
             # Fallback: if no context, return synchronous error response

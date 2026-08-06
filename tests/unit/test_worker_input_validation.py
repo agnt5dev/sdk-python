@@ -127,6 +127,41 @@ async def test_non_object_inputs_fail_before_workflow_handler(payload):
 
 
 @pytest.mark.asyncio
+async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
+    from agnt5.workflow import WorkflowContext
+
+    executor = _DummyExecutor()
+    emitted_types = []
+
+    def reject_sync_emit(self, event):
+        raise AssertionError(f"synchronous lifecycle emission used for {event.event_type}")
+
+    async def record_async_emit(self, event):
+        emitted_types.append(event.event_type)
+
+    monkeypatch.setattr(WorkflowContext, "emit", reject_sync_emit)
+    monkeypatch.setattr(WorkflowContext, "emit_async", record_async_emit)
+
+    async def handler(ctx):
+        return {"ok": True}
+
+    request = _request({})
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="async_lifecycle_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is None
+    assert emitted_types == [
+        "run.started",
+        "workflow.started",
+        "workflow.completed",
+        "run.completed",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_pull_workflow_pause_returns_terminal_without_queueing_workflow_terminal():
     executor = _DummyExecutor()
     queued_events = []
