@@ -235,6 +235,10 @@ class ExecutorMixin:
                 getattr(self, "_entity_state_adapter", None)
             )
             ctx = context_factory(input_dict, request)
+            if getattr(ctx, "_activation_client", None) is None:
+                ctx._activation_client = _resolve_activation_client(
+                    self, getattr(request, "metadata", None)
+                )
             token = set_current_context(ctx)
             span_token = _set_current_span_from_runtime_context(
                 getattr(request, "runtime_context", None)
@@ -606,6 +610,7 @@ class ExecutorMixin:
                 attempt=getattr(req, "attempt", 0),
                 runtime_context=req.runtime_context,
                 worker=self._rust_worker,
+                trace_metadata=getattr(req, "metadata", None),
             )
 
         async def execute(ctx: Context, input_dict: dict, req: Any):

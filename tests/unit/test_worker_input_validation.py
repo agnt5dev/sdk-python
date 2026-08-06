@@ -197,6 +197,35 @@ async def test_negotiated_activation_without_native_client_fails_before_workflow
 
 
 @pytest.mark.asyncio
+async def test_direct_tool_inherits_activation_client_and_worker_authority():
+    executor = _DurableExecutor()
+    authority = {
+        "durable_activation_v1": "true",
+        "dispatch_mode": "pull",
+        "worker_id": "worker-1",
+        "worker_session_id": "session-1",
+        "lease_id": "lease-1",
+        "lease_attempt": "1",
+    }
+
+    class Tool:
+        name = "durable_tool"
+
+        async def invoke(self, ctx):
+            assert ctx._activation_client is executor
+            assert ctx.metadata == authority
+            return {"ok": True}
+
+    request = _request({})
+    request.metadata = authority
+    response = await executor._execute_tool(Tool(), request.input_data, request)
+
+    assert response is not None
+    assert response.success is True
+    assert deserialize(response.output_data) == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_durable_workflow_sleep_returns_typed_worker_suspension():
     executor = _DurableExecutor()
 
