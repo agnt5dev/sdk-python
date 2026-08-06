@@ -202,10 +202,7 @@ fn decision_to_python(decision: ActivationDecision) -> PyResult<PyActivationDeci
             accepted_journal_offset: receipt.accepted_journal_offset,
             fence_token: Vec::new(),
             replay_output: None,
-            message: format!(
-                "activation attempt is active on worker session {}",
-                receipt.active_worker_session_id
-            ),
+            message: "activation attempt is owned by another worker session".to_string(),
         }),
         ActivationDecision::Conflict {
             activation_id,
@@ -454,6 +451,27 @@ pub fn register_activation_client(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_message_does_not_expose_worker_session_authority() {
+        let secret_session = "agnt5ws1.payload.signature";
+        let decision = ActivationDecision::Wait {
+            activation_id: "activation-1".to_string(),
+            receipt: agnt5_sdk_core::pb::ActivationWaitReceipt {
+                attempt: 2,
+                active_worker_session_id: secret_session.to_string(),
+                accepted_journal_offset: 7,
+            },
+        };
+
+        let converted = decision_to_python(decision).expect("WAIT decision");
+
+        assert_eq!(
+            converted.message,
+            "activation attempt is owned by another worker session"
+        );
+        assert!(!converted.message.contains(secret_session));
+    }
 
     #[test]
     fn preserves_required_child_error_code() {
