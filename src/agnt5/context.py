@@ -201,6 +201,7 @@ class Context:
         self._component_name: Optional[str] = None
         self._memo_namespace = memo_namespace or ""
         self._memo_child_sequences: dict[str, int] = {}
+        self._activation_sequences: dict[str, int] = {}
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
@@ -238,6 +239,22 @@ class Context:
     def metadata(self) -> dict[str, str]:
         """Runtime dispatch metadata for this invocation."""
         return dict(self._trace_metadata or {})
+
+    @property
+    def activation(self):
+        """Current durable activation, including its downstream idempotency key."""
+
+        from .activation import current_activation
+
+        return current_activation()
+
+    def allocate_activation_key(self, kind: str, name: str) -> str:
+        """Allocate a deterministic sequential key for compatibility call paths."""
+
+        namespace = f"{kind}:{name}"
+        ordinal = self._activation_sequences.get(namespace, 0)
+        self._activation_sequences[namespace] = ordinal + 1
+        return f"{namespace}:{ordinal}"
 
     @property
     def logger(self) -> ContextLogger:

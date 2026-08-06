@@ -24,8 +24,15 @@ from typing import (
 
 from docstring_parser import parse as parse_docstring
 
-from ._serialization import serialize_to_str
+from ._serialization import deserialize, serialize, serialize_to_str
 from ._telemetry import setup_module_logger, truncate_span_attribute_value
+from .activation import (
+    ActivationKind,
+    ActivationRecoveryPolicy,
+    _reset_current_activation,
+    _set_current_activation,
+    activation_request_from_context,
+)
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
 
@@ -36,6 +43,25 @@ logger = setup_module_logger(__name__)
 
 T = TypeVar("T")
 ToolHandler = Callable[..., Awaitable[T]]
+
+
+def _coerce_recovery_policy(
+    value: ActivationRecoveryPolicy | str,
+) -> ActivationRecoveryPolicy:
+    if isinstance(value, ActivationRecoveryPolicy):
+        return value
+    normalized = value.strip().lower()
+    mapping = {
+        "idempotent_retry": ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+        "durable_steps": ActivationRecoveryPolicy.DURABLE_STEPS,
+        "unknown_outcome": ActivationRecoveryPolicy.UNKNOWN_OUTCOME,
+        "compensate": ActivationRecoveryPolicy.COMPENSATE,
+        "fail": ActivationRecoveryPolicy.FAIL,
+    }
+    try:
+        return mapping[normalized]
+    except KeyError as error:
+        raise ConfigurationError(f"Unsupported tool recovery policy: {value!r}") from error
 
 
 def _serialize_for_span(value: Any) -> str:
@@ -243,6 +269,10 @@ class Tool:
         input_schema: Optional[Dict[str, Any]] = None,
         confirmation: bool = False,
         auto_schema: bool = False,
+        recovery_policy: ActivationRecoveryPolicy | str = (
+            ActivationRecoveryPolicy.UNKNOWN_OUTCOME
+        ),
+        durable: bool = True,
     ):
         """
         Initialize a Tool.
@@ -259,6 +289,8 @@ class Tool:
         self.description = description
         self.handler = handler
         self.confirmation = confirmation
+        self.recovery_policy = _coerce_recovery_policy(recovery_policy)
+        self.durable = durable
 
         # Extract or use provided schema
         if auto_schema:
@@ -292,6 +324,28 @@ class Tool:
             )
 
     async def invoke(self, ctx: Context, **kwargs) -> Any:
+        return await self._invoke(ctx, kwargs, stable_key=None)
+
+    async def invoke_with_stable_key(
+        self,
+        ctx: Context,
+        arguments: Dict[str, Any],
+        *,
+        stable_key: Optional[str],
+    ) -> Any:
+        """Invoke using a provider/tool-call identity when one is available."""
+
+        return await self._invoke(ctx, arguments, stable_key=stable_key)
+
+    async def _invoke(
+        self,
+        ctx: Context,
+        kwargs: Dict[str, Any],
+        *,
+        stable_key: Optional[str],
+        allow_activation: bool = True,
+        allow_memo: bool = True,
+    ) -> Any:
         """
         Invoke the tool with given arguments.
 
@@ -310,6 +364,21 @@ class Tool:
             the journal for cached results before executing and cache results
             after successful execution.
         """
+        metadata = getattr(ctx, "_trace_metadata", None) or {}
+        activation_client = getattr(ctx, "_activation_client", None)
+        if (
+            allow_activation
+            and self.durable
+            and metadata.get("durable_activation_v1") == "true"
+            and activation_client is not None
+        ):
+            return await self._invoke_durable(
+                ctx,
+                kwargs,
+                stable_key=stable_key,
+                activation_client=activation_client,
+            )
+
         injected_fault = _consume_eval_tool_fault(ctx, self.name)
         if injected_fault:
             raise RuntimeError(injected_fault)
@@ -319,7 +388,7 @@ class Tool:
         content_hash = None
         memo = None
 
-        if hasattr(ctx, "_memo") and ctx._memo:
+        if allow_memo and hasattr(ctx, "_memo") and ctx._memo:
             memo = ctx._memo
             step_key, content_hash = memo.tool_call_key(self.name, kwargs)
 
@@ -379,6 +448,62 @@ class Tool:
             from .context import _current_context
 
             _current_context.reset(token)
+
+    async def _invoke_durable(
+        self,
+        ctx: Context,
+        arguments: Dict[str, Any],
+        *,
+        stable_key: Optional[str],
+        activation_client: Any,
+    ) -> Any:
+        logical_key = (
+            f"tool:{self.name}:{stable_key}"
+            if stable_key
+            else ctx.allocate_activation_key("tool", self.name)
+        )
+        request = activation_request_from_context(
+            ctx,
+            kind=ActivationKind.TOOL,
+            stable_key=logical_key,
+            input_value={"name": self.name, "arguments": arguments},
+            recovery_policy=self.recovery_policy,
+        )
+        activation_token = None
+
+        def on_admitted(decision):
+            nonlocal activation_token
+            activation_token = _set_current_activation(decision)
+
+        async def execute():
+            return await self._invoke(
+                ctx,
+                arguments,
+                stable_key=stable_key,
+                allow_activation=False,
+                allow_memo=False,
+            )
+
+        retryable = self.recovery_policy in {
+            ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+            ActivationRecoveryPolicy.DURABLE_STEPS,
+        }
+        try:
+            result, _receipt = await activation_client.run(
+                request,
+                execute,
+                encode_output=serialize,
+                decode_output=deserialize,
+                latency_ms=lambda: 0,
+                on_admitted=on_admitted,
+                failure_error_code="TOOL_FAILED",
+                failure_retryable=retryable,
+                failure_external_outcome_certainty="UNKNOWN",
+            )
+            return result
+        finally:
+            if activation_token is not None:
+                _reset_current_activation(activation_token)
 
     def get_schema(self) -> Dict[str, Any]:
         """
@@ -461,6 +586,9 @@ def tool(
     auto_schema: bool = True,
     confirmation: bool = False,
     input_schema: Optional[Dict[str, Any]] = None,
+    recovery_policy: ActivationRecoveryPolicy | str = (
+        ActivationRecoveryPolicy.UNKNOWN_OUTCOME
+    ),
 ) -> Callable[..., Any]:
     """
     Decorator to mark a function as a tool with automatic schema extraction.
@@ -471,6 +599,9 @@ def tool(
         auto_schema: Automatically extract schema from type hints and docstring
         confirmation: Whether tool requires confirmation before execution
         input_schema: Manual schema (only if auto_schema=False)
+        recovery_policy: Interrupted-work policy. Ordinary tools default to
+            ``unknown_outcome``; explicitly idempotent or nested durable tools
+            may opt into ``idempotent_retry`` or ``durable_steps``.
 
     Returns:
         Decorated function that can be invoked as a tool
@@ -545,6 +676,7 @@ def tool(
             input_schema=input_schema,
             confirmation=confirmation,
             auto_schema=auto_schema,
+            recovery_policy=recovery_policy,
         )
 
         # Register tool
@@ -616,6 +748,7 @@ class AskUserTool(Tool):
             description="Ask the user a question and wait for their text response",
             handler=self._handler,
             auto_schema=True,
+            durable=False,
         )
         self.context = context
 
@@ -707,6 +840,7 @@ class RequestApprovalTool(Tool):
             description="Request user approval for an action before proceeding",
             handler=self._handler,
             auto_schema=True,
+            durable=False,
         )
         self.context = context
 

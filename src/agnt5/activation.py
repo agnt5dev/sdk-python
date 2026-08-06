@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import struct
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
@@ -109,6 +110,41 @@ class ActivationFailureReceipt:
     accepted_journal_offset: int
     status: str
     replayed: bool = False
+
+
+@dataclass(frozen=True)
+class ActivationExecution:
+    """Authority exposed to user code while one activation is executing."""
+
+    activation_id: str
+    attempt: int
+    idempotency_key: str
+
+
+_current_activation: ContextVar[ActivationExecution | None] = ContextVar(
+    "agnt5_current_activation",
+    default=None,
+)
+
+
+def current_activation() -> ActivationExecution | None:
+    """Return the active durable unit for downstream idempotency propagation."""
+
+    return _current_activation.get()
+
+
+def _set_current_activation(decision: ActivationDecision) -> Token:
+    return _current_activation.set(
+        ActivationExecution(
+            activation_id=decision.activation_id,
+            attempt=decision.attempt,
+            idempotency_key=f"agnt5:{decision.activation_id}",
+        )
+    )
+
+
+def _reset_current_activation(token: Token) -> None:
+    _current_activation.reset(token)
 
 
 class ActivationTransport(Protocol):
@@ -337,6 +373,9 @@ class ActivationClient:
         | None = None,
         on_failed: Callable[[ActivationDecision, ActivationFailureReceipt, Exception], None]
         | None = None,
+        failure_error_code: str = "STEP_FAILED",
+        failure_retryable: bool = False,
+        failure_external_outcome_certainty: str = "UNKNOWN",
     ) -> tuple[T, ActivationDecision | ActivationCompletionReceipt]:
         """Execute or replay one activation, returning only after durable acceptance."""
 
@@ -374,10 +413,10 @@ class ActivationClient:
                 activation_id=decision.activation_id,
                 attempt=decision.attempt,
                 fence_token=decision.fence_token,
-                error_code="STEP_FAILED",
+                error_code=failure_error_code,
                 error_data=error_data,
-                retryable=False,
-                external_outcome_certainty="UNKNOWN",
+                retryable=failure_retryable,
+                external_outcome_certainty=failure_external_outcome_certainty,
             )
             if (
                 receipt.activation_id != decision.activation_id
@@ -414,6 +453,67 @@ class ActivationClient:
         if on_completed is not None:
             on_completed(decision, receipt)
         return result, receipt
+
+
+def activation_request_from_context(
+    context: Any,
+    *,
+    kind: ActivationKind,
+    stable_key: str,
+    input_value: Any,
+    recovery_policy: ActivationRecoveryPolicy,
+) -> BeginActivationRequest:
+    """Build one journal-bound request from negotiated worker context authority."""
+
+    metadata = dict(getattr(context, "_trace_metadata", None) or {})
+    project_id = metadata.get("project_id") or metadata.get("tenant_id") or ""
+    run_id = getattr(context, "run_id", "")
+    worker_session_id = metadata.get("worker_session_id") or metadata.get("worker_id") or ""
+    run_authority = metadata.get("run_authority") or run_id
+    lease_authority = metadata.get("lease_authority") or metadata.get("lease_id") or ""
+    definition_version = metadata.get("activation_definition_version") or ""
+    component_name = (
+        metadata.get("component_name")
+        or getattr(context, "component_name", None)
+        or getattr(context, "_agent_name", None)
+        or ""
+    )
+    if not all(
+        (
+            project_id,
+            run_id,
+            worker_session_id,
+            run_authority,
+            lease_authority,
+            component_name,
+            definition_version,
+        )
+    ):
+        raise ActivationError(
+            ActivationErrorCode.DURABILITY_UNAVAILABLE,
+            "durable activation requires project, run, worker-session, run, lease, component, and definition authority",
+        )
+    canonical_config = metadata.get("activation_definition_config", '["object",[]]').encode(
+        "utf-8"
+    )
+    return BeginActivationRequest(
+        project_id=project_id,
+        run_id=run_id,
+        parent_activation_id=metadata.get("parent_activation_id", ""),
+        kind=kind,
+        stable_key=stable_key,
+        input_digest=hashlib.sha256(canonical_activation_value(input_value)).digest(),
+        definition_digest=activation_definition_digest(
+            decode_sha256(metadata.get("activation_artifact_sha256", "")),
+            component_name,
+            definition_version,
+            canonical_config,
+        ),
+        recovery_policy=recovery_policy,
+        worker_session_id=worker_session_id,
+        run_authority=run_authority.encode("utf-8"),
+        lease_authority=lease_authority.encode("utf-8"),
+    )
 
 
 def canonical_activation_value(value: Any) -> bytes:

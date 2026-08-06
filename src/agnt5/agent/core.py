@@ -754,9 +754,10 @@ class Agent:
         if callback_context.tool is None:
             raise ValueError(f"Tool '{callback_context.tool_name}' not found")
 
-        result = await callback_context.tool.invoke(
+        result = await callback_context.tool.invoke_with_stable_key(
             callback_context.context,
-            **callback_context.arguments,
+            callback_context.arguments,
+            stable_key=callback_context.tool_call_id or None,
         )
 
         after = self.callbacks.after_tool
@@ -2038,7 +2039,11 @@ class Agent:
                                         result_text = f"Error: Tool '{tool_name}' not found"
                                     else:
                                         # Execute tool
-                                        result = await tool.invoke(context, **tool_args)
+                                        result = await tool.invoke_with_stable_key(
+                                            context,
+                                            tool_args,
+                                            stable_key=tool_call_id or None,
+                                        )
 
                                         # Check if this was a handoff
                                         if isinstance(result, dict) and result.get("_handoff"):

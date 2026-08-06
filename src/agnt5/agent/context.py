@@ -112,6 +112,7 @@ class AgentContext(Context):
             trace_metadata=trace_metadata,
             memo_namespace=memo_namespace,
         )
+        self._activation_client = getattr(parent_context, "_activation_client", None)
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id

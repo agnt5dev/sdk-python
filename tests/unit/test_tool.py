@@ -15,6 +15,13 @@ import json
 import pytest
 
 from agnt5 import Context, tool
+from agnt5.activation import (
+    ActivationDecision,
+    ActivationDecisionKind,
+    ActivationKind,
+    ActivationRecoveryPolicy,
+    activation_id,
+)
 from agnt5.exceptions import ConfigurationError
 from agnt5.tool import (
     Tool,
@@ -609,6 +616,82 @@ def test_tool_decorator_returns_tool_instance():
     # Function metadata is copied to Tool
     assert inspectable_tool.__name__ == "inspectable_tool"
     assert inspectable_tool.__doc__ == "Inspectable tool."
+
+
+@pytest.mark.asyncio
+async def test_durable_tool_uses_provider_call_identity_and_exposes_downstream_key():
+    class RecordingActivationClient:
+        async def run(self, request, execute, **options):
+            self.request = request
+            self.options = options
+            decision = ActivationDecision(
+                kind=ActivationDecisionKind.EXECUTE,
+                activation_id=activation_id(
+                    request.project_id,
+                    request.run_id,
+                    request.parent_activation_id,
+                    request.kind,
+                    request.stable_key,
+                ),
+                attempt=1,
+                accepted_journal_offset=7,
+                fence_token=b"fence",
+            )
+            options["on_admitted"](decision)
+            return await execute(), decision
+
+    observed = {}
+
+    @tool(recovery_policy="idempotent_retry")
+    async def charge(ctx: Context, amount: int) -> dict:
+        observed["activation"] = ctx.activation
+        return {"amount": amount}
+
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="corr-1",
+        parent_correlation_id="parent-1",
+        trace_metadata={
+            "durable_activation_v1": "true",
+            "project_id": "project-1",
+            "component_name": "billing-agent",
+            "worker_session_id": "worker-session-1",
+            "run_authority": "run-authority-1",
+            "lease_authority": "lease-authority-1",
+            "activation_definition_version": "v1",
+            "activation_artifact_sha256": "00" * 32,
+            "activation_definition_config": '["object",[]]',
+        },
+    )
+    client = RecordingActivationClient()
+    ctx._activation_client = client
+
+    result = await charge.invoke_with_stable_key(
+        ctx,
+        {"amount": 42},
+        stable_key="provider-call-7",
+    )
+
+    assert result == {"amount": 42}
+    assert client.request.kind is ActivationKind.TOOL
+    assert client.request.stable_key == "tool:charge:provider-call-7"
+    assert client.request.recovery_policy is ActivationRecoveryPolicy.IDEMPOTENT_RETRY
+    assert client.options["failure_error_code"] == "TOOL_FAILED"
+    assert client.options["failure_retryable"] is True
+    assert observed["activation"].idempotency_key == (
+        f"agnt5:{observed['activation'].activation_id}"
+    )
+    assert ctx.activation is None
+
+
+def test_tool_recovery_defaults_to_unknown_outcome_and_rejects_unknown_values():
+    async def handler(ctx: Context) -> None:
+        return None
+
+    ordinary = Tool("ordinary", "", handler)
+    assert ordinary.recovery_policy is ActivationRecoveryPolicy.UNKNOWN_OUTCOME
+    with pytest.raises(ConfigurationError, match="Unsupported tool recovery policy"):
+        Tool("bad", "", handler, recovery_policy="blind_retry")
 
 
 def test_tool_without_return_type():
