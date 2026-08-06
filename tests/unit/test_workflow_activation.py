@@ -8,10 +8,15 @@ from agnt5.activation import (
     ActivationDecision,
     ActivationDecisionKind,
     ActivationFailureReceipt,
+    ActivationKind,
     activation_id,
 )
 from agnt5.events import Completed, Failed, Started
-from agnt5.exceptions import ActivationError, ActivationErrorCode
+from agnt5.exceptions import (
+    ActivationError,
+    ActivationErrorCode,
+    DurableSleepSuspension,
+)
 from agnt5.function import FunctionContext, FunctionRegistry, function
 from agnt5.workflow import WorkflowContext, WorkflowEntity
 
@@ -91,6 +96,67 @@ def activation_context(transport):
     events = []
     context.emit = events.append
     return context, entity, events
+
+
+def durable_sleep_context(transport):
+    context, entity, events = activation_context(transport)
+    context._trace_metadata["durable_suspension_v1"] = "true"
+    return context, entity, events
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_yields_typed_timer_authority_without_local_wait():
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+
+    with pytest.raises(DurableSleepSuspension) as caught:
+        await context.sleep(2.5, name="backoff")
+
+    suspension = caught.value
+    assert suspension.timer_key == "sleep:backoff"
+    assert suspension.delay_ms == 2500
+    assert suspension.attempt == 1
+    assert suspension.fence_token == b"fence-1"
+    assert len(suspension.input_digest) == 32
+    assert len(suspension.definition_digest) == 32
+    assert not entity.has_completed_step("sleep:backoff")
+    assert transport.begin_requests[0].kind is ActivationKind.TIMER
+    assert transport.complete_requests == []
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_resume_completes_only_matching_timer_activation():
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    context._trace_metadata.update(
+        {
+            "timer_key": "sleep:backoff",
+            "activation_id": activation_id(
+                "project-1",
+                "run-1",
+                "",
+                ActivationKind.TIMER,
+                "sleep:backoff",
+            ),
+        }
+    )
+
+    await context.sleep(2.5, name="backoff")
+
+    assert entity.has_completed_step("sleep:backoff")
+    assert transport.begin_requests == []
+
+
+@pytest.mark.asyncio
+async def test_sleep_zero_is_noop_and_negative_is_rejected():
+    transport = WorkflowActivationTransport()
+    context, _entity, _events = durable_sleep_context(transport)
+
+    await context.sleep(0, name="noop")
+    with pytest.raises(ValueError, match="negative"):
+        await context.sleep(-1, name="invalid")
+
+    assert transport.begin_requests == []
 
 
 @pytest.mark.asyncio

@@ -292,6 +292,35 @@ class ActivationClient:
     def __init__(self, transport: ActivationTransport) -> None:
         self._transport = transport
 
+    async def begin(self, request: BeginActivationRequest) -> ActivationDecision:
+        """Admit one activation and validate the runtime-owned identity."""
+
+        expected_id = activation_id(
+            request.project_id,
+            request.run_id,
+            request.parent_activation_id,
+            request.kind,
+            request.stable_key,
+        )
+        decision = await self._transport.begin(request)
+        if decision.activation_id != expected_id:
+            raise ActivationError(
+                ActivationErrorCode.UNKNOWN_OUTCOME,
+                f"runtime returned activation ID {decision.activation_id!r}, expected {expected_id!r}",
+                activation_id=decision.activation_id,
+                attempt=decision.attempt,
+            )
+        if decision.kind is ActivationDecisionKind.EXECUTE and (
+            decision.attempt <= 0 or not decision.fence_token
+        ):
+            raise ActivationError(
+                ActivationErrorCode.UNKNOWN_OUTCOME,
+                "EXECUTE receipt is missing fenced authority",
+                activation_id=decision.activation_id,
+                attempt=decision.attempt,
+            )
+        return decision
+
     async def run(
         self,
         request: BeginActivationRequest,
@@ -310,21 +339,7 @@ class ActivationClient:
     ) -> tuple[T, ActivationDecision | ActivationCompletionReceipt]:
         """Execute or replay one activation, returning only after durable acceptance."""
 
-        expected_id = activation_id(
-            request.project_id,
-            request.run_id,
-            request.parent_activation_id,
-            request.kind,
-            request.stable_key,
-        )
-        decision = await self._transport.begin(request)
-        if decision.activation_id != expected_id:
-            raise ActivationError(
-                ActivationErrorCode.UNKNOWN_OUTCOME,
-                f"runtime returned activation ID {decision.activation_id!r}, expected {expected_id!r}",
-                activation_id=decision.activation_id,
-                attempt=decision.attempt,
-            )
+        decision = await self.begin(request)
         if decision.kind is ActivationDecisionKind.REPLAY:
             if decision.replay_output is None:
                 raise ActivationError(
@@ -341,13 +356,6 @@ class ActivationClient:
             return result, decision
         if decision.kind is not ActivationDecisionKind.EXECUTE:
             raise _decision_error(decision)
-        if decision.attempt <= 0 or not decision.fence_token:
-            raise ActivationError(
-                ActivationErrorCode.UNKNOWN_OUTCOME,
-                "EXECUTE receipt is missing fenced authority",
-                activation_id=decision.activation_id,
-                attempt=decision.attempt,
-            )
         if on_admitted is not None:
             on_admitted(decision)
 

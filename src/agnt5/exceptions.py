@@ -93,6 +93,32 @@ class ActivationError(AGNT5Error):
         super().__init__(f"durable activation {code.value}{identity}: {message}")
 
 
+class DurableSleepSuspension(BaseException):
+    """Internal nonterminal signal converted into a typed worker response."""
+
+    def __init__(
+        self,
+        *,
+        activation_id: str,
+        attempt: int,
+        fence_token: bytes,
+        timer_key: str,
+        input_digest: bytes,
+        definition_digest: bytes,
+        continuation: bytes,
+        delay_ms: int,
+    ) -> None:
+        super().__init__(f"durable sleep suspended: {timer_key}")
+        self.activation_id = activation_id
+        self.attempt = attempt
+        self.fence_token = fence_token
+        self.timer_key = timer_key
+        self.input_digest = input_digest
+        self.definition_digest = definition_digest
+        self.continuation = continuation
+        self.delay_ms = delay_ms
+
+
 class NotImplementedError(AGNT5Error):
     """Raised when a feature is not yet implemented."""
 

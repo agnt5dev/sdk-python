@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
@@ -20,17 +21,124 @@ from .activation import (
     ActivationKind,
     ActivationRecoveryPolicy,
     BeginActivationRequest,
+    activation_id,
     canonical_activation_value,
     decode_sha256,
 )
 from .events import Completed, ComponentType, Failed, OperationType, Started
-from .exceptions import ActivationError, ActivationErrorCode
+from .exceptions import ActivationError, ActivationErrorCode, DurableSleepSuspension
 from .function import FunctionContext, FunctionRegistry
 
 if TYPE_CHECKING:
     from .workflow import WorkflowContext
 
 T = TypeVar("T")
+
+
+def _activation_definition(
+    context: WorkflowContext,
+) -> tuple[dict[str, str], str, ActivationDefinition]:
+    metadata = context._trace_metadata or {}
+    project_id = metadata.get("project_id", "") or metadata.get("tenant_id", "")
+    component_name = (
+        context._workflow_name or metadata.get("component_name", "") or context._workflow_entity.key
+    )
+    definition_version = metadata.get("activation_definition_version", "")
+    if not all((project_id, component_name, definition_version)):
+        raise ActivationError(
+            ActivationErrorCode.DURABILITY_UNAVAILABLE,
+            "durable activation requires project and deployed definition identity",
+        )
+    definition = ActivationDefinition(
+        artifact_sha256=decode_sha256(metadata.get("activation_artifact_sha256", "")),
+        component_name=component_name,
+        definition_version=definition_version,
+        canonical_config=metadata.get("activation_definition_config", '["object",[]]').encode(
+            "utf-8"
+        ),
+    )
+    return metadata, project_id, definition
+
+
+async def run_durable_sleep(
+    context: WorkflowContext,
+    *,
+    timer_key: str,
+    delay_ms: int,
+) -> None:
+    """Admit a timer activation and return control to the runtime as suspension."""
+
+    metadata, project_id, definition = _activation_definition(context)
+    worker_session_id = metadata.get("worker_session_id", "") or metadata.get("worker_id", "")
+    run_authority = metadata.get("run_authority", "") or context.run_id
+    lease_authority = metadata.get("lease_authority", "") or metadata.get("lease_id", "")
+    if not all((worker_session_id, run_authority, lease_authority)):
+        raise ActivationError(
+            ActivationErrorCode.DURABILITY_UNAVAILABLE,
+            "durable sleep requires worker-session, run, and lease authority",
+        )
+
+    input_value = {"delay_ms": delay_ms, "timer_key": timer_key}
+    input_digest = hashlib.sha256(canonical_activation_value(input_value)).digest()
+    request = BeginActivationRequest(
+        project_id=project_id,
+        run_id=context.run_id,
+        parent_activation_id=metadata.get("parent_activation_id", ""),
+        kind=ActivationKind.TIMER,
+        stable_key=timer_key,
+        input_digest=input_digest,
+        definition_digest=definition.digest,
+        recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+        worker_session_id=worker_session_id,
+        run_authority=run_authority.encode("utf-8"),
+        lease_authority=lease_authority.encode("utf-8"),
+    )
+    expected_id = activation_id(
+        request.project_id,
+        request.run_id,
+        request.parent_activation_id,
+        request.kind,
+        request.stable_key,
+    )
+    resumed_timer_key = metadata.get("timer_key", "")
+    resumed_activation_id = metadata.get("activation_id", "")
+    if resumed_timer_key == timer_key:
+        if resumed_activation_id != expected_id:
+            raise ActivationError(
+                ActivationErrorCode.NON_DETERMINISTIC_REPLAY,
+                "timer resume authority does not match the deterministic sleep activation",
+                activation_id=resumed_activation_id,
+            )
+        context._workflow_entity.record_step_completion(timer_key, "sleep", input_value, None)
+        return
+
+    decision = await context._activation_client.begin(request)
+    if decision.kind is not ActivationDecisionKind.EXECUTE:
+        from .activation import _decision_error
+
+        raise _decision_error(decision)
+
+    continuation: dict[str, Any] = {
+        "completed_steps": context._workflow_entity._completed_steps,
+        "step_events": context._workflow_entity._step_events,
+        "workflow_correlation_id": context._correlation_id,
+    }
+    state = context._workflow_entity._state
+    if state is not None:
+        continuation["workflow_state"] = state.get_state_snapshot()
+
+    raise DurableSleepSuspension(
+        activation_id=decision.activation_id,
+        attempt=decision.attempt,
+        fence_token=decision.fence_token,
+        timer_key=timer_key,
+        input_digest=input_digest,
+        definition_digest=definition.digest,
+        continuation=json.dumps(continuation, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        ),
+        delay_ms=delay_ms,
+    )
 
 
 async def execute_checkpoint_callable(

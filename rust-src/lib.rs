@@ -893,6 +893,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorker>()?;
     m.add_class::<PyExecuteComponentRequest>()?;
     m.add_class::<PyExecuteComponentResponse>()?;
+    m.add_class::<types::PyWorkerSuspension>()?;
     m.add_class::<PyComponentInfo>()?;
     m.add_class::<PyTriggerSpec>()?;
     m.add_class::<PyStepCheckpoint>()?;

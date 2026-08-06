@@ -6,7 +6,9 @@ Supports functions, entities, workflows, agents, and tools.
 from __future__ import annotations, print_function
 
 import asyncio
+import base64
 import inspect
+import json
 import secrets
 import time
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
@@ -107,6 +109,32 @@ def _resolve_activation_client(executor: Any, metadata: dict[str, str] | None) -
             "runtime negotiated durable_activation_v1 but the executor has no activation client",
         )
     return None
+
+
+def _workflow_dispatch_metadata(request: Any) -> dict[str, str]:
+    """Merge bounded runtime-authored continuation state into dispatch metadata."""
+
+    metadata = dict(getattr(request, "metadata", None) or {})
+    encoded = metadata.get("continuation_b64", "")
+    if not encoded:
+        return metadata
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        continuation = json.loads(base64.urlsafe_b64decode(encoded + padding))
+        if not isinstance(continuation, dict):
+            raise ValueError("continuation must be an object")
+        for key in ("completed_steps", "step_events", "workflow_state"):
+            if key not in metadata and key in continuation:
+                metadata[key] = json.dumps(
+                    continuation[key], ensure_ascii=False, separators=(",", ":")
+                )
+        if "workflow_correlation_id" not in metadata and isinstance(
+            continuation.get("workflow_correlation_id"), str
+        ):
+            metadata["workflow_correlation_id"] = continuation["workflow_correlation_id"]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        logger.warning("Ignoring malformed durable sleep continuation")
+    return metadata
 
 
 def _normalize_hosted_agent_stream_event(event: Any) -> Any:
@@ -1475,7 +1503,7 @@ class ExecutorMixin:
         from .._state_adapter import _entity_state_adapter_ctx, _get_state_adapter
         from ..context import set_current_context
         from ..events import Completed, ComponentType, Failed, Started
-        from ..exceptions import WaitingForUserInputException
+        from ..exceptions import DurableSleepSuspension, WaitingForUserInputException
         from ..workflow import WorkflowContext, WorkflowEntity, WorkflowState
 
         # Set entity state adapter in context so workflows can use Entities
@@ -1487,6 +1515,7 @@ class ExecutorMixin:
         span_token = None
         session_id = None
         start_time_ns = time.time_ns()
+        dispatch_metadata = _workflow_dispatch_metadata(request)
 
         try:
             # Parse input data
@@ -1502,10 +1531,10 @@ class ExecutorMixin:
             resumed_step_correlation_id = None
             resumed_step_name = None
 
-            if hasattr(request, "metadata") and request.metadata:
+            if dispatch_metadata:
                 # Parse completed steps for replay
-                if "completed_steps" in request.metadata:
-                    completed_steps_json = request.metadata["completed_steps"]
+                if "completed_steps" in dispatch_metadata:
+                    completed_steps_json = dispatch_metadata["completed_steps"]
                     if completed_steps_json:
                         try:
                             completed_steps = json.loads(completed_steps_json)
@@ -1514,8 +1543,8 @@ class ExecutorMixin:
                             )
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse completed_steps from metadata")
-                elif "step_events" in request.metadata:
-                    step_events_json = request.metadata["step_events"]
+                elif "step_events" in dispatch_metadata:
+                    step_events_json = dispatch_metadata["step_events"]
                     if step_events_json:
                         try:
                             step_events_list = json.loads(step_events_json)
@@ -1530,8 +1559,8 @@ class ExecutorMixin:
                             logger.warning("Failed to parse step_events from metadata")
 
                 # Parse initial workflow state
-                if "workflow_state" in request.metadata:
-                    workflow_state_json = request.metadata["workflow_state"]
+                if "workflow_state" in dispatch_metadata:
+                    workflow_state_json = dispatch_metadata["workflow_state"]
                     if workflow_state_json:
                         try:
                             initial_state = json.loads(workflow_state_json)
@@ -1540,24 +1569,24 @@ class ExecutorMixin:
                             logger.warning("Failed to parse workflow_state from metadata")
 
                 # Check for user response (resume after pause)
-                if "user_response" in request.metadata:
-                    user_response = request.metadata["user_response"]
+                if "user_response" in dispatch_metadata:
+                    user_response = dispatch_metadata["user_response"]
                     logger.debug(f"Resuming workflow with user response: {user_response}")
 
                 # Restore workflow correlation ID for resume
                 # This ensures the same correlation ID is used after resume
-                if "workflow_correlation_id" in request.metadata:
-                    resumed_workflow_correlation_id = request.metadata["workflow_correlation_id"]
+                if "workflow_correlation_id" in dispatch_metadata:
+                    resumed_workflow_correlation_id = dispatch_metadata["workflow_correlation_id"]
                     logger.debug(
                         f"Restoring workflow correlation ID: {resumed_workflow_correlation_id}"
                     )
 
                 # Restore step correlation info for proper event pairing on resume
-                if "step_correlation_id" in request.metadata:
-                    resumed_step_correlation_id = request.metadata["step_correlation_id"]
+                if "step_correlation_id" in dispatch_metadata:
+                    resumed_step_correlation_id = dispatch_metadata["step_correlation_id"]
                     logger.debug(f"Restoring step correlation ID: {resumed_step_correlation_id}")
-                if "step_name" in request.metadata:
-                    resumed_step_name = request.metadata["step_name"]
+                if "step_name" in dispatch_metadata:
+                    resumed_step_name = dispatch_metadata["step_name"]
                     logger.debug(f"Restoring step name: {resumed_step_name}")
 
             # Resolve session/user scopes for state and memory. Platform metadata
@@ -1590,8 +1619,8 @@ class ExecutorMixin:
 
             # Inject user response if resuming from pause
             if user_response:
-                if hasattr(request, "metadata") and request.metadata:
-                    pause_index_str = request.metadata.get("pause_index", "0")
+                if dispatch_metadata:
+                    pause_index_str = dispatch_metadata.get("pause_index", "0")
                     try:
                         workflow_entity._pause_index = int(pause_index_str)
                     except ValueError:
@@ -1624,10 +1653,8 @@ class ExecutorMixin:
                 runtime_context=request.runtime_context,
                 is_streaming=is_streaming,
                 worker=self._rust_worker,
-                trace_metadata=getattr(request, "metadata", None),
-                activation_client=_resolve_activation_client(
-                    self, getattr(request, "metadata", None)
-                ),
+                trace_metadata=dispatch_metadata,
+                activation_client=_resolve_activation_client(self, dispatch_metadata),
             )
 
             # Set context in contextvar
@@ -1819,6 +1846,37 @@ class ExecutorMixin:
             if pull_response is None:
                 ctx.emit(run_completed_event)
             return pull_response
+
+        except DurableSleepSuspension as suspension:
+            from .._core import PyWorkerSuspension
+
+            logger.info("Workflow yielded a durable timer suspension")
+            return PyExecuteComponentResponse(
+                invocation_id=request.invocation_id,
+                success=True,
+                output_data=b"",
+                state_update=None,
+                error_message=None,
+                metadata={
+                    "component_name": config.name,
+                    "component_type": "workflow",
+                },
+                event_type="workflow.paused",
+                content_index=0,
+                sequence=0,
+                attempt=getattr(request, "attempt", 0),
+                worker_suspension=PyWorkerSuspension(
+                    activation_id=suspension.activation_id,
+                    attempt=suspension.attempt,
+                    fence_token=suspension.fence_token,
+                    timer_key=suspension.timer_key,
+                    ready_at_ms=0,
+                    input_digest=suspension.input_digest,
+                    definition_digest=suspension.definition_digest,
+                    continuation=suspension.continuation,
+                    delay_ms=suspension.delay_ms,
+                ),
+            )
 
         except WaitingForUserInputException as pause:
             # Workflow paused for user input.
