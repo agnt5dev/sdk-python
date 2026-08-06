@@ -38,18 +38,25 @@ def test_activation_kinds_match_the_frozen_proto_contract():
 
 
 @pytest.mark.asyncio
-async def test_native_transport_maps_structured_errors_to_activation_errors():
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        ActivationErrorCode.STALE_AUTHORITY,
+        ActivationErrorCode.REQUIRED_CHILD_UNRESOLVED,
+    ],
+)
+async def test_native_transport_maps_structured_errors_to_activation_errors(error_code):
     class NativeClient:
         async def begin_activation(self, *_args):
             raise RuntimeError(
-                'AGNT5_ACTIVATION_ERROR:{"code":"STALE_AUTHORITY",'
+                f'AGNT5_ACTIVATION_ERROR:{{"code":"{error_code.value}",'
                 '"message":"lease was replaced","activationId":"actv1_test","attempt":2}'
             )
 
     transport = NativeActivationTransport(NativeClient())
     with pytest.raises(ActivationError) as caught:
         await transport.begin(activation_request())
-    assert caught.value.code is ActivationErrorCode.STALE_AUTHORITY
+    assert caught.value.code is error_code
     assert caught.value.activation_id == "actv1_test"
     assert caught.value.attempt == 2
 
