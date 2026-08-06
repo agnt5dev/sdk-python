@@ -38,6 +38,7 @@ fn activation_error_code(code: ErrorCode) -> &'static str {
         ErrorCode::PayloadConflict => "PAYLOAD_CONFLICT",
         ErrorCode::IllegalTransition => "ILLEGAL_TRANSITION",
         ErrorCode::StateVersionConflict => "STATE_VERSION_CONFLICT",
+        ErrorCode::RequiredChildUnresolved => "REQUIRED_CHILD_UNRESOLVED",
         ErrorCode::InvalidInput | ErrorCode::InvalidMessage | ErrorCode::InvalidState => {
             "INVALID_ARGUMENT"
         }
@@ -448,4 +449,17 @@ pub fn register_activation_client(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyActivationCompletionReceipt>()?;
     m.add_class::<PyActivationFailureReceipt>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_required_child_error_code() {
+        assert_eq!(
+            activation_error_code(ErrorCode::RequiredChildUnresolved),
+            "REQUIRED_CHILD_UNRESOLVED"
+        );
+    }
 }
