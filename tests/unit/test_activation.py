@@ -23,6 +23,15 @@ from agnt5.activation import (
 from agnt5.exceptions import ActivationError, ActivationErrorCode
 
 
+def test_activation_kinds_match_the_frozen_proto_contract():
+    assert int(ActivationKind.STEP) == 1
+    assert int(ActivationKind.FUNCTION) == 2
+    assert ActivationKind.AGENT is ActivationKind.FUNCTION
+    assert int(ActivationKind.MODEL) == 3
+    assert int(ActivationKind.TOOL) == 4
+    assert int(ActivationKind.CHILD) == 5
+
+
 @pytest.mark.asyncio
 async def test_native_transport_maps_structured_errors_to_activation_errors():
     class NativeClient:

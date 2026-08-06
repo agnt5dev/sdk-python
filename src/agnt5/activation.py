@@ -37,8 +37,9 @@ class ActivationKind(IntEnum):
     """Stable V1 activation kinds."""
 
     STEP = 1
-    MODEL = 2
-    AGENT = 3
+    FUNCTION = 2
+    AGENT = FUNCTION
+    MODEL = 3
     TOOL = 4
     CHILD = 5
     APPROVAL = 6
