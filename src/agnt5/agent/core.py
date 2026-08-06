@@ -559,7 +559,11 @@ class Agent:
             ctx,
             child_name=self.name,
             stable_key=stable_key,
-            input_value={"agent": self.name, "message": message, "history": history},
+            input_value={
+                "agent": self.name,
+                "message": message,
+                "history": deserialize(serialize(history)) if history is not None else None,
+            },
             join_policy=join_policy,
         )
         activation_token = None
