@@ -6,11 +6,21 @@ import json
 import logging
 import os
 import time
+from contextvars import ContextVar
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 
 from .._ids import generate_cid
+from .._serialization import deserialize, serialize
+from ..activation import (
+    ActivationDecision,
+    ActivationKind,
+    ActivationRecoveryPolicy,
+    _reset_current_activation,
+    _set_current_activation,
+    activation_request_from_context,
+)
 from ..context import get_current_context
 from ..events import Event
 from ..prompt_manifest import resolve_prompt_from_manifest
@@ -30,6 +40,10 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+_model_activation_execute: ContextVar[bool] = ContextVar(
+    "agnt5_model_activation_execute",
+    default=False,
+)
 
 try:
     from .._core import LanguageModel as RustLanguageModel
@@ -42,6 +56,78 @@ except ImportError:
     RustLanguageModel = None  # type: ignore
     RustLanguageModelConfig = None  # type: ignore
     RustResponse = None  # type: ignore
+
+
+def _model_recovery_policy(value: str | None) -> ActivationRecoveryPolicy:
+    normalized = (value or "unknown_outcome").strip().lower()
+    mapping = {
+        "idempotent_retry": ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+        "durable_steps": ActivationRecoveryPolicy.DURABLE_STEPS,
+        "unknown_outcome": ActivationRecoveryPolicy.UNKNOWN_OUTCOME,
+        "compensate": ActivationRecoveryPolicy.COMPENSATE,
+        "fail": ActivationRecoveryPolicy.FAIL,
+    }
+    try:
+        return mapping[normalized]
+    except KeyError as error:
+        from ..exceptions import ActivationError, ActivationErrorCode
+
+        raise ActivationError(
+            ActivationErrorCode.INVALID_ARGUMENT,
+            f"Unsupported model recovery policy: {value!r}",
+        ) from error
+
+
+def _model_activation_input(request: GenerateRequest) -> Dict[str, Any]:
+    cache = request.config.cache
+    return {
+        "model": request.model,
+        "system_prompt": request.system_prompt,
+        "messages": [
+            {
+                "role": message.role.value,
+                "content": message.content,
+                "tool_calls": message.tool_calls,
+                "tool_call_id": message.tool_call_id,
+            }
+            for message in request.messages
+        ],
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+            for tool in request.tools
+        ],
+        "tool_choice": request.tool_choice.value if request.tool_choice else None,
+        "config": {
+            "temperature": request.config.temperature,
+            "max_tokens": request.config.max_tokens,
+            "top_p": request.config.top_p,
+            "cache": (
+                {
+                    "enabled": cache.enabled,
+                    "ttl": cache.ttl,
+                    "key": cache.key,
+                    "retention": cache.retention,
+                    "resource": cache.resource,
+                }
+                if cache
+                else None
+            ),
+            "built_in_tools": [tool.value for tool in request.config.built_in_tools],
+            "reasoning_effort": (
+                request.config.reasoning_effort.value
+                if request.config.reasoning_effort
+                else None
+            ),
+            "modalities": [value.value for value in request.config.modalities or []],
+            "store": request.config.store,
+            "previous_response_id": request.config.previous_response_id,
+        },
+        "response_schema": request.response_schema,
+    }
 
 
 class LMClient(LanguageModel):
@@ -93,11 +179,26 @@ class LMClient(LanguageModel):
             return await self._run_managed_prompt(request)
 
         current_ctx = get_current_context()
+        durable_execute = _model_activation_execute.get()
+        if (
+            current_ctx
+            and not durable_execute
+            and (getattr(current_ctx, "_trace_metadata", None) or {}).get(
+                "durable_activation_v1"
+            )
+            == "true"
+        ):
+            return await self._generate_durable(request, current_ctx)
         step_key = None
         content_hash = None
 
         # Check memoization cache
-        if current_ctx and hasattr(current_ctx, "_memo") and current_ctx._memo:
+        if (
+            not durable_execute
+            and current_ctx
+            and hasattr(current_ctx, "_memo")
+            and current_ctx._memo
+        ):
             memo = current_ctx._memo
             step_key, content_hash = memo.lm_call_key(
                 model=request.model,
@@ -143,7 +244,13 @@ class LMClient(LanguageModel):
                 )
 
             # Cache result
-            if current_ctx and current_ctx._memo and step_key and content_hash:
+            if (
+                not durable_execute
+                and current_ctx
+                and current_ctx._memo
+                and step_key
+                and content_hash
+            ):
                 await current_ctx._memo.cache_lm_result(step_key, content_hash, response)
 
             return response
@@ -154,6 +261,64 @@ class LMClient(LanguageModel):
             if current_ctx:
                 self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
             raise
+
+    async def _generate_durable(self, request: GenerateRequest, context: Any) -> GenerateResponse:
+        activation_client = getattr(context, "_activation_client", None)
+        if activation_client is None:
+            from ..exceptions import ActivationError, ActivationErrorCode
+
+            raise ActivationError(
+                ActivationErrorCode.DURABILITY_UNAVAILABLE,
+                "runtime negotiated durable_activation_v1 but no activation client is available",
+            )
+        policy = _model_recovery_policy(request.config.recovery_policy)
+        stable_key = context.allocate_activation_key("model", request.model)
+        activation_request = activation_request_from_context(
+            context,
+            kind=ActivationKind.MODEL,
+            stable_key=stable_key,
+            input_value=_model_activation_input(request),
+            recovery_policy=policy,
+        )
+        admitted: ActivationDecision | None = None
+        started = time.monotonic()
+
+        def on_admitted(decision: ActivationDecision) -> None:
+            nonlocal admitted
+            admitted = decision
+
+        async def execute() -> GenerateResponse:
+            if admitted is None:
+                from ..exceptions import ActivationError, ActivationErrorCode
+
+                raise ActivationError(
+                    ActivationErrorCode.UNKNOWN_OUTCOME,
+                    "model activation executed without admitted authority",
+                )
+            activation_token = _set_current_activation(admitted)
+            execute_token = _model_activation_execute.set(True)
+            try:
+                return await self.generate(request)
+            finally:
+                _model_activation_execute.reset(execute_token)
+                _reset_current_activation(activation_token)
+
+        result, _receipt = await activation_client.run(
+            activation_request,
+            execute,
+            encode_output=lambda response: serialize(response.to_dict()),
+            decode_output=lambda value: GenerateResponse.from_dict(deserialize(value)),
+            latency_ms=lambda: int((time.monotonic() - started) * 1000),
+            on_admitted=on_admitted,
+            failure_error_code="MODEL_FAILED",
+            failure_retryable=policy
+            in {
+                ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+                ActivationRecoveryPolicy.DURABLE_STEPS,
+            },
+            failure_external_outcome_certainty="UNKNOWN",
+        )
+        return result
 
     async def _run_managed_prompt(self, request: GenerateRequest) -> GenerateResponse:
         manifest_request = resolve_prompt_from_manifest(request)

@@ -24,6 +24,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agnt5 import lm
+from agnt5._serialization import serialize
+from agnt5.activation import (
+    ActivationClient,
+    ActivationCompletionReceipt,
+    ActivationDecision,
+    ActivationDecisionKind,
+    ActivationKind,
+    activation_id,
+)
 from agnt5.context import Context, LLMRuntimeOptions, set_current_context
 from agnt5.lm import (
     GenerateRequest,
@@ -93,6 +102,47 @@ class MockAsyncStreamIterator:
         chunk = self.chunks[self.index]
         self.index += 1
         return chunk
+
+
+class ModelActivationTransport:
+    def __init__(self, replay: GenerateResponse | None = None):
+        self.replay = replay
+        self.begin_requests = []
+        self.complete_requests = []
+
+    async def begin(self, request):
+        self.begin_requests.append(request)
+        return ActivationDecision(
+            kind=(
+                ActivationDecisionKind.REPLAY
+                if self.replay is not None
+                else ActivationDecisionKind.EXECUTE
+            ),
+            activation_id=activation_id(
+                request.project_id,
+                request.run_id,
+                request.parent_activation_id,
+                request.kind,
+                request.stable_key,
+            ),
+            attempt=1,
+            accepted_journal_offset=7,
+            fence_token=b"" if self.replay is not None else b"fence",
+            replay_output=(
+                serialize(self.replay.to_dict()) if self.replay is not None else None
+            ),
+        )
+
+    async def complete(self, **request):
+        self.complete_requests.append(request)
+        return ActivationCompletionReceipt(
+            activation_id=request["activation_id"],
+            attempt=request["attempt"],
+            accepted_journal_offset=8,
+        )
+
+    async def fail(self, **_request):
+        raise AssertionError("model failure was not expected")
 
 
 def test_lm_client_build_kwargs_for_prompt_cache_options():
@@ -174,6 +224,94 @@ def mock_rust_stream_chunks():
 # ============================================================================
 # Basic Generation Tests
 # ============================================================================
+
+
+def durable_lm_context(transport: ModelActivationTransport) -> Context:
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="cid-1",
+        parent_correlation_id="",
+        trace_metadata={
+            "durable_activation_v1": "true",
+            "project_id": "project-1",
+            "component_name": "research-agent",
+            "worker_session_id": "worker-session-1",
+            "run_authority": "run-authority-1",
+            "lease_authority": "lease-authority-1",
+            "activation_definition_version": "v1",
+            "activation_artifact_sha256": "00" * 32,
+            "activation_definition_config": '["object",[]]',
+        },
+    )
+    ctx._activation_client = ActivationClient(transport)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_model_final_is_committed_through_a_durable_activation(mock_rust_generate):
+    transport = ModelActivationTransport()
+    ctx = durable_lm_context(transport)
+    mock_rust_generate.id = "response-1"
+    mock_rust_generate.usage.cached_tokens = 0
+    mock_rust_generate.usage.cache_creation_tokens = 0
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            async def generate(**_kwargs):
+                assert ctx.activation is not None
+                assert ctx.activation.idempotency_key.startswith("agnt5:actv1_")
+                return mock_rust_generate
+
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(side_effect=generate)
+            mock_rust_class.return_value = mock_instance
+            client = LMClient(provider="openai")
+            response = await client.generate(
+                GenerateRequest(
+                    model="openai/gpt-4o-mini",
+                    messages=[Message.user("hello")],
+                )
+            )
+
+            assert response.text == "This is a test response."
+            assert transport.begin_requests[0].kind is ActivationKind.MODEL
+            assert transport.begin_requests[0].stable_key == "model:openai/gpt-4o-mini:0"
+            assert len(transport.complete_requests) == 1
+            assert mock_instance.generate.await_count == 1
+            assert ctx.activation is None
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_accepted_model_final_replays_without_provider_call():
+    replay = GenerateResponse(
+        text="cached final",
+        usage=TokenUsage(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        finish_reason="stop",
+    )
+    transport = ModelActivationTransport(replay)
+    ctx = durable_lm_context(transport)
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(side_effect=AssertionError("provider called"))
+            mock_rust_class.return_value = mock_instance
+            client = LMClient(provider="openai")
+            response = await client.generate(
+                GenerateRequest(
+                    model="openai/gpt-4o-mini",
+                    messages=[Message.user("hello")],
+                )
+            )
+
+            assert response.text == "cached final"
+            assert response.usage.total_tokens == 5
+            mock_instance.generate.assert_not_called()
+            assert transport.complete_requests == []
+    finally:
+        token.var.reset(token)
 
 
 @pytest.mark.asyncio
