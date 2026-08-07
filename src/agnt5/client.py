@@ -451,9 +451,54 @@ class Client:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
+        # A saturated gateway keeps the run durably queued but detaches the
+        # synchronous Engine tail. Preserve run()'s blocking contract by
+        # waiting through short status/result requests instead of holding the
+        # original gateway request open.
         data = response.json()
-        return parse_run_response(data)
+        parsed = parse_run_response(data)
+        if response.status_code == 202 and parsed.run_id:
+            wait_timeout = self.timeout if timeout is None else timeout
+            return self._wait_for_detached_run(parsed.run_id, wait_timeout)
+        return parsed
+
+    def _wait_for_detached_run(
+        self,
+        run_id: str,
+        timeout: float,
+    ) -> RunResponse[Any]:
+        """Wait for a detached run with bounded, backoff-based polling."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        poll_interval = 0.1
+        terminal_status_observed = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
+
+            if not terminal_status_observed:
+                status = self.get_status(run_id)
+                terminal_status_observed = status.is_complete
+
+            if terminal_status_observed:
+                result = self.get_result(run_id)
+                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
+                    return result
+
+            time.sleep(min(poll_interval, remaining))
+            poll_interval = min(poll_interval * 1.5, 2.0)
 
     def submit(
         self,
@@ -635,7 +680,6 @@ class Client:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
         return parse_run_response(response.json())
 
     def wait_for_result(
@@ -2220,8 +2264,51 @@ class AsyncClient:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
-        return parse_run_response(response.json())
+        # Preserve run()'s wait-for-terminal contract when the gateway has
+        # durably detached an excess synchronous waiter.
+        parsed = parse_run_response(response.json())
+        if response.status_code == 202 and parsed.run_id:
+            return await self._wait_for_detached_run(parsed.run_id, self.timeout)
+        return parsed
+
+    async def _wait_for_detached_run(
+        self,
+        run_id: str,
+        timeout: float,
+    ) -> RunResponse[Any]:
+        """Wait for a detached run without blocking the Python event loop."""
+        import asyncio
+        import time
+
+        deadline = time.monotonic() + timeout
+        poll_interval = 0.1
+        terminal_status_observed = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
+
+            if not terminal_status_observed:
+                status = await self.get_status(run_id)
+                terminal_status_observed = status.is_complete
+
+            if terminal_status_observed:
+                result = await self.get_result(run_id)
+                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
+                    return result
+
+            await asyncio.sleep(min(poll_interval, remaining))
+            poll_interval = min(poll_interval * 1.5, 2.0)
 
     async def stream_events(
         self,
