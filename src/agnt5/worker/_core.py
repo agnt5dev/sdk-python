@@ -138,6 +138,7 @@ class Worker(ExecutorMixin):
         min_slots: int | None = None,
         max_slots: int | None = None,
         claim_timeout_ms: int | None = None,
+        activation_artifact_sha256: str | None = None,
     ):
         """Initialize a new Worker with explicit or automatic component registration.
 
@@ -182,6 +183,8 @@ class Worker(ExecutorMixin):
             min_slots: Minimum parked poll slots to keep open.
             max_slots: Maximum parked poll slots.
             claim_timeout_ms: Lease duration for claimed jobs, in milliseconds.
+            activation_artifact_sha256: Immutable deployed artifact SHA-256 used
+                in durable activation identity. Managed runtimes normally inject it.
         """
         self.service_name = service_name
         self.service_version = service_version
@@ -195,6 +198,14 @@ class Worker(ExecutorMixin):
 
         # Initialize metadata with user-provided values
         self.metadata = dict(metadata or {})
+        activation_artifact_sha256 = (
+            activation_artifact_sha256
+            or self.metadata.get("activation_artifact_sha256")
+            or os.getenv("AGNT5_ACTIVATION_ARTIFACT_SHA256")
+        )
+        if activation_artifact_sha256:
+            self.metadata.setdefault("activation_artifact_sha256", activation_artifact_sha256)
+            os.environ["AGNT5_ACTIVATION_ARTIFACT_SHA256"] = activation_artifact_sha256
         project_id = project_id or self.metadata.get("project_id")
         deployment_id = deployment_id or self.metadata.get("deployment_id")
         _configure_worker_environment(
@@ -229,12 +240,14 @@ class Worker(ExecutorMixin):
 
         # Import Rust worker
         try:
+            from .. import _core as rust_core
             from .._core import PyComponentInfo, PyTriggerSpec, PyWorker, PyWorkerConfig
 
             self._PyWorker = PyWorker
             self._PyWorkerConfig = PyWorkerConfig
             self._PyComponentInfo = PyComponentInfo
             self._PyTriggerSpec = PyTriggerSpec
+            self._PyActivationClient = getattr(rust_core, "PyActivationClient", None)
         except ImportError as e:
             _sentry.capture_exception(
                 e,
@@ -264,6 +277,15 @@ class Worker(ExecutorMixin):
             max_concurrency=max_concurrency,
         )
         self._rust_worker = self._PyWorker(self._rust_config)
+        self._activation_client = None
+        if self._PyActivationClient is not None:
+            from ..activation import ActivationClient, NativeActivationTransport
+
+            endpoint = os.getenv("AGNT5_ENGINE_URL") or coordinator_endpoint
+            native_activation_client = self._PyActivationClient(endpoint)
+            self._activation_client = ActivationClient(
+                NativeActivationTransport(native_activation_client)
+            )
 
         # ChatBot registry: maps agent name -> ChatBot instance
         # Populated when ChatBot instances are passed in the agents list
@@ -1007,6 +1029,20 @@ class Worker(ExecutorMixin):
         if dashboard_url:
             print(f"  Dashboard: {dashboard_url}")
         print()
+
+    def _activation_client_for_metadata(
+        self, metadata: dict[str, str] | None
+    ) -> Any | None:
+        if (metadata or {}).get("durable_activation_v1") != "true":
+            return None
+        if self._activation_client is None:
+            from ..exceptions import ActivationError, ActivationErrorCode
+
+            raise ActivationError(
+                ActivationErrorCode.DURABILITY_UNAVAILABLE,
+                "runtime negotiated durable_activation_v1 but the native activation client is unavailable",
+            )
+        return self._activation_client
 
     async def run(self) -> None:
         """Run the worker (register and start message loop).

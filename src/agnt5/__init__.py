@@ -17,6 +17,14 @@ if not _agnt5_logger.handlers:
 
 from . import chat, eval, events, improvement, lm, serverless
 from ._telemetry import get_logger, set_log_level
+from .activation import (
+    ActivationEvidence,
+    ActivationExecution,
+    ActivationRecoveryPolicy,
+    ActivationUsage,
+    ChildJoinPolicy,
+    current_activation,
+)
 from .agent import (
     Agent,
     AgentCompleted,
@@ -101,6 +109,8 @@ from .events import (
     Timeout,
 )
 from .exceptions import (
+    ActivationError,
+    ActivationErrorCode,
     AGNT5Error,
     ConfigurationError,
     ExecutionError,
@@ -449,6 +459,14 @@ __all__ = [
     "RetryPolicy",
     # Exceptions
     "AGNT5Error",
+    "ActivationError",
+    "ActivationErrorCode",
+    "ActivationEvidence",
+    "ActivationExecution",
+    "ActivationRecoveryPolicy",
+    "ChildJoinPolicy",
+    "ActivationUsage",
+    "current_activation",
     "ConfigurationError",
     "ExecutionError",
     "RetryError",

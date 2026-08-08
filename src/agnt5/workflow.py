@@ -72,6 +72,7 @@ class WorkflowContext(Context):
         attempt: int = 0,
         runtime_context: Optional[Any] = None,
         checkpoint_client: Optional[Any] = None,
+        activation_client: Optional[Any] = None,
         is_streaming: bool = False,
         worker: Optional[Any] = None,
         correlation_id: Optional[str] = None,
@@ -88,7 +89,8 @@ class WorkflowContext(Context):
             user_id: User identifier for user-scoped memory (optional)
             attempt: Retry attempt number (0-indexed)
             runtime_context: RuntimeContext for trace correlation
-            checkpoint_client: Optional CheckpointClient for platform-side memoization
+            checkpoint_client: Optional CheckpointClient for legacy platform-side memoization
+            activation_client: Optional durable-activation client negotiated by the worker
             is_streaming: Whether this is a streaming request (for real-time SSE log delivery)
             worker: PyWorker instance for event queueing
             correlation_id: Unique identifier for this workflow execution
@@ -110,7 +112,10 @@ class WorkflowContext(Context):
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
         self._checkpoint_client = checkpoint_client
-        self._delta_sequence: int = 0  # Sequence for delta events (separate from checkpoint sequence)
+        self._activation_client = activation_client
+        self._delta_sequence: int = (
+            0  # Sequence for delta events (separate from checkpoint sequence)
+        )
 
         # Memory scoping identifiers (use private attrs since properties are read-only)
         self._session_id = session_id or run_id  # Default: session = run (ephemeral)
@@ -142,7 +147,13 @@ class WorkflowContext(Context):
 
     # === State Management ===
 
-    def _forward_delta(self, event_type: str, output_data: str, content_index: int = 0, source_timestamp_ns: int = 0) -> None:
+    def _forward_delta(
+        self,
+        event_type: str,
+        output_data: str,
+        content_index: int = 0,
+        source_timestamp_ns: int = 0,
+    ) -> None:
         """
         Forward a streaming delta event from a nested component.
 
@@ -291,11 +302,12 @@ class WorkflowContext(Context):
 
     def _get_or_create_state_adapter(self):
         """Get the worker-bound state adapter, falling back to standalone mode."""
-        if not hasattr(self, '_state_adapter'):
+        if not hasattr(self, "_state_adapter"):
             try:
                 self._state_adapter = _get_state_adapter()
             except RuntimeError:
                 from ._state_adapter import StateAdapter
+
                 self._state_adapter = StateAdapter()
         return self._state_adapter
 
@@ -312,7 +324,7 @@ class WorkflowContext(Context):
         """
         from .state import SessionContext
 
-        if not hasattr(self, '_session_context'):
+        if not hasattr(self, "_session_context"):
             self._session_context = SessionContext(
                 state_adapter=self._get_or_create_state_adapter(),
                 session_id=self._session_id,
@@ -331,7 +343,7 @@ class WorkflowContext(Context):
 
         from .state import UserContext
 
-        if not hasattr(self, '_user_context'):
+        if not hasattr(self, "_user_context"):
             self._user_context = UserContext(
                 state_adapter=self._get_or_create_state_adapter(),
                 user_id=self._user_id,
@@ -359,12 +371,13 @@ class WorkflowContext(Context):
         """
         from .memory import MemoryAccessor
 
-        if not hasattr(self, '_memory_accessor'):
+        if not hasattr(self, "_memory_accessor"):
             # Get state adapter from worker context
             try:
                 adapter = _get_state_adapter()
             except RuntimeError:
                 from ._state_adapter import StateAdapter
+
                 adapter = StateAdapter()
 
             self._memory_accessor = MemoryAccessor(
@@ -372,7 +385,7 @@ class WorkflowContext(Context):
                 session_id=self._session_id,
                 user_id=self._user_id,
                 run_id=self._run_id,
-                semantic_provider=getattr(self, '_semantic_provider', None),
+                semantic_provider=getattr(self, "_semantic_provider", None),
                 tenant_id=(self._trace_metadata or {}).get("tenant_id"),
                 deployment_id=(self._trace_metadata or {}).get("deployment_id"),
             )
@@ -399,11 +412,12 @@ class WorkflowContext(Context):
         """
         from .memory import ConversationAccessor
 
-        if not hasattr(self, '_conversation_accessor'):
+        if not hasattr(self, "_conversation_accessor"):
             try:
                 adapter = _get_state_adapter()
             except RuntimeError:
                 from ._state_adapter import StateAdapter
+
                 adapter = StateAdapter()
 
             self._conversation_accessor = ConversationAccessor(
@@ -421,6 +435,7 @@ class WorkflowContext(Context):
         name_or_handler: Union[str, Callable, Awaitable[T]],
         func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T], Any] = None,
         *args: Any,
+        key: Optional[str] = None,
         **kwargs: Any,
     ) -> T:
         """
@@ -465,6 +480,7 @@ class WorkflowContext(Context):
             name_or_handler: Step name (str), @function reference, or awaitable
             func_or_awaitable: Function/awaitable when name is provided, or first arg
             *args: Additional arguments for the function
+            key: Stable key required for reordered, repeated, or concurrent step work
             **kwargs: Keyword arguments for the function
 
         Returns:
@@ -496,16 +512,23 @@ class WorkflowContext(Context):
         # Determine which calling pattern is being used
         if callable(name_or_handler) and hasattr(name_or_handler, "_agnt5_config"):
             # Pattern 1: step(handler, *args, **kwargs) - @function call
-            return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+            return await self._step_function(
+                name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+            )
         elif isinstance(name_or_handler, str):
             # Check if it's a registered function name (legacy pattern)
             from .function import FunctionRegistry
+
             if FunctionRegistry.get(name_or_handler) is not None:
                 # Pattern 4: Legacy string-based function call
-                return await self._step_function(name_or_handler, func_or_awaitable, *args, **kwargs)
+                return await self._step_function(
+                    name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+                )
             elif func_or_awaitable is not None:
                 # Pattern 2/3: step("name", awaitable) or step("name", callable, *args)
-                return await self._step_checkpoint(name_or_handler, func_or_awaitable, *args, **kwargs)
+                return await self._step_checkpoint(
+                    name_or_handler, func_or_awaitable, *args, activation_key=key, **kwargs
+                )
             else:
                 # String without second arg and not a registered function
                 raise ValueError(
@@ -515,8 +538,8 @@ class WorkflowContext(Context):
                 )
         elif inspect.iscoroutine(name_or_handler) or inspect.isawaitable(name_or_handler):
             # Awaitable passed directly - auto-generate name
-            coro_name = getattr(name_or_handler, '__name__', 'awaitable')
-            return await self._step_checkpoint(coro_name, name_or_handler)
+            coro_name = getattr(name_or_handler, "__name__", "awaitable")
+            return await self._step_checkpoint(coro_name, name_or_handler, activation_key=key)
         elif callable(name_or_handler):
             # Callable without @function decorator
             raise ValueError(
@@ -535,6 +558,7 @@ class WorkflowContext(Context):
         handler: Union[str, Callable],
         first_arg: Any = None,
         *args: Any,
+        activation_key: Optional[str] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -560,9 +584,33 @@ class WorkflowContext(Context):
         else:
             handler_name = handler
 
-        # Generate unique step name for durability
+        # Generate unique step name for lifecycle display and a stable activation key.
+        from .activation import stable_step_key
+
         step_name = f"{handler_name}_{self._step_counter}"
+        step_key = stable_step_key(handler_name, self._step_counter, activation_key)
         self._step_counter += 1
+
+        if self._activation_client is not None:
+            from .workflow_activation import execute_function_callable, run_durable_step
+
+            input_value = {"args": list(args), "kwargs": kwargs}
+            return await run_durable_step(
+                self,
+                name=step_name,
+                step_key=step_key,
+                handler_name=handler_name,
+                input_value=input_value,
+                execute=lambda step_correlation_id: execute_function_callable(
+                    self,
+                    handler_name,
+                    step_name,
+                    step_key,
+                    step_correlation_id,
+                    args,
+                    kwargs,
+                ),
+            )
 
         # Generate unique event_id for this step (for hierarchy tracking)
         step_event_id = str(uuid.uuid4())
@@ -574,6 +622,7 @@ class WorkflowContext(Context):
             # Emit a step.completed event with cache_hit metadata so tests can
             # prove replay happened (vs re-execution which emits started+completed)
             from .events import Completed, ComponentType, OperationType
+
             replay_event = Completed(
                 name=step_name,
                 correlation_id=generate_cid(),
@@ -591,13 +640,20 @@ class WorkflowContext(Context):
 
         # Emit workflow.step.started checkpoint
         from .events import ComponentType, OperationType, Started
+
         step_started = Started(
             name=step_name,
             correlation_id=step_correlation_id,
-            parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+            parent_correlation_id=self._step_event_stack[-1]
+            if self._step_event_stack
+            else self._correlation_id,
             component_type=ComponentType.WORKFLOW,
             operation=OperationType.STEP,
-            input_data={"step_name": step_name, "handler_name": handler_name, "input": args or kwargs},
+            input_data={
+                "step_name": step_name,
+                "handler_name": handler_name,
+                "input": args or kwargs,
+            },
             metadata={"name": step_name},
         )
         self.emit(step_started)
@@ -710,6 +766,7 @@ class WorkflowContext(Context):
 
                 # Emit function.completed event (before workflow.step.completed)
                 from .events import Completed
+
                 func_duration_ms = (time.time_ns() - func_start_time) // 1_000_000
                 func_completed = Completed(
                     name=handler_name,
@@ -733,10 +790,16 @@ class WorkflowContext(Context):
                 step_completed = Completed(
                     name=step_name,
                     correlation_id=step_correlation_id,
-                    parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+                    parent_correlation_id=self._step_event_stack[-1]
+                    if self._step_event_stack
+                    else self._correlation_id,
                     component_type=ComponentType.WORKFLOW,
                     operation=OperationType.STEP,
-                    output_data={"step_name": step_name, "handler_name": handler_name, "result": result},
+                    output_data={
+                        "step_name": step_name,
+                        "handler_name": handler_name,
+                        "result": result,
+                    },
                     metadata={"name": step_name},
                 )
                 self.emit(step_completed)
@@ -746,6 +809,7 @@ class WorkflowContext(Context):
             except Exception as e:
                 # Emit function.failed event (before workflow.step.failed)
                 from .events import Failed
+
                 func_duration_ms = (time.time_ns() - func_start_time) // 1_000_000
                 func_failed = Failed(
                     name=handler_name,
@@ -770,7 +834,9 @@ class WorkflowContext(Context):
                 step_failed = Failed(
                     name=step_name,
                     correlation_id=step_correlation_id,
-                    parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+                    parent_correlation_id=self._step_event_stack[-1]
+                    if self._step_event_stack
+                    else self._correlation_id,
                     component_type=ComponentType.WORKFLOW,
                     operation=OperationType.STEP,
                     error_code=type(e).__name__,
@@ -969,6 +1035,7 @@ class WorkflowContext(Context):
                 except Exception as e:
                     duration_ms = int((time.time() - item_start) * 1000)
                     from .batch import BatchItemError
+
                     return BatchItemResult(
                         index=index,
                         run_id=f"local-{index}",
@@ -1162,6 +1229,7 @@ class WorkflowContext(Context):
         name: str,
         func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T]],
         *args: Any,
+        activation_key: Optional[str] = None,
         **kwargs: Any,
     ) -> T:
         """
@@ -1187,9 +1255,28 @@ class WorkflowContext(Context):
         import json
         import time
 
+        from .activation import stable_step_key
+
         # Generate step key for platform memoization
-        step_key = f"step:{name}:{self._step_counter}"
+        step_key = stable_step_key(name, self._step_counter, activation_key)
         self._step_counter += 1
+
+        if self._activation_client is not None:
+            from .workflow_activation import execute_checkpoint_callable, run_durable_step
+
+            input_value = (
+                {"args": list(args), "kwargs": kwargs} if callable(func_or_awaitable) else None
+            )
+            return await run_durable_step(
+                self,
+                name=name,
+                step_key=step_key,
+                handler_name="checkpoint",
+                input_value=input_value,
+                execute=lambda _step_correlation_id: execute_checkpoint_callable(
+                    self, name, step_key, func_or_awaitable, args, kwargs
+                ),
+            )
 
         # Generate identifiers for this step and its event correlation.
         step_event_id = str(uuid.uuid4())
@@ -1201,10 +1288,9 @@ class WorkflowContext(Context):
                 # Engine cache key is still (tenant_id, run_id). On worker
                 # paths that tenant_id is a legacy alias for project identity,
                 # so prefer project_id when present and fall back to tenant_id.
-                project_or_tenant_id = (
-                    (self._trace_metadata or {}).get("project_id", "")
-                    or (self._trace_metadata or {}).get("tenant_id", "")
-                )
+                project_or_tenant_id = (self._trace_metadata or {}).get("project_id", "") or (
+                    self._trace_metadata or {}
+                ).get("tenant_id", "")
                 result = await self._checkpoint_client.step_started(
                     project_or_tenant_id,
                     self.run_id,
@@ -1217,10 +1303,14 @@ class WorkflowContext(Context):
                     cached_value = json.loads(result.cached_output.decode("utf-8"))
                     self._logger.info(f"🔄 Replaying memoized step from platform: {name}")
                     # Also record locally for consistency
-                    self._workflow_entity.record_step_completion(name, "checkpoint", None, cached_value)
+                    self._workflow_entity.record_step_completion(
+                        name, "checkpoint", None, cached_value
+                    )
                     return cached_value
             except Exception as e:
-                self._logger.warning(f"Platform memoization check failed, falling back to local: {e}")
+                self._logger.warning(
+                    f"Platform memoization check failed, falling back to local: {e}"
+                )
 
         # Fall back to local memoization (for backward compatibility)
         if self._workflow_entity.has_completed_step(name):
@@ -1230,10 +1320,13 @@ class WorkflowContext(Context):
 
         # Emit workflow.step.started checkpoint for observability
         from .events import ComponentType, OperationType, Started
+
         step_started = Started(
             name=name,
             correlation_id=step_correlation_id,
-            parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+            parent_correlation_id=self._step_event_stack[-1]
+            if self._step_event_stack
+            else self._correlation_id,
             component_type=ComponentType.WORKFLOW,
             operation=OperationType.STEP,
             input_data={"step_name": name, "handler_name": "checkpoint"},
@@ -1251,7 +1344,9 @@ class WorkflowContext(Context):
                 if inspect.isasyncgen(func_or_awaitable):
                     # Direct async generator - consume while forwarding events
                     result = await self._consume_streaming_result(func_or_awaitable, name)
-                elif inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(func_or_awaitable):
+                elif inspect.iscoroutine(func_or_awaitable) or inspect.isawaitable(
+                    func_or_awaitable
+                ):
                     result = await func_or_awaitable
                 elif callable(func_or_awaitable):
                     # Call with args/kwargs if provided
@@ -1264,7 +1359,9 @@ class WorkflowContext(Context):
                     else:
                         result = call_result
                 else:
-                    raise ValueError(f"step() second argument must be awaitable or callable, got {type(func_or_awaitable)}")
+                    raise ValueError(
+                        f"step() second argument must be awaitable or callable, got {type(func_or_awaitable)}"
+                    )
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -1275,10 +1372,9 @@ class WorkflowContext(Context):
             if self._checkpoint_client:
                 try:
                     output_bytes = serialize_to_str(result).encode("utf-8")
-                    project_or_tenant_id = (
-                        (self._trace_metadata or {}).get("project_id", "")
-                        or (self._trace_metadata or {}).get("tenant_id", "")
-                    )
+                    project_or_tenant_id = (self._trace_metadata or {}).get("project_id", "") or (
+                        self._trace_metadata or {}
+                    ).get("tenant_id", "")
                     await self._checkpoint_client.step_completed(
                         project_or_tenant_id,
                         self.run_id,
@@ -1301,10 +1397,13 @@ class WorkflowContext(Context):
 
             # Emit workflow.step.completed checkpoint to journal for crash recovery
             from .events import Completed
+
             step_completed = Completed(
                 name=name,
                 correlation_id=step_correlation_id,
-                parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+                parent_correlation_id=self._step_event_stack[-1]
+                if self._step_event_stack
+                else self._correlation_id,
                 component_type=ComponentType.WORKFLOW,
                 operation=OperationType.STEP,
                 output_data={"step_name": name, "handler_name": "checkpoint", "result": result},
@@ -1328,10 +1427,9 @@ class WorkflowContext(Context):
             # Record failure to platform
             if self._checkpoint_client:
                 try:
-                    project_or_tenant_id = (
-                        (self._trace_metadata or {}).get("project_id", "")
-                        or (self._trace_metadata or {}).get("tenant_id", "")
-                    )
+                    project_or_tenant_id = (self._trace_metadata or {}).get("project_id", "") or (
+                        self._trace_metadata or {}
+                    ).get("tenant_id", "")
                     await self._checkpoint_client.step_failed(
                         project_or_tenant_id,
                         self.run_id,
@@ -1346,10 +1444,13 @@ class WorkflowContext(Context):
 
             # Emit workflow.step.failed checkpoint
             from .events import Failed
+
             step_failed = Failed(
                 name=name,
                 correlation_id=step_correlation_id,
-                parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+                parent_correlation_id=self._step_event_stack[-1]
+                if self._step_event_stack
+                else self._correlation_id,
                 component_type=ComponentType.WORKFLOW,
                 operation=OperationType.STEP,
                 error_code=type(e).__name__,
@@ -1385,12 +1486,39 @@ class WorkflowContext(Context):
                 await ctx.step(send_followup, user_id)
             ```
         """
+        import math
         import time
+
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            raise ValueError("sleep duration must be a finite number")
+        if not math.isfinite(seconds):
+            raise ValueError("sleep duration must be finite")
+        if seconds < 0:
+            raise ValueError("sleep duration cannot be negative")
+        if seconds == 0:
+            return
 
         # Generate unique step name for this sleep
         sleep_name = name or f"sleep_{self._step_counter}"
         self._step_counter += 1
         step_key = f"sleep:{sleep_name}"
+
+        if (self._trace_metadata or {}).get("durable_suspension_v1") == "true":
+            if self._activation_client is None:
+                from .exceptions import ActivationError, ActivationErrorCode
+
+                raise ActivationError(
+                    ActivationErrorCode.DURABILITY_UNAVAILABLE,
+                    "runtime negotiated durable_suspension_v1 but no activation client is available",
+                )
+            from .workflow_activation import run_durable_sleep
+
+            await run_durable_sleep(
+                self,
+                timer_key=step_key,
+                delay_ms=max(1, math.ceil(seconds * 1000)),
+            )
+            return
 
         # Check if sleep was already started (replay scenario)
         if self._workflow_entity.has_completed_step(step_key):
@@ -1401,7 +1529,9 @@ class WorkflowContext(Context):
 
             if elapsed >= duration:
                 # Sleep period already elapsed
-                self._logger.info(f"🔄 Sleep '{sleep_name}' already completed (elapsed: {elapsed:.1f}s)")
+                self._logger.info(
+                    f"🔄 Sleep '{sleep_name}' already completed (elapsed: {elapsed:.1f}s)"
+                )
                 return
 
             # Sleep for remaining duration
@@ -1421,13 +1551,20 @@ class WorkflowContext(Context):
         step_correlation_id = generate_cid()
 
         from .events import Completed, ComponentType, OperationType, Started
+
         step_started = Started(
             name=sleep_name,
             correlation_id=step_correlation_id,
-            parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+            parent_correlation_id=self._step_event_stack[-1]
+            if self._step_event_stack
+            else self._correlation_id,
             component_type=ComponentType.WORKFLOW,
             operation=OperationType.STEP,
-            input_data={"step_name": sleep_name, "handler_name": "sleep", "duration_seconds": seconds},
+            input_data={
+                "step_name": sleep_name,
+                "handler_name": "sleep",
+                "duration_seconds": seconds,
+            },
             metadata={"name": sleep_name},
         )
         self.emit(step_started)
@@ -1440,10 +1577,16 @@ class WorkflowContext(Context):
         step_completed = Completed(
             name=sleep_name,
             correlation_id=step_correlation_id,
-            parent_correlation_id=self._step_event_stack[-1] if self._step_event_stack else self._correlation_id,
+            parent_correlation_id=self._step_event_stack[-1]
+            if self._step_event_stack
+            else self._correlation_id,
             component_type=ComponentType.WORKFLOW,
             operation=OperationType.STEP,
-            output_data={"step_name": sleep_name, "handler_name": "sleep", "duration_seconds": seconds},
+            output_data={
+                "step_name": sleep_name,
+                "handler_name": "sleep",
+                "duration_seconds": seconds,
+            },
             duration_ms=duration_ms,
             metadata={"name": sleep_name},
         )
@@ -1562,7 +1705,9 @@ class WorkflowContext(Context):
         response_key = f"user_response:{self.run_id}:{pause_index}"
         step_name = f"wait_for_user_{pause_index}"
 
-        parent_correlation_id = self._step_event_stack[-1] if self._step_event_stack else self._correlation_id
+        parent_correlation_id = (
+            self._step_event_stack[-1] if self._step_event_stack else self._correlation_id
+        )
 
         # Increment pause index for next call (whether we replay or pause)
         self._workflow_entity._pause_index += 1
@@ -1580,12 +1725,16 @@ class WorkflowContext(Context):
             original_step_name = self._workflow_entity._resumed_step_name or step_name
 
             if original_step_correlation_id:
-                self._logger.debug(f"Using restored step correlation ID: {original_step_correlation_id}")
+                self._logger.debug(
+                    f"Using restored step correlation ID: {original_step_correlation_id}"
+                )
             else:
                 # Normal during multi-step HITL replay — only the latest paused step
                 # has a correlation ID from the platform; earlier replayed steps generate new ones.
                 original_step_correlation_id = generate_cid()
-                self._logger.debug(f"No restored step correlation ID, using new: {original_step_correlation_id}")
+                self._logger.debug(
+                    f"No restored step correlation ID, using new: {original_step_correlation_id}"
+                )
 
             # Emit workflow.resumed FIRST - workflow is continuing after pause
             workflow_resumed = Resumed(
@@ -1622,7 +1771,7 @@ class WorkflowContext(Context):
             if response in {"__skipped__", "__skip__"}:
                 return None
             if isinstance(response, str) and response.startswith("__custom__:"):
-                return response[len("__custom__:"):]
+                return response[len("__custom__:") :]
             return response
 
         # No cached response - this is a fresh execution, emit step.started
@@ -1713,7 +1862,7 @@ class WorkflowContext(Context):
         if self._workflow_entity._step_events:
             checkpoint_metadata["step_events"] = _json.dumps(self._workflow_entity._step_events)
         # Include workflow state snapshot
-        if hasattr(self, '_workflow_entity') and self._workflow_entity._state is not None:
+        if hasattr(self, "_workflow_entity") and self._workflow_entity._state is not None:
             if self._workflow_entity._state.has_changes():
                 state_snapshot = self._workflow_entity._state.get_state_snapshot()
                 checkpoint_metadata["workflow_state"] = _json.dumps(state_snapshot)
@@ -1792,6 +1941,7 @@ def _sanitize_for_json(obj: Any) -> Any:
     # For other objects, try to serialize or convert to string
     try:
         import json
+
         json.dumps(obj)
         return obj
     except (TypeError, ValueError):
@@ -1892,7 +2042,9 @@ class WorkflowEntity:
         self._state_changes: list[Dict[str, Any]] = []
         self._persisted_state_change_count: int = 0
 
-        logger.debug(f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}, component={component_name}")
+        logger.debug(
+            f"Created WorkflowEntity: run={run_id}, scope={memory_scope}, key={entity_key}, component={component_name}"
+        )
 
     @property
     def run_id(self) -> str:
@@ -1974,14 +2126,18 @@ class WorkflowEntity:
 
         # Also add to step_events so it gets serialized to metadata on next pause
         # This ensures previous user responses are preserved across resumes
-        self._step_events.append({
-            "step_name": response_key,
-            "handler_name": "user_response",
-            "input": None,
-            "result": response,
-        })
+        self._step_events.append(
+            {
+                "step_name": response_key,
+                "handler_name": "user_response",
+                "input": None,
+                "result": response,
+            }
+        )
 
-        logger.info(f"Injected user response for {self.run_id} at pause {self._pause_index}: {response}")
+        logger.info(
+            f"Injected user response for {self.run_id} at pause {self._pause_index}: {response}"
+        )
 
     def get_agent_data(self, agent_name: str) -> Dict[str, Any]:
         """
@@ -2075,8 +2231,12 @@ class WorkflowEntity:
 
             # Save state with version check and proper scope
             new_version = await adapter.save_state(
-                self._entity_type, self._key, state_dict, current_version,
-                scope=scope, scope_id=scope_id
+                self._entity_type,
+                self._key,
+                state_dict,
+                current_version,
+                scope=scope,
+                scope_id=scope_id,
             )
 
             logger.debug(
@@ -2089,8 +2249,7 @@ class WorkflowEntity:
             self._persisted_state_change_count = len(self._state_changes)
         except Exception as e:
             logger.error(
-                f"❌ ERROR: Failed to persist workflow state for {self.run_id}: {e}",
-                exc_info=True
+                f"❌ ERROR: Failed to persist workflow state for {self.run_id}: {e}", exc_info=True
             )
             # Re-raise to let caller handle
             raise
@@ -2153,6 +2312,7 @@ class WorkflowState(StateInterface):
         if self._emitter:
             from ._ids import generate_cid
             from .events import StateChanged
+
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
                 correlation_id=generate_cid(),
@@ -2176,6 +2336,7 @@ class WorkflowState(StateInterface):
         if self._emitter:
             from ._ids import generate_cid
             from .events import StateChanged
+
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
                 correlation_id=generate_cid(),
@@ -2203,6 +2364,7 @@ class WorkflowState(StateInterface):
         if self._emitter:
             from ._ids import generate_cid
             from .events import StateChanged
+
             state_event = StateChanged(
                 name=self._workflow_entity._component_name or "workflow",
                 correlation_id=generate_cid(),
@@ -2380,10 +2542,13 @@ def workflow(
         if inspect.iscoroutinefunction(func):
             handler_func = cast(HandlerFunc, func)
         else:
-            # Wrap sync function in async
+            # Run synchronous workflow bodies outside the shared event-loop
+            # thread. asyncio.to_thread() also propagates contextvars, so the
+            # workflow context and tracing parent remain available to the
+            # handler without blocking unrelated workflow coroutines.
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                return func(*args, **kwargs)
+                return await asyncio.to_thread(func, *args, **kwargs)
 
             handler_func = cast(HandlerFunc, async_wrapper)
 
@@ -2457,7 +2622,9 @@ def workflow(
                     try:
                         await workflow_entity._persist_state()
                     except Exception as e:
-                        logger.error(f"Failed to persist workflow state (non-fatal): {e}", exc_info=True)
+                        logger.error(
+                            f"Failed to persist workflow state (non-fatal): {e}", exc_info=True
+                        )
                         # Don't fail the workflow - persistence failure shouldn't break execution
 
                     return result
@@ -2481,7 +2648,9 @@ def workflow(
                     try:
                         await ctx._workflow_entity._persist_state()
                     except Exception as e:
-                        logger.error(f"Failed to persist workflow state (non-fatal): {e}", exc_info=True)
+                        logger.error(
+                            f"Failed to persist workflow state (non-fatal): {e}", exc_info=True
+                        )
                         # Don't fail the workflow - persistence failure shouldn't break execution
 
                     return result

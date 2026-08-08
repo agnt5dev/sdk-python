@@ -201,6 +201,7 @@ class Context:
         self._component_name: Optional[str] = None
         self._memo_namespace = memo_namespace or ""
         self._memo_child_sequences: dict[str, int] = {}
+        self._activation_sequences: dict[str, int] = {}
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
@@ -238,6 +239,22 @@ class Context:
     def metadata(self) -> dict[str, str]:
         """Runtime dispatch metadata for this invocation."""
         return dict(self._trace_metadata or {})
+
+    @property
+    def activation(self):
+        """Current durable activation, including its downstream idempotency key."""
+
+        from .activation import current_activation
+
+        return current_activation()
+
+    def allocate_activation_key(self, kind: str, name: str) -> str:
+        """Allocate a deterministic sequential key for compatibility call paths."""
+
+        namespace = f"{kind}:{name}"
+        ordinal = self._activation_sequences.get(namespace, 0)
+        self._activation_sequences[namespace] = ordinal + 1
+        return f"{namespace}:{ordinal}"
 
     @property
     def logger(self) -> ContextLogger:
@@ -295,16 +312,32 @@ class Context:
     def _get_emitter(self) -> EventEmitter:
         """Get or create the event emitter (lazy initialization)."""
         if self._emitter is None:
-            # Pass trace metadata, experiment_id, and project/deployment IDs as base_metadata
-            # so every checkpoint event carries them back to the engine.
+            # Pass trace metadata, execution authority, and project/deployment
+            # IDs as base_metadata so every checkpoint event carries them back
+            # to the engine. The runtime validates the lease fields before it
+            # accepts worker-authored lifecycle mutations.
             # The current engine cache key is still (tenant_id, run_id), where
             # tenant_id is a legacy alias for project identity on worker/runtime
             # paths. Events must therefore preserve the same value stamped on
             # run.queued during the migration window.
             trace_base = {}
             if self._trace_metadata:
-                for key in ("traceparent", "tracestate", "experiment_id", "tenant_id", "deployment_id",
-                            "attempt", "max_attempts", "component_name", "component_type"):
+                for key in (
+                    "traceparent",
+                    "tracestate",
+                    "experiment_id",
+                    "tenant_id",
+                    "deployment_id",
+                    "attempt",
+                    "max_attempts",
+                    "component_name",
+                    "component_type",
+                    "dispatch_mode",
+                    "worker_id",
+                    "worker_session_id",
+                    "lease_id",
+                    "lease_attempt",
+                ):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
             self._emitter = EventEmitter(

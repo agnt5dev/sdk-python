@@ -1,10 +1,14 @@
 """Worker executor input validation tests."""
 
+import ast
+import base64
+import inspect
 from types import SimpleNamespace
 
 import pytest
 
 from agnt5._serialization import deserialize, serialize
+from agnt5.activation import ActivationDecision, ActivationDecisionKind, activation_id
 from agnt5.worker._executors import ExecutorMixin, _agent_missing_message_error
 
 
@@ -14,6 +18,26 @@ class _DummyExecutor(ExecutorMixin):
         self._checkpoint_client = None
         self._rust_worker = None
         self.service_name = "test"
+
+
+class _DurableExecutor(_DummyExecutor):
+    def _activation_client_for_metadata(self, _metadata):
+        return self
+
+    async def begin(self, request):
+        return ActivationDecision(
+            kind=ActivationDecisionKind.EXECUTE,
+            activation_id=activation_id(
+                request.project_id,
+                request.run_id,
+                request.parent_activation_id,
+                request.kind,
+                request.stable_key,
+            ),
+            attempt=2,
+            accepted_journal_offset=11,
+            fence_token=b"fence-2",
+        )
 
 
 def _request(payload):
@@ -37,12 +61,23 @@ def _assert_clear_non_object_failure(response, payload):
     assert type(payload).__name__ in response.error_message
 
 
+def test_executor_mixin_never_calls_blocking_context_emit():
+    """Lifecycle and stream emission must not block the shared event loop."""
+    tree = ast.parse(inspect.getsource(ExecutorMixin))
+    blocking_calls = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "emit"
+    ]
+    assert blocking_calls == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", ["Alabama", ["a", "b"], 42])
 @pytest.mark.parametrize("component_type", ["function", "tool", "agent"])
-async def test_non_object_inputs_fail_before_generic_executor_handlers(
-    component_type, payload
-):
+async def test_non_object_inputs_fail_before_generic_executor_handlers(component_type, payload):
     executor = _DummyExecutor()
     handler_called = False
 
@@ -63,6 +98,7 @@ async def test_non_object_inputs_fail_before_generic_executor_handlers(
             _request(payload),
         )
     elif component_type == "tool":
+
         class Tool:
             name = "invalid_input_tool"
 
@@ -103,6 +139,41 @@ async def test_non_object_inputs_fail_before_workflow_handler(payload):
 
     _assert_clear_non_object_failure(response, payload)
     assert handler_called is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
+    from agnt5.workflow import WorkflowContext
+
+    executor = _DummyExecutor()
+    emitted_types = []
+
+    def reject_sync_emit(self, event):
+        raise AssertionError(f"synchronous lifecycle emission used for {event.event_type}")
+
+    async def record_async_emit(self, event):
+        emitted_types.append(event.event_type)
+
+    monkeypatch.setattr(WorkflowContext, "emit", reject_sync_emit)
+    monkeypatch.setattr(WorkflowContext, "emit_async", record_async_emit)
+
+    async def handler(ctx):
+        return {"ok": True}
+
+    request = _request({})
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="async_lifecycle_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is None
+    assert emitted_types == [
+        "run.started",
+        "workflow.started",
+        "workflow.completed",
+        "run.completed",
+    ]
 
 
 @pytest.mark.asyncio
@@ -150,6 +221,93 @@ async def test_pull_workflow_pause_returns_terminal_without_queueing_workflow_te
     assert response.metadata["step_name"] == "wait_for_user_0"
     assert response.metadata["step_correlation_id"]
     assert response.metadata["workflow_correlation_id"]
+
+
+@pytest.mark.asyncio
+async def test_negotiated_activation_without_native_client_fails_before_workflow_code():
+    executor = _DummyExecutor()
+    handler_called = False
+
+    async def handler(ctx):
+        nonlocal handler_called
+        handler_called = True
+
+    request = _request({})
+    request.metadata = {"durable_activation_v1": "true"}
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="durable_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is not None
+    assert response.success is False
+    assert "executor has no activation client" in response.error_message
+    assert handler_called is False
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_inherits_activation_client_and_worker_authority():
+    executor = _DurableExecutor()
+    authority = {
+        "durable_activation_v1": "true",
+        "dispatch_mode": "pull",
+        "worker_id": "worker-1",
+        "worker_session_id": "session-1",
+        "lease_id": "lease-1",
+        "lease_attempt": "1",
+    }
+
+    class Tool:
+        name = "durable_tool"
+
+        async def invoke(self, ctx):
+            assert ctx._activation_client is executor
+            assert ctx.metadata == authority
+            return {"ok": True}
+
+    request = _request({})
+    request.metadata = authority
+    response = await executor._execute_tool(Tool(), request.input_data, request)
+
+    assert response is not None
+    assert response.success is True
+    assert deserialize(response.output_data) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_sleep_returns_typed_worker_suspension():
+    executor = _DurableExecutor()
+
+    async def handler(ctx):
+        await ctx.sleep(2.5, name="backoff")
+
+    request = _request({})
+    request.metadata = {
+        "durable_activation_v1": "true",
+        "durable_suspension_v1": "true",
+        "project_id": "project-1",
+        "worker_session_id": "session-1",
+        "lease_id": "lease-1",
+        "activation_artifact_sha256": base64.b64encode(b"a" * 32).decode(),
+        "activation_definition_version": "v1",
+        "activation_definition_config": '["object",[]]',
+        "component_name": "durable_workflow",
+    }
+    response = await executor._execute_workflow(
+        SimpleNamespace(name="durable_workflow", handler=handler),
+        request.input_data,
+        request,
+    )
+
+    assert response is not None
+    assert response.success is True
+    assert response.event_type == "workflow.paused"
+    assert response.worker_suspension is not None
+    assert response.worker_suspension.timer_key == "sleep:backoff"
+    assert response.worker_suspension.delay_ms == 2500
+    assert response.worker_suspension.attempt == 2
+    assert bytes(response.worker_suspension.fence_token) == b"fence-2"
 
 
 def test_agent_missing_message_error_lists_received_keys():

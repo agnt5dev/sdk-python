@@ -154,6 +154,7 @@ class GenerationConfig:
     modalities: Optional[List[Modality]] = None
     store: Optional[bool] = None
     previous_response_id: Optional[str] = None
+    recovery_policy: Optional[str] = None
 
 
 @dataclass

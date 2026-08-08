@@ -1,7 +1,7 @@
 use agnt5_sdk_core::pb::{
     dispatch_component_response, ComponentInfo, ComponentSchema, ComponentType,
     DispatchComponentRequest, DispatchComponentResponse, StateTransition, StateUpdate,
-    StepCheckpoint, TriggerSpec,
+    StepCheckpoint, TriggerSpec, WorkerSuspension,
 };
 use pyo3::prelude::*;
 use serde_json;
@@ -433,6 +433,74 @@ impl From<DispatchComponentRequest> for PyExecuteComponentRequest {
 
 #[pyclass]
 #[derive(Clone)]
+pub struct PyWorkerSuspension {
+    #[pyo3(get)]
+    pub activation_id: String,
+    #[pyo3(get)]
+    pub attempt: u32,
+    #[pyo3(get)]
+    pub fence_token: Vec<u8>,
+    #[pyo3(get)]
+    pub timer_key: String,
+    #[pyo3(get)]
+    pub ready_at_ms: i64,
+    #[pyo3(get)]
+    pub input_digest: Vec<u8>,
+    #[pyo3(get)]
+    pub definition_digest: Vec<u8>,
+    #[pyo3(get)]
+    pub continuation: Vec<u8>,
+    #[pyo3(get)]
+    pub delay_ms: i64,
+}
+
+#[pymethods]
+impl PyWorkerSuspension {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        activation_id: String,
+        attempt: u32,
+        fence_token: Vec<u8>,
+        timer_key: String,
+        ready_at_ms: i64,
+        input_digest: Vec<u8>,
+        definition_digest: Vec<u8>,
+        continuation: Vec<u8>,
+        delay_ms: i64,
+    ) -> Self {
+        Self {
+            activation_id,
+            attempt,
+            fence_token,
+            timer_key,
+            ready_at_ms,
+            input_digest,
+            definition_digest,
+            continuation,
+            delay_ms,
+        }
+    }
+}
+
+impl From<PyWorkerSuspension> for WorkerSuspension {
+    fn from(value: PyWorkerSuspension) -> Self {
+        Self {
+            activation_id: value.activation_id,
+            attempt: value.attempt,
+            fence_token: value.fence_token,
+            timer_key: value.timer_key,
+            ready_at_ms: value.ready_at_ms,
+            input_digest: value.input_digest,
+            definition_digest: value.definition_digest,
+            continuation: value.continuation,
+            delay_ms: value.delay_ms,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
 pub struct PyExecuteComponentResponse {
     #[pyo3(get)]
     pub invocation_id: String,
@@ -459,12 +527,27 @@ pub struct PyExecuteComponentResponse {
     // Retry orchestration
     #[pyo3(get)]
     pub attempt: i32,
+    #[pyo3(get)]
+    pub worker_suspension: Option<PyWorkerSuspension>,
 }
 
 #[pymethods]
 impl PyExecuteComponentResponse {
     #[new]
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        invocation_id,
+        success,
+        output_data,
+        state_update,
+        error_message,
+        metadata,
+        event_type,
+        content_index,
+        sequence,
+        attempt,
+        worker_suspension=None,
+    ))]
     fn new(
         invocation_id: String,
         success: bool,
@@ -476,6 +559,7 @@ impl PyExecuteComponentResponse {
         content_index: Option<i32>,
         sequence: Option<i64>,
         attempt: Option<i32>,
+        worker_suspension: Option<PyWorkerSuspension>,
     ) -> Self {
         Self {
             invocation_id,
@@ -488,13 +572,18 @@ impl PyExecuteComponentResponse {
             content_index: content_index.unwrap_or(0),
             sequence: sequence.unwrap_or(0),
             attempt: attempt.unwrap_or(0),
+            worker_suspension,
         }
     }
 }
 
 impl From<PyExecuteComponentResponse> for DispatchComponentResponse {
     fn from(resp: PyExecuteComponentResponse) -> Self {
-        let result = if resp.success {
+        let result = if let Some(suspension) = resp.worker_suspension.clone() {
+            Some(dispatch_component_response::Result::WorkerSuspension(
+                suspension.into(),
+            ))
+        } else if resp.success {
             if let Some(update) = resp.state_update.clone() {
                 Some(dispatch_component_response::Result::StateUpdate(
                     update.into(),
@@ -526,13 +615,30 @@ impl From<PyExecuteComponentResponse> for DispatchComponentResponse {
 
 impl From<DispatchComponentResponse> for PyExecuteComponentResponse {
     fn from(resp: DispatchComponentResponse) -> Self {
-        let (output_data, state_update) = match resp.result {
-            Some(dispatch_component_response::Result::OutputData(data)) => (data, None),
+        let (output_data, state_update, worker_suspension) = match resp.result {
+            Some(dispatch_component_response::Result::OutputData(data)) => (data, None, None),
             Some(dispatch_component_response::Result::StateUpdate(update)) => {
-                (Vec::new(), Some(PyStateUpdate::from(update)))
+                (Vec::new(), Some(PyStateUpdate::from(update)), None)
             }
-            Some(dispatch_component_response::Result::FlowContinuation(_)) => (Vec::new(), None),
-            None => (Vec::new(), None),
+            Some(dispatch_component_response::Result::FlowContinuation(_)) => {
+                (Vec::new(), None, None)
+            }
+            Some(dispatch_component_response::Result::WorkerSuspension(value)) => (
+                Vec::new(),
+                None,
+                Some(PyWorkerSuspension {
+                    activation_id: value.activation_id,
+                    attempt: value.attempt,
+                    fence_token: value.fence_token,
+                    timer_key: value.timer_key,
+                    ready_at_ms: value.ready_at_ms,
+                    input_digest: value.input_digest,
+                    definition_digest: value.definition_digest,
+                    continuation: value.continuation,
+                    delay_ms: value.delay_ms,
+                }),
+            ),
+            None => (Vec::new(), None, None),
         };
 
         Self {
@@ -550,6 +656,7 @@ impl From<DispatchComponentResponse> for PyExecuteComponentResponse {
             content_index: resp.content_index,
             sequence: resp.sequence,
             attempt: resp.attempt,
+            worker_suspension,
         }
     }
 }
@@ -739,5 +846,50 @@ impl From<PyComponentInfo> for ComponentInfo {
             backoff_multiplier,
             triggers: comp.triggers.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PyExecuteComponentResponse, PyWorkerSuspension};
+    use agnt5_sdk_core::pb::{dispatch_component_response, DispatchComponentResponse};
+    use std::collections::HashMap;
+
+    #[test]
+    fn typed_worker_suspension_crosses_python_response_boundary() {
+        let response = PyExecuteComponentResponse {
+            invocation_id: "run-1".into(),
+            success: true,
+            output_data: Vec::new(),
+            state_update: None,
+            error_message: None,
+            metadata: HashMap::new(),
+            event_type: "workflow.paused".into(),
+            content_index: 0,
+            sequence: 0,
+            attempt: 3,
+            worker_suspension: Some(PyWorkerSuspension {
+                activation_id: "activation-1".into(),
+                attempt: 2,
+                fence_token: b"fence-2".to_vec(),
+                timer_key: "sleep:backoff".into(),
+                ready_at_ms: 0,
+                input_digest: vec![1; 32],
+                definition_digest: vec![2; 32],
+                continuation: b"continuation".to_vec(),
+                delay_ms: 5_000,
+            }),
+        };
+
+        let converted: DispatchComponentResponse = response.into();
+        let Some(dispatch_component_response::Result::WorkerSuspension(suspension)) =
+            converted.result
+        else {
+            panic!("typed worker suspension result");
+        };
+        assert_eq!(suspension.activation_id, "activation-1");
+        assert_eq!(suspension.timer_key, "sleep:backoff");
+        assert_eq!(suspension.delay_ms, 5_000);
+        assert_eq!(converted.event_type, "workflow.paused");
     }
 }

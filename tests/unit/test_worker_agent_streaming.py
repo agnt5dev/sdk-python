@@ -22,6 +22,9 @@ class _RecordingWorker:
     def emit_event_sync(self, *, event_type: str, **kwargs) -> None:
         self.event_types.append(event_type)
 
+    async def emit_event_async(self, *, event_type: str, **kwargs) -> None:
+        self.event_types.append(event_type)
+
     def queue_event(self, *, event_type: str, **kwargs) -> None:
         self.event_types.append(event_type)
 

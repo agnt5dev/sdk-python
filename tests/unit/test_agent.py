@@ -14,6 +14,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agnt5 import Agent, Context, Sandbox, tool
+from agnt5.activation import (
+    ActivationDecision,
+    ActivationDecisionKind,
+    ActivationKind,
+    ChildJoinPolicy,
+    activation_id,
+)
 from agnt5.agent import AgentContext, AgentRegistry, AgentResult, Handoff, handoff
 from agnt5.exceptions import WaitingForUserInputException
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel, Message, TokenUsage
@@ -751,6 +758,75 @@ async def test_agent_handoff():
     assert result.output == "I am the target agent"
     assert target_lm.requests
     assert all(not message.tool_calls for message in target_lm.requests[0].messages)
+
+
+@pytest.mark.asyncio
+async def test_durable_handoff_is_nested_under_one_child_activation():
+    class RecordingActivationClient:
+        def __init__(self):
+            self.requests = []
+
+        async def run(self, request, execute, **options):
+            self.requests.append(request)
+            decision = ActivationDecision(
+                kind=ActivationDecisionKind.EXECUTE,
+                activation_id=activation_id(
+                    request.project_id,
+                    request.run_id,
+                    request.parent_activation_id,
+                    request.kind,
+                    request.stable_key,
+                ),
+                attempt=1,
+                accepted_journal_offset=len(self.requests),
+                fence_token=b"fence",
+            )
+            if callback := options.get("on_admitted"):
+                callback(decision)
+            return await execute(), decision
+
+    target = Agent(
+        name="target",
+        model=MockLanguageModel(responses=["handled"]),
+        instructions="Handle delegated work",
+    )
+    source = Agent(
+        name="source",
+        model=MockLanguageModel(),
+        instructions="Delegate work",
+        handoffs=[handoff(target, join_policy=ChildJoinPolicy.REQUIRED)],
+    )
+    ctx = Context(
+        run_id="run-1",
+        correlation_id="corr-1",
+        parent_correlation_id="parent-1",
+        trace_metadata={
+            "durable_activation_v1": "true",
+            "project_id": "project-1",
+            "component_name": "router",
+            "worker_session_id": "worker-1",
+            "run_authority": "run-authority",
+            "lease_authority": "lease-authority",
+            "activation_definition_version": "v1",
+            "activation_artifact_sha256": "00" * 32,
+            "activation_definition_config": '["object",[]]',
+        },
+    )
+    client = RecordingActivationClient()
+    ctx._activation_client = client
+
+    result = await source.tools["transfer_to_target"].invoke_with_stable_key(
+        ctx,
+        {"message": "take this"},
+        stable_key="provider-call-1",
+    )
+
+    assert result["output"] == "handled"
+    child_request = next(request for request in client.requests if request.kind is ActivationKind.CHILD)
+    assert all(request.kind is not ActivationKind.TOOL for request in client.requests)
+    assert child_request.parent_activation_id == ""
+    assert child_request.child is not None
+    assert child_request.child.join_policy is ChildJoinPolicy.REQUIRED
 
 
 def test_handoff_configuration():

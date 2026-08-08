@@ -122,6 +122,14 @@ _TERMINAL_EVENT_TYPES = frozenset({
     "workflow.paused",
 })
 
+_EXECUTION_AUTHORITY_METADATA_KEYS = (
+    "dispatch_mode",
+    "worker_id",
+    "worker_session_id",
+    "lease_id",
+    "lease_attempt",
+)
+
 
 def is_terminal_event(event_type: str) -> bool:
     """True only for events the gateway tail-stream waits for."""
@@ -694,6 +702,19 @@ class EventEmitter:
         """Set the worker for queueing events."""
         self._worker = worker
 
+    def _event_metadata(
+        self, event_metadata: Optional[dict[str, str]]
+    ) -> dict[str, str]:
+        merged = dict(self._base_metadata)
+        if event_metadata:
+            merged.update(event_metadata)
+        # Authority is transport-authored dispatch state. User event metadata
+        # may add observability fields but cannot replace the current fence.
+        for key in _EXECUTION_AUTHORITY_METADATA_KEYS:
+            if key in self._base_metadata:
+                merged[key] = self._base_metadata[key]
+        return merged
+
     def emit(self, event: Event) -> EventEnvelope:
         """Emit a typed event to the platform.
 
@@ -781,6 +802,7 @@ class EventEmitter:
                         "[EventEmitter.emit_async] Failed to queue non-terminal checkpoint: %s",
                         e,
                     )
+                    raise
             else:
                 try:
                     await self._worker.emit_event_async(
@@ -796,6 +818,7 @@ class EventEmitter:
                     logger.error(
                         "[EventEmitter.emit_async] Failed to emit checkpoint: %s", e
                     )
+                    raise
         else:
             content_index = getattr(event, "index", 0)
             try:
@@ -841,9 +864,7 @@ class EventEmitter:
         ):
             for event in events:
                 event_data = event.to_dict()
-                merged_metadata = dict(self._base_metadata)
-                if event.metadata:
-                    merged_metadata.update(event.metadata)
+                merged_metadata = self._event_metadata(event.metadata)
                 merged_metadata.update(
                     guardrail_subject_metadata(event.event_type, event_data, self._run_id)
                 )
@@ -869,14 +890,14 @@ class EventEmitter:
                     logger.error(
                         "[EventEmitter.emit_batch_async] Failed to queue event: %s", e
                     )
+                    if is_checkpoint_event(event.event_type):
+                        raise
             return
 
         batch_tuples = []
         for event in events:
             event_data = event.to_dict()
-            merged_metadata = dict(self._base_metadata)
-            if event.metadata:
-                merged_metadata.update(event.metadata)
+            merged_metadata = self._event_metadata(event.metadata)
             merged_metadata.update(
                 guardrail_subject_metadata(event.event_type, event_data, self._run_id)
             )
@@ -930,9 +951,7 @@ class EventEmitter:
             return
 
         try:
-            merged_metadata = dict(self._base_metadata)
-            if envelope.metadata:
-                merged_metadata.update(envelope.metadata)
+            merged_metadata = self._event_metadata(envelope.metadata)
 
             self._sequence += 1
 
@@ -969,6 +988,11 @@ class EventEmitter:
                     parent_correlation_id=parent_correlation_id,
                 )
         except Exception as e:
+            if is_checkpoint_event(envelope.event_type):
+                logger.error(
+                    "[EventEmitter._queue_event_async] Failed to emit checkpoint: %s", e
+                )
+                raise
             logger.error("[EventEmitter._queue_event_async] Failed to queue event: %s", e)
 
     def _queue_event(
@@ -995,9 +1019,7 @@ class EventEmitter:
             return
 
         try:
-            merged_metadata = dict(self._base_metadata)
-            if envelope.metadata:
-                merged_metadata.update(envelope.metadata)
+            merged_metadata = self._event_metadata(envelope.metadata)
 
             self._sequence += 1
 
@@ -1011,34 +1033,15 @@ class EventEmitter:
 
                 # For checkpoint events, use emit_event_sync which blocks until
                 # the platform acknowledges the event has been persisted.
-                try:
-                    self._worker.emit_event_sync(
-                        run_id=self._run_id,
-                        event_type=envelope.event_type,
-                        event_data=serialize(envelope.data),
-                        sequence_number=self._sequence,
-                        metadata=merged_metadata,
-                        source_timestamp_ns=envelope.source_timestamp_ns,
-                        timeout_ms=5000,
-                    )
-                except Exception as e:
-                    # On failure, fall back to async queue to ensure event isn't lost
-                    logger.warning(
-                        "[EventEmitter._queue_event] Checkpoint sync emit failed (%s), "
-                        "falling back to async: type=%s", e, envelope.event_type,
-                    )
-                    self._worker.queue_event(
-                        invocation_id=self._run_id,
-                        event_type=envelope.event_type,
-                        event_data=serialize(envelope.data),
-                        content_index=envelope.content_index,
-                        sequence=self._sequence,
-                        metadata=merged_metadata,
-                        source_timestamp_ns=envelope.source_timestamp_ns,
-                        is_streaming=True,
-                        correlation_id=correlation_id,
-                        parent_correlation_id=parent_correlation_id,
-                    )
+                self._worker.emit_event_sync(
+                    run_id=self._run_id,
+                    event_type=envelope.event_type,
+                    event_data=serialize(envelope.data),
+                    sequence_number=self._sequence,
+                    metadata=merged_metadata,
+                    source_timestamp_ns=envelope.source_timestamp_ns,
+                    timeout_ms=5000,
+                )
             else:
                 # Use async queue for observability/streaming events
                 self._worker.queue_event(
@@ -1054,6 +1057,9 @@ class EventEmitter:
                     parent_correlation_id=parent_correlation_id,
                 )
         except Exception as e:
+            if is_checkpoint_event(envelope.event_type):
+                logger.error("[EventEmitter._queue_event] Failed to emit checkpoint: %s", e)
+                raise
             logger.error("[EventEmitter._queue_event] Failed to queue event: %s", e)
 
     @property

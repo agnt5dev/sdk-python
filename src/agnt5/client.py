@@ -33,6 +33,14 @@ AGNT5_TENANT_ID_ENV = "AGNT5_TENANT_ID"
 AGNT5_DEPLOYMENT_ID_ENV = "AGNT5_DEPLOYMENT_ID"
 
 
+def _with_idempotency_key(
+    headers: Dict[str, str], idempotency_key: Optional[str]
+) -> Dict[str, str]:
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
 @dataclass
 class ReceivedEvent:
     """Event received from SSE stream.
@@ -136,7 +144,10 @@ def _parse_sse_to_event(
             payload.get("content_index", payload.get("contentIndex", data.get("index", 0))),
         ),
         sequence=payload.get("sequence", data.get("sequence", default_sequence)),
-        run_id=data.get("run_id") or data.get("runId") or payload.get("run_id") or payload.get("runId"),
+        run_id=data.get("run_id")
+        or data.get("runId")
+        or payload.get("run_id")
+        or payload.get("runId"),
     )
 
 
@@ -284,6 +295,8 @@ class Client:
         timeout: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> RunResponse[Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -303,6 +316,7 @@ class Client:
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Request timeout in seconds (optional, defaults to client timeout)
             headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Returns:
             RunResponse containing the output and metadata
@@ -346,6 +360,7 @@ class Client:
         )
         if headers:
             request_headers.update(headers)
+        _with_idempotency_key(request_headers, idempotency_key)
 
         # Make request with auth and session headers
         response = self._client.post(
@@ -359,53 +374,74 @@ class Client:
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                return parse_run_response({
-                    "run_id": error_data.get("runId", ""),
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": error_data.get("error", "Component not found"),
+                        },
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": "",
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": "",
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": f"Component '{component}' not found",
+                        },
+                    }
+                )
 
         if response.status_code == 503:
             try:
                 error_data = response.json()
-                return parse_run_response({
-                    "run_id": error_data.get("runId", ""),
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "SERVICE_UNAVAILABLE", "message": error_data.get("error", "Service unavailable")},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {
+                            "code": "SERVICE_UNAVAILABLE",
+                            "message": error_data.get("error", "Service unavailable"),
+                        },
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": "",
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "SERVICE_UNAVAILABLE", "message": "Service unavailable"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": "",
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {"code": "SERVICE_UNAVAILABLE", "message": "Service unavailable"},
+                    }
+                )
 
         if response.status_code == 504:
             try:
                 error_data = response.json()
-                return parse_run_response({
-                    "run_id": error_data.get("runId", ""),
-                    "status_code": 500,
-                    "status": "timeout",
-                    "error": {"code": "TIMEOUT", "message": "Execution timeout"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": "",
-                    "status_code": 500,
-                    "status": "timeout",
-                    "error": {"code": "TIMEOUT", "message": "Execution timeout"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": "",
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                    }
+                )
 
         # For other non-2xx status codes, try to parse JSON or raise
         if response.status_code >= 400:
@@ -415,9 +451,54 @@ class Client:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
+        # A saturated gateway keeps the run durably queued but detaches the
+        # synchronous Engine tail. Preserve run()'s blocking contract by
+        # waiting through short status/result requests instead of holding the
+        # original gateway request open.
         data = response.json()
-        return parse_run_response(data)
+        parsed = parse_run_response(data)
+        if response.status_code == 202 and parsed.run_id:
+            wait_timeout = self.timeout if timeout is None else timeout
+            return self._wait_for_detached_run(parsed.run_id, wait_timeout)
+        return parsed
+
+    def _wait_for_detached_run(
+        self,
+        run_id: str,
+        timeout: float,
+    ) -> RunResponse[Any]:
+        """Wait for a detached run with bounded, backoff-based polling."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        poll_interval = 0.1
+        terminal_status_observed = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
+
+            if not terminal_status_observed:
+                status = self.get_status(run_id)
+                terminal_status_observed = status.is_complete
+
+            if terminal_status_observed:
+                result = self.get_result(run_id)
+                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
+                    return result
+
+            time.sleep(min(poll_interval, remaining))
+            poll_interval = min(poll_interval * 1.5, 2.0)
 
     def submit(
         self,
@@ -427,6 +508,8 @@ class Client:
         metadata: Optional[Dict[str, str]] = None,
         tenant: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -447,6 +530,7 @@ class Client:
                 Client.__init__ docstring.
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -487,14 +571,18 @@ class Client:
             request_body = input_data
 
         # Make request with auth headers
-        response = self._client.post(
-            url,
-            json=request_body,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        response = self._client.post(
+            url,
+            json=request_body,
+            headers=request_headers,
         )
 
         # Handle errors
@@ -566,19 +654,23 @@ class Client:
                 error_data = response.json()
                 error_msg = error_data.get("error", "Run not found or not complete")
                 current_status = error_data.get("status", "unknown")
-                return parse_run_response({
-                    "run_id": run_id,
-                    "status_code": 500,
-                    "status": current_status,
-                    "error": {"code": "NOT_READY", "message": error_msg},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": current_status,
+                        "error": {"code": "NOT_READY", "message": error_msg},
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": run_id,
-                    "status_code": 500,
-                    "status": "unknown",
-                    "error": {"code": "NOT_FOUND", "message": "Run not found"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "unknown",
+                        "error": {"code": "NOT_FOUND", "message": "Run not found"},
+                    }
+                )
 
         # Handle other errors
         if response.status_code >= 400:
@@ -588,7 +680,6 @@ class Client:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
         return parse_run_response(response.json())
 
     def wait_for_result(
@@ -633,12 +724,17 @@ class Client:
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed >= timeout:
-                return parse_run_response({
-                    "run_id": run_id,
-                    "status_code": 500,
-                    "status": "timeout",
-                    "error": {"code": "TIMEOUT", "message": f"Timeout waiting for run to complete after {timeout}s"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
 
             # Get current status
             status = self.get_status(run_id)
@@ -807,21 +903,31 @@ class Client:
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                return parse_eval_response({
-                    "run_id": error_data.get("runId", ""),
-                    "output": None,
-                    "scores": [],
-                    "passed": False,
-                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
-                })
+                return parse_eval_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "output": None,
+                        "scores": [],
+                        "passed": False,
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": error_data.get("error", "Component not found"),
+                        },
+                    }
+                )
             except ValueError:
-                return parse_eval_response({
-                    "run_id": "",
-                    "output": None,
-                    "scores": [],
-                    "passed": False,
-                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
-                })
+                return parse_eval_response(
+                    {
+                        "run_id": "",
+                        "output": None,
+                        "scores": [],
+                        "passed": False,
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": f"Component '{component}' not found",
+                        },
+                    }
+                )
 
         if response.status_code >= 400:
             try:
@@ -840,6 +946,8 @@ class Client:
         component_type: str = "function",
         tenant: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ):
         """Stream responses from a component using Server-Sent Events (SSE).
 
@@ -853,6 +961,7 @@ class Client:
             tenant: Sub-tenant override for this call (optional)
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Yields:
             String chunks as they arrive from the component
@@ -875,15 +984,19 @@ class Client:
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth headers
-        with self._client.stream(
-            "POST",
-            url,
-            json=input_data,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        with self._client.stream(
+            "POST",
+            url,
+            json=input_data,
+            headers=request_headers,
             timeout=300.0,  # 5 minute timeout for streaming
         ) as response:
             # Check for errors
@@ -959,6 +1072,8 @@ class Client:
         tenant: Optional[str] = None,
         timeout: float = 300.0,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> Iterator[ReceivedEvent]:
         """Stream events from a component execution.
 
@@ -976,6 +1091,7 @@ class Client:
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Yields:
             ReceivedEvent objects as they arrive from the stream
@@ -1010,17 +1126,21 @@ class Client:
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
         # Use streaming request with auth and session headers
-        with self._client.stream(
-            "POST",
-            url,
-            json=input_data,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 session_id=session_id,
                 user_id=user_id,
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        with self._client.stream(
+            "POST",
+            url,
+            json=input_data,
+            headers=request_headers,
             timeout=timeout,
         ) as response:
             # Check for errors
@@ -1065,7 +1185,9 @@ class Client:
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
                             # Use helper to properly parse error structure
-                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
+                            raise _parse_error_response(
+                                data, run_id=data.get("runId") or data.get("run_id")
+                            )
 
                         # Yield typed Event object
                         if current_event_type:
@@ -1178,6 +1300,8 @@ class Client:
         metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs.
 
@@ -1204,6 +1328,7 @@ class Client:
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: HTTP request timeout in seconds (optional)
+            idempotency_key: Stable caller key for safely retrying this batch.
 
         Returns:
             BatchResult containing all item results and statistics
@@ -1273,9 +1398,12 @@ class Client:
         if metadata:
             request_body["metadata"] = metadata
 
-        headers = self._build_headers(
-            deployment_id=deployment_id,
-            include_ambient_deployment_id=False,
+        headers = _with_idempotency_key(
+            self._build_headers(
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
+            idempotency_key,
         )
         response = self._client.post(url, json=request_body, headers=headers, timeout=timeout)
         response.raise_for_status()
@@ -1400,6 +1528,7 @@ class Client:
                 # If we're already in an async context, use nest_asyncio pattern
                 # or run in a new thread
                 import concurrent.futures
+
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, _run_batch())
                     raw_results = future.result()
@@ -1415,17 +1544,21 @@ class Client:
         results: List[BatchEvalItemResult] = []
         for i, (item, raw) in enumerate(zip(normalized_items, raw_results)):
             if isinstance(raw, Exception):
-                results.append(BatchEvalItemResult.from_exception(
-                    raw,
-                    index=item.index if item.index is not None else i,
-                    item_id=item.item_id,
-                ))
+                results.append(
+                    BatchEvalItemResult.from_exception(
+                        raw,
+                        index=item.index if item.index is not None else i,
+                        item_id=item.item_id,
+                    )
+                )
             else:
-                results.append(BatchEvalItemResult.from_eval_response(
-                    raw,
-                    index=item.index if item.index is not None else i,
-                    item_id=item.item_id,
-                ))
+                results.append(
+                    BatchEvalItemResult.from_eval_response(
+                        raw,
+                        index=item.index if item.index is not None else i,
+                        item_id=item.item_id,
+                    )
+                )
 
         # Sort results by index
         results.sort(key=lambda r: r.index)
@@ -1611,19 +1744,23 @@ class EntityProxy:
             if response.status_code == 504:
                 try:
                     error_data = response.json()
-                    return parse_run_response({
-                        "run_id": error_data.get("run_id", ""),
-                        "status_code": 500,
-                        "status": "timeout",
-                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
-                    })
+                    return parse_run_response(
+                        {
+                            "run_id": error_data.get("run_id", ""),
+                            "status_code": 500,
+                            "status": "timeout",
+                            "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                        }
+                    )
                 except ValueError:
-                    return parse_run_response({
-                        "run_id": "",
-                        "status_code": 500,
-                        "status": "timeout",
-                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
-                    })
+                    return parse_run_response(
+                        {
+                            "run_id": "",
+                            "status_code": 500,
+                            "status": "timeout",
+                            "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                        }
+                    )
 
             if response.status_code >= 400:
                 try:
@@ -2048,6 +2185,8 @@ class AsyncClient:
         user_id: Optional[str] = None,
         tenant: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> RunResponse[Any]:
         """Execute a component asynchronously and wait for the result.
 
@@ -2060,6 +2199,7 @@ class AsyncClient:
             tenant: Sub-tenant override for this call (X-TENANT-ID).
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Returns:
             RunResponse containing the output and metadata
@@ -2073,35 +2213,49 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/run")
 
-        response = await client.post(
-            url,
-            json=input_data,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 session_id=session_id,
                 user_id=user_id,
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        response = await client.post(
+            url,
+            json=input_data,
+            headers=request_headers,
         )
 
         # Handle HTTP errors
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                return parse_run_response({
-                    "run_id": error_data.get("runId", ""),
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": error_data.get("error", "Component not found"),
+                        },
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": "",
-                    "status_code": 500,
-                    "status": "failed",
-                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": "",
+                        "status_code": 500,
+                        "status": "failed",
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": f"Component '{component}' not found",
+                        },
+                    }
+                )
 
         if response.status_code >= 400:
             try:
@@ -2110,8 +2264,51 @@ class AsyncClient:
             except ValueError:
                 response.raise_for_status()
 
-        # Parse successful response
-        return parse_run_response(response.json())
+        # Preserve run()'s wait-for-terminal contract when the gateway has
+        # durably detached an excess synchronous waiter.
+        parsed = parse_run_response(response.json())
+        if response.status_code == 202 and parsed.run_id:
+            return await self._wait_for_detached_run(parsed.run_id, self.timeout)
+        return parsed
+
+    async def _wait_for_detached_run(
+        self,
+        run_id: str,
+        timeout: float,
+    ) -> RunResponse[Any]:
+        """Wait for a detached run without blocking the Python event loop."""
+        import asyncio
+        import time
+
+        deadline = time.monotonic() + timeout
+        poll_interval = 0.1
+        terminal_status_observed = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
+
+            if not terminal_status_observed:
+                status = await self.get_status(run_id)
+                terminal_status_observed = status.is_complete
+
+            if terminal_status_observed:
+                result = await self.get_result(run_id)
+                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
+                    return result
+
+            await asyncio.sleep(min(poll_interval, remaining))
+            poll_interval = min(poll_interval * 1.5, 2.0)
 
     async def stream_events(
         self,
@@ -2123,6 +2320,8 @@ class AsyncClient:
         tenant: Optional[str] = None,
         timeout: float = 300.0,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> AsyncIterator[ReceivedEvent]:
         """Async stream events from a component execution.
 
@@ -2140,6 +2339,7 @@ class AsyncClient:
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Yields:
             ReceivedEvent objects as they arrive from the stream
@@ -2167,17 +2367,21 @@ class AsyncClient:
         client = await self._ensure_client()
         url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
 
-        async with client.stream(
-            "POST",
-            url,
-            json=input_data,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 session_id=session_id,
                 user_id=user_id,
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        async with client.stream(
+            "POST",
+            url,
+            json=input_data,
+            headers=request_headers,
             timeout=timeout,
         ) as response:
             if response.status_code != 200:
@@ -2220,7 +2424,9 @@ class AsyncClient:
                         # Check for error event
                         if current_event_type == "error" or "error" in data:
                             # Use helper to properly parse error structure
-                            raise _parse_error_response(data, run_id=data.get("runId") or data.get("run_id"))
+                            raise _parse_error_response(
+                                data, run_id=data.get("runId") or data.get("run_id")
+                            )
 
                         # Yield typed Event object
                         if current_event_type:
@@ -2238,6 +2444,8 @@ class AsyncClient:
         metadata: Optional[Dict[str, str]] = None,
         tenant: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> SubmitResponse:
         """Submit a component for async execution and return immediately.
 
@@ -2254,6 +2462,7 @@ class AsyncClient:
             tenant: Sub-tenant override for this call (X-TENANT-ID).
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
+            idempotency_key: Stable caller key for safely retrying this invocation.
 
         Returns:
             SubmitResponse containing run_id and metadata
@@ -2270,14 +2479,18 @@ class AsyncClient:
         else:
             request_body = input_data
 
-        response = await client.post(
-            url,
-            json=request_body,
-            headers=self._build_headers(
+        request_headers = _with_idempotency_key(
+            self._build_headers(
                 tenant_override=tenant,
                 deployment_id=deployment_id,
                 include_ambient_deployment_id=False,
             ),
+            idempotency_key,
+        )
+        response = await client.post(
+            url,
+            json=request_body,
+            headers=request_headers,
         )
         response.raise_for_status()
 
@@ -2322,19 +2535,23 @@ class AsyncClient:
                 error_data = response.json()
                 error_msg = error_data.get("error", "Run not found or not complete")
                 current_status = error_data.get("status", "unknown")
-                return parse_run_response({
-                    "run_id": run_id,
-                    "status_code": 500,
-                    "status": current_status,
-                    "error": {"code": "NOT_READY", "message": error_msg},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": current_status,
+                        "error": {"code": "NOT_READY", "message": error_msg},
+                    }
+                )
             except ValueError:
-                return parse_run_response({
-                    "run_id": run_id,
-                    "status_code": 500,
-                    "status": "unknown",
-                    "error": {"code": "NOT_FOUND", "message": "Run not found"},
-                })
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "unknown",
+                        "error": {"code": "NOT_FOUND", "message": "Run not found"},
+                    }
+                )
 
         if response.status_code >= 400:
             try:
@@ -2497,21 +2714,31 @@ class AsyncClient:
         if response.status_code == 404:
             try:
                 error_data = response.json()
-                return parse_eval_response({
-                    "run_id": error_data.get("runId", ""),
-                    "output": None,
-                    "scores": [],
-                    "passed": False,
-                    "error": {"code": "NOT_FOUND", "message": error_data.get("error", "Component not found")},
-                })
+                return parse_eval_response(
+                    {
+                        "run_id": error_data.get("runId", ""),
+                        "output": None,
+                        "scores": [],
+                        "passed": False,
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": error_data.get("error", "Component not found"),
+                        },
+                    }
+                )
             except ValueError:
-                return parse_eval_response({
-                    "run_id": "",
-                    "output": None,
-                    "scores": [],
-                    "passed": False,
-                    "error": {"code": "NOT_FOUND", "message": f"Component '{component}' not found"},
-                })
+                return parse_eval_response(
+                    {
+                        "run_id": "",
+                        "output": None,
+                        "scores": [],
+                        "passed": False,
+                        "error": {
+                            "code": "NOT_FOUND",
+                            "message": f"Component '{component}' not found",
+                        },
+                    }
+                )
 
         if response.status_code >= 400:
             try:
@@ -2535,6 +2762,8 @@ class AsyncClient:
         metadata: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
         deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> "BatchResult":
         """Execute a component in batch with multiple inputs asynchronously.
 
@@ -2561,6 +2790,7 @@ class AsyncClient:
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
             timeout: HTTP request timeout in seconds (optional)
+            idempotency_key: Stable caller key for safely retrying this batch.
 
         Returns:
             BatchResult containing all item results and statistics
@@ -2631,9 +2861,12 @@ class AsyncClient:
             request_body["metadata"] = metadata
 
         client = await self._ensure_client()
-        headers = self._build_headers(
-            deployment_id=deployment_id,
-            include_ambient_deployment_id=False,
+        headers = _with_idempotency_key(
+            self._build_headers(
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
+            idempotency_key,
         )
         response = await client.post(url, json=request_body, headers=headers, timeout=timeout)
         response.raise_for_status()
@@ -2738,17 +2971,21 @@ class AsyncClient:
         results: List[BatchEvalItemResult] = []
         for i, (item, raw) in enumerate(zip(normalized_items, raw_results)):
             if isinstance(raw, Exception):
-                results.append(BatchEvalItemResult.from_exception(
-                    raw,
-                    index=item.index if item.index is not None else i,
-                    item_id=item.item_id,
-                ))
+                results.append(
+                    BatchEvalItemResult.from_exception(
+                        raw,
+                        index=item.index if item.index is not None else i,
+                        item_id=item.item_id,
+                    )
+                )
             else:
-                results.append(BatchEvalItemResult.from_eval_response(
-                    raw,
-                    index=item.index if item.index is not None else i,
-                    item_id=item.item_id,
-                ))
+                results.append(
+                    BatchEvalItemResult.from_eval_response(
+                        raw,
+                        index=item.index if item.index is not None else i,
+                        item_id=item.item_id,
+                    )
+                )
 
         # Sort results by index
         results.sort(key=lambda r: r.index)

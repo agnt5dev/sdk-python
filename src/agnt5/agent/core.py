@@ -10,8 +10,15 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple, U
 
 from .. import lm
 from .._ids import generate_cid
-from .._serialization import serialize_to_str
+from .._serialization import deserialize, serialize, serialize_to_str
 from .._telemetry import setup_module_logger, truncate_span_attribute_value
+from ..activation import (
+    ActivationRecoveryPolicy,
+    ChildJoinPolicy,
+    _reset_current_activation,
+    _set_current_activation,
+    child_activation_request_from_context,
+)
 from ..callbacks import (
     AfterAgentCallback,
     AfterModelCallback,
@@ -460,12 +467,19 @@ class Agent:
 
         @tool_decorator(
             name=f"ask_{agent.name}",
-            description=agent.instructions or f"Ask the {agent.name} agent for help"
+            description=agent.instructions or f"Ask the {agent.name} agent for help",
+            recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+            durable=False,
         )
         async def agent_as_tool(ctx: Context, message: str) -> str:
             """Invoke the agent with a message and return its response."""
-            result = await agent.run(message, context=ctx)
-            return result.output
+            result = await agent._run_delegated_child(
+                ctx,
+                message,
+                history=None,
+                join_policy=ChildJoinPolicy.REQUIRED,
+            )
+            return result["output"]
 
         # Get the tool from registry
         return ToolRegistry.get(f"ask_{agent.name}")
@@ -486,7 +500,9 @@ class Agent:
 
         @tool_decorator(
             name=handoff.tool_name,
-            description=handoff.description
+            description=handoff.description,
+            recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+            durable=False,
         )
         async def transfer_tool(ctx: Context, message: str) -> Dict[str, Any]:
             """Transfer control to another agent.
@@ -507,21 +523,77 @@ class Agent:
                     )
 
             # Run target agent (using run for non-streaming invocation)
-            result = await target_agent.run(
+            result = await target_agent._run_delegated_child(
+                ctx,
                 message,
-                context=ctx,
-                history=history
+                history=history,
+                join_policy=handoff.join_policy,
             )
 
             # Return with handoff marker
             return {
                 "_handoff": True,
                 "to_agent": target_agent.name,
-                "output": result.output,
-                "tool_calls": result.tool_calls,
+                "output": result["output"],
+                "tool_calls": result["tool_calls"],
             }
 
         return ToolRegistry.get(handoff.tool_name)
+
+    async def _run_delegated_child(
+        self,
+        ctx: Context,
+        message: str,
+        *,
+        history: Optional[List[Message]],
+        join_policy: ChildJoinPolicy,
+    ) -> Dict[str, Any]:
+        """Run or replay this agent as one logical durable child."""
+
+        metadata = getattr(ctx, "_trace_metadata", None) or {}
+        activation_client = getattr(ctx, "_activation_client", None)
+        if metadata.get("durable_activation_v1") != "true" or activation_client is None:
+            result = await self.run(message, context=ctx, history=history)
+            return {"output": result.output, "tool_calls": result.tool_calls}
+
+        stable_key = ctx.allocate_activation_key("child", self.name)
+        request = child_activation_request_from_context(
+            ctx,
+            child_name=self.name,
+            stable_key=stable_key,
+            input_value={
+                "agent": self.name,
+                "message": message,
+                "history": deserialize(serialize(history)) if history is not None else None,
+            },
+            join_policy=join_policy,
+        )
+        activation_token = None
+
+        def on_admitted(decision):
+            nonlocal activation_token
+            activation_token = _set_current_activation(decision)
+
+        async def execute() -> Dict[str, Any]:
+            result = await self.run(message, context=ctx, history=history)
+            return {"output": result.output, "tool_calls": result.tool_calls}
+
+        try:
+            result, _receipt = await activation_client.run(
+                request,
+                execute,
+                encode_output=serialize,
+                decode_output=deserialize,
+                latency_ms=lambda: 0,
+                on_admitted=on_admitted,
+                failure_error_code="CHILD_FAILED",
+                failure_retryable=True,
+                failure_external_outcome_certainty="UNKNOWN",
+            )
+            return result
+        finally:
+            if activation_token is not None:
+                _reset_current_activation(activation_token)
 
     def _render_prompt(
         self,
@@ -754,9 +826,10 @@ class Agent:
         if callback_context.tool is None:
             raise ValueError(f"Tool '{callback_context.tool_name}' not found")
 
-        result = await callback_context.tool.invoke(
+        result = await callback_context.tool.invoke_with_stable_key(
             callback_context.context,
-            **callback_context.arguments,
+            callback_context.arguments,
+            stable_key=callback_context.tool_call_id or None,
         )
 
         after = self.callbacks.after_tool
@@ -2038,7 +2111,11 @@ class Agent:
                                         result_text = f"Error: Tool '{tool_name}' not found"
                                     else:
                                         # Execute tool
-                                        result = await tool.invoke(context, **tool_args)
+                                        result = await tool.invoke_with_stable_key(
+                                            context,
+                                            tool_args,
+                                            stable_key=tool_call_id or None,
+                                        )
 
                                         # Check if this was a handoff
                                         if isinstance(result, dict) and result.get("_handoff"):

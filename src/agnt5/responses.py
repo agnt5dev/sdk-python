@@ -19,6 +19,7 @@ class RunStatus(str, Enum):
     """Run execution status values."""
 
     ENQUEUED = "enqueued"
+    QUEUED = "queued"
     STARTED = "started"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -500,7 +501,7 @@ def parse_run_response(data: Dict[str, Any]) -> RunResponse[Any]:
         status_str = data.get("status", "unknown")
         if status_str == "completed":
             status_code = 200
-        elif status_str in ("enqueued", "running", "started"):
+        elif status_str in ("enqueued", "queued", "running", "started"):
             status_code = 202
         else:
             status_code = 500

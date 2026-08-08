@@ -841,15 +841,11 @@ impl PyWorker {
                     return Ok(Some(response));
                 }
 
-                // Create tracing span with invocation_id that will be inherited by all logs
-                let invocation_span = tracing::info_span!(
-                    "execute_component",
-                    invocation.id = %invoke_request.invocation_id,
-                    service.name = %invoke_request.service_name,
-                    component.name = %invoke_request.component_name,
-                    worker.id = %runtime_message.worker_id,
-                );
-                let _guard = invocation_span.enter();
+                // Do not hold a `tracing::Span::enter()` guard across this async
+                // handler. Tokio may poll it on different threads, which corrupts
+                // tracing's thread-local span stack under concurrency. The Python
+                // execution future below uses `.instrument(execution_span)`, which
+                // is the async-safe propagation mechanism.
 
                 // Extract trace context from request metadata
                 let parent_context =
