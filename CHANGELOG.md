@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-08
+
+### Added
+
+- Add the durable activation V1 contract for fenced checkpoint, function,
+  tool, model, and delegated-agent execution.
+- Add durable workflow sleeps, invocation idempotency keys, replay-safe model
+  finals, and required-child recovery.
+
+### Changed
+
+- Build the native extension against `agnt5-sdk-core` 0.2.0 and enable durable
+  activation V1 in default package builds.
+- Keep worker lifecycle emission asynchronous and run synchronous workflow
+  handlers outside the Python event loop.
+
+### Fixed
+
+- Fail closed when durable checkpoints cannot be acknowledged, preserve
+  execution and wait authority across activation boundaries, and wait for
+  durably detached runs to be accepted.
+
 ## [0.9.8] - 2026-08-04
 
 ### Fixed
@@ -98,7 +120,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/agnt5dev/sdk-python/compare/v0.9.8...v0.10.0
 [0.9.8]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/agnt5dev/sdk-python/compare/v0.9.5...v0.9.6

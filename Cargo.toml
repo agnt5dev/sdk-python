@@ -1,6 +1,6 @@
 [package]
 name = "agnt5-sdk-python"
-version = "0.9.8"
+version = "0.10.0"
 edition = "2021"
 authors = ["AGNT5 Team"]
 
@@ -18,7 +18,7 @@ pyo3-async-runtimes = { version = "0.27.0", features = ["tokio-runtime"] }
 tokio = { version = "1.48.0", features = ["full"] }
 
 # Shared AGNT5 runtime foundation
-agnt5-sdk-core = "0.1.6"
+agnt5-sdk-core = "0.2.0"
 
 # Base64 decoding and JSON handling
 base64 = "0.22"
@@ -46,11 +46,9 @@ hex = "0.4"
 uuid = { version = "1.18.1", features = ["v4"] }
 
 [features]
-default = ["wasm-sandbox", "libsql-memory"]
+default = ["wasm-sandbox", "libsql-memory", "durable-activation-v1"]
 libsql-memory = ["agnt5-sdk-core/libsql-memory"]
 wasm-sandbox = ["agnt5-sdk-core/wasm-sandbox"]
-# Kept opt-in until an sdk-core release containing durable activation V1 is
-# published. Monorepo E2E builds use the sibling sdk-core checkout.
 durable-activation-v1 = []
 
 [build-dependencies]
