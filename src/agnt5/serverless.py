@@ -263,6 +263,27 @@ class WorkerlessContext:
             payload: dict[str, Any] = {"event_type": event, "data": data}
         elif isinstance(event, dict):
             payload = dict(event)
+        elif hasattr(event, "to_dict"):
+            fields = event.to_dict()
+            payload = {
+                "event_type": fields.get("event_type", getattr(event, "event_type", "")),
+                "data": fields,
+            }
+            event_metadata = getattr(event, "metadata", None)
+            event_correlation_id = getattr(event, "correlation_id", None)
+            event_parent_id = getattr(event, "parent_correlation_id", None)
+            merged_metadata = dict(event_metadata or {})
+            if event_correlation_id:
+                merged_metadata["correlation_id"] = event_correlation_id
+            if event_parent_id:
+                merged_metadata["parent_correlation_id"] = event_parent_id
+            if merged_metadata:
+                payload["metadata"] = merged_metadata
+            if event_correlation_id:
+                payload["correlation_id"] = event_correlation_id
+            event_timestamp_ns = getattr(event, "timestamp_ns", None)
+            if event_timestamp_ns:
+                payload["timestamp_ns"] = event_timestamp_ns
         elif hasattr(event, "to_response_fields"):
             fields = event.to_response_fields()
             payload = {
@@ -319,6 +340,14 @@ class _WorkerlessFunctionContext(FunctionContext):
         self._workerless_parent._append_event(event)
         return event
 
+    def emit_observed(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+    async def emit_observed_async(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
 
 class _WorkerlessAgentContext(AgentContext):
     """Agent context that keeps conversation state inside the invoke checkpoint."""
@@ -335,6 +364,7 @@ class _WorkerlessAgentContext(AgentContext):
             parent_correlation_id=parent.parent_correlation_id,
             trace_metadata=parent.metadata,
         )
+        self._workerless_parent = parent
         self._memo = None
         self.saved_messages: list[Any] = []
 
@@ -345,6 +375,14 @@ class _WorkerlessAgentContext(AgentContext):
         self.saved_messages = list(messages)
 
     def emit(self, event: Any) -> Any:
+        return event
+
+    def emit_observed(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
+        return event
+
+    async def emit_observed_async(self, event: Any) -> Any:
+        self._workerless_parent._append_event(event)
         return event
 
 
@@ -374,6 +412,16 @@ class ServerlessApp:
             agents=agents,
         )
         self._manifest = _build_manifest(service_name, service_version, self.components)
+
+        # Third-party framework capture — same auto-attach as the worker path.
+        try:
+            from .integrations import auto_enable as _capture_auto_enable
+
+            _capture_auto_enable()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "third-party capture auto-enable failed", exc_info=True
+            )
 
     def manifest(self) -> dict[str, Any]:
         return dict(self._manifest)

@@ -337,6 +337,16 @@ class Worker(ExecutorMixin):
         else:
             logger.debug("SDK telemetry not enabled")
 
+        # Third-party framework capture (openai, google-adk) — attach before
+        # component discovery imports user modules so class-level patches are
+        # in place ahead of any client construction.
+        try:
+            from ..integrations import auto_enable as _capture_auto_enable
+
+            _capture_auto_enable()
+        except Exception:
+            logger.warning("third-party capture auto-enable failed", exc_info=True)
+
         # Component registration
         if auto_register:
             if any([functions, workflows, entities, agents, tools, scorers]):

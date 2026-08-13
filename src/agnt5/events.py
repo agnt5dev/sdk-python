@@ -282,6 +282,22 @@ class Event:
         return result
 
 
+def _append_event_subclass_fields(event: Event, result: dict[str, Any]) -> None:
+    """Preserve fields declared by typed lifecycle subclasses.
+
+    ``Started``/``Completed``/``Failed`` use explicit serializers for the hot
+    path.  Without this final pass, fields added by subclasses (for example
+    ``LMCompleted.finish_reason`` or ``ToolCallStarted.tool_call_id``) silently
+    disappear from the journal payload.
+    """
+    for key, value in event.__dict__.items():
+        if key.startswith("_") or key in result or key == "metadata" or value is None:
+            continue
+        if isinstance(value, Enum):
+            value = value.value
+        result[key] = value
+
+
 # =============================================================================
 # Lifecycle Event Base
 # =============================================================================
@@ -354,6 +370,7 @@ class Started(LifecycleEvent):
             result["metadata"] = self.metadata
         if self.operation is not None:
             result["operation"] = self.operation.value
+        _append_event_subclass_fields(self, result)
         return result
 
 
@@ -395,6 +412,7 @@ class Completed(LifecycleEvent):
             result["metadata"] = self.metadata
         if self.operation is not None:
             result["operation"] = self.operation.value
+        _append_event_subclass_fields(self, result)
         return result
 
 
@@ -436,6 +454,7 @@ class Failed(LifecycleEvent):
             result["metadata"] = self.metadata
         if self.operation is not None:
             result["operation"] = self.operation.value
+        _append_event_subclass_fields(self, result)
         return result
 
 
@@ -740,6 +759,65 @@ class EventEmitter:
 
         self._queue_event(envelope, event.correlation_id, event.parent_correlation_id)
         return envelope
+
+    def emit_observed(self, event: Event) -> EventEnvelope:
+        """Queue an observational event without waiting for journal acknowledgement.
+
+        Third-party capture must not inherit the correctness/durability contract
+        of native lifecycle checkpoints.  These events still enter the durable
+        journal queue (``is_streaming=False``), but queue pressure or transport
+        failure is best-effort and never blocks the observed application call.
+        """
+        event_data = event.to_dict()
+        merged_metadata = self._event_metadata(event.metadata)
+        merged_metadata.update(
+            guardrail_subject_metadata(event.event_type, event_data, self._run_id)
+        )
+        if event.correlation_id:
+            merged_metadata["correlation_id"] = event.correlation_id
+        if event.parent_correlation_id:
+            merged_metadata["parent_correlation_id"] = event.parent_correlation_id
+
+        envelope = EventEnvelope(
+            event_type=event.event_type,
+            data=event_data,
+            source_timestamp_ns=event.timestamp_ns,
+            content_index=getattr(event, "index", 0),
+            metadata=dict(event.metadata) if event.metadata else None,
+        )
+        if self._worker is None:
+            logger.debug(
+                "[EventEmitter.emit_observed] No worker set, dropping event: type=%s, run_id=%s",
+                event.event_type,
+                self._run_id,
+            )
+            return envelope
+
+        self._sequence += 1
+        try:
+            self._worker.queue_event(
+                invocation_id=self._run_id,
+                event_type=event.event_type,
+                event_data=serialize(event_data),
+                content_index=getattr(event, "index", 0),
+                sequence=self._sequence,
+                metadata=merged_metadata,
+                source_timestamp_ns=event.timestamp_ns,
+                is_streaming=False,
+                correlation_id=event.correlation_id,
+                parent_correlation_id=event.parent_correlation_id,
+            )
+        except Exception:
+            logger.debug(
+                "[EventEmitter.emit_observed] Failed to queue observed event: %s",
+                event.event_type,
+                exc_info=True,
+            )
+        return envelope
+
+    async def emit_observed_async(self, event: Event) -> EventEnvelope:
+        """Async-callable twin of :meth:`emit_observed`; intentionally non-blocking."""
+        return self.emit_observed(event)
 
     async def emit_async(self, event: Event) -> EventEnvelope:
         """Emit a typed event asynchronously.

@@ -22,7 +22,7 @@ from agnt5 import (
 )
 from agnt5.lm import GenerateRequest, GenerateResponse, LanguageModel
 from agnt5.lm.events import LMCompleted, LMContentBlockDelta
-from agnt5.serverless import serve
+from agnt5.serverless import WorkerlessContext, _WorkerlessAgentContext, serve
 
 
 class FakeAgentCompleted:
@@ -87,6 +87,39 @@ class ServerlessTestModel(LanguageModel):
             if getattr(message.role, "value", message.role) == "user"
         ]
         return "actual:" + "|".join(user_messages)
+
+
+def test_workerless_agent_observed_event_preserves_capture_fields() -> None:
+    parent = WorkerlessContext(
+        invocation_id="workerless-run-1",
+        run_id="run-1",
+        attempt=1,
+        component_name="agent",
+    )
+    context = _WorkerlessAgentContext(parent, "agent", "session-1")
+    event = LMCompleted(
+        name="openai/gpt-4o-mini",
+        correlation_id="lm-1",
+        parent_correlation_id="agent-1",
+        model="openai/gpt-4o-mini",
+        provider="openai",
+        input_tokens=2,
+        output_tokens=3,
+        total_tokens=5,
+        finish_reason="stop",
+        output_data={"output": "done"},
+        metadata={"source": "openai", "provider": "openai"},
+    )
+
+    context.emit_observed(event)
+
+    [captured] = parent.events_snapshot()
+    assert captured["event_type"] == "lm.completed"
+    assert captured["correlation_id"] == "lm-1"
+    assert captured["metadata"]["source"] == "openai"
+    assert captured["metadata"]["parent_correlation_id"] == "agent-1"
+    assert captured["data"]["finish_reason"] == "stop"
+    assert captured["data"]["total_tokens"] == 5
 
 
 @pytest.fixture(autouse=True)
