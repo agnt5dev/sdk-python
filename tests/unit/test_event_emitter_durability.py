@@ -83,6 +83,31 @@ def test_sync_transient_queue_failure_remains_best_effort() -> None:
     assert envelope.event_type == "output.delta"
 
 
+def test_observed_lifecycle_event_queues_without_checkpoint_rpc() -> None:
+    worker = MagicMock()
+    emitter = EventEmitter(run_id="run-1")
+    emitter.set_worker(worker)
+
+    envelope = emitter.emit_observed(checkpoint_started())
+
+    assert envelope.event_type == "workflow.started"
+    worker.emit_event_sync.assert_not_called()
+    worker.emit_event_async.assert_not_called()
+    worker.queue_event.assert_called_once()
+    assert worker.queue_event.call_args.kwargs["is_streaming"] is False
+
+
+def test_observed_lifecycle_queue_failure_is_best_effort() -> None:
+    worker = MagicMock()
+    worker.queue_event.side_effect = RuntimeError("journal queue unavailable")
+    emitter = EventEmitter(run_id="run-1")
+    emitter.set_worker(worker)
+
+    envelope = emitter.emit_observed(checkpoint_started())
+
+    assert envelope.event_type == "workflow.started"
+
+
 @pytest.mark.asyncio
 async def test_async_checkpoint_failure_propagates() -> None:
     worker = MagicMock()

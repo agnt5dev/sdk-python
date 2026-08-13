@@ -35,13 +35,14 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           SKIP_PUBLISH: ${{ inputs.skip-publish }}
         run: |
           PACKAGE_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*version = "\(.*\)"/\1/')
 
           if [ "$EVENT_NAME" = release ]; then
-            if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "Release tag must be vX.Y.Z: $RELEASE_TAG" >&2
+            if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$'; then
+              echo "Release tag must be a stable or PEP 440 prerelease version: $RELEASE_TAG" >&2
               exit 1
             fi
             RELEASE_VERSION=${RELEASE_TAG#v}
@@ -51,6 +52,15 @@ jobs:
             fi
             if ! grep -Fq "## [$RELEASE_VERSION]" CHANGELOG.md; then
               echo "CHANGELOG.md is missing ## [$RELEASE_VERSION]" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$PACKAGE_VERSION" | grep -Eq '(a|b|rc)[0-9]+$'; then
+              if [ "$RELEASE_PRERELEASE" != true ]; then
+                echo "Prerelease package $PACKAGE_VERSION requires a GitHub prerelease" >&2
+                exit 1
+              fi
+            elif [ "$RELEASE_PRERELEASE" = true ]; then
+              echo "Stable package $PACKAGE_VERSION cannot be published from a GitHub prerelease" >&2
               exit 1
             fi
           elif [ "$EVENT_NAME" = workflow_dispatch ] && [ "$SKIP_PUBLISH" != true ]; then

@@ -363,12 +363,28 @@ class Context:
         emitter = self._get_emitter()
         return emitter.emit(event)
 
+    def emit_observed(self, event: Event) -> EventEnvelope:
+        """Queue a best-effort observational event without a durability wait."""
+        emitter = self._get_emitter()
+        emit_observed = getattr(emitter, "emit_observed", None)
+        if emit_observed is not None:
+            return emit_observed(event)
+        return emitter.emit(event)
+
     async def emit_async(self, event: Event) -> EventEnvelope:
         """Emit a typed event asynchronously.
 
         Checkpoint gRPC runs on the tokio runtime natively, avoiding thread pool overhead.
         """
         emitter = self._get_emitter()
+        return await emitter.emit_async(event)
+
+    async def emit_observed_async(self, event: Event) -> EventEnvelope:
+        """Async-callable best-effort observational emission."""
+        emitter = self._get_emitter()
+        emit_observed_async = getattr(emitter, "emit_observed_async", None)
+        if emit_observed_async is not None:
+            return await emit_observed_async(event)
         return await emitter.emit_async(event)
 
     async def emit_batch_async(self, events: list) -> None:

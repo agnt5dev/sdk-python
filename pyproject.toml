@@ -1,6 +1,6 @@
 [project]
 name = "agnt5"
-version = "0.10.0"
+version = "0.11.0b0"
 description = "AGNT5 Python SDK - Build durable, resilient agent-first applications"
 readme = "README.md"
 authors = [{name = "AGNT5 Team", email = "team@agnt5.com"}]
@@ -29,6 +29,14 @@ dependencies = [
     "edwh-uuid7>=0.2.3",
     "orjson>=3.11.5",
 ]
+
+[project.optional-dependencies]
+# Supported bands for optional capture integrations; capture activates on
+# library presence, not on these extras. Upper bounds prevent a future major
+# from being silently treated as compatible with our instrumentation hooks.
+openai = ["openai>=1.66.0,<3"]
+openai-agents = ["openai-agents>=0.3.0,<1"]
+google-adk = ["google-adk>=1.7.0,<3"]
 
 [project.urls]
 "Homepage" = "https://agnt5.com"
@@ -110,7 +118,10 @@ exclude_lines = [
 [dependency-groups]
 dev = [
     "coverage>=7.8.2",
+    "google-adk==2.6.3",
     "maturin>=1.8.6",
+    "openai==2.54.0",
+    "openai-agents==0.20.0",
     "pyright>=1.1.405",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",

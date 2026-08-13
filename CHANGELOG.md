@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0b0] - 2026-08-12
+
+### Added
+
+- Capture installed OpenAI, OpenAI Agents SDK, and Google ADK calls made
+  inside AGNT5 components without requiring application-level instrumentation.
+- Emit correlated `agent.*`, `lm.*`, and `tool_call.*` journal events with
+  provider, model, token, `source`, and `capture_mode=observed` metadata.
+- Add optional dependency groups for the supported OpenAI, OpenAI Agents SDK,
+  and Google ADK version bands, including Google ADK Python 1.7 and newer.
+
+### Changed
+
+- Auto-enable available capture integrations at worker and serverless startup
+  while keeping missing or disabled third-party libraries as no-ops.
+- Preserve provider behavior when capture fails and suppress duplicate raw
+  OpenAI events inside OpenAI Agents SDK model spans.
+
 ## [0.10.0] - 2026-08-08
 
 ### Added
@@ -120,7 +138,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b0...HEAD
+[0.11.0b0]: https://github.com/agnt5dev/sdk-python/compare/v0.10.0...v0.11.0b0
 [0.10.0]: https://github.com/agnt5dev/sdk-python/compare/v0.9.8...v0.10.0
 [0.9.8]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/agnt5dev/sdk-python/compare/v0.9.6...v0.9.7
