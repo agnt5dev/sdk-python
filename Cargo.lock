@@ -31,7 +31,7 @@ dependencies = [
 [[package]]
 name = "agnt5-sdk-core"
 version = "0.2.0"
-source = "git+https://github.com/agnt5dev/sdk-core.git?rev=1a36a025f920ec73dc31318d8a6883142436f4b2#1a36a025f920ec73dc31318d8a6883142436f4b2"
+source = "git+https://github.com/agnt5dev/sdk-core.git?rev=7c8d8ceb612f7f34a5c36c6d8e313d382c84a882#7c8d8ceb612f7f34a5c36c6d8e313d382c84a882"
 dependencies = [
  "anyhow",
  "async-stream",
