@@ -43,8 +43,10 @@ from .agent import (
     ToolCallStarted,
     agent,
     discover_agents_md,
+    discover_skills,
     handoff,
     load_agents_md,
+    resolve_skills,
 )
 from .batch import (
     BatchConfig,
@@ -355,8 +357,10 @@ __all__ = [
     "SkillLoaded",
     "agent",
     "discover_agents_md",
+    "discover_skills",
     "handoff",
     "load_agents_md",
+    "resolve_skills",
     "AgentCallbackContext",
     "AgentCallbacks",
     "AfterAgentCallback",
