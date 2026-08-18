@@ -632,7 +632,7 @@ class WorkflowContext(Context):
                 output_data=result,
                 metadata={"cache_hit": "true"},
             )
-            await self.emit_async(replay_event)
+            self.emit(replay_event)
             return result
 
         # Use step_event_id as correlation_id for pairing started ↔ completed
@@ -656,7 +656,7 @@ class WorkflowContext(Context):
             },
             metadata={"name": step_name},
         )
-        await self.emit_async(step_started)
+        self.emit(step_started)
 
         # Push this step's event_id onto the stack for nested calls
         self._step_event_stack.append(step_event_id)
@@ -722,7 +722,7 @@ class WorkflowContext(Context):
                 input_data=func_input_data,
                 attempt=0,
             )
-            await self.emit_async(func_started)
+            self.emit(func_started)
             func_start_time = time.time_ns()
 
             context_token = set_current_context(func_ctx)
@@ -776,7 +776,7 @@ class WorkflowContext(Context):
                     output_data=result if isinstance(result, dict) else {"result": result},
                     duration_ms=func_duration_ms,
                 )
-                await self.emit_async(func_completed)
+                self.emit(func_completed)
 
                 # Pop this step's event_id from the stack (execution complete)
                 if self._step_event_stack:
@@ -802,7 +802,7 @@ class WorkflowContext(Context):
                     },
                     metadata={"name": step_name},
                 )
-                await self.emit_async(step_completed)
+                self.emit(step_completed)
 
                 return result
 
@@ -820,7 +820,7 @@ class WorkflowContext(Context):
                     error_message=str(e),
                     duration_ms=func_duration_ms,
                 )
-                await self.emit_async(func_failed)
+                self.emit(func_failed)
 
                 # Pop this step's event_id from the stack (execution failed)
                 if self._step_event_stack:
@@ -843,7 +843,7 @@ class WorkflowContext(Context):
                     error_message=str(e),
                     metadata={"name": step_name},
                 )
-                await self.emit_async(step_failed)
+                self.emit(step_failed)
 
                 # Record error in span
                 span.set_attribute("error", "true")
@@ -1332,7 +1332,7 @@ class WorkflowContext(Context):
             input_data={"step_name": name, "handler_name": "checkpoint"},
             metadata={"name": name},
         )
-        await self.emit_async(step_started)
+        self.emit(step_started)
 
         # Push this step's event_id onto the stack for nested calls
         self._step_event_stack.append(step_event_id)
@@ -1410,7 +1410,7 @@ class WorkflowContext(Context):
                 duration_ms=latency_ms,
                 metadata={"name": name},
             )
-            await self.emit_async(step_completed)
+            self.emit(step_completed)
 
             self._logger.info(f"✅ Checkpoint completed: {name} ({latency_ms}ms)")
             return result
@@ -1457,7 +1457,7 @@ class WorkflowContext(Context):
                 error_message=str(e),
                 metadata={"name": name},
             )
-            await self.emit_async(step_failed)
+            self.emit(step_failed)
             raise
 
     async def sleep(self, seconds: float, name: Optional[str] = None) -> None:
@@ -1567,7 +1567,7 @@ class WorkflowContext(Context):
             },
             metadata={"name": sleep_name},
         )
-        await self.emit_async(step_started)
+        self.emit(step_started)
 
         self._logger.info(f"💤 Starting durable sleep '{sleep_name}': {seconds}s")
         await asyncio.sleep(seconds)
@@ -1590,7 +1590,7 @@ class WorkflowContext(Context):
             duration_ms=duration_ms,
             metadata={"name": sleep_name},
         )
-        await self.emit_async(step_completed)
+        self.emit(step_completed)
         self._logger.info(f"⏰ Sleep '{sleep_name}' completed")
 
     async def wait_for_user(
@@ -1744,7 +1744,7 @@ class WorkflowContext(Context):
                 component_type=ComponentType.WORKFLOW,
                 resume_data={"response": response, "pause_index": pause_index},
             )
-            await self.emit_async(workflow_resumed)
+            self.emit(workflow_resumed)
 
             # Emit workflow.step.completed - complete the SAME step that was paused
             # Use the ORIGINAL correlation ID so started/completed events pair correctly
@@ -1761,7 +1761,7 @@ class WorkflowContext(Context):
                 },
                 metadata={"name": original_step_name},
             )
-            await self.emit_async(step_completed)
+            self.emit(step_completed)
 
             # Clear the resumed step info after use
             self._workflow_entity._resumed_step_correlation_id = None
@@ -1791,7 +1791,7 @@ class WorkflowContext(Context):
             },
             metadata={"name": step_name, "type": "user_input"},
         )
-        await self.emit_async(step_started)
+        self.emit(step_started)
 
         # No response yet - pause execution
         # Collect current workflow state for checkpoint
@@ -1815,7 +1815,7 @@ class WorkflowContext(Context):
             allow_custom=allow_custom,
             skippable=skippable,
         )
-        await self.emit_async(approval_requested)
+        self.emit(approval_requested)
 
         # Emit workflow.step.paused - step is pausing for user input
         # This should arrive AFTER approval.requested in the event stream
@@ -1835,7 +1835,7 @@ class WorkflowContext(Context):
                 "skippable": skippable,
             },
         )
-        await self.emit_async(step_paused)
+        self.emit(step_paused)
 
         # Emit workflow.paused - workflow is pausing for user input
         # This should arrive AFTER workflow.step.paused in the event stream
@@ -1886,7 +1886,7 @@ class WorkflowContext(Context):
             metadata=checkpoint_metadata,
         )
         if (self._trace_metadata or {}).get("dispatch_mode") != "pull":
-            await self.emit_async(workflow_paused)
+            self.emit(workflow_paused)
 
         raise WaitingForUserInputException(
             question=question,
