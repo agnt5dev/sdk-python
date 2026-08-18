@@ -6,6 +6,10 @@ import pytest
 
 from agnt5 import Agent
 from agnt5 import Skill as ExportedSkill
+from agnt5 import discover_skills as exported_discover_skills
+from agnt5 import resolve_skills as exported_resolve_skills
+from agnt5.agent import discover_skills as agent_discover_skills
+from agnt5.agent import resolve_skills as agent_resolve_skills
 from agnt5.agent.skill_events import SkillLoaded
 from agnt5.agent.skills import (
     Skill,
@@ -47,6 +51,13 @@ description: Extract tables and text from PDFs
 
 Run `scripts/extract.py` against the uploaded PDF.
 """
+
+
+def test_skill_helpers_are_exported_from_public_namespaces():
+    assert exported_discover_skills is discover_skills
+    assert exported_resolve_skills is resolve_skills
+    assert agent_discover_skills is discover_skills
+    assert agent_resolve_skills is resolve_skills
 
 
 def _write_skill(root, folder, name, description, body="Do the thing."):
