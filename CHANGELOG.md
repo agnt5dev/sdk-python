@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-18
+
+### Fixed
+
+- Re-export `discover_skills` and `resolve_skills` from `agnt5` and
+  `agnt5.agent`. Both were already declared public in
+  `agnt5/agent/skills.py` via `__all__`, but neither `__init__` layer
+  re-exported them, so the documented
+  `from agnt5 import discover_skills` raised `ImportError`. The sibling
+  helper `discover_agents_md` was exported, as is the equivalent
+  `discoverSkills` in the TypeScript SDK.
+
 ## [0.11.0b0] - 2026-08-12
 
 ### Added
