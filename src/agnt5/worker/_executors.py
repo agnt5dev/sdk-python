@@ -1704,8 +1704,6 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting run.started event: "
                     f"component={config.name}, correlation_id={run_correlation_id}"
                 )
-                await ctx.emit_async(run_started_event)
-
                 wf_trace_id = _trace_id_from_request(request)
 
                 # Emit workflow.started event (child of run)
@@ -1721,7 +1719,10 @@ class ExecutorMixin:
                     f"[_execute_workflow] Emitting workflow.started event: "
                     f"component={config.name}, correlation_id={workflow_correlation_id}"
                 )
-                await ctx.emit_async(workflow_started_event)
+                # These adjacent non-terminal lifecycle events share the same
+                # durability boundary, so append them with one SDK-to-runtime
+                # round trip while preserving their journal order.
+                await ctx.emit_batch_async([run_started_event, workflow_started_event])
             else:
                 logger.debug(
                     f"[_execute_workflow] Skipping run.started and workflow.started for resumed workflow: "
