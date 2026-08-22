@@ -147,6 +147,7 @@ async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
 
     executor = _DummyExecutor()
     emitted_types = []
+    batch_types = []
 
     def reject_sync_emit(self, event):
         raise AssertionError(f"synchronous lifecycle emission used for {event.event_type}")
@@ -154,8 +155,14 @@ async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
     async def record_async_emit(self, event):
         emitted_types.append(event.event_type)
 
+    async def record_batch_emit(self, events):
+        event_types = [event.event_type for event in events]
+        batch_types.append(event_types)
+        emitted_types.extend(event_types)
+
     monkeypatch.setattr(WorkflowContext, "emit", reject_sync_emit)
     monkeypatch.setattr(WorkflowContext, "emit_async", record_async_emit)
+    monkeypatch.setattr(WorkflowContext, "emit_batch_async", record_batch_emit)
 
     async def handler(ctx):
         return {"ok": True}
@@ -168,6 +175,7 @@ async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
     )
 
     assert response is None
+    assert batch_types == [["run.started", "workflow.started"]]
     assert emitted_types == [
         "run.started",
         "workflow.started",
