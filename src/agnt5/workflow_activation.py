@@ -214,6 +214,7 @@ async def execute_function_callable(
             worker=context._worker,
             trace_metadata=context._trace_metadata,
             memo_namespace=context.allocate_memo_child_scope("step", step_key),
+            activation_client=context._activation_client,
         )
         if len(args) == 1 and isinstance(args[0], dict):
             function_input = args[0]

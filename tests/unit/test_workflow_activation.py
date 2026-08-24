@@ -18,6 +18,7 @@ from agnt5.exceptions import (
     DurableSleepSuspension,
 )
 from agnt5.function import FunctionContext, FunctionRegistry, function
+from agnt5.lm import GenerateRequest, GenerateResponse, LMClient
 from agnt5.workflow import WorkflowContext, WorkflowEntity
 
 
@@ -291,6 +292,34 @@ async def test_function_form_uses_same_activation_boundary_and_explicit_key():
     assert [type(event) for event in events] == [Started, Started, Completed, Completed]
     assert events[0].component_type.value == "workflow"
     assert events[1].component_type.value == "function"
+
+
+@pytest.mark.asyncio
+async def test_function_form_propagates_activation_client_to_nested_model_call():
+    transport = WorkflowActivationTransport()
+    context, _entity, _events = activation_context(transport)
+
+    @function
+    async def load(ctx: FunctionContext):
+        client = LMClient(provider="openai")
+
+        async def generate(request: GenerateRequest) -> GenerateResponse:
+            del request
+            return GenerateResponse(text="nested durable result")
+
+        client.generate = generate
+        return await client._generate_durable(
+            GenerateRequest(model="openai/gpt-4o-mini"),
+            ctx,
+        )
+
+    result = await context.step(load)
+
+    assert result.text == "nested durable result"
+    assert [request.kind for request in transport.begin_requests] == [
+        ActivationKind.STEP,
+        ActivationKind.MODEL,
+    ]
 
 
 @pytest.mark.asyncio
