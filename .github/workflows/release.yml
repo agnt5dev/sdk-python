@@ -170,8 +170,12 @@ jobs:
             maturin build \
             --release \
             --locked \
+            --compatibility manylinux_2_39 \
             --target ${{ matrix.target }} \
             --out dist
+
+      - name: Verify modern Linux wheel tag
+        run: test -n "$(find dist -maxdepth 1 -name '*manylinux_2_39*.whl' -print -quit)"
 
       - name: Show sccache stats (after)
         run: sccache --show-stats
@@ -181,6 +185,97 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.arch }}
           path: ./dist/*.whl
+          retention-days: 7
+
+  build-wheels-linux-compatible:
+    name: Linux Wheel manylinux_2_28 (${{ matrix.target }})
+    needs: validate-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64:latest
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64:latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Build Vercel-compatible wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          container: ${{ matrix.container }}
+          args: --release --locked --compatibility pypi --out dist
+          sccache: true
+
+      - name: Verify compatible Linux wheel tag
+        run: test -n "$(find dist -maxdepth 1 -name '*manylinux_2_28*.whl' -print -quit)"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-manylinux-2-28-${{ matrix.arch }}
+          path: ./dist/*.whl
+          retention-days: 7
+
+  verify-vercel-wheel:
+    name: Verify Vercel wheel compatibility
+    needs: [build-wheels-linux, build-wheels-linux-compatible]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download x86_64 compatibility wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-linux-manylinux-2-28-x64
+          path: dist/
+
+      - name: Download x86_64 modern wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-linux-x64
+          path: dist/
+
+      - name: Install on a manylinux_2_34 baseline
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            quay.io/pypa/manylinux_2_34_x86_64:latest \
+            bash -lc '/opt/python/cp311-cp311/bin/python -m pip install --no-index --no-deps --find-links=/dist agnt5'
+
+  build-sdist:
+    name: Source distribution
+    needs: validate-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          container: "off"
+          args: --out dist
+
+      - name: Verify source distribution
+        run: test -n "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: ./dist/*.tar.gz
           retention-days: 7
 
   build-wheels-macos:
@@ -287,7 +382,13 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [validate-release, build-wheels-linux, build-wheels-macos]
+    needs:
+      - validate-release
+      - build-wheels-linux
+      - build-wheels-linux-compatible
+      - verify-vercel-wheel
+      - build-wheels-macos
+      - build-sdist
     runs-on: ubuntu-latest
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.skip-publish != true)
     outputs:
@@ -301,7 +402,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF_NAME}" = main
 
-      - name: Download all wheels
+      - name: Download all distributions
         uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
@@ -310,10 +411,10 @@ jobs:
 
       - name: List wheels
         run: |
-          echo "=== Built wheels ==="
+          echo "=== Built distributions ==="
           ls -lh dist/
           echo ""
-          echo "Expected 3 wheels (x86_64-linux, aarch64-linux, aarch64-darwin)"
+          echo "Expected 5 wheels (two Linux baselines per architecture plus macOS) and 1 sdist"
 
       - name: Get SDK version
         id: version
@@ -353,6 +454,10 @@ jobs:
           echo "### Wheels" >> $GITHUB_STEP_SUMMARY
           for wheel in dist/*.whl; do
             echo "- \`$(basename "$wheel")\`" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "### Source distribution" >> $GITHUB_STEP_SUMMARY
+          for archive in dist/*.tar.gz; do
+            echo "- \`$(basename "$archive")\`" >> $GITHUB_STEP_SUMMARY
           done
 
       - name: Post to Slack channel

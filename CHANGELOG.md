@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0b1] - 2026-08-24
+
+### Changed
+
+- Build Linux wheels for both `manylinux_2_28` and `manylinux_2_39`, verify
+  installation on a `manylinux_2_34` baseline, and publish a source
+  distribution alongside the wheels.
+- Update the native extension to `agnt5-sdk-core` 0.2.1.
+
+### Fixed
+
+- Preserve the durable activation client when `WorkflowContext.step()` invokes
+  a decorated function so nested model calls remain durable.
+
 ## [0.11.0b0] - 2026-08-12
 
 ### Added
@@ -138,7 +152,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b0...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b1...HEAD
+[0.11.0b1]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b0...v0.11.0b1
 [0.11.0b0]: https://github.com/agnt5dev/sdk-python/compare/v0.10.0...v0.11.0b0
 [0.10.0]: https://github.com/agnt5dev/sdk-python/compare/v0.9.8...v0.10.0
 [0.9.8]: https://github.com/agnt5dev/sdk-python/compare/v0.9.7...v0.9.8

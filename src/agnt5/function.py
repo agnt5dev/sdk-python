@@ -38,6 +38,7 @@ class FunctionContext(Context):
         worker: Optional[Any] = None,
         trace_metadata: Optional[dict[str, str]] = None,
         memo_namespace: Optional[str] = None,
+        activation_client: Optional[Any] = None,
     ) -> None:
         super().__init__(
             run_id,
@@ -52,6 +53,7 @@ class FunctionContext(Context):
         )
         self._retry_policy = retry_policy
         self._state = StateInterface({})
+        self._activation_client = activation_client
 
     @property
     def state(self) -> StateInterface:
