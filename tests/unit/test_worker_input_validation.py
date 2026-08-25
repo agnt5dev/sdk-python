@@ -190,7 +190,10 @@ async def test_pull_workflow_pause_returns_terminal_without_queueing_workflow_te
     queued_events = []
 
     async def handler(ctx):
-        ctx.emit = queued_events.append
+        async def capture_event(event):
+            queued_events.append(event)
+
+        ctx.emit_async = capture_event
         await ctx.wait_for_user(
             "Approve deployment?",
             input_type="approval",
