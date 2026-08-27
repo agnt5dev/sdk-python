@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0b3] - 2026-08-26
+
+### Fixed
+
+- Update the native extension to `agnt5-sdk-core` 0.2.3 so token-auth
+  customer-hosted workers configure verified TLS for discovered HTTPS runtime
+  endpoints, including coordinator reconnects and engine connections.
+
 ## [0.11.0b2] - 2026-08-26
 
 ### Fixed
@@ -160,7 +168,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b2...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b3...HEAD
+[0.11.0b3]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b2...v0.11.0b3
 [0.11.0b2]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b1...v0.11.0b2
 [0.11.0b1]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b0...v0.11.0b1
 [0.11.0b0]: https://github.com/agnt5dev/sdk-python/compare/v0.10.0...v0.11.0b0
