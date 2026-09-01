@@ -694,6 +694,12 @@ fn log_from_python(
     // Emit log at appropriate level through Rust tracing
     // The opentelemetry_appender_tracing layer will now extract trace_id/span_id
     // from the attached OpenTelemetry context above
+    //
+    // The run id goes out under two names on purpose (AGNT5-1070):
+    // `agnt5.run.id` is the canonical attribute, matching what create_span puts
+    // on the trace span and what the control plane prefers; `run_id` is the
+    // legacy flat field older control planes and saved queries still match on.
+    // Drop `run_id` once no supported control plane relies on it.
     match level.to_uppercase().as_str() {
         "DEBUG" => tracing::debug!(
             target: "agnt5_sdk_python",
@@ -703,6 +709,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),
@@ -717,6 +724,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),
@@ -731,6 +739,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),
@@ -745,6 +754,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),
@@ -759,6 +769,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),
@@ -773,6 +784,7 @@ fn log_from_python(
             python_line = line,
             python_target = target.as_deref(),
             run_id = run_id.as_deref(),
+            agnt5.run.id = run_id.as_deref(),
             tenant_id = effective_tenant_id.as_deref(),
             deployment_id = effective_deployment_id.as_deref(),
             log_attributes = attrs_json.as_deref(),

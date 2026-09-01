@@ -12,7 +12,12 @@ from typing import Any, Literal
 
 from .. import _sentry
 from .._serialization import serialize_to_str
-from .._telemetry import ensure_root_otel_handler, init_sdk_telemetry, setup_module_logger
+from .._telemetry import (
+    ensure_root_otel_handler,
+    init_sdk_telemetry,
+    run_scope,
+    setup_module_logger,
+)
 from ..function import FunctionRegistry
 from ..scorer import (
     ScorerRegistry,
@@ -31,6 +36,11 @@ from ._prompt_executor import (
 )
 
 logger = setup_module_logger(__name__)
+
+
+def _run_id_of(invocation_id: str) -> str:
+    """Run id for an invocation id, dropping any ``:suffix``."""
+    return invocation_id.split(":", 1)[0]
 
 
 def _set_positive_int_env(name: str, value: int | None) -> None:
@@ -880,23 +890,31 @@ class Worker(ExecutorMixin):
             Wraps the resolved handler coroutine so the running asyncio.Task
             registers itself by run_id, enabling cooperative cancellation
             (a CancelExecution → task.cancel() → CancelledError in the handler).
+
+            resolve_coro runs synchronously here and logs while it dispatches,
+            so it gets the run scope too -- otherwise those lines reach the
+            control plane unattributed (AGNT5-1070).
             """
-            return self._track_invocation(
-                request.invocation_id, resolve_coro(request)
-            )
+            with run_scope(_run_id_of(request.invocation_id)):
+                coro = resolve_coro(request)
+            return self._track_invocation(request.invocation_id, coro)
 
         return handle_message
 
     def _track_invocation(self, invocation_id: str, coro: Any) -> Any:
         """Wrap a handler coroutine so its task self-registers by run_id."""
-        run_id = invocation_id.split(":", 1)[0]
+        run_id = _run_id_of(invocation_id)
 
         async def _tracked():
             task = asyncio.current_task()
             if task is not None:
                 self._inflight[run_id] = task
             try:
-                return await coro
+                # Binds run_id for every log record emitted while the handler
+                # runs, so SDK-internal lines are attributable to the run and
+                # not only the ones that happen to print the id (AGNT5-1070).
+                with run_scope(run_id):
+                    return await coro
             finally:
                 self._inflight.pop(run_id, None)
 
