@@ -26,7 +26,7 @@ class TraceEvent:
     """Event from execution trace (for glassbox testing).
 
     Attributes:
-        event_type: Event type (e.g., "run.started", "lm.call.completed")
+        event_type: Event type (e.g., "run.started", "lm.completed")
         event_id: Unique event identifier
         correlation_id: Correlation ID linking related events
         parent_correlation_id: Parent correlation ID (for hierarchical events)
@@ -93,9 +93,9 @@ class EvalContext:
         """Get all LLM call completion events.
 
         Returns:
-            List of lm.call.completed events
+            List of lm.completed events
         """
-        return self.get_events_by_type("lm.call.completed")
+        return self.get_events_by_type("lm.completed")
 
     def get_total_tokens(self) -> int:
         """Calculate total token usage from trace.
@@ -186,7 +186,7 @@ class ScorerRequest:
         Returns:
             Sum of total_tokens from all LLM calls
         """
-        lm_calls = self.get_trace_events("lm.call.completed")
+        lm_calls = self.get_trace_events("lm.completed")
         return sum(e.data.get("total_tokens", 0) for e in lm_calls)
 
     def get_tool_calls(self) -> List[ToolCall]:
