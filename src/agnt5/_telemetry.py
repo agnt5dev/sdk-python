@@ -1,21 +1,58 @@
 """OpenTelemetry integration for Python logging."""
 
+import contextvars
 import json
 import logging
 import warnings
 import weakref
-from typing import Any, Dict, MutableMapping, Optional, Union
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, MutableMapping, Optional, Union
 
 # Module-level default log level (set via set_log_level())
 _default_log_level: Optional[int] = None
 _telemetry_initialized = False
 _EXECUTION_LOGGER_NAME = "agnt5.execution"
+
 _DEFAULT_SPAN_ATTRIBUTE_VALUE_MAX_CHARS = 8192
 
 # Standard logging kwargs that should NOT be treated as custom attributes
 _STANDARD_LOGGING_KWARGS = frozenset({
     'exc_info', 'stack_info', 'stacklevel', 'extra'
 })
+
+# Run-scoped correlation id.
+#
+# ctx.logger records carry run_id on the record itself (ContextLogger.extra),
+# but every other application log line -- the dispatcher, the executors, any
+# third-party library reaching the root handler -- carried nothing, so the
+# control plane could not attribute them to a run (AGNT5-1070). The worker
+# binds this once per invocation and every record emitted inside that scope
+# inherits it, without each log site having to know the run id.
+_current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "agnt5_current_run_id", default=None
+)
+
+
+def get_current_run_id() -> Optional[str]:
+    """Return the run id bound to the current context, if any."""
+    return _current_run_id.get()
+
+
+@contextmanager
+def run_scope(run_id: Optional[str]) -> Iterator[None]:
+    """Bind ``run_id`` to the current context for the duration of the block.
+
+    A falsy run id is a no-op so callers need not special-case it. The binding
+    is task-local: concurrent runs in the same worker keep their own value.
+    """
+    if not run_id:
+        yield
+        return
+    token = _current_run_id.set(run_id)
+    try:
+        yield
+    finally:
+        _current_run_id.reset(token)
 
 
 class ContextLogger(logging.LoggerAdapter):
@@ -105,10 +142,12 @@ class OpenTelemetryHandler(logging.Handler):
                     exc_text = ''.join(traceback.format_exception(*record.exc_info))
                 message = f"{message}\n{exc_text}"
 
-            # Extract correlation IDs (added by _CorrelationFilter)
+            # Extract correlation IDs. ctx.logger puts these on the record
+            # itself; everything else falls back to the run scope the worker
+            # bound for the current invocation (AGNT5-1070).
             trace_id = getattr(record, 'trace_id', None)
             span_id = getattr(record, 'span_id', None)
-            run_id = getattr(record, 'run_id', None)
+            run_id = getattr(record, 'run_id', None) or _current_run_id.get()
             attributes = getattr(record, 'agnt5_attrs', None)
 
             # Forward to OTLP for observability storage
