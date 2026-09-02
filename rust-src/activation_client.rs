@@ -8,10 +8,13 @@ use agnt5_sdk_core::pb::{
     CompleteActivationRequest, FailActivationRequest,
 };
 use agnt5_sdk_core::runtime_adapter::{ActivationAdapter, ActivationDecision};
+use agnt5_sdk_core::worker::Worker as CoreWorker;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
+
+use crate::worker::PyWorker;
 
 const NATIVE_ACTIVATION_ERROR_PREFIX: &str = "AGNT5_ACTIVATION_ERROR:";
 
@@ -83,6 +86,7 @@ fn activation_error(error: SdkError) -> PyErr {
 pub struct PyActivationClient {
     adapter: Arc<Mutex<Option<ActivationAdapter>>>,
     endpoint: String,
+    worker: Option<Arc<StdMutex<Option<CoreWorker>>>>,
 }
 
 #[pyclass]
@@ -133,6 +137,33 @@ pub struct PyActivationFailureReceipt {
 }
 
 impl PyActivationClient {
+    async fn flush_worker_events(
+        worker: Option<Arc<StdMutex<Option<CoreWorker>>>>,
+        run_id: &str,
+    ) -> PyResult<()> {
+        let Some(worker) = worker else {
+            return Ok(());
+        };
+        let core_worker = worker
+            .lock()
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to lock worker before activation: {error}"
+                ))
+            })?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "Worker is not initialized before activation",
+                )
+            })?;
+        core_worker
+            .flush_run_events_before_durable_write(run_id)
+            .await
+            .map_err(activation_error)
+    }
+
     async fn connected_adapter(
         adapter: Arc<Mutex<Option<ActivationAdapter>>>,
         endpoint: String,
@@ -260,8 +291,8 @@ fn status_name(status: ActivationStatus) -> &'static str {
 #[pymethods]
 impl PyActivationClient {
     #[new]
-    #[pyo3(signature = (endpoint = None))]
-    pub fn new(endpoint: Option<String>) -> Self {
+    #[pyo3(signature = (endpoint = None, worker = None))]
+    pub fn new(endpoint: Option<String>, worker: Option<PyRef<'_, PyWorker>>) -> Self {
         let endpoint = endpoint
             .or_else(|| std::env::var("AGNT5_ENGINE_URL").ok())
             .or_else(|| std::env::var("AGNT5_COORDINATOR_ENDPOINT").ok())
@@ -269,6 +300,7 @@ impl PyActivationClient {
         Self {
             adapter: Arc::new(Mutex::new(None)),
             endpoint,
+            worker: worker.map(|worker| worker.worker.clone()),
         }
     }
 
@@ -293,7 +325,9 @@ impl PyActivationClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
+        let worker = self.worker.clone();
         future_into_py(py, async move {
+            Self::flush_worker_events(worker, &run_id).await?;
             let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
             let decision = adapter
                 .begin(BeginActivationRequest {
@@ -354,7 +388,9 @@ impl PyActivationClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
+        let worker = self.worker.clone();
         future_into_py(py, async move {
+            Self::flush_worker_events(worker, &run_id).await?;
             let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
             let receipt = adapter
                 .complete(CompleteActivationRequest {
@@ -417,7 +453,9 @@ impl PyActivationClient {
         }
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
+        let worker = self.worker.clone();
         future_into_py(py, async move {
+            Self::flush_worker_events(worker, &run_id).await?;
             let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
             let receipt = adapter
                 .fail(FailActivationRequest {

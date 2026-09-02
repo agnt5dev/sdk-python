@@ -3,6 +3,7 @@ from types import ModuleType
 
 import pytest
 
+import agnt5
 from agnt5.worker import _core as worker_core
 from agnt5.worker._core import Worker
 
@@ -26,6 +27,12 @@ class FakePyWorker:
         self.config = config
 
 
+class FakePyActivationClient:
+    def __init__(self, endpoint: str | None = None, worker: FakePyWorker | None = None) -> None:
+        self.endpoint = endpoint
+        self.worker = worker
+
+
 class FakeEntityStateManager:
     def __init__(self, tenant_id: str) -> None:
         self.tenant_id = tenant_id
@@ -44,11 +51,13 @@ def fake_native_core(monkeypatch):
     fake_module = ModuleType("agnt5._core")
     fake_module.PyWorkerConfig = FakePyWorkerConfig
     fake_module.PyWorker = FakePyWorker
+    fake_module.PyActivationClient = FakePyActivationClient
     fake_module.PyComponentInfo = FakeComponentInfo
     fake_module.PyTriggerSpec = FakeTriggerSpec
     fake_module.EntityStateManager = FakeEntityStateManager
     fake_module.log_from_python = lambda *_args, **_kwargs: None
     monkeypatch.setitem(sys.modules, "agnt5._core", fake_module)
+    monkeypatch.setattr(agnt5, "_core", fake_module)
     monkeypatch.setattr(worker_core, "init_sdk_telemetry", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(worker_core._sentry, "initialize_sentry", lambda **_kwargs: False)
 
@@ -84,6 +93,7 @@ def test_worker_pull_options_configure_sdk_core_environment(fake_native_core):
     assert worker.metadata["project_id"] == "project-py"
     assert worker.metadata["deployment_id"] == "deployment-py"
     assert worker._rust_config.max_concurrency == 10
+    assert worker._activation_client._transport._native_client.worker is worker._rust_worker
     assert worker_core.os.environ["AGNT5_COORDINATOR_ENDPOINT"] == "http://localhost:34186"
     assert worker_core.os.environ["AGNT5_PROJECT_ID"] == "project-py"
     assert worker_core.os.environ["AGNT5_DEPLOYMENT_ID"] == "deployment-py"

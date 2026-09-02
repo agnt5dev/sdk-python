@@ -140,7 +140,7 @@ impl From<PyWorkerConfig> for WorkerConfig {
 #[pyclass]
 pub struct PyWorker {
     config: PyWorkerConfig,
-    worker: Arc<Mutex<Option<Worker>>>,
+    pub(crate) worker: Arc<Mutex<Option<Worker>>>,
     message_handler: Arc<Mutex<Option<Py<PyAny>>>>,
     /// Python callback invoked with a run_id when a CancelExecution arrives,
     /// so the Python layer can cancel the matching asyncio.Task.
