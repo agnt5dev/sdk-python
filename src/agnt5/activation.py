@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
+from ._serialization import serialize
 from .exceptions import ActivationError, ActivationErrorCode
 
 DURABLE_ACTIVATION_V1 = "durable_activation_v1"
@@ -22,6 +23,7 @@ _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
 _U64_MAX = 2**64 - 1
 _NATIVE_ACTIVATION_ERROR_PREFIX = "AGNT5_ACTIVATION_ERROR:"
+MAX_ACTIVATION_INPUT_BYTES = 64 * 1024
 
 T = TypeVar("T")
 
@@ -102,6 +104,8 @@ class BeginActivationRequest:
     run_authority: bytes
     lease_authority: bytes
     child: ChildActivationLinkage | None = None
+    display_name: str = ""
+    input_data: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,7 @@ class ActivationUsage:
     latency_ms: int = 0
     provider: str = ""
     model: str = ""
+    cached_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -228,6 +233,7 @@ class ActivationTransport(Protocol):
         retryable: bool,
         external_outcome_certainty: str,
         evidence: tuple[ActivationEvidence, ...],
+        latency_ms: int = 0,
     ) -> ActivationFailureReceipt: ...
 
 
@@ -285,6 +291,8 @@ class NativeActivationTransport:
                     if request.child is not None
                     else None
                 ),
+                request.display_name,
+                list(request.input_data),
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -328,6 +336,7 @@ class NativeActivationTransport:
                 usage.latency_ms,
                 usage.provider,
                 usage.model,
+                usage.cached_tokens,
                 [
                     (item.evidence_type, list(item.payload), list(item.sha256))
                     for item in evidence
@@ -355,6 +364,7 @@ class NativeActivationTransport:
         retryable: bool,
         external_outcome_certainty: str,
         evidence: tuple[ActivationEvidence, ...],
+        latency_ms: int = 0,
     ) -> ActivationFailureReceipt:
         try:
             response = await self._native_client.fail_activation(
@@ -371,6 +381,7 @@ class NativeActivationTransport:
                     (item.evidence_type, list(item.payload), list(item.sha256))
                     for item in evidence
                 ],
+                latency_ms,
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -476,6 +487,7 @@ class ActivationClient:
         retryable: bool,
         external_outcome_certainty: str = "UNKNOWN",
         evidence: tuple[ActivationEvidence, ...] = (),
+        latency_ms: int = 0,
     ) -> ActivationFailureReceipt:
         """Commit one fenced failure and validate the returned authority."""
 
@@ -490,6 +502,7 @@ class ActivationClient:
             retryable=retryable,
             external_outcome_certainty=external_outcome_certainty,
             evidence=evidence,
+            latency_ms=latency_ms,
         )
         if receipt.activation_id != decision.activation_id or receipt.attempt != decision.attempt:
             raise ActivationError(
@@ -560,6 +573,7 @@ class ActivationClient:
                 retryable=failure_retryable,
                 external_outcome_certainty=failure_external_outcome_certainty,
                 evidence=failure_evidence(user_error) if failure_evidence is not None else (),
+                latency_ms=latency_ms(),
             )
             if on_failed is not None:
                 on_failed(decision, receipt, user_error)
@@ -589,6 +603,8 @@ def activation_request_from_context(
     recovery_policy: ActivationRecoveryPolicy,
     definition_digest: bytes | None = None,
     child: ChildActivationLinkage | None = None,
+    display_name: str = "",
+    input_data: Any = None,
 ) -> BeginActivationRequest:
     """Build one journal-bound request from negotiated worker context authority."""
 
@@ -650,6 +666,8 @@ def activation_request_from_context(
         run_authority=run_authority.encode("utf-8"),
         lease_authority=lease_authority.encode("utf-8"),
         child=child,
+        display_name=display_name,
+        input_data=encode_activation_input(input_data),
     )
 
 
@@ -660,6 +678,8 @@ def child_activation_request_from_context(
     stable_key: str,
     input_value: Any,
     join_policy: ChildJoinPolicy = ChildJoinPolicy.REQUIRED,
+    display_name: str = "",
+    input_data: Any = None,
 ) -> BeginActivationRequest:
     """Build one deterministic delegated-child request from parent authority."""
 
@@ -674,6 +694,8 @@ def child_activation_request_from_context(
         stable_key=stable_key,
         input_value=input_value,
         recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+        display_name=display_name,
+        input_data=input_data,
     )
     child_definition_digest = hashlib.sha256(
         _CHILD_DEFINITION_DOMAIN
@@ -697,6 +719,27 @@ def child_activation_request_from_context(
         join_policy=join_policy,
     )
     return replace(base, definition_digest=child_definition_digest, child=linkage)
+
+
+def encode_activation_input(value: Any) -> bytes:
+    """Encode the display-oriented input payload journaled with an activation.
+
+    The payload is informational (the digest carries identity), so it is
+    serialized loosely and bounded to keep journal records small.
+    """
+
+    if value is None:
+        return b""
+    try:
+        encoded = serialize(value)
+    except (TypeError, ValueError):
+        encoded = json.dumps({"repr": repr(value)}, ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= MAX_ACTIVATION_INPUT_BYTES:
+        return encoded
+    return json.dumps(
+        {"truncated": True, "bytes": len(encoded)},
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def canonical_activation_value(value: Any) -> bytes:

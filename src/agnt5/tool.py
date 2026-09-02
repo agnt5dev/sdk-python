@@ -9,6 +9,7 @@ import asyncio
 import functools
 import inspect
 import json
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -332,10 +333,32 @@ class Tool:
         arguments: Dict[str, Any],
         *,
         stable_key: Optional[str],
+        tool_call_id: Optional[str] = None,
+        iteration: Optional[int] = None,
     ) -> Any:
         """Invoke using a provider/tool-call identity when one is available."""
 
-        return await self._invoke(ctx, arguments, stable_key=stable_key)
+        return await self._invoke(
+            ctx,
+            arguments,
+            stable_key=stable_key,
+            tool_call_id=tool_call_id,
+            iteration=iteration,
+        )
+
+    def _activation_enabled(self, ctx: Any) -> bool:
+        """Whether an invocation on this context runs through a TOOL activation.
+
+        When it does, the runtime journals the activation as the tool_call.*
+        record and callers must not emit their own lifecycle events.
+        """
+
+        metadata = getattr(ctx, "_trace_metadata", None) or {}
+        return (
+            self.durable
+            and metadata.get("durable_activation_v1") == "true"
+            and getattr(ctx, "_activation_client", None) is not None
+        )
 
     async def _invoke(
         self,
@@ -345,6 +368,8 @@ class Tool:
         stable_key: Optional[str],
         allow_activation: bool = True,
         allow_memo: bool = True,
+        tool_call_id: Optional[str] = None,
+        iteration: Optional[int] = None,
     ) -> Any:
         """
         Invoke the tool with given arguments.
@@ -364,19 +389,14 @@ class Tool:
             the journal for cached results before executing and cache results
             after successful execution.
         """
-        metadata = getattr(ctx, "_trace_metadata", None) or {}
-        activation_client = getattr(ctx, "_activation_client", None)
-        if (
-            allow_activation
-            and self.durable
-            and metadata.get("durable_activation_v1") == "true"
-            and activation_client is not None
-        ):
+        if allow_activation and self._activation_enabled(ctx):
             return await self._invoke_durable(
                 ctx,
                 kwargs,
                 stable_key=stable_key,
-                activation_client=activation_client,
+                activation_client=ctx._activation_client,
+                tool_call_id=tool_call_id,
+                iteration=iteration,
             )
 
         injected_fault = _consume_eval_tool_fault(ctx, self.name)
@@ -456,6 +476,8 @@ class Tool:
         *,
         stable_key: Optional[str],
         activation_client: Any,
+        tool_call_id: Optional[str] = None,
+        iteration: Optional[int] = None,
     ) -> Any:
         logical_key = (
             f"tool:{self.name}:{stable_key}"
@@ -468,8 +490,16 @@ class Tool:
             stable_key=logical_key,
             input_value={"name": self.name, "arguments": arguments},
             recovery_policy=self.recovery_policy,
+            display_name=self.name,
+            input_data={
+                "name": self.name,
+                "arguments": arguments,
+                "tool_call_id": tool_call_id or "",
+                "iteration": iteration,
+            },
         )
         activation_token = None
+        started_at = time.monotonic()
 
         def on_admitted(decision):
             nonlocal activation_token
@@ -494,7 +524,7 @@ class Tool:
                 execute,
                 encode_output=serialize,
                 decode_output=deserialize,
-                latency_ms=lambda: 0,
+                latency_ms=lambda: int((time.monotonic() - started_at) * 1000),
                 on_admitted=on_admitted,
                 failure_error_code="TOOL_FAILED",
                 failure_retryable=retryable,

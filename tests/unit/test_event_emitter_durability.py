@@ -170,3 +170,90 @@ async def test_async_transient_batch_queue_failure_remains_best_effort(
     emitter.set_worker(worker)
 
     await emitter.emit_batch_async([transient_delta()])
+
+
+def lifecycle_batch() -> list:
+    return [
+        Started(
+            name="run",
+            correlation_id="run-1",
+            parent_correlation_id="",
+            component_type=ComponentType.RUN,
+        ),
+        Started(
+            name="wf",
+            correlation_id="workflow-1",
+            parent_correlation_id="run-1",
+            component_type=ComponentType.WORKFLOW,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deferred_lifecycle_queues_nonterminal_checkpoints_for_complete_job() -> None:
+    worker = MagicMock()
+    worker.emit_event_async = AsyncMock()
+    worker.emit_event_batch_async = AsyncMock()
+    emitter = EventEmitter(run_id="run-1", defer_lifecycle=True)
+    emitter.set_worker(worker)
+
+    await emitter.emit_batch_async(lifecycle_batch())
+    await emitter.emit_async(checkpoint_started())
+
+    # sdk-core holds queued events for the run and carries them in CompleteJob.
+    assert worker.queue_event.call_count == 3
+    queued_types = [call.kwargs["event_type"] for call in worker.queue_event.call_args_list]
+    assert queued_types == ["run.started", "workflow.started", "workflow.started"]
+    assert all(call.kwargs["is_streaming"] is False for call in worker.queue_event.call_args_list)
+    worker.emit_event_batch_async.assert_not_awaited()
+    worker.emit_event_async.assert_not_awaited()
+
+    # Terminal events still await so the core can pre-flush and fence them.
+    await emitter.emit_async(terminal_checkpoint())
+    worker.emit_event_async.assert_awaited_once()
+    assert worker.emit_event_async.await_args.kwargs["event_type"] == "workflow.completed"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_awaits_the_batch_rpc_when_not_deferred(monkeypatch) -> None:
+    monkeypatch.setattr(events_module, "_FIRE_AND_FORGET_NONTERMINAL", False)
+    worker = MagicMock()
+    worker.emit_event_batch_async = AsyncMock()
+    emitter = EventEmitter(run_id="run-1")
+    emitter.set_worker(worker)
+
+    await emitter.emit_batch_async(lifecycle_batch())
+
+    worker.queue_event.assert_not_called()
+    worker.emit_event_batch_async.assert_awaited_once()
+    assert not emitter.defer_lifecycle
+
+
+def test_context_defers_lifecycle_only_for_negotiated_non_streaming_pull_runs() -> None:
+    from agnt5.context import Context
+
+    negotiated = {"dispatch_mode": "pull", "pull_completion_lifecycle_v1": "true"}
+    deferred = Context(
+        run_id="run-1",
+        correlation_id="c",
+        parent_correlation_id="p",
+        trace_metadata=negotiated,
+    )
+    assert deferred._get_emitter().defer_lifecycle is True
+
+    streaming = Context(
+        run_id="run-2",
+        correlation_id="c",
+        parent_correlation_id="p",
+        is_streaming=True,
+        trace_metadata=negotiated,
+    )
+    assert streaming._get_emitter().defer_lifecycle is False
+
+    legacy = Context(
+        run_id="run-3",
+        correlation_id="c",
+        parent_correlation_id="p",
+        trace_metadata={"dispatch_mode": "pull"},
+    )
+    assert legacy._get_emitter().defer_lifecycle is False

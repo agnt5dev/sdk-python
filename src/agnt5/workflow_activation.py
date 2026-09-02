@@ -6,26 +6,26 @@ import hashlib
 import inspect
 import json
 import time
-import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
 from ._ids import generate_cid
 from ._serialization import deserialize, serialize
 from ._telemetry import truncate_span_attribute_value
 from .activation import (
-    ActivationCompletionReceipt,
     ActivationDecision,
     ActivationDecisionKind,
     ActivationDefinition,
-    ActivationFailureReceipt,
     ActivationKind,
     ActivationRecoveryPolicy,
     BeginActivationRequest,
+    _reset_current_activation,
+    _set_current_activation,
     activation_id,
     canonical_activation_value,
     decode_sha256,
+    encode_activation_input,
 )
-from .events import Completed, ComponentType, Failed, OperationType, Started
+from .events import Completed, ComponentType, Failed, Started
 from .exceptions import ActivationError, ActivationErrorCode, DurableSleepSuspension
 from .function import FunctionContext, FunctionRegistry
 
@@ -95,6 +95,8 @@ async def run_durable_sleep(
         worker_session_id=worker_session_id,
         run_authority=run_authority.encode("utf-8"),
         lease_authority=lease_authority.encode("utf-8"),
+        display_name=timer_key,
+        input_data=encode_activation_input(input_value),
     )
     expected_id = activation_id(
         request.project_id,
@@ -343,109 +345,55 @@ async def run_durable_step(
         worker_session_id=worker_session_id,
         run_authority=run_authority.encode("utf-8"),
         lease_authority=lease_authority.encode("utf-8"),
+        display_name=name,
+        input_data=encode_activation_input(
+            {"step_name": name, "handler_name": handler_name, "input": input_value}
+        ),
     )
-    step_event_id = str(uuid.uuid4())
-    step_correlation_id = generate_cid()
     started_at = time.monotonic()
-
-    def parent_correlation_id() -> str:
-        return (
-            context._step_event_stack[-1] if context._step_event_stack else context._correlation_id
-        )
+    # The runtime journals the activation itself as the step boundary record
+    # (workflow.step.started/completed/failed keyed by the activation id), so
+    # the SDK emits nothing here. While the step executes, the activation is
+    # the current activation and the ambient parent for nested function.*
+    # events, stream deltas, and logs.
+    activation_token = None
+    activation_cid = ""
 
     def on_admitted(decision: ActivationDecision) -> None:
-        context.emit(
-            Started(
-                name=name,
-                correlation_id=step_correlation_id,
-                parent_correlation_id=parent_correlation_id(),
-                component_type=ComponentType.WORKFLOW,
-                operation=OperationType.STEP,
-                input_data={"step_name": name, "handler_name": handler_name},
-                metadata={
-                    "name": name,
-                    "step_key": step_key,
-                    "activation_id": decision.activation_id,
-                    "activation_attempt": str(decision.attempt),
-                    "accepted_journal_offset": str(decision.accepted_journal_offset),
-                },
-            )
-        )
-        context._step_event_stack.append(step_event_id)
-
-    def pop_step() -> None:
-        if not context._step_event_stack:
+        nonlocal activation_token, activation_cid
+        if decision.kind is not ActivationDecisionKind.EXECUTE:
             return
-        popped_id = context._step_event_stack.pop()
-        if popped_id != step_event_id:
-            context._logger.warning(
-                f"Step event stack mismatch in durable step: expected {step_event_id}, got {popped_id}"
-            )
+        activation_cid = decision.activation_id
+        activation_token = _set_current_activation(decision)
+        context._step_event_stack.append(decision.activation_id)
 
-    def on_completed(
-        decision: ActivationDecision,
-        receipt: ActivationDecision | ActivationCompletionReceipt,
-    ) -> None:
-        pop_step()
-        context.emit(
-            Completed(
-                name=name,
-                correlation_id=step_correlation_id,
-                parent_correlation_id=parent_correlation_id(),
-                component_type=ComponentType.WORKFLOW,
-                operation=OperationType.STEP,
-                output_data={"step_name": name, "handler_name": handler_name},
-                duration_ms=int((time.monotonic() - started_at) * 1000),
-                metadata={
-                    "name": name,
-                    "step_key": step_key,
-                    "cache_hit": str(decision.kind is ActivationDecisionKind.REPLAY).lower(),
-                    "activation_id": decision.activation_id,
-                    "activation_attempt": str(decision.attempt),
-                    "accepted_journal_offset": str(receipt.accepted_journal_offset),
-                },
-            )
-        )
-
-    def on_failed(
-        decision: ActivationDecision,
-        receipt: ActivationFailureReceipt,
-        error: Exception,
-    ) -> None:
-        pop_step()
-        context.emit(
-            Failed(
-                name=name,
-                correlation_id=step_correlation_id,
-                parent_correlation_id=parent_correlation_id(),
-                component_type=ComponentType.WORKFLOW,
-                operation=OperationType.STEP,
-                error_code=type(error).__name__,
-                error_message=str(error),
-                metadata={
-                    "name": name,
-                    "step_key": step_key,
-                    "activation_id": decision.activation_id,
-                    "activation_attempt": str(decision.attempt),
-                    "accepted_journal_offset": str(receipt.accepted_journal_offset),
-                },
-            )
-        )
+    def release() -> None:
+        nonlocal activation_token, activation_cid
+        if activation_cid and context._step_event_stack:
+            if context._step_event_stack[-1] == activation_cid:
+                context._step_event_stack.pop()
+            else:
+                context._logger.warning(
+                    f"Step event stack mismatch in durable step: expected {activation_cid}, "
+                    f"got {context._step_event_stack[-1]}"
+                )
+        if activation_token is not None:
+            _reset_current_activation(activation_token)
+            activation_token = None
+        activation_cid = ""
 
     try:
         result, _receipt = await context._activation_client.run(
             request,
-            lambda: execute(step_correlation_id),
+            lambda: execute(activation_cid),
             encode_output=serialize,
             decode_output=deserialize,
             latency_ms=lambda: int((time.monotonic() - started_at) * 1000),
             on_admitted=on_admitted,
-            on_completed=on_completed,
-            on_failed=on_failed,
+            on_completed=lambda _decision, _receipt: release(),
+            on_failed=lambda _decision, _receipt, _error: release(),
         )
-    except Exception:
-        if context._step_event_stack and context._step_event_stack[-1] == step_event_id:
-            context._step_event_stack.pop()
-        raise
+    finally:
+        release()
     context._workflow_entity.record_step_completion(step_key, handler_name, input_value, result)
     return result

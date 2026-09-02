@@ -423,14 +423,14 @@ class TestTraceAssertions:
                 "data": {},
             },
             {
-                "event_type": "lm.call.completed",
+                "event_type": "lm.completed",
                 "event_id": "2",
                 "correlation_id": "a",
                 "timestamp_ns": 2_000_000,
                 "data": {"total_tokens": 500},
             },
             {
-                "event_type": "lm.call.completed",
+                "event_type": "lm.completed",
                 "event_id": "3",
                 "correlation_id": "a",
                 "timestamp_ns": 3_000_000,
@@ -766,7 +766,7 @@ class TestEvalContext:
 
         events = [
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="1",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -774,7 +774,7 @@ class TestEvalContext:
                 data={"total_tokens": 500},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="2",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -800,7 +800,7 @@ class TestEvalContext:
                 data={},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="2",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -810,7 +810,7 @@ class TestEvalContext:
         ]
         ctx = EvalContext(input="test", output="result", events=events)
 
-        lm_events = ctx.get_events_by_type("lm.call.completed")
+        lm_events = ctx.get_events_by_type("lm.completed")
         assert len(lm_events) == 1
         assert lm_events[0].data["total_tokens"] == 500
 
@@ -828,7 +828,7 @@ class TestEvalContext:
                 data={},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="2",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -836,7 +836,7 @@ class TestEvalContext:
                 data={"total_tokens": 500},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="3",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -855,7 +855,7 @@ class TestEvalContext:
 
         events = [
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="1",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -863,7 +863,7 @@ class TestEvalContext:
                 data={"total_tokens": 500},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="2",
                 correlation_id="a",
                 parent_correlation_id=None,
@@ -958,7 +958,7 @@ class TestEvalContext:
                 data={"tool_name": "search", "tool_call_id": "call-1", "duration_ms": 5},
             ),
             TraceEvent(
-                event_type="lm.call.completed",
+                event_type="lm.completed",
                 event_id="evt-3",
                 correlation_id="span-lm",
                 timestamp_ns=3000,

@@ -292,7 +292,7 @@ class Worker(ExecutorMixin):
             from ..activation import ActivationClient, NativeActivationTransport
 
             endpoint = os.getenv("AGNT5_ENGINE_URL") or coordinator_endpoint
-            native_activation_client = self._PyActivationClient(endpoint)
+            native_activation_client = self._PyActivationClient(endpoint, self._rust_worker)
             self._activation_client = ActivationClient(
                 NativeActivationTransport(native_activation_client)
             )

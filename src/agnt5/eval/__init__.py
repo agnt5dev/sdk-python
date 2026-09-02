@@ -57,7 +57,7 @@ Example usage:
     >>> from agnt5.eval import TraceAssertion, trace_scorer, ScorerInput
     >>> trace = [
     ...     {"event_type": "run.started", "event_id": "1", "correlation_id": "a", "timestamp_ns": 1000, "data": {}},
-    ...     {"event_type": "lm.call.completed", "event_id": "2", "correlation_id": "a", "timestamp_ns": 2000, "data": {"total_tokens": 500}},
+    ...     {"event_type": "lm.completed", "event_id": "2", "correlation_id": "a", "timestamp_ns": 2000, "data": {"total_tokens": 500}},
     ... ]
     >>> input = ScorerInput(output="result", trace=trace)
     >>> assertions = [TraceAssertion.max_tokens(1000), TraceAssertion.no_errors()]

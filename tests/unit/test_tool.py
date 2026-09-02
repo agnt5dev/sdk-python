@@ -670,11 +670,22 @@ async def test_durable_tool_uses_provider_call_identity_and_exposes_downstream_k
         ctx,
         {"amount": 42},
         stable_key="provider-call-7",
+        tool_call_id="provider-call-7",
+        iteration=2,
     )
 
     assert result == {"amount": 42}
     assert client.request.kind is ActivationKind.TOOL
     assert client.request.stable_key == "tool:charge:provider-call-7"
+    assert client.request.display_name == "charge"
+    assert json.loads(client.request.input_data) == {
+        "name": "charge",
+        "arguments": {"amount": 42},
+        "tool_call_id": "provider-call-7",
+        "iteration": 2,
+    }
+    assert client.options["latency_ms"]() >= 0
+    assert charge._activation_enabled(ctx) is True
     assert client.request.recovery_policy is ActivationRecoveryPolicy.IDEMPOTENT_RETRY
     assert client.options["failure_error_code"] == "TOOL_FAILED"
     assert client.options["failure_retryable"] is True
@@ -707,3 +718,21 @@ def test_tool_without_return_type():
     assert tool_instance is not None
     schema = tool_instance.get_schema()
     assert "input_schema" in schema
+
+
+def test_activation_enabled_requires_durable_tool_and_negotiated_context():
+    async def handler(ctx: Context) -> None:
+        return None
+
+    durable_ctx = Context(
+        run_id="run-1",
+        correlation_id="corr-1",
+        parent_correlation_id="",
+        trace_metadata={"durable_activation_v1": "true"},
+    )
+    durable_ctx._activation_client = object()
+    plain_ctx = Context(run_id="run-1", correlation_id="corr-1", parent_correlation_id="")
+
+    assert Tool("durable", "", handler)._activation_enabled(durable_ctx) is True
+    assert Tool("durable", "", handler)._activation_enabled(plain_ctx) is False
+    assert Tool("legacy", "", handler, durable=False)._activation_enabled(durable_ctx) is False

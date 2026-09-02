@@ -25,6 +25,10 @@ class _RecordingWorker:
     async def emit_event_async(self, *, event_type: str, **kwargs) -> None:
         self.event_types.append(event_type)
 
+    async def emit_event_batch_async(self, events) -> None:
+        # (run_id, event_type, data, sequence, metadata, timestamp_ns)
+        self.event_types.extend(event[1] for event in events)
+
     def queue_event(self, *, event_type: str, **kwargs) -> None:
         self.event_types.append(event_type)
 

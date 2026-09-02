@@ -9,6 +9,7 @@ Tests cover:
 - Handoff mechanisms
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -768,6 +769,7 @@ async def test_durable_handoff_is_nested_under_one_child_activation():
 
         async def run(self, request, execute, **options):
             self.requests.append(request)
+            self.options = options
             decision = ActivationDecision(
                 kind=ActivationDecisionKind.EXECUTE,
                 activation_id=activation_id(
@@ -815,6 +817,9 @@ async def test_durable_handoff_is_nested_under_one_child_activation():
     client = RecordingActivationClient()
     ctx._activation_client = client
 
+    emitted = []
+    ctx.emit = emitted.append
+
     result = await source.tools["transfer_to_target"].invoke_with_stable_key(
         ctx,
         {"message": "take this"},
@@ -827,6 +832,14 @@ async def test_durable_handoff_is_nested_under_one_child_activation():
     assert child_request.parent_activation_id == ""
     assert child_request.child is not None
     assert child_request.child.join_policy is ChildJoinPolicy.REQUIRED
+    assert child_request.display_name == "target"
+    assert json.loads(child_request.input_data) == {
+        "agent": "target",
+        "message": "take this",
+        "history_len": 0,
+    }
+    assert client.options["latency_ms"]() >= 0
+    assert getattr(ctx, "_activation_managed_agent", None) is None
 
 
 def test_handoff_configuration():
@@ -1229,3 +1242,157 @@ async def test_agent_run_equivalent_to_stream(mock_lm):
     # Both should produce same output
     assert final_event is not None
     assert result_sync.output == final_event.output_data["output"]
+
+
+def _durable_trace_metadata(component_name: str) -> dict:
+    return {
+        "durable_activation_v1": "true",
+        "project_id": "project-1",
+        "component_name": component_name,
+        "worker_session_id": "worker-1",
+        "run_authority": "run-authority",
+        "lease_authority": "lease-authority",
+        "activation_definition_version": "v1",
+        "activation_artifact_sha256": "00" * 32,
+        "activation_definition_config": '["object",[]]',
+    }
+
+
+class _RecordingActivationClient:
+    def __init__(self):
+        self.requests = []
+        self.decisions = []
+
+    async def run(self, request, execute, **options):
+        self.requests.append(request)
+        decision = ActivationDecision(
+            kind=ActivationDecisionKind.EXECUTE,
+            activation_id=activation_id(
+                request.project_id,
+                request.run_id,
+                request.parent_activation_id,
+                request.kind,
+                request.stable_key,
+            ),
+            attempt=1,
+            accepted_journal_offset=len(self.requests),
+            fence_token=b"fence",
+        )
+        self.decisions.append(decision)
+        if callback := options.get("on_admitted"):
+            callback(decision)
+        return await execute(), decision
+
+
+@pytest.mark.asyncio
+async def test_durable_tool_calls_are_journaled_by_the_activation_not_the_loop():
+    @tool(recovery_policy="idempotent_retry")
+    async def charge(ctx: Context, amount: int) -> dict:
+        return {"amount": amount}
+
+    mock_lm = MockLanguageModel(
+        responses=["charging", "charged"],
+        tool_calls=[
+            [{"id": "call_1", "name": "charge", "arguments": '{"amount": 42}'}],
+            None,
+        ],
+    )
+    agent = Agent(name="biller", model=mock_lm, instructions="Bill", tools=[charge])
+    ctx = AgentContext(
+        run_id="run-1",
+        agent_name="biller",
+        trace_metadata=_durable_trace_metadata("biller"),
+    )
+    client = _RecordingActivationClient()
+    ctx._activation_client = client
+    emitted = []
+    ctx.emit = emitted.append
+
+    yielded = [event async for event in agent.stream("bill me", context=ctx)]
+
+    assert [request.kind for request in client.requests] == [ActivationKind.TOOL]
+    assert client.requests[0].display_name == "charge"
+    assert json.loads(client.requests[0].input_data) == {
+        "name": "charge",
+        "arguments": {"amount": 42},
+        "tool_call_id": "call_1",
+        "iteration": 1,
+    }
+    # Stream consumers still see the tool_call.* pair, but nothing is emitted
+    # to the platform for it: the TOOL activation is the record.
+    assert [e.event_type for e in yielded if e.event_type.startswith("tool_call.")] == [
+        "tool_call.started",
+        "tool_call.completed",
+    ]
+    assert [e.event_type for e in emitted if e.event_type.startswith("tool_call.")] == []
+    # The agent itself is not activation-managed here, so its lifecycle still flows.
+    assert [e.event_type for e in emitted if e.event_type.startswith("agent.")][0] == (
+        "agent.started"
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_tool_calls_still_emit_lifecycle_under_durable_context():
+    @tool(durable=False)
+    async def lookup(ctx: Context, key: str) -> str:
+        return key.upper()
+
+    mock_lm = MockLanguageModel(
+        responses=["looking", "done"],
+        tool_calls=[
+            [{"id": "call_1", "name": "lookup", "arguments": '{"key": "a"}'}],
+            None,
+        ],
+    )
+    agent = Agent(name="finder", model=mock_lm, instructions="Find", tools=[lookup])
+    ctx = AgentContext(
+        run_id="run-1",
+        agent_name="finder",
+        trace_metadata=_durable_trace_metadata("finder"),
+    )
+    client = _RecordingActivationClient()
+    ctx._activation_client = client
+    emitted = []
+    ctx.emit = emitted.append
+
+    async for _ in agent.stream("find a", context=ctx):
+        pass
+
+    assert client.requests == []
+    assert [e.event_type for e in emitted if e.event_type.startswith("tool_call.")] == [
+        "tool_call.started",
+        "tool_call.completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delegated_child_lifecycle_is_the_child_activation():
+    target = Agent(
+        name="target",
+        model=MockLanguageModel(responses=["handled"]),
+        instructions="Handle delegated work",
+    )
+    ctx = AgentContext(
+        run_id="run-1",
+        agent_name="source",
+        trace_metadata=_durable_trace_metadata("source"),
+    )
+    client = _RecordingActivationClient()
+    ctx._activation_client = client
+    emitted = []
+    ctx.emit = emitted.append
+    original_parent = ctx._parent_correlation_id
+
+    result = await target._run_delegated_child(
+        ctx, "take this", history=None, join_policy=ChildJoinPolicy.REQUIRED
+    )
+
+    assert result["output"] == "handled"
+    child_activation_id = client.decisions[0].activation_id
+    lifecycle = {"agent.started", "agent.completed", "agent.failed"}
+    assert [e.event_type for e in emitted if e.event_type in lifecycle] == []
+    iteration_events = [e for e in emitted if e.event_type.startswith("agent.iteration.")]
+    assert iteration_events
+    assert {e.parent_correlation_id for e in iteration_events} == {child_activation_id}
+    assert ctx._parent_correlation_id == original_parent
+    assert getattr(ctx, "_activation_managed_agent", None) is None

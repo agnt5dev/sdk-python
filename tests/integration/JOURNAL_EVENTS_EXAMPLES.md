@@ -307,6 +307,15 @@ def test_event_metadata(client, worker_process, platform):
 ["run.enqueued", "run.assigned", "run.started", "function.started", "function.completed", "run.completed"]
 ```
 
+The journal sequence is the same in pull mode. When the runtime negotiates
+`pull_completion_lifecycle_v1`, a non-streaming pull worker no longer appends
+`run.started`, `function.started`, and `function.completed` one RPC at a time:
+sdk-core holds them and delivers them inside `CompleteJob`, and the runtime
+appends them atomically just below the fenced completion request. Tests that
+read the journal see identical event types and source timestamps; tests that
+count `Append`/`AppendBatch` RPCs per run should expect zero for plain
+functions under that capability.
+
 ### Error Scenarios
 
 #### Function Failures

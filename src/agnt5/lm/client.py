@@ -24,6 +24,7 @@ from ..activation import (
     _reset_current_activation,
     _set_current_activation,
     activation_request_from_context,
+    current_activation,
 )
 from ..context import get_current_context
 from ..events import Event
@@ -40,6 +41,7 @@ from .events import (
 from .types import (
     GenerateRequest,
     GenerateResponse,
+    Message,
     TokenUsage,
 )
 
@@ -135,6 +137,34 @@ def _model_activation_input(request: GenerateRequest) -> Dict[str, Any]:
             "previous_response_id": request.config.previous_response_id,
         },
         "response_schema": request.response_schema,
+    }
+
+
+def _serialize_request_message(message: Message) -> Dict[str, Any]:
+    # Include tool_calls and tool_call_id so the trace shows the
+    # OpenAI/Anthropic protocol shape the Rust LM client actually sends: tool
+    # result messages render as role:"tool" with tool_call_id, and assistant
+    # turns that requested tools include the tool_calls block. The Rust
+    # ApiMessage builder in sdk-core/src/lm/openai_common.rs:179 routes by
+    # presence of tool_call_id; mirror that here for display fidelity.
+    role = "tool" if message.tool_call_id else message.role.value
+    out: Dict[str, Any] = {"role": role, "content": message.content}
+    if message.tool_call_id:
+        out["tool_call_id"] = message.tool_call_id
+    if message.tool_calls:
+        out["tool_calls"] = message.tool_calls
+    return out
+
+
+def _model_started_input(request: GenerateRequest) -> Dict[str, Any]:
+    """The display payload shared by lm.started and the MODEL activation record."""
+
+    return {
+        "system_prompt": request.system_prompt,
+        "messages": [_serialize_request_message(m) for m in request.messages],
+        "temperature": request.config.temperature,
+        "max_tokens": request.config.max_tokens,
+        "tools_count": len(request.tools) if request.tools else 0,
     }
 
 
@@ -248,9 +278,12 @@ class LMClient(LanguageModel):
             kwargs["runtime_context"] = current_ctx._runtime_context
 
         start_time_ns = time.time_ns()
+        # Under a MODEL activation EXECUTE the runtime journals lm.* from the
+        # activation RPCs, so the SDK emits no lifecycle events of its own.
+        emit_lifecycle = bool(current_ctx) and not durable_execute
         correlation_id = generate_cid()
 
-        if current_ctx:
+        if emit_lifecycle:
             self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
 
         try:
@@ -260,7 +293,7 @@ class LMClient(LanguageModel):
             end_time_ns = time.time_ns()
             latency_ms = (end_time_ns - start_time_ns) // 1_000_000
 
-            if current_ctx:
+            if emit_lifecycle:
                 self._emit_completed(
                     current_ctx, model, response, latency_ms, end_time_ns, correlation_id
                 )
@@ -280,7 +313,7 @@ class LMClient(LanguageModel):
         except Exception as e:
             end_time_ns = time.time_ns()
             latency_ms = (end_time_ns - start_time_ns) // 1_000_000
-            if current_ctx:
+            if emit_lifecycle:
                 self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
             raise
 
@@ -301,6 +334,8 @@ class LMClient(LanguageModel):
             stable_key=stable_key,
             input_value=_model_activation_input(request),
             recovery_policy=policy,
+            display_name=request.model,
+            input_data=self._model_activation_display_input(request),
         )
         admitted: ActivationDecision | None = None
         started = time.monotonic()
@@ -342,6 +377,9 @@ class LMClient(LanguageModel):
             completion_usage=lambda response: ActivationUsage(
                 tokens_in=response.usage.prompt_tokens if response.usage else 0,
                 tokens_out=response.usage.completion_tokens if response.usage else 0,
+                cached_tokens=(
+                    (getattr(response.usage, "cached_tokens", 0) or 0) if response.usage else 0
+                ),
                 provider=(
                     request.model.split("/", 1)[0]
                     if "/" in request.model
@@ -434,10 +472,18 @@ class LMClient(LanguageModel):
 
         block_types: Dict[int, str] = {}
         start_time_ns = time.time_ns()
-        correlation_id = generate_cid()
+        # Under a MODEL activation EXECUTE the activation is the lm.* record:
+        # deltas carry its id and the runtime journals the lifecycle itself.
+        stream_activation = (
+            current_activation() if _model_stream_activation_execute.get() else None
+        )
+        emit_lifecycle = bool(current_ctx) and stream_activation is None
+        correlation_id = (
+            stream_activation.activation_id if stream_activation is not None else generate_cid()
+        )
         parent_correlation_id = current_ctx.correlation_id if current_ctx else ""
 
-        if current_ctx:
+        if emit_lifecycle:
             self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
 
         try:
@@ -501,13 +547,13 @@ class LMClient(LanguageModel):
                         duration_ms=latency_ms,
                     )
 
-                    if current_ctx and not _model_stream_activation_execute.get():
+                    if emit_lifecycle:
                         self._emit_completed(
                             current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id
                         )
 
         except Exception as e:
-            if current_ctx and not _model_stream_activation_execute.get():
+            if emit_lifecycle:
                 end_time_ns = time.time_ns()
                 latency_ms = (end_time_ns - start_time_ns) // 1_000_000
                 self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
@@ -544,6 +590,8 @@ class LMClient(LanguageModel):
             stable_key=context.allocate_activation_key("model", model),
             input_value=_model_activation_input(request),
             recovery_policy=policy,
+            display_name=request.model,
+            input_data=self._model_activation_display_input(request),
         )
         decision = await activation_client.begin(activation_request)
         if decision.kind is ActivationDecisionKind.REPLAY:
@@ -556,18 +604,18 @@ class LMClient(LanguageModel):
                     activation_id=decision.activation_id,
                     attempt=decision.attempt,
                 )
+            # A REPLAY appends nothing to the journal; the in-memory stream is
+            # rebuilt for the consumer under the activation's id.
             replayed = GenerateResponse.from_dict(deserialize(decision.replay_output))
-            correlation_id = generate_cid()
+            correlation_id = decision.activation_id
             parent_correlation_id = context.correlation_id
-            started_event = LMContentBlockStarted(
+            yield LMContentBlockStarted(
                 name=model,
                 correlation_id=correlation_id,
                 parent_correlation_id=parent_correlation_id,
                 block_type="text",
                 index=0,
             )
-            self._emit_started(context, model, request, time.time_ns(), correlation_id)
-            yield started_event
             if replayed.text:
                 yield LMContentBlockDelta(
                     name=model,
@@ -603,14 +651,6 @@ class LMClient(LanguageModel):
                     "replayed": True,
                 },
                 duration_ms=0,
-            )
-            self._emit_completed(
-                context,
-                model,
-                replayed,
-                0,
-                time.time_ns(),
-                correlation_id,
             )
             yield completed_event
             return
@@ -702,14 +742,7 @@ class LMClient(LanguageModel):
                             evidence_payload,
                         ),
                     ),
-                )
-                self._emit_failed(
-                    context,
-                    model,
-                    error,
-                    int((time.monotonic() - started) * 1000),
-                    time.time_ns(),
-                    failure_event.correlation_id if failure_event else generate_cid(),
+                    latency_ms=int((time.monotonic() - started) * 1000),
                 )
                 if failure_event is not None:
                     yield failure_event
@@ -723,24 +756,25 @@ class LMClient(LanguageModel):
                 usage=ActivationUsage(
                     tokens_in=usage.prompt_tokens if usage else 0,
                     tokens_out=usage.completion_tokens if usage else 0,
+                    cached_tokens=(getattr(usage, "cached_tokens", 0) or 0) if usage else 0,
                     latency_ms=int((time.monotonic() - started) * 1000),
                     provider=self._provider or "",
                     model=model,
                 ),
                 evidence=_model_terminal_evidence(terminal_response),
             )
-            self._emit_completed(
-                context,
-                model,
-                terminal_response,
-                int((time.monotonic() - started) * 1000),
-                time.time_ns(),
-                terminal.correlation_id,
-            )
             yield terminal
         finally:
             _model_stream_activation_execute.reset(execute_token)
             _reset_current_activation(activation_token)
+
+    def _model_activation_display_input(self, request: GenerateRequest) -> Dict[str, Any]:
+        payload = _model_started_input(request)
+        payload["model"] = request.model
+        payload["provider"] = (
+            request.model.split("/", 1)[0] if "/" in request.model else (self._provider or "")
+        )
+        return payload
 
     def _build_kwargs(self, request: GenerateRequest, model: str) -> Dict[str, Any]:
         """Build kwargs dict for Rust call."""
@@ -887,36 +921,13 @@ class LMClient(LanguageModel):
         timestamp_ns: int,
         correlation_id: str,
     ) -> None:
-        # Serialize messages for event. Include tool_calls and tool_call_id so
-        # the trace shows the OpenAI/Anthropic protocol shape the Rust LM
-        # client actually sends — tool result messages render as role:"tool"
-        # with tool_call_id, and assistant turns that requested tools include
-        # the tool_calls block. The Rust ApiMessage builder in
-        # sdk-core/src/lm/openai_common.rs:179 routes by presence of
-        # tool_call_id; mirror that here for display fidelity.
-        def _serialize_msg(m):
-            role = "tool" if m.tool_call_id else m.role.value
-            out: Dict[str, Any] = {"role": role, "content": m.content}
-            if m.tool_call_id:
-                out["tool_call_id"] = m.tool_call_id
-            if m.tool_calls:
-                out["tool_calls"] = m.tool_calls
-            return out
-
-        messages = [_serialize_msg(m) for m in request.messages]
         started_event = LMStarted(
             name=model,
             correlation_id=correlation_id,
             parent_correlation_id=ctx.correlation_id,
             model=model,
             provider=self._provider or "unknown",
-            input_data={
-                "system_prompt": request.system_prompt,
-                "messages": messages,
-                "temperature": request.config.temperature,
-                "max_tokens": request.config.max_tokens,
-                "tools_count": len(request.tools) if request.tools else 0,
-            },
+            input_data=_model_started_input(request),
             metadata={"name": model},
         )
         ctx.emit(started_event)
