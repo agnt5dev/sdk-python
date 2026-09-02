@@ -337,6 +337,7 @@ class Context:
                     "worker_session_id",
                     "lease_id",
                     "lease_attempt",
+                    "assignment_commit_offset",
                 ):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]

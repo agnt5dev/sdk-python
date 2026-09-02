@@ -128,6 +128,7 @@ _EXECUTION_AUTHORITY_METADATA_KEYS = (
     "worker_session_id",
     "lease_id",
     "lease_attempt",
+    "assignment_commit_offset",
 )
 
 

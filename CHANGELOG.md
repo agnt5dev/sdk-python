@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Legacy (non-durable) paths, HITL resume, and executor-managed top-level
   `agent.*` lifecycle are unchanged.
 
+### Fixed
+
+- Preserve the runtime-authored assignment commit offset on lifecycle records
+  so append-time lease fencing can bridge projection lag immediately after a
+  pull claim.
+
 ## [0.11.0b3] - 2026-08-26
 
 ### Fixed
