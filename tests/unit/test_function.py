@@ -73,6 +73,7 @@ class TestFunctionDecorator:
             "worker_session_id": "session-1",
             "lease_id": "lease-7",
             "lease_attempt": "7",
+            "assignment_commit_offset": "42",
         }
         ctx = FunctionContext(
             run_id="run-1",

@@ -44,6 +44,7 @@ def test_event_metadata_cannot_override_execution_authority() -> None:
             "worker_session_id": "session-1",
             "lease_id": "lease-1",
             "lease_attempt": "1",
+            "assignment_commit_offset": "42",
         },
     )
 
@@ -51,12 +52,14 @@ def test_event_metadata_cannot_override_execution_authority() -> None:
         {
             "lease_id": "forged-lease",
             "worker_id": "forged-worker",
+            "assignment_commit_offset": "999",
             "custom": "preserved",
         }
     )
 
     assert metadata["lease_id"] == "lease-1"
     assert metadata["worker_id"] == "worker-1"
+    assert metadata["assignment_commit_offset"] == "42"
     assert metadata["custom"] == "preserved"
 
 
