@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0b4] - 2026-09-02
+
+### Changed
+
+- Durable activations are now the step boundary records. For every call that
+  goes through the activation RPCs (workflow steps and timers, model calls,
+  durable tools, delegated child agents) the SDK no longer emits its own
+  `workflow.step.*`, `lm.*`, `tool_call.*`, or `agent.*` lifecycle events and
+  instead supplies `display_name` and a bounded JSON `input_data` (64 KiB,
+  truncation marker beyond that) on `BeginActivation`, `cached_tokens` on the
+  completion usage, and a measured `latency_ms` on `FailActivation`. The
+  runtime journals one kind-named record per side keyed by the activation id;
+  a REPLAY appends nothing.
+- While an activation executes it is the current activation and the ambient
+  parent correlation id, so nested `function.*` events, stream deltas, and
+  logs parent to the journaled record. Stream consumers still receive the
+  in-memory `lm.*` and `tool_call.*` events under the activation id.
+- Legacy (non-durable) paths, HITL resume, and executor-managed top-level
+  `agent.*` lifecycle are unchanged.
+
 ## [0.11.0b3] - 2026-08-26
 
 ### Fixed

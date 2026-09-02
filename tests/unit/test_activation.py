@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import math
 import time
 
@@ -23,6 +24,7 @@ from agnt5.activation import (
     activation_id,
     canonical_activation_value,
     child_activation_request_from_context,
+    encode_activation_input,
     stable_step_key,
 )
 from agnt5.exceptions import ActivationError, ActivationErrorCode
@@ -317,3 +319,77 @@ async def test_activation_client_refuses_non_execution_decisions(kind, code):
             latency_ms=lambda: 0,
         )
     assert caught.value.code is code
+
+
+def test_encode_activation_input_is_bounded_json():
+    assert encode_activation_input(None) == b""
+    assert json.loads(encode_activation_input({"b": 1, "a": "x"})) == {"a": "x", "b": 1}
+    oversized = {"blob": "x" * (64 * 1024)}
+    marker = json.loads(encode_activation_input(oversized))
+    assert marker["truncated"] is True
+    assert marker["bytes"] > 64 * 1024
+    assert len(encode_activation_input(oversized)) < 64
+
+
+@pytest.mark.asyncio
+async def test_native_transport_forwards_display_fields_and_failure_latency():
+    class NativeClient:
+        def __init__(self):
+            self.begin_args = None
+            self.fail_args = None
+            self.complete_args = None
+
+        async def begin_activation(self, *args):
+            self.begin_args = args
+            raise RuntimeError("stop")
+
+        async def complete_activation(self, *args):
+            self.complete_args = args
+            raise RuntimeError("stop")
+
+        async def fail_activation(self, *args):
+            self.fail_args = args
+            raise RuntimeError("stop")
+
+    native = NativeClient()
+    transport = NativeActivationTransport(native)
+    request = BeginActivationRequest(
+        **{
+            **activation_request().__dict__,
+            "display_name": "load",
+            "input_data": b'{"x":1}',
+        }
+    )
+    with pytest.raises(ActivationError):
+        await transport.begin(request)
+    assert native.begin_args[-2:] == ("load", list(b'{"x":1}'))
+
+    with pytest.raises(ActivationError):
+        await transport.complete(
+            project_id="p",
+            run_id="r",
+            activation_id="a",
+            attempt=1,
+            fence_token=b"f",
+            output=b"{}",
+            output_digest=b"d",
+            usage=ActivationUsage(tokens_in=1, tokens_out=2, cached_tokens=3),
+            evidence=(),
+        )
+    assert native.complete_args[-2] == 3
+
+    with pytest.raises(ActivationError):
+        await transport.fail(
+            project_id="p",
+            run_id="r",
+            activation_id="a",
+            attempt=1,
+            fence_token=b"f",
+            error_code="STEP_FAILED",
+            error_data=b"{}",
+            retryable=False,
+            external_outcome_certainty="UNKNOWN",
+            evidence=(),
+            latency_ms=17,
+        )
+    assert native.fail_args[-1] == 17

@@ -268,8 +268,10 @@ async def test_model_final_is_committed_through_a_durable_activation(mock_rust_g
     transport = ModelActivationTransport()
     ctx = durable_lm_context(transport)
     mock_rust_generate.id = "response-1"
-    mock_rust_generate.usage.cached_tokens = 0
+    mock_rust_generate.usage.cached_tokens = 4
     mock_rust_generate.usage.cache_creation_tokens = 0
+    emitted = []
+    ctx.emit = emitted.append
     token = set_current_context(ctx)
     try:
         with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
@@ -292,12 +294,22 @@ async def test_model_final_is_committed_through_a_durable_activation(mock_rust_g
             assert response.text == "This is a test response."
             assert transport.begin_requests[0].kind is ActivationKind.MODEL
             assert transport.begin_requests[0].stable_key == "model:openai/gpt-4o-mini:0"
+            assert transport.begin_requests[0].display_name == "openai/gpt-4o-mini"
+            begin_input = json.loads(transport.begin_requests[0].input_data)
+            assert begin_input["model"] == "openai/gpt-4o-mini"
+            assert begin_input["provider"] == "openai"
+            assert begin_input["messages"] == [{"role": "user", "content": "hello"}]
+            assert begin_input["tools_count"] == 0
             assert len(transport.complete_requests) == 1
             usage = transport.complete_requests[0]["usage"]
             assert usage.tokens_in == mock_rust_generate.usage.prompt_tokens
             assert usage.tokens_out == mock_rust_generate.usage.completion_tokens
+            assert usage.cached_tokens == 4
+            assert usage.latency_ms >= 0
             assert usage.provider == "openai"
             assert usage.model == "openai/gpt-4o-mini"
+            # The activation is the lm.* record; the SDK emits no lifecycle of its own.
+            assert emitted == []
             evidence = transport.complete_requests[0]["evidence"][0]
             assert evidence.evidence_type == "model_provider_terminal_v1"
             assert b'"classification":"accepted_final"' in evidence.payload
@@ -316,6 +328,8 @@ async def test_accepted_model_final_replays_without_provider_call():
     )
     transport = ModelActivationTransport(replay)
     ctx = durable_lm_context(transport)
+    emitted = []
+    ctx.emit = emitted.append
     token = set_current_context(ctx)
     try:
         with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
@@ -334,6 +348,7 @@ async def test_accepted_model_final_replays_without_provider_call():
             assert response.usage.total_tokens == 5
             mock_instance.generate.assert_not_called()
             assert transport.complete_requests == []
+            assert emitted == []
     finally:
         token.var.reset(token)
 
@@ -361,6 +376,8 @@ async def test_stream_terminal_is_committed_before_it_is_exposed():
     )
     transport = ModelActivationTransport()
     ctx = durable_lm_context(transport)
+    emitted = []
+    ctx.emit = emitted.append
     token = set_current_context(ctx)
     try:
         with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
@@ -380,9 +397,22 @@ async def test_stream_terminal_is_committed_before_it_is_exposed():
             ]
 
             assert events[-1].event_type == "lm.completed"
+            stream_activation_id = transport.complete_requests[0]["activation_id"]
+            assert stream_activation_id.startswith("actv1_")
+            # Deltas flow to the consumer under the activation id; the runtime
+            # journals the lm.* boundary from the activation RPCs.
+            assert [event.event_type for event in events] == [
+                "lm.content_block.started",
+                "lm.content_block.delta",
+                "lm.content_block.completed",
+                "lm.completed",
+            ]
+            assert {event.correlation_id for event in events} == {stream_activation_id}
+            assert emitted == []
             assert len(transport.complete_requests) == 1
             assert transport.complete_requests[0]["usage"].tokens_in == 3
             assert transport.complete_requests[0]["usage"].tokens_out == 2
+            assert transport.complete_requests[0]["usage"].latency_ms >= 0
             assert (
                 transport.complete_requests[0]["evidence"][0].evidence_type
                 == "model_provider_terminal_v1"
@@ -401,6 +431,8 @@ async def test_accepted_stream_final_replays_without_provider_call():
     )
     transport = ModelActivationTransport(replay)
     ctx = durable_lm_context(transport)
+    emitted = []
+    ctx.emit = emitted.append
     token = set_current_context(ctx)
     try:
         with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
@@ -424,8 +456,13 @@ async def test_accepted_stream_final_replays_without_provider_call():
             deltas = [event.content for event in events if event.event_type == "lm.content_block.delta"]
             assert deltas == ["replayed stream final"]
             assert events[-1].event_type == "lm.completed"
+            replay_activation_id = activation_id(
+                "project-1", "run-1", "", ActivationKind.MODEL, "model:openai/gpt-4o-mini:0"
+            )
+            assert {event.correlation_id for event in events} == {replay_activation_id}
             mock_instance.stream_iter.assert_not_called()
             assert transport.complete_requests == []
+            assert emitted == []
     finally:
         token.var.reset(token)
 
@@ -440,6 +477,8 @@ async def test_interrupted_stream_records_bounded_evidence_and_no_terminal_final
     )
     transport = ModelActivationTransport()
     ctx = durable_lm_context(transport)
+    emitted = []
+    ctx.emit = emitted.append
     token = set_current_context(ctx)
     try:
         with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
@@ -464,6 +503,9 @@ async def test_interrupted_stream_records_bounded_evidence_and_no_terminal_final
             assert len(transport.fail_requests) == 1
             failure = transport.fail_requests[0]
             assert failure["error_code"] == "MODEL_STREAM_INTERRUPTED"
+            assert failure["latency_ms"] >= 0
+            assert events[-1].correlation_id == failure["activation_id"]
+            assert emitted == []
             evidence = failure["evidence"][0]
             assert evidence.evidence_type == "model_stream_interruption_v1"
             assert b'"partial_chunks":1' in evidence.payload

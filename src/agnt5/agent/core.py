@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import secrets
+import time as _time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple, Union
@@ -13,11 +14,13 @@ from .._ids import generate_cid
 from .._serialization import deserialize, serialize, serialize_to_str
 from .._telemetry import setup_module_logger, truncate_span_attribute_value
 from ..activation import (
+    ActivationDecision,
     ActivationRecoveryPolicy,
     ChildJoinPolicy,
     _reset_current_activation,
     _set_current_activation,
     child_activation_request_from_context,
+    current_activation,
 )
 from ..callbacks import (
     AfterAgentCallback,
@@ -567,15 +570,36 @@ class Agent:
                 "history": deserialize(serialize(history)) if history is not None else None,
             },
             join_policy=join_policy,
+            display_name=self.name,
+            input_data={
+                "agent": self.name,
+                "message": message,
+                "history_len": len(history) if history is not None else 0,
+            },
         )
         activation_token = None
+        admitted: Optional[ActivationDecision] = None
+        started_at = _time.monotonic()
 
         def on_admitted(decision):
-            nonlocal activation_token
+            nonlocal activation_token, admitted
+            admitted = decision
             activation_token = _set_current_activation(decision)
 
         async def execute() -> Dict[str, Any]:
-            result = await self.run(message, context=ctx, history=history)
+            # The CHILD activation is this agent's agent.* record: the run loop
+            # skips its own lifecycle events and parents iterations to it.
+            previous_managed = getattr(ctx, "_activation_managed_agent", None)
+            ctx._activation_managed_agent = self.name
+            original_parent = (
+                ctx.set_as_parent(admitted.activation_id) if admitted is not None else None
+            )
+            try:
+                result = await self.run(message, context=ctx, history=history)
+            finally:
+                ctx._activation_managed_agent = previous_managed
+                if original_parent is not None:
+                    ctx.restore_parent(original_parent)
             return {"output": result.output, "tool_calls": result.tool_calls}
 
         try:
@@ -584,7 +608,7 @@ class Agent:
                 execute,
                 encode_output=serialize,
                 decode_output=deserialize,
-                latency_ms=lambda: 0,
+                latency_ms=lambda: int((_time.monotonic() - started_at) * 1000),
                 on_admitted=on_admitted,
                 failure_error_code="CHILD_FAILED",
                 failure_retryable=True,
@@ -594,6 +618,43 @@ class Agent:
         finally:
             if activation_token is not None:
                 _reset_current_activation(activation_token)
+
+    def _lifecycle_managed(self, context: Any) -> bool:
+        """Whether something else already records this agent's agent.* boundary.
+
+        True when the worker executor emits the top-level lifecycle, or when
+        this agent is running inside its own CHILD activation (the runtime
+        journals that activation as the agent.* record).
+        """
+
+        if getattr(context, "_executor_managed_lifecycle", False):
+            return True
+        for candidate in (context, getattr(context, "parent_context", None)):
+            if getattr(candidate, "_activation_managed_agent", None) == self.name:
+                return True
+        return False
+
+    def _activation_agent_correlation_id(self, context: Any) -> str:
+        """The correlation id for this run: the CHILD activation id when managed by one."""
+
+        active = current_activation()
+        if active is not None and any(
+            getattr(candidate, "_activation_managed_agent", None) == self.name
+            for candidate in (context, getattr(context, "parent_context", None))
+        ):
+            return active.activation_id
+        return generate_cid()
+
+    def _emits_tool_lifecycle(self, context: Any, tool_name: str) -> bool:
+        """Whether the agent loop emits tool_call.* for this tool.
+
+        A tool that runs through a TOOL activation is journaled by the runtime;
+        the loop still yields the events to stream consumers but does not emit
+        them to the platform.
+        """
+
+        tool = self.tools.get(tool_name)
+        return tool is None or not tool._activation_enabled(context)
 
     def _render_prompt(
         self,
@@ -830,6 +891,8 @@ class Agent:
             callback_context.context,
             callback_context.arguments,
             stable_key=callback_context.tool_call_id or None,
+            tool_call_id=callback_context.tool_call_id or None,
+            iteration=callback_context.iteration,
         )
 
         after = self.callbacks.after_tool
@@ -876,7 +939,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = generate_cid()
+        agent_correlation_id = self._activation_agent_correlation_id(context)
 
         if context is None:
             import uuid
@@ -914,7 +977,7 @@ class Agent:
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
         # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not getattr(context, '_executor_managed_lifecycle', False):
+        if context and not self._lifecycle_managed(context):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
@@ -961,7 +1024,7 @@ class Agent:
             )
             if before_agent_result is not None:
                 context.restore_parent(original_agent_parent)
-                if context and not getattr(context, '_executor_managed_lifecycle', False):
+                if context and not self._lifecycle_managed(context):
                     context.emit(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
@@ -1200,6 +1263,10 @@ class Agent:
                             # Yield tool call started event with unique content_index
                             tool_correlation_id = f"tool-{secrets.token_hex(5)}"
                             tool_start_time = _time.time()
+                            # A tool that runs through a TOOL activation is
+                            # journaled by the runtime; only yield to stream
+                            # consumers in that case.
+                            emit_tool_lifecycle = self._emits_tool_lifecycle(context, tool_name)
                             tool_started_event = ToolCallStarted(
                                 name=tool_name,
                                 correlation_id=tool_correlation_id,
@@ -1211,7 +1278,7 @@ class Agent:
                             )
                             # Emit to platform for persistence
                             self.logger.debug(f"Emitting ToolCallStarted: tool={tool_name}")
-                            if context:
+                            if context and emit_tool_lifecycle:
                                 self.logger.debug(f"context.emit(ToolCallStarted) for {tool_name}")
                                 context.emit(tool_started_event)
                             yield tool_started_event
@@ -1255,7 +1322,7 @@ class Agent:
                                             index=tool_idx,
                                         )
                                         # Emit to platform for persistence
-                                        if context:
+                                        if context and emit_tool_lifecycle:
                                             context.emit(tool_completed_event)
                                         yield tool_completed_event
                                         sequence += 1
@@ -1302,7 +1369,7 @@ class Agent:
                                     index=tool_idx,
                                 )
                                 # Emit to platform for persistence
-                                if context:
+                                if context and emit_tool_lifecycle:
                                     context.emit(tool_completed_event)
                                 yield tool_completed_event
                                 sequence += 1
@@ -1357,7 +1424,7 @@ class Agent:
                                     error_message=str(e),
                                 )
                                 # Emit to platform for persistence
-                                if context:
+                                if context and emit_tool_lifecycle:
                                     context.emit(tool_failed_event)
                                 yield tool_failed_event
                                 sequence += 1
@@ -1420,7 +1487,7 @@ class Agent:
 
                         # Emit agent.completed checkpoint for journal persistence
                         # Skip if executor already manages lifecycle (to avoid duplicate events)
-                        if context and not getattr(context, '_executor_managed_lifecycle', False):
+                        if context and not self._lifecycle_managed(context):
                             context.emit(AgentCompleted(
                                 name=self.name,
                                 correlation_id=agent_correlation_id,
@@ -1460,7 +1527,7 @@ class Agent:
 
                 # Emit agent.completed checkpoint for journal persistence (with max_iterations flag)
                 # Skip if executor already manages lifecycle (to avoid duplicate events)
-                if context and not getattr(context, '_executor_managed_lifecycle', False):
+                if context and not self._lifecycle_managed(context):
                     context.emit(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
@@ -1492,7 +1559,7 @@ class Agent:
             context.restore_parent(original_agent_parent)
 
             # Skip if executor already manages lifecycle (to avoid duplicate events)
-            if context and not getattr(context, '_executor_managed_lifecycle', False):
+            if context and not self._lifecycle_managed(context):
                 context.emit(AgentFailed(
                     name=self.name,
                     correlation_id=agent_correlation_id,
@@ -1850,7 +1917,7 @@ class Agent:
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
 
         # Generate correlation_id for pairing agent.started ↔ agent.completed/failed
-        agent_correlation_id = generate_cid()
+        agent_correlation_id = self._activation_agent_correlation_id(context)
 
         if context is None:
             # Standalone execution - create AgentContext with valid UUID
@@ -1896,7 +1963,7 @@ class Agent:
         # Emit agent.started checkpoint for journal persistence
         # Skip if executor already emitted (to avoid duplicate events)
         # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not getattr(context, '_executor_managed_lifecycle', False):
+        if context and not self._lifecycle_managed(context):
             context.emit(AgentStarted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
@@ -2084,10 +2151,11 @@ class Agent:
                                 # Generate correlation ID for this tool call
                                 tool_correlation_id = f"tool-{secrets.token_hex(5)}"
                                 tool_start_time = _time.time()
+                                emit_tool_lifecycle = self._emits_tool_lifecycle(context, tool_name)
 
                                 # Emit tool call started event
                                 self.logger.debug(f" Tool call started: {tool_name}, context={context is not None}, correlation_id={tool_correlation_id}")
-                                if context:
+                                if context and emit_tool_lifecycle:
                                     event = ToolCallStarted(
                                         name=tool_name,
                                         correlation_id=tool_correlation_id,
@@ -2115,6 +2183,8 @@ class Agent:
                                             context,
                                             tool_args,
                                             stable_key=tool_call_id or None,
+                                            tool_call_id=tool_call_id or None,
+                                            iteration=iteration + 1,
                                         )
 
                                         # Check if this was a handoff
@@ -2129,7 +2199,7 @@ class Agent:
                                             # Add output data to span for trace visibility
                                             span.set_attribute("output.data", _serialize_span_data(result["output"]))
                                             # Emit tool call completed event for handoff
-                                            if context:
+                                            if context and emit_tool_lifecycle:
                                                 tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
                                                 context.emit(ToolCallCompleted(
                                                     name=tool_name,
@@ -2158,7 +2228,7 @@ class Agent:
 
                                     # Emit tool call completed event
                                     self.logger.debug(f" Tool call completed: {tool_name}, context={context is not None}")
-                                    if context:
+                                    if context and emit_tool_lifecycle:
                                         tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
                                         event = ToolCallCompleted(
                                             name=tool_name,
@@ -2219,7 +2289,7 @@ class Agent:
 
                                     # Emit tool call failed event
                                     self.logger.debug(f" Tool call failed: {tool_name}, error={e}")
-                                    if context:
+                                    if context and emit_tool_lifecycle:
                                         event = ToolCallFailed(
                                             name=tool_name,
                                             correlation_id=tool_correlation_id,
@@ -2292,7 +2362,7 @@ class Agent:
 
                             # Emit completion checkpoint
                             # Skip if executor already manages lifecycle (to avoid duplicate events)
-                            if context and not getattr(context, '_executor_managed_lifecycle', False):
+                            if context and not self._lifecycle_managed(context):
                                 context.emit(AgentCompleted(
                                     name=self.name,
                                     correlation_id=agent_correlation_id,
@@ -2325,7 +2395,7 @@ class Agent:
 
                     # Emit completion checkpoint (iterations == max_iterations indicates max iterations reached)
                     # Skip if executor already manages lifecycle (to avoid duplicate events)
-                    if context and not getattr(context, '_executor_managed_lifecycle', False):
+                    if context and not self._lifecycle_managed(context):
                         context.emit(AgentCompleted(
                             name=self.name,
                             correlation_id=agent_correlation_id,
@@ -2350,7 +2420,7 @@ class Agent:
 
                 # Emit error checkpoint for observability
                 # Skip if executor already manages lifecycle (to avoid duplicate events)
-                if context and not getattr(context, '_executor_managed_lifecycle', False):
+                if context and not self._lifecycle_managed(context):
                     context.emit(AgentFailed(
                         name=self.name,
                         correlation_id=agent_correlation_id,

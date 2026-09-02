@@ -288,6 +288,8 @@ impl PyActivationClient {
         run_authority: Vec<u8>,
         lease_authority: Vec<u8>,
         child: Option<(String, String, String, Vec<u8>, i32)>,
+        display_name: String,
+        input_data: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
@@ -321,6 +323,8 @@ impl PyActivationClient {
                             join_policy,
                         },
                     ),
+                    display_name,
+                    input_data,
                 })
                 .await
                 .map_err(activation_error)?;
@@ -345,6 +349,7 @@ impl PyActivationClient {
         latency_ms: i64,
         provider: String,
         model: String,
+        cached_tokens: i64,
         evidence: Vec<(String, Vec<u8>, Vec<u8>)>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
@@ -371,6 +376,7 @@ impl PyActivationClient {
                         latency_ms,
                         provider,
                         model,
+                        cached_tokens,
                     }),
                     evidence: inline_evidence(evidence),
                 })
@@ -399,6 +405,7 @@ impl PyActivationClient {
         retryable: bool,
         external_outcome_certainty: String,
         evidence: Vec<(String, Vec<u8>, Vec<u8>)>,
+        latency_ms: i64,
     ) -> PyResult<Bound<'py, PyAny>> {
         if external_outcome_certainty != "UNKNOWN" {
             return Err(bridge_error(
@@ -426,6 +433,7 @@ impl PyActivationClient {
                     retryable,
                     external_outcome_certainty: ActivationExternalOutcomeCertainty::Unknown as i32,
                     evidence: inline_evidence(evidence),
+                    latency_ms,
                 })
                 .await
                 .map_err(activation_error)?;
