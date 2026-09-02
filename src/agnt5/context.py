@@ -340,9 +340,18 @@ class Context:
                 ):
                     if key in self._trace_metadata:
                         trace_base[key] = self._trace_metadata[key]
+            # The runtime stamps pull_completion_lifecycle_v1 on a dispatch
+            # whose lifecycle records may ride inside CompleteJob. Streaming
+            # runs keep per-event delivery so SSE viewers see boundaries live.
+            defer_lifecycle = (
+                not self._is_streaming
+                and bool(self._trace_metadata)
+                and self._trace_metadata.get("pull_completion_lifecycle_v1") == "true"
+            )
             self._emitter = EventEmitter(
                 run_id=self._run_id,
                 base_metadata=trace_base or None,
+                defer_lifecycle=defer_lifecycle,
             )
             if self._worker is not None:
                 self._emitter.set_worker(self._worker)

@@ -711,11 +711,25 @@ class EventEmitter:
         self,
         run_id: Optional[str] = None,
         base_metadata: Optional[dict[str, str]] = None,
+        defer_lifecycle: bool = False,
     ) -> None:
         self._run_id = run_id or ""
         self._base_metadata = base_metadata or {}
         self._sequence = 0
         self._worker: Any = None
+        # When the runtime negotiated pull_completion_lifecycle_v1 for this
+        # non-streaming pull run, non-terminal checkpoints are queued instead
+        # of awaited: sdk-core holds them and carries them inside CompleteJob.
+        # Terminal events still await; the core pre-flushes held events before
+        # any other durable write, so ordering is preserved either way.
+        self._defer_lifecycle = defer_lifecycle
+
+    @property
+    def defer_lifecycle(self) -> bool:
+        return self._defer_lifecycle
+
+    def _queue_nonterminal_checkpoints(self) -> bool:
+        return self._defer_lifecycle or _FIRE_AND_FORGET_NONTERMINAL
 
     def set_worker(self, worker: Any) -> None:
         """Set the worker for queueing events."""
@@ -861,7 +875,7 @@ class EventEmitter:
             # Terminal events still await — the Rust side pre-flushes
             # the journal queue before sending the terminal RPC, so
             # ordering of started → completed is preserved.
-            if _FIRE_AND_FORGET_NONTERMINAL and not is_terminal_event(event.event_type):
+            if self._queue_nonterminal_checkpoints() and not is_terminal_event(event.event_type):
                 try:
                     self._worker.queue_event(
                         invocation_id=self._run_id,
@@ -937,7 +951,7 @@ class EventEmitter:
             return
 
         # Fire-and-forget path — queue each event, no await.
-        if _FIRE_AND_FORGET_NONTERMINAL and all(
+        if self._queue_nonterminal_checkpoints() and all(
             not is_terminal_event(e.event_type) for e in events
         ):
             for event in events:
