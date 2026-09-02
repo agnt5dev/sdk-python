@@ -630,7 +630,6 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting run.started event: "
                 f"tool={tool.name}, correlation_id={run_correlation_id}"
             )
-            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -649,7 +648,8 @@ class ExecutorMixin:
                 f"[_execute_tool] Emitting tool.started event: "
                 f"tool={tool.name}, correlation_id={tool_correlation_id}"
             )
-            await ctx.emit_async(tool_started_event)
+            # run.started and tool.started travel as one acknowledged batch.
+            await ctx.emit_batch_async([run_started_event, tool_started_event])
 
             # Execute tool with error handling for proper event emission
             try:
@@ -805,7 +805,6 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting run.started event: "
                 f"entity={entity_type.name}, correlation_id={run_correlation_id}"
             )
-            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -823,7 +822,8 @@ class ExecutorMixin:
                 f"[_execute_entity] Emitting entity.started event: "
                 f"entity={entity_type.name}, key={entity_key}, method={method_name}"
             )
-            await ctx.emit_async(entity_started_event)
+            # run.started and entity.started travel as one acknowledged batch.
+            await ctx.emit_batch_async([run_started_event, entity_started_event])
 
             # Execute entity method with error handling
             try:
@@ -1002,7 +1002,6 @@ class ExecutorMixin:
                 f"[_execute_agent] Emitting run.started event: "
                 f"agent={agent.name}, correlation_id={run_correlation_id}"
             )
-            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -1020,7 +1019,8 @@ class ExecutorMixin:
                 f"[_execute_agent] Emitting agent.started event: "
                 f"agent={agent.name}, correlation_id={agent_correlation_id}"
             )
-            await ctx.emit_async(agent_started_event)
+            # run.started and agent.started travel as one acknowledged batch.
+            await ctx.emit_batch_async([run_started_event, agent_started_event])
 
             # Mark context as executor-managed so Agent._run_core() doesn't emit
             # duplicate agent.started/completed events
@@ -1344,7 +1344,6 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting run.started event: "
                 f"scorer={config.name}, correlation_id={run_correlation_id}"
             )
-            await ctx.emit_async(run_started_event)
 
             trace_id = _trace_id_from_request(req)
 
@@ -1363,7 +1362,8 @@ class ExecutorMixin:
                 f"[_execute_scorer] Emitting scorer.started event: "
                 f"scorer={config.name}, correlation_id={scorer_correlation_id}"
             )
-            await ctx.emit_async(scorer_started_event)
+            # run.started and scorer.started travel as one acknowledged batch.
+            await ctx.emit_batch_async([run_started_event, scorer_started_event])
 
             # Execute scorer with error handling
             try:
