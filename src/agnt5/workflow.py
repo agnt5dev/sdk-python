@@ -7,12 +7,14 @@ import functools
 import inspect
 import time
 import uuid
+from contextvars import ContextVar
 from typing import (
     TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
     Dict,
+    Iterator,
     List,
     Optional,
     Sequence,
@@ -36,6 +38,42 @@ if TYPE_CHECKING:
 logger = setup_module_logger(__name__)
 
 T = TypeVar("T")
+
+
+class _TaskLocalStepEventStack:
+    """Copy-on-write step hierarchy isolated by the current async context."""
+
+    def __init__(self) -> None:
+        self._values: ContextVar[tuple[str, ...]] = ContextVar(
+            f"agnt5_step_event_stack_{id(self)}", default=()
+        )
+
+    def append(self, event_id: str) -> None:
+        self._values.set((*self._values.get(), event_id))
+
+    def pop(self) -> str:
+        values = self._values.get()
+        if not values:
+            raise IndexError("pop from empty step event stack")
+        self._values.set(values[:-1])
+        return values[-1]
+
+    def __bool__(self) -> bool:
+        return bool(self._values.get())
+
+    def __getitem__(self, index: int) -> str:
+        return self._values.get()[index]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values.get())
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _TaskLocalStepEventStack):
+            return self._values.get() == other._values.get()
+        if isinstance(other, (list, tuple)):
+            return self._values.get() == tuple(other)
+        return False
+
 
 # Global workflow registry
 _WORKFLOW_REGISTRY: Dict[str, WorkflowConfig] = {}
@@ -123,7 +161,7 @@ class WorkflowContext(Context):
 
         # Step hierarchy tracking - for nested step visualization
         # Stack of event IDs for currently executing steps
-        self._step_event_stack: List[str] = []
+        self._step_event_stack = _TaskLocalStepEventStack()
 
         # Workflow-specific metadata for events (set by worker during execution)
         self._workflow_name: Optional[str] = None
