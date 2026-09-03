@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-03
+
+### Changed
+
+- Build the native extension against `agnt5-sdk-core` 0.2.6.
+
 ## [0.11.0] - 2026-09-03
 
 ### Changed
@@ -213,7 +219,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - PyPI publishing for the standalone `agnt5dev/sdk-python` repository.
 - Published `agnt5-sdk-core` crate dependency for the native Python extension.
 
-[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/agnt5dev/sdk-python/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b5...v0.11.0
 [0.11.0b5]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b4...v0.11.0b5
 [0.11.0b4]: https://github.com/agnt5dev/sdk-python/compare/v0.11.0b3...v0.11.0b4
