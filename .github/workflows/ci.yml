@@ -13,7 +13,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
+  # sccache cannot cache incremental compiles, and nothing in CI reads
+  # debug info. Both settings make the dev build smaller and cacheable.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   validate-pr:
@@ -42,6 +45,32 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-
+
+      - name: Configure compiler cache backend
+        # The GitHub Actions cache is scoped per branch, so every pull request
+        # starts cold. A Cloudflare R2 bucket (S3-compatible) is shared across
+        # all branches. Fall back to the Actions cache when the bucket is not
+        # configured, for example on pull requests from forks.
+        env:
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -n "$R2_ACCOUNT_ID" ] && [ -n "$R2_BUCKET" ] && [ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ]; then
+            {
+              echo "SCCACHE_BUCKET=$R2_BUCKET"
+              echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+              echo "SCCACHE_REGION=auto"
+              echo "SCCACHE_S3_KEY_PREFIX=sdk-python/${RUNNER_OS}-${RUNNER_ARCH}"
+              echo "AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID"
+              echo "AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY"
+            } >> "$GITHUB_ENV"
+            echo "Compiler cache: R2 bucket $R2_BUCKET"
+          else
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Compiler cache: GitHub Actions cache (R2 not configured)"
+          fi
 
       - name: Setup shared compiler cache
         uses: mozilla-actions/sccache-action@v0.0.11
