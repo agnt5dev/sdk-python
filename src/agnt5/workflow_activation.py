@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import json
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
@@ -139,9 +138,7 @@ async def run_durable_sleep(
         timer_key=timer_key,
         input_digest=input_digest,
         definition_digest=definition.digest,
-        continuation=json.dumps(continuation, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        ),
+        continuation=serialize(continuation),
         delay_ms=delay_ms,
     )
 

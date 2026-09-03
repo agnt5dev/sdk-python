@@ -1344,6 +1344,39 @@ class Agent:
                                             prompt_context,
                                             agent_result,
                                         )
+
+                                        # A handoff ends this router iteration and
+                                        # agent just like a direct answer. Close both
+                                        # lifecycles after the delegated child and
+                                        # transfer tool have settled.
+                                        context.restore_parent(original_iteration_parent)
+                                        iteration_duration_ms = int(
+                                            (_time.time() - iteration_start_time) * 1000
+                                        )
+                                        if context:
+                                            context.emit(AgentIterationCompleted(
+                                                name=self.name,
+                                                correlation_id=iteration_correlation_id,
+                                                parent_correlation_id=agent_correlation_id,
+                                                iteration=iteration + 1,
+                                                duration_ms=iteration_duration_ms,
+                                                has_tool_calls=True,
+                                                tool_calls_count=tool_idx + 1,
+                                                metadata={"name": self.name},
+                                            ))
+
+                                        context.restore_parent(original_agent_parent)
+                                        if context and not self._lifecycle_managed(context):
+                                            context.emit(AgentCompleted(
+                                                name=self.name,
+                                                correlation_id=agent_correlation_id,
+                                                parent_correlation_id=context._parent_correlation_id,
+                                                iterations=iteration + 1,
+                                                tool_calls_count=len(all_tool_calls),
+                                                handoff_to=agent_result.handoff_to,
+                                                output_length=len(agent_result.output),
+                                                metadata={"name": self.name},
+                                            ))
                                         yield agent_result
                                         return
 

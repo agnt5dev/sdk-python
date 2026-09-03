@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import json
 
 import pytest
+from pydantic import BaseModel
 
 from agnt5.activation import (
     ActivationClient,
@@ -129,6 +131,27 @@ async def test_durable_sleep_yields_typed_timer_authority_without_local_wait():
         "timer_key": "sleep:backoff",
     }
     assert transport.complete_requests == []
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_serializes_typed_completed_step_outputs():
+    class TypedOutput(BaseModel):
+        value: int
+
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    entity.record_step_completion(
+        "step:typed:0",
+        "typed",
+        {"value": 42},
+        TypedOutput(value=42),
+    )
+
+    with pytest.raises(DurableSleepSuspension) as caught:
+        await context.sleep(1, name="backoff")
+
+    continuation = json.loads(caught.value.continuation)
+    assert continuation["completed_steps"]["step:typed:0"] == {"value": 42}
 
 
 @pytest.mark.asyncio
@@ -330,6 +353,53 @@ async def test_function_form_uses_same_activation_boundary_and_explicit_key():
     assert observed["stack"] == [step_activation_id]
     assert context._step_event_stack == []
     assert context.activation is None
+
+
+@pytest.mark.asyncio
+async def test_parallel_durable_steps_keep_task_local_event_stacks():
+    transport = WorkflowActivationTransport()
+    context, _entity, _events = activation_context(transport)
+    second_admitted = asyncio.Event()
+    first_completed = asyncio.Event()
+    first_activation_id = activation_id(
+        "project-1", "run-1", "", ActivationKind.STEP, "step:first:0"
+    )
+    second_activation_id = activation_id(
+        "project-1", "run-1", "", ActivationKind.STEP, "step:second:1"
+    )
+    original_complete = transport.complete
+
+    async def complete_in_order(**request):
+        receipt = await original_complete(**request)
+        if request["activation_id"] == first_activation_id:
+            first_completed.set()
+        return receipt
+
+    transport.complete = complete_in_order
+    observed_stacks = {}
+
+    async def first():
+        await second_admitted.wait()
+        observed_stacks["first"] = list(context._step_event_stack)
+        return "first"
+
+    async def second():
+        second_admitted.set()
+        await first_completed.wait()
+        observed_stacks["second"] = list(context._step_event_stack)
+        return "second"
+
+    results = await context.parallel(
+        context.step("first", first),
+        context.step("second", second),
+    )
+
+    assert results == ["first", "second"]
+    assert observed_stacks == {
+        "first": [first_activation_id],
+        "second": [second_activation_id],
+    }
+    assert context._step_event_stack == []
 
 
 @pytest.mark.asyncio

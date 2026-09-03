@@ -751,14 +751,28 @@ async def test_agent_handoff():
         instructions="I coordinate tasks",
         handoffs=[handoff(target_agent, "Transfer to target agent")],
     )
+    ctx = AgentContext(run_id="run-handoff", agent_name="source")
+    emitted = []
+    ctx.emit = emitted.append
 
-    result = await source_agent.run("Need specialized help")
+    result = await source_agent.run("Need specialized help", context=ctx)
 
     # Should have handed off to target
     assert result.handoff_to == "target"
     assert result.output == "I am the target agent"
     assert target_lm.requests
     assert all(not message.tool_calls for message in target_lm.requests[0].messages)
+    source_lifecycle = [
+        event.event_type
+        for event in emitted
+        if getattr(event, "name", "") == "source" and event.event_type.startswith("agent.")
+    ]
+    assert source_lifecycle == [
+        "agent.started",
+        "agent.iteration.started",
+        "agent.iteration.completed",
+        "agent.completed",
+    ]
 
 
 @pytest.mark.asyncio
