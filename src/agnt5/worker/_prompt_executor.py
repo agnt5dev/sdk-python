@@ -19,7 +19,6 @@ PROMPT_WORKER_INPUT_SCHEMA_VERSION = "agnt5.eval.prompt_worker_input.v1"
 
 PROMPT_EXECUTOR_METADATA = {
     "source": "agnt5_builtin",
-    "agnt5_builtin": "prompt_executor",
     "schema_version": PROMPT_WORKER_INPUT_SCHEMA_VERSION,
 }
 

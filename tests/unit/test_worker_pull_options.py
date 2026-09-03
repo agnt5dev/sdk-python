@@ -39,7 +39,8 @@ class FakeEntityStateManager:
 
 
 class FakeComponentInfo:
-    pass
+    def __init__(self, **kwargs) -> None:
+        self.__dict__.update(kwargs)
 
 
 class FakeTriggerSpec:
@@ -125,7 +126,9 @@ def test_worker_mode_pull_rejects_long_poll_disable(fake_native_core):
         Worker(service_name="py-worker", worker_mode="pull", parked_polling=False)
 
 
-@pytest.mark.parametrize("kwargs", [{"min_slots": 0}, {"max_slots": -1}, {"claim_timeout_ms": True}])
+@pytest.mark.parametrize(
+    "kwargs", [{"min_slots": 0}, {"max_slots": -1}, {"claim_timeout_ms": True}]
+)
 def test_pull_slot_options_must_be_positive_integers(fake_native_core, kwargs):
     with pytest.raises(ValueError, match="must be a positive integer"):
         Worker(service_name="py-worker", **kwargs)
@@ -134,3 +137,43 @@ def test_pull_slot_options_must_be_positive_integers(fake_native_core, kwargs):
 def test_worker_mode_must_be_push_or_pull(fake_native_core):
     with pytest.raises(ValueError, match="worker_mode must be 'push' or 'pull'"):
         Worker(service_name="py-worker", worker_mode="sideways")
+
+
+def test_worker_scorer_registration_uses_canonical_builtin_source(fake_native_core):
+    from agnt5.eval.types import ScorerResult
+    from agnt5.scorer import (
+        BUILTIN_DETERMINISTIC_SCORER_NAMES,
+        ScorerRegistry,
+        all_builtin_judge_scorers,
+        scorer,
+    )
+
+    ScorerRegistry.clear()
+
+    @scorer(name="custom_quality")
+    async def custom_quality(_request):
+        return ScorerResult(score=1.0, passed=True)
+
+    try:
+        worker = Worker(service_name="py-worker", scorers=[custom_quality])
+        scorers = {
+            component.name: component
+            for component in worker._discover_components()
+            if component.component_type == "scorer"
+        }
+
+        builtin_names = set(BUILTIN_DETERMINISTIC_SCORER_NAMES) | set(all_builtin_judge_scorers())
+        assert set(scorers) == builtin_names | {"custom_quality"}
+
+        for name in builtin_names:
+            component = scorers[name]
+            assert component.metadata["source"] == "agnt5_builtin"
+            assert "agnt5_builtin" not in component.metadata
+            assert "agnt5.builtin" not in component.metadata
+            assert "builtin" not in component.config
+
+        custom = scorers["custom_quality"]
+        assert "source" not in custom.metadata
+        assert "builtin" not in custom.config
+    finally:
+        ScorerRegistry.clear()

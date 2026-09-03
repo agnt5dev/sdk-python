@@ -20,6 +20,7 @@ from .._telemetry import (
 )
 from ..function import FunctionRegistry
 from ..scorer import (
+    BUILTIN_DETERMINISTIC_SCORER_NAMES,
     ScorerRegistry,
     all_builtin_judge_scorers,
     get_builtin_judge_scorer_config,
@@ -36,6 +37,8 @@ from ._prompt_executor import (
 )
 
 logger = setup_module_logger(__name__)
+
+_BUILTIN_COMPONENT_SOURCE = "agnt5_builtin"
 
 
 def _run_id_of(invocation_id: str) -> str:
@@ -85,13 +88,7 @@ def _configure_worker_environment(
 def _is_system_component(component: Any) -> bool:
     """Return True for platform-injected components hidden from user summaries."""
     metadata = getattr(component, "metadata", {}) or {}
-    config = getattr(component, "config", {}) or {}
-
-    return (
-        metadata.get("source") == "agnt5_builtin"
-        or bool(metadata.get("agnt5_builtin"))
-        or config.get("builtin") == "true"
-    )
+    return metadata.get("source") == _BUILTIN_COMPONENT_SOURCE
 
 
 class Worker(ExecutorMixin):
@@ -676,7 +673,7 @@ class Worker(ExecutorMixin):
                     name=PROMPT_EXECUTOR_COMPONENT_NAME,
                     component_type="function",
                     metadata=PROMPT_EXECUTOR_METADATA,
-                    config={"builtin": "true"},
+                    config={},
                     input_schema=PROMPT_EXECUTOR_INPUT_SCHEMA,
                     output_schema=PROMPT_EXECUTOR_OUTPUT_SCHEMA,
                 )
@@ -776,8 +773,24 @@ class Worker(ExecutorMixin):
             )
             registered_scorer_names.add(config.name)
 
-        # These AGNT5-owned judge built-ins are routable scorer names, but they
-        # are not user custom scorer registrations.
+        # AGNT5-owned deterministic built-ins are routable worker capabilities,
+        # but native SDK-core intercepts them before Python component dispatch.
+        for scorer_name in BUILTIN_DETERMINISTIC_SCORER_NAMES:
+            if scorer_name in registered_scorer_names:
+                continue
+            components.append(
+                self._create_component_info(
+                    name=scorer_name,
+                    component_type="scorer",
+                    metadata={"source": _BUILTIN_COMPONENT_SOURCE},
+                    config={},
+                    input_schema=None,
+                    output_schema=None,
+                )
+            )
+            registered_scorer_names.add(scorer_name)
+
+        # AGNT5-owned judge built-ins fall through to their Python handlers.
         for scorer_name, config in all_builtin_judge_scorers().items():
             if scorer_name in registered_scorer_names:
                 continue
@@ -788,9 +801,9 @@ class Worker(ExecutorMixin):
                     metadata={
                         "scope": config.scope,
                         "description": config.description,
-                        "source": "agnt5_builtin",
+                        "source": _BUILTIN_COMPONENT_SOURCE,
                     },
-                    config={"builtin": "true"},
+                    config={},
                     input_schema=None,
                     output_schema=None,
                 )
