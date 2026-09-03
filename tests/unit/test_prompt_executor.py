@@ -10,6 +10,7 @@ import pytest
 from agnt5.worker._core import _is_system_component
 from agnt5.worker._prompt_executor import (
     PROMPT_EXECUTOR_COMPONENT_NAME,
+    PROMPT_EXECUTOR_METADATA,
     PROMPT_WORKER_INPUT_SCHEMA_VERSION,
     execute_prompt_worker_input,
     is_prompt_executor_component,
@@ -176,10 +177,12 @@ def test_prompt_executor_component_aliases() -> None:
 
 def test_prompt_executor_component_is_hidden_from_user_summaries() -> None:
     class Component:
-        metadata = {"source": "agnt5_builtin", "agnt5_builtin": "prompt_executor"}
-        config = {"builtin": "true"}
+        metadata = PROMPT_EXECUTOR_METADATA
+        config = {}
 
     assert _is_system_component(Component())
+    assert Component.metadata["source"] == "agnt5_builtin"
+    assert "agnt5_builtin" not in Component.metadata
 
 
 def test_user_component_is_visible_in_user_summaries() -> None:
