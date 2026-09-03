@@ -33,17 +33,23 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
-        run: |
-          if ! command -v rustup &> /dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            source "$HOME/.cargo/env"
-          else
-            rustup default stable
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Restore Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-
 
       - name: Setup shared compiler cache
         uses: mozilla-actions/sccache-action@v0.0.11
@@ -218,23 +224,23 @@ jobs:
           clean: true
 
       - name: Setup Rust toolchain
-        run: |
-          # Check if rustup exists, install if not
-          if ! command -v rustup &> /dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            # Source cargo env for current shell
-            source "$HOME/.cargo/env"
-          else
-            # Update to latest stable if rustup exists
-            rustup update stable
-            rustup default stable
-          fi
-          rustup target add aarch64-apple-darwin
-          # Make cargo available in subsequent steps
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && echo "$HOME/.local/bin" >> $GITHUB_PATH
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Restore Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-
 
       - name: Setup shared compiler cache
         uses: mozilla-actions/sccache-action@v0.0.11
@@ -250,7 +256,7 @@ jobs:
       - name: Build ARM64 wheel
         working-directory: .
         run: |
-          ~/.local/bin/uv run --with maturin \
+          uv run --with maturin \
             maturin build \
             --release \
             --locked \
