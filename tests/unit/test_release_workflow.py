@@ -49,7 +49,24 @@ def test_workflows_use_persistent_compiler_cache():
         workflow = path.read_text()
 
         assert "mozilla-actions/sccache-action@v0.0.11" in workflow
-        assert 'SCCACHE_GHA_ENABLED: "true"' in workflow
         assert "RUSTC_WRAPPER: sccache" in workflow
         assert "SCCACHE_DIR" not in workflow
         assert "SCCACHE_VERSION" not in workflow
+
+    assert 'SCCACHE_GHA_ENABLED: "true"' in RELEASE_WORKFLOW.read_text()
+
+
+def test_ci_shares_compiler_cache_across_branches_via_r2():
+    workflow = CI_WORKFLOW.read_text()
+
+    # The Actions cache is branch-scoped; the R2 bucket is shared across PRs.
+    assert "SCCACHE_BUCKET=$R2_BUCKET" in workflow
+    assert "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" in workflow
+    assert "SCCACHE_REGION=auto" in workflow
+    assert "SCCACHE_S3_KEY_PREFIX=sdk-python/" in workflow
+    assert "secrets.R2_ACCESS_KEY_ID" in workflow
+    assert "secrets.R2_SECRET_ACCESS_KEY" in workflow
+    # Fork PRs have no secrets; keep the Actions cache as a fallback.
+    assert "SCCACHE_GHA_ENABLED=true" in workflow
+    assert 'CARGO_INCREMENTAL: "0"' in workflow
+    assert 'CARGO_PROFILE_DEV_DEBUG: "0"' in workflow
