@@ -1,0 +1,72 @@
+name: SDK Python CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  validate-pr:
+    name: Validate pull request
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Restore Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-
+
+      - name: Setup shared compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Configure build parallelism
+        run: echo "CARGO_BUILD_JOBS=$(nproc 2>/dev/null || echo 4)" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: uv sync --group dev --no-install-project
+
+      - name: Build development extension
+        run: uv run maturin develop --locked
+
+      - name: Lint
+        run: uv run ruff check src
+
+      - name: Run unit tests
+        # The golden fixture lives in the sibling sdk-core repository, which is
+        # not present in this standalone checkout.
+        run: >-
+          uv run pytest tests/unit -q
+          --ignore=tests/unit/test_eval_goldens.py
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats

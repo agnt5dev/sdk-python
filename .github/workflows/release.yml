@@ -1,87 +1,27 @@
 name: SDK Python Release
 
+# Runs only when a GitHub release is published. There is intentionally no
+# manual trigger: cut a release (or prerelease) from the GitHub UI or `gh
+# release create` and this workflow builds and publishes the matching version.
+# Pull request validation lives in ci.yml.
 on:
-  pull_request:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      skip-publish:
-        description: "Skip PyPI publish"
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  validate-pr:
-    name: Validate pull request
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    env:
-      RUSTC_WRAPPER: sccache
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.98.0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Restore Cargo downloads
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98-
-
-      - name: Setup shared compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: "v0.16.0"
-
-      - name: Configure build parallelism
-        run: echo "CARGO_BUILD_JOBS=$(nproc 2>/dev/null || echo 4)" >> "$GITHUB_ENV"
-
-      - name: Install dependencies
-        run: uv sync --group dev --no-install-project
-
-      - name: Build development extension
-        run: uv run maturin develop --locked
-
-      - name: Lint
-        run: uv run ruff check src
-
-      - name: Run unit tests
-        # The golden fixture lives in the sibling sdk-core repository, which is
-        # not present in this standalone checkout.
-        run: >-
-          uv run pytest tests/unit -q
-          --ignore=tests/unit/test_eval_goldens.py
-
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats
-
   validate-release:
     name: Validate release metadata
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -91,38 +31,32 @@ jobs:
       - name: Validate version and changelog
         id: version
         env:
-          EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
-          SKIP_PUBLISH: ${{ inputs.skip-publish }}
         run: |
           PACKAGE_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*version = "\(.*\)"/\1/')
 
-          if [ "$EVENT_NAME" = release ]; then
-            if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$'; then
-              echo "Release tag must be a stable or PEP 440 prerelease version: $RELEASE_TAG" >&2
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$'; then
+            echo "Release tag must be a stable or PEP 440 prerelease version: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          RELEASE_VERSION=${RELEASE_TAG#v}
+          if [ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Release tag $RELEASE_TAG does not match package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [$RELEASE_VERSION]" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing ## [$RELEASE_VERSION]" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$PACKAGE_VERSION" | grep -Eq '(a|b|rc)[0-9]+$'; then
+            if [ "$RELEASE_PRERELEASE" != true ]; then
+              echo "Prerelease package $PACKAGE_VERSION requires a GitHub prerelease" >&2
               exit 1
             fi
-            RELEASE_VERSION=${RELEASE_TAG#v}
-            if [ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]; then
-              echo "Release tag $RELEASE_TAG does not match package version $PACKAGE_VERSION" >&2
-              exit 1
-            fi
-            if ! grep -Fq "## [$RELEASE_VERSION]" CHANGELOG.md; then
-              echo "CHANGELOG.md is missing ## [$RELEASE_VERSION]" >&2
-              exit 1
-            fi
-            if printf '%s\n' "$PACKAGE_VERSION" | grep -Eq '(a|b|rc)[0-9]+$'; then
-              if [ "$RELEASE_PRERELEASE" != true ]; then
-                echo "Prerelease package $PACKAGE_VERSION requires a GitHub prerelease" >&2
-                exit 1
-              fi
-            elif [ "$RELEASE_PRERELEASE" = true ]; then
-              echo "Stable package $PACKAGE_VERSION cannot be published from a GitHub prerelease" >&2
-              exit 1
-            fi
-          elif [ "$EVENT_NAME" = workflow_dispatch ] && [ "$SKIP_PUBLISH" != true ]; then
-            test "${GITHUB_REF_NAME}" = main
+          elif [ "$RELEASE_PRERELEASE" = true ]; then
+            echo "Stable package $PACKAGE_VERSION cannot be published from a GitHub prerelease" >&2
+            exit 1
           fi
 
           echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
@@ -282,18 +216,7 @@ jobs:
       - build-wheels-macos
       - build-sdist
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.skip-publish != true)
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Require main branch
-        if: github.event_name == 'workflow_dispatch'
-        run: test "${GITHUB_REF_NAME}" = main
-
       - name: Download all distributions
         uses: actions/download-artifact@v8
         with:
@@ -308,12 +231,6 @@ jobs:
           echo ""
           echo "Expected 3 wheels (Linux x86_64, Linux ARM64, and macOS ARM64) and 1 sdist"
 
-      - name: Get SDK version
-        id: version
-        run: |
-          VERSION=${{ needs.validate-release.outputs.version }}
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -322,25 +239,14 @@ jobs:
           skip-existing: true
           verbose: true
 
-      - name: Create and push release tag
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
-            echo "Tag v${VERSION} already exists" >&2
-            exit 1
-          fi
-          git config user.name "agnt5-release-bot"
-          git config user.email "release-bot@agnt5.com"
-          git tag -a "v${VERSION}" -m "v${VERSION}"
-          git push origin "v${VERSION}"
-
       - name: Output release summary
+        env:
+          VERSION: ${{ needs.validate-release.outputs.version }}
         run: |
           echo "## Release Complete" >> $GITHUB_STEP_SUMMARY
           echo "**Package:** \`agnt5\` (PyPI)" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** ${{ github.event.release.html_url }}" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Wheels" >> $GITHUB_STEP_SUMMARY
@@ -360,6 +266,6 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: ${{ secrets.SLACK_CHANNEL_ID }}
-            text: "${{ job.status == 'success' && '✓' || '✗' }} agnt5-sdk-python:${{ steps.version.outputs.version }}${{ job.status != 'success' && format(' - {0}', job.status) || '' }}"
+            text: "${{ job.status == 'success' && '✓' || '✗' }} agnt5-sdk-python:${{ needs.validate-release.outputs.version }}${{ job.status != 'success' && format(' - {0}', job.status) || '' }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
