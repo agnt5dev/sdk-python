@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.0b6] - 2026-09-03
+
+### Changed
+
+- Preserve provider-specific tool-call data across native prompt, response,
+  and streaming conversions, and update the Google API compatibility matrix.
+- Build the native extension against `agnt5-sdk-core` 0.2.5.
+
+### Fixed
+
+- Isolate durable step hierarchy state between concurrent asyncio tasks while
+  retaining inherited nesting within each task.
+- Complete the router iteration and source agent lifecycles after a delegated
+  handoff settles.
+- Serialize durable sleep continuations with the SDK serializer so typed step
+  outputs such as Pydantic models remain resumable.
+
 ## [0.11.0b5] - 2026-09-02
 
 ### Fixed

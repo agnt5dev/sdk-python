@@ -5,8 +5,8 @@ Tests real Google Gemini API connections to catch breaking changes.
 Run weekly via CI to ensure SDK compatibility with Google APIs.
 
 Models tested:
-- gemini-2.0-flash (fast, cost-effective)
-- gemini-1.5-pro (older but widely used)
+- gemini-3.6-flash (stable, fast, tool-capable)
+- gemini-3.5-flash-lite (stable, cost-effective)
 
 Test categories:
 - Basic generation (non-streaming)
@@ -43,8 +43,8 @@ pytestmark = [
 
 # Models to test - covering different model families and versions
 GOOGLE_MODELS = [
-    "google/gemini-2.0-flash",  # Gemini 2.0 - fast/cheap
-    "google/gemini-1.5-pro",    # Gemini 1.5 Pro - older but widely used
+    "google/gemini-3.6-flash",
+    "google/gemini-3.5-flash-lite",
 ]
 
 # Default model for non-parameterized tests

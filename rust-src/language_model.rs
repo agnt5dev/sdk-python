@@ -1002,10 +1002,30 @@ fn parse_prompt(py: Python<'_>, prompt: &Py<PyAny>) -> PyResult<Vec<ParsedMessag
                                         .extract()?
                                 };
 
+                            let provider_data = if let Some(value) =
+                                tc_dict.get_item("provider_data")?
+                            {
+                                if value.is_none() {
+                                    None
+                                } else {
+                                    let json_mod = py.import("json")?;
+                                    let encoded: String =
+                                        json_mod.call_method1("dumps", (value,))?.extract()?;
+                                    Some(serde_json::from_str(&encoded).map_err(|err| {
+                                        PyValueError::new_err(format!(
+                                            "tool_call provider_data is not JSON serializable: {err}"
+                                        ))
+                                    })?)
+                                }
+                            } else {
+                                None
+                            };
+
                             calls.push(ToolCall {
                                 id,
                                 name,
                                 arguments,
+                                provider_data,
                             });
                         }
                         Some(calls)
@@ -1421,6 +1441,9 @@ impl PyResponse {
                 dict.set_item("id", &tool_call.id)?;
                 dict.set_item("name", &tool_call.name)?;
                 dict.set_item("arguments", &tool_call.arguments)?;
+                if let Some(provider_data) = &tool_call.provider_data {
+                    dict.set_item("provider_data", json_to_py(py, provider_data)?)?;
+                }
                 py_list.append(dict)?;
             }
             Ok(Some(py_list.into()))
@@ -1643,6 +1666,9 @@ impl PyStreamChunk {
             dict.set_item("id", &tool_call.id)?;
             dict.set_item("name", &tool_call.name)?;
             dict.set_item("arguments", &tool_call.arguments)?;
+            if let Some(provider_data) = &tool_call.provider_data {
+                dict.set_item("provider_data", json_to_py(py, provider_data)?)?;
+            }
             py_list.append(dict)?;
         }
         Ok(Some(py_list.into()))

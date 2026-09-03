@@ -3,6 +3,7 @@ import base64
 import json
 
 import pytest
+from pydantic import BaseModel
 
 from agnt5.activation import (
     ActivationClient,
@@ -130,6 +131,27 @@ async def test_durable_sleep_yields_typed_timer_authority_without_local_wait():
         "timer_key": "sleep:backoff",
     }
     assert transport.complete_requests == []
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_serializes_typed_completed_step_outputs():
+    class TypedOutput(BaseModel):
+        value: int
+
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    entity.record_step_completion(
+        "step:typed:0",
+        "typed",
+        {"value": 42},
+        TypedOutput(value=42),
+    )
+
+    with pytest.raises(DurableSleepSuspension) as caught:
+        await context.sleep(1, name="backoff")
+
+    continuation = json.loads(caught.value.continuation)
+    assert continuation["completed_steps"]["step:typed:0"] == {"value": 42}
 
 
 @pytest.mark.asyncio
