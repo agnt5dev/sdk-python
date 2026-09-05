@@ -1,6 +1,11 @@
 import pytest
 
-from agnt5._state_adapter import StateAdapter, _entity_state_adapter_ctx, create_state_context
+from agnt5._state_adapter import (
+    StateAdapter,
+    _entity_state_adapter_ctx,
+    _state_request_route_ctx,
+    create_state_context,
+)
 from agnt5.agent import AgentContext
 from agnt5.workflow import WorkflowContext, WorkflowEntity
 
@@ -108,6 +113,34 @@ async def test_versioned_load_fails_closed_when_platform_is_unavailable():
             scope="run",
             scope_id="run-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_state_adapter_passes_current_execution_route_to_rust():
+    class CapturingRustState:
+        def __init__(self):
+            self.load_args = None
+            self.save_args = None
+
+        async def py_get_cached_or_load(self, *args):
+            self.load_args = args
+            return b"{}", 0
+
+        async def py_save_state(self, *args):
+            self.save_args = args
+            return 1
+
+    rust_state = CapturingRustState()
+    adapter = StateAdapter(rust_state)
+    token = _state_request_route_ctx.set("run-route-1")
+    try:
+        await adapter.load_with_version("WorkflowEntity", "run-1", "run", "run-1")
+        await adapter.save_state("WorkflowEntity", "run-1", {}, 0, "run", "run-1")
+    finally:
+        _state_request_route_ctx.reset(token)
+
+    assert rust_state.load_args[-1] == "run-route-1"
+    assert rust_state.save_args[-1] == "run-route-1"
 
 
 @pytest.mark.asyncio

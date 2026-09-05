@@ -157,6 +157,13 @@ def _compute_state_hash(state: Any, state_type: Optional[Type]) -> str:
 _state_adapter_ctx: contextvars.ContextVar[Optional["StateAdapter"]] = \
     contextvars.ContextVar('_state_adapter', default=None)
 
+# Routes Rust state requests back through the parked poll slot that owns the
+# current execution. Each concurrent pull handler has a distinct response
+# channel, so this cannot be represented by one worker-global sender.
+_state_request_route_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    '_state_request_route', default=''
+)
+
 
 class StateAdapter:
     """
@@ -248,7 +255,7 @@ class StateAdapter:
         try:
             # Rust checks cache first, loads from platform if needed
             state_json_bytes, version = await self._rust_core.py_get_cached_or_load(
-                entity_type, entity_key, scope, scope_id
+                entity_type, entity_key, scope, scope_id, _state_request_route_ctx.get()
             )
 
             # Convert bytes to dict
@@ -317,6 +324,7 @@ class StateAdapter:
             expected_version,
             scope,
             scope_id,
+            _state_request_route_ctx.get(),
         )
 
         return new_version
@@ -351,7 +359,7 @@ class StateAdapter:
 
         try:
             state_json_bytes, version = await self._rust_core.py_get_cached_or_load(
-                entity_type, entity_key, scope, scope_id
+                entity_type, entity_key, scope, scope_id, _state_request_route_ctx.get()
             )
 
             if state_json_bytes:
