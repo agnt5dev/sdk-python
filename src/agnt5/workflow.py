@@ -335,7 +335,7 @@ class WorkflowContext(Context):
         state = self._workflow_entity.state
         # Pass checkpoint callback to state for real-time streaming
         if hasattr(state, "_set_emitter"):
-            state._set_emitter(self.emit)
+            state._set_emitter(self.emit, self.emit_async)
         return state
 
     def _get_or_create_state_adapter(self):
@@ -2327,8 +2327,10 @@ class WorkflowState(StateInterface):
         super().__init__(state_dict)
         self._workflow_entity = workflow_entity
         self._emitter: Optional[Any] = None  # EventEmitter for state change events
+        self._async_emitter: Optional[Any] = None
+        self._write_lock = asyncio.Lock()
 
-    def _set_emitter(self, emitter: Any) -> None:
+    def _set_emitter(self, emitter: Any, async_emitter: Any = None) -> None:
         """
         Set the event emitter for real-time state change streaming.
 
@@ -2336,6 +2338,50 @@ class WorkflowState(StateInterface):
             emitter: EventEmitter instance for emitting state change events
         """
         self._emitter = emitter
+        self._async_emitter = async_emitter
+
+    async def _change_async(self, key: str, value: Any, operation: str) -> None:
+        from ._ids import generate_cid
+        from .events import StateChanged
+
+        # Serialize changes to this state only, never unrelated workflows.
+        async with self._write_lock:
+            state_event = StateChanged(
+                name=self._workflow_entity._component_name or "workflow",
+                correlation_id=generate_cid(),
+                parent_correlation_id="",
+                key=key,
+                value=value,
+                operation=operation,
+            )
+            if self._async_emitter is not None:
+                await self._async_emitter(state_event)
+            elif self._emitter is not None:
+                # Compatibility for custom synchronous checkpoint callbacks.
+                await asyncio.to_thread(self._emitter, state_event)
+            # Publish local state only after the durable acknowledgement.
+            if operation == "delete":
+                super().delete(key)
+            else:
+                super().set(key, value)
+            import time
+
+            self._workflow_entity._state_changes.append({
+                "key": key, "value": value, "timestamp": time.time(),
+                "deleted": operation == "delete",
+            })
+
+    async def set_async(self, key: str, value: Any) -> None:
+        """Persist a change without blocking the event loop; await its acknowledgement.
+
+        Use this in async workflows. The synchronous ``set`` remains available
+        for synchronous callers and blocks its calling thread until acknowledged.
+        """
+        await self._change_async(key, value, "set")
+
+    async def delete_async(self, key: str) -> None:
+        """Persist a deletion without blocking the event loop."""
+        await self._change_async(key, None, "delete")
 
     def set(self, key: str, value: Any) -> None:
         """Set value and track change."""
