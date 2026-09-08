@@ -849,6 +849,17 @@ fn log_from_python(
     Ok(())
 }
 
+/// Shared monotonic clock for worker and language execution observations.
+#[pyfunction]
+fn core_metric_time_ms() -> f64 {
+    agnt5_sdk_core::core_metrics::now_ms()
+}
+
+#[pyfunction]
+fn record_core_business_timing(run_id: &str, started_ms: f64, outcome: &str) {
+    agnt5_sdk_core::core_metrics::record_timing(run_id, "business", started_ms, outcome);
+}
+
 /// Record opt-in worker memory snapshots as OTEL gauge samples.
 #[pyfunction]
 fn record_worker_memory_metrics(
@@ -954,6 +965,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shutdown_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(log_from_python, m)?)?;
     m.add_function(wrap_pyfunction!(record_worker_memory_metrics, m)?)?;
+    m.add_function(wrap_pyfunction!(core_metric_time_ms, m)?)?;
+    m.add_function(wrap_pyfunction!(record_core_business_timing, m)?)?;
     m.add_function(wrap_pyfunction!(create_span, m)?)?;
     m.add_function(wrap_pyfunction!(create_tool_span, m)?)?;
     Ok(())

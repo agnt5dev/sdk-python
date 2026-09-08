@@ -85,6 +85,12 @@ Configuration can be supplied explicitly or through `AGNT5_GATEWAY_URL`,
 | `Client` / `AsyncClient` | Invoke and observe deployed components |
 | `Worker` | Register components and serve runtime dispatch |
 
+In async workflows, use `await ctx.state.set_async(key, value)` and
+`await ctx.state.delete_async(key)`. These await the runtime's durable
+acknowledgment while allowing other workflows to run. Reads remain local via
+`ctx.state.get(key)`. The existing synchronous `set` and `delete` methods remain
+supported, but block their calling thread while waiting for persistence.
+
 The shared Rust runtime foundation lives in
 [`agnt5dev/sdk-core`](https://github.com/agnt5dev/sdk-core). Vendor sandbox
 adapters live in

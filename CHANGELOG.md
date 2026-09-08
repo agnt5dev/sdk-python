@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-09-08
+
+### Fixed
+
+- Route state responses to the dispatch that requested them.
+- Await workflow state writes without blocking the asyncio event loop.
+
+### Added
+
+- Measure business execution with the shared core clock while preserving user
+  results, errors, and cancellation if telemetry fails.
+
+### Changed
+
+- Build against SDK core 0.2.7 for session refresh, slot scaling, and execution
+  timing observations.
+
 ## [0.11.1] - 2026-09-03
 
 ### Changed

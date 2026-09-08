@@ -876,7 +876,11 @@ class EventEmitter:
             # Terminal events still await — the Rust side pre-flushes
             # the journal queue before sending the terminal RPC, so
             # ordering of started → completed is preserved.
-            if self._queue_nonterminal_checkpoints() and not is_terminal_event(event.event_type):
+            if (
+                self._queue_nonterminal_checkpoints()
+                and not is_terminal_event(event.event_type)
+                and not event.event_type.startswith("workflow.state.")
+            ):
                 try:
                     self._worker.queue_event(
                         invocation_id=self._run_id,
@@ -953,7 +957,9 @@ class EventEmitter:
 
         # Fire-and-forget path — queue each event, no await.
         if self._queue_nonterminal_checkpoints() and all(
-            not is_terminal_event(e.event_type) for e in events
+            not is_terminal_event(e.event_type)
+            and not e.event_type.startswith("workflow.state.")
+            for e in events
         ):
             for event in events:
                 event_data = event.to_dict()

@@ -124,6 +124,12 @@ pub struct EntityStateManager {
     /// Channel for sending requests to the worker stream
     pub(crate) request_sender: Arc<Mutex<Option<agnt5_sdk_core::flume::Sender<ServiceMessage>>>>,
 
+    /// Per-dispatch response channels used by parked pull slots. Concurrent
+    /// handlers cannot share `request_sender`: each slot owns a different
+    /// receiver, which is closed as soon as that handler returns.
+    pub(crate) request_senders:
+        Arc<RwLock<HashMap<String, (String, agnt5_sdk_core::flume::Sender<ServiceMessage>)>>>,
+
     /// Maximum number of retries on version conflict (default: 3)
     pub(crate) max_retries: u32,
 
@@ -139,6 +145,7 @@ impl EntityStateManager {
             cache: Arc::new(RwLock::new(HashMap::new())),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             request_sender: Arc::new(Mutex::new(None)),
+            request_senders: Arc::new(RwLock::new(HashMap::new())),
             max_retries: 3,
             base_delay_ms: 100,
         }
@@ -149,6 +156,29 @@ impl EntityStateManager {
         let mut request_sender = self.request_sender.lock().await;
         *request_sender = Some(sender);
         log::debug!("EntityStateManager: Request sender configured");
+    }
+
+    pub async fn set_request_sender_for_route(
+        &self,
+        route_id: String,
+        sender: agnt5_sdk_core::flume::Sender<ServiceMessage>,
+    ) -> String {
+        let registration_id = uuid::Uuid::new_v4().to_string();
+        self.request_senders
+            .write()
+            .await
+            .insert(route_id, (registration_id.clone(), sender));
+        registration_id
+    }
+
+    pub async fn clear_request_sender_for_route(&self, route_id: &str, registration_id: &str) {
+        let mut senders = self.request_senders.write().await;
+        if senders
+            .get(route_id)
+            .is_some_and(|(current_id, _)| current_id == registration_id)
+        {
+            senders.remove(route_id);
+        }
     }
 
     /// Handle incoming RuntimeServiceResponse from the platform
@@ -186,6 +216,7 @@ impl EntityStateManager {
     async fn send_request(
         &self,
         operation: runtime_service_request::Operation,
+        request_route_id: &str,
     ) -> Result<RuntimeServiceResponse, EntityError> {
         // Generate unique request ID
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -221,15 +252,24 @@ impl EntityStateManager {
         };
 
         // Send request via worker stream
-        {
-            let sender = self.request_sender.lock().await;
-            if let Some(ref sender) = *sender {
-                sender.send_async(service_message).await.map_err(|e| {
-                    EntityError::PlatformError(format!("Failed to send request: {}", e))
-                })?;
-            } else {
-                return Err(EntityError::NotConnected);
-            }
+        let sender = if request_route_id.is_empty() {
+            self.request_sender.lock().await.clone()
+        } else {
+            self.request_senders
+                .read()
+                .await
+                .get(request_route_id)
+                .map(|(_, sender)| sender.clone())
+        };
+        let send_result = match sender {
+            Some(sender) => sender.send_async(service_message).await.map_err(|error| {
+                EntityError::PlatformError(format!("Failed to send request: {error}"))
+            }),
+            None => Err(EntityError::NotConnected),
+        };
+        if let Err(error) = send_result {
+            self.pending_requests.write().await.remove(&request_id);
+            return Err(error);
         }
 
         log::debug!(
@@ -268,6 +308,7 @@ impl EntityStateManager {
         entity_key: String,
         scope: String,
         scope_id: String,
+        request_route_id: &str,
     ) -> Result<EntityLoadResult, EntityError> {
         log::debug!(
             "EntityStateManager: Loading from platform {}:{} (scope: {}, scope_id: {})",
@@ -285,7 +326,7 @@ impl EntityStateManager {
                 scope_id,
             });
 
-        let response = self.send_request(operation).await?;
+        let response = self.send_request(operation, request_route_id).await?;
 
         // Extract load result
         match response.result {
@@ -317,6 +358,7 @@ impl EntityStateManager {
         expected_version: i64,
         scope: String,
         scope_id: String,
+        request_route_id: &str,
     ) -> Result<EntitySaveResult, EntityError> {
         log::debug!(
             "EntityStateManager: Saving to platform {}:{} (expected version: {}, scope: {}, scope_id: {})",
@@ -337,7 +379,7 @@ impl EntityStateManager {
                 scope_id: scope_id.clone(),
             });
 
-        let response = self.send_request(operation).await?;
+        let response = self.send_request(operation, request_route_id).await?;
 
         // Extract save result
         match response.result {
@@ -378,6 +420,7 @@ impl EntityStateManager {
         entity_key: String,
         scope: String,
         scope_id: String,
+        request_route_id: &str,
     ) -> Result<(Vec<u8>, i64), EntityError> {
         // Cache key includes scope info for proper isolation
         let state_key = (
@@ -417,7 +460,13 @@ impl EntityStateManager {
         );
 
         let result = self
-            .load_from_platform(entity_type.clone(), entity_key.clone(), scope, scope_id)
+            .load_from_platform(
+                entity_type.clone(),
+                entity_key.clone(),
+                scope,
+                scope_id,
+                request_route_id,
+            )
             .await?;
 
         // Update cache if found
@@ -444,6 +493,7 @@ impl EntityStateManager {
         expected_version: i64,
         scope: String,
         scope_id: String,
+        request_route_id: &str,
     ) -> Result<i64, EntityError> {
         let result = self
             .save_to_platform(
@@ -453,6 +503,7 @@ impl EntityStateManager {
                 expected_version,
                 scope,
                 scope_id,
+                request_route_id,
             )
             .await?;
 
@@ -474,6 +525,7 @@ impl EntityStateManager {
         entity_key: String,
         scope: String,
         scope_id: String,
+        request_route_id: &str,
         update_fn: F,
     ) -> Result<i64, EntityError>
     where
@@ -490,6 +542,7 @@ impl EntityStateManager {
                     entity_key.clone(),
                     scope.clone(),
                     scope_id.clone(),
+                    request_route_id,
                 )
                 .await?;
 
@@ -505,6 +558,7 @@ impl EntityStateManager {
                     current_version,
                     scope.clone(),
                     scope_id.clone(),
+                    request_route_id,
                 )
                 .await
             {
@@ -603,7 +657,7 @@ impl EntityStateManager {
             from_service: String::new(),
         });
 
-        let response = self.send_request(operation).await?;
+        let response = self.send_request(operation, "").await?;
 
         match response.result {
             Some(runtime_service_response::Result::MessageSend(result)) => Ok(result.message_id),
@@ -627,7 +681,7 @@ impl EntityStateManager {
             after_message_id: String::new(),
         });
 
-        let response = self.send_request(operation).await?;
+        let response = self.send_request(operation, "").await?;
 
         match response.result {
             Some(runtime_service_response::Result::MessageList(result)) => Ok(result.messages),
@@ -655,7 +709,7 @@ impl EntityStateManager {
             expires_at_ns: 0,
         });
 
-        let response = self.send_request(operation).await?;
+        let response = self.send_request(operation, "").await?;
 
         match response.result {
             Some(runtime_service_response::Result::SessionCreate(result)) => Ok(result.session_id),
@@ -681,6 +735,83 @@ impl EntityStateManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_dispatch_routes_do_not_share_a_closed_sender() {
+        let manager = Arc::new(EntityStateManager::new("project-1".to_string()));
+        let (sender_a, receiver_a) = agnt5_sdk_core::flume::unbounded();
+        let (sender_b, receiver_b) = agnt5_sdk_core::flume::unbounded();
+        manager
+            .set_request_sender_for_route("run-a".to_string(), sender_a)
+            .await;
+        manager
+            .set_request_sender_for_route("run-b".to_string(), sender_b)
+            .await;
+        drop(receiver_b);
+
+        let request_manager = Arc::clone(&manager);
+        let request = tokio::spawn(async move {
+            request_manager
+                .get_cached_or_load(
+                    "WorkflowEntity".to_string(),
+                    "run-a".to_string(),
+                    "run".to_string(),
+                    "run-a".to_string(),
+                    "run-a",
+                )
+                .await
+        });
+        let outbound = receiver_a
+            .recv_async()
+            .await
+            .expect("run-a must use its own live response channel");
+        let request_id = match outbound.message_type {
+            Some(service_message::MessageType::RuntimeService(request)) => request.request_id,
+            _ => panic!("expected runtime service request"),
+        };
+        manager
+            .handle_response(RuntimeServiceResponse {
+                request_id,
+                success: true,
+                error_message: String::new(),
+                result: Some(runtime_service_response::Result::EntityStateLoad(
+                    agnt5_sdk_core::pb::EntityStateLoadResult {
+                        found: false,
+                        state_json: Vec::new(),
+                        version: 0,
+                    },
+                )),
+            })
+            .await;
+
+        assert_eq!(request.await.unwrap().unwrap(), (Vec::new(), 0));
+    }
+
+    #[tokio::test]
+    async fn clearing_an_old_route_registration_preserves_its_replacement() {
+        let manager = Arc::new(EntityStateManager::new("project-1".to_string()));
+        let (old_sender, old_receiver) = agnt5_sdk_core::flume::unbounded();
+        let old_registration = manager
+            .set_request_sender_for_route("run-a".to_string(), old_sender)
+            .await;
+        let (new_sender, new_receiver) = agnt5_sdk_core::flume::unbounded();
+        manager
+            .set_request_sender_for_route("run-a".to_string(), new_sender)
+            .await;
+
+        manager
+            .clear_request_sender_for_route("run-a", &old_registration)
+            .await;
+
+        assert!(old_receiver.is_disconnected());
+        assert!(!new_receiver.is_disconnected());
+        assert!(manager.request_senders.read().await.contains_key("run-a"));
+    }
+}
+
 // PyO3 Python bindings
 #[pymethods]
 impl EntityStateManager {
@@ -692,7 +823,7 @@ impl EntityStateManager {
     /// Load entity state (Python-facing async method)
     ///
     /// Returns tuple: (found, state_json, version)
-    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new()))]
+    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new(), request_route_id = String::new()))]
     pub fn py_load_state<'py>(
         &self,
         py: Python<'py>,
@@ -700,12 +831,13 @@ impl EntityStateManager {
         entity_key: String,
         scope: String,
         scope_id: String,
+        request_route_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let result = manager
-                .load_from_platform(entity_type, entity_key, scope, scope_id)
+                .load_from_platform(entity_type, entity_key, scope, scope_id, &request_route_id)
                 .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
@@ -717,7 +849,7 @@ impl EntityStateManager {
     /// Save entity state (Python-facing async method)
     ///
     /// Returns new_version
-    #[pyo3(signature = (entity_type, entity_key, state_json, expected_version, scope = String::new(), scope_id = String::new()))]
+    #[pyo3(signature = (entity_type, entity_key, state_json, expected_version, scope = String::new(), scope_id = String::new(), request_route_id = String::new()))]
     pub fn py_save_state<'py>(
         &self,
         py: Python<'py>,
@@ -727,6 +859,7 @@ impl EntityStateManager {
         expected_version: i64,
         scope: String,
         scope_id: String,
+        request_route_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
@@ -739,6 +872,7 @@ impl EntityStateManager {
                     expected_version,
                     scope,
                     scope_id,
+                    &request_route_id,
                 )
                 .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
@@ -751,7 +885,7 @@ impl EntityStateManager {
     /// Get cached state or load from platform (Python-facing async method)
     ///
     /// Returns tuple: (state_json, version)
-    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new()))]
+    #[pyo3(signature = (entity_type, entity_key, scope = String::new(), scope_id = String::new(), request_route_id = String::new()))]
     pub fn py_get_cached_or_load<'py>(
         &self,
         py: Python<'py>,
@@ -759,12 +893,13 @@ impl EntityStateManager {
         entity_key: String,
         scope: String,
         scope_id: String,
+        request_route_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let manager = self.clone_arc();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (state_json, version) = manager
-                .get_cached_or_load(entity_type, entity_key, scope, scope_id)
+                .get_cached_or_load(entity_type, entity_key, scope, scope_id, &request_route_id)
                 .await
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
@@ -886,6 +1021,7 @@ impl EntityStateManager {
             cache: self.cache.clone(),
             pending_requests: self.pending_requests.clone(),
             request_sender: self.request_sender.clone(),
+            request_senders: self.request_senders.clone(),
             max_retries: self.max_retries,
             base_delay_ms: self.base_delay_ms,
         })

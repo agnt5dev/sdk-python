@@ -181,6 +181,7 @@ impl PyWorker {
                 cache: manager_ref.cache.clone(),
                 pending_requests: manager_ref.pending_requests.clone(),
                 request_sender: manager_ref.request_sender.clone(),
+                request_senders: manager_ref.request_senders.clone(),
                 max_retries: manager_ref.max_retries,
                 base_delay_ms: manager_ref.base_delay_ms,
             }))
@@ -798,16 +799,56 @@ impl PyWorker {
         runtime_message: RuntimeMessage,
         tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
     ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
-        // Always update the sender on EntityStateManager so it points to the
-        // current connection's response channel.  On reconnect a fresh
-        // (response_tx, response_rx) pair is created; the old sender's receiver
-        // has been dropped, so any send on it would fail with "closed channel".
-        {
+        let request_route_id = match runtime_message.message_data.as_ref() {
+            Some(runtime_message::MessageData::DispatchComponent(request)) => {
+                Some(request.invocation_id.clone())
+            }
+            _ => None,
+        };
+        let route_registration = {
             let manager_guard = entity_state_manager_arc.lock().await;
             if let Some(ref manager) = *manager_guard {
+                // Keep the fallback current for legacy operations that do not
+                // carry a dispatch route. Pull handlers use the scoped sender
+                // below because each concurrent parked slot owns its own
+                // short-lived response channel.
                 manager.set_request_sender(tx.clone()).await;
+                if let Some(route_id) = request_route_id.as_ref() {
+                    let registration_id = manager
+                        .set_request_sender_for_route(route_id.clone(), tx.clone())
+                        .await;
+                    Some((manager.clone(), route_id.clone(), registration_id))
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+
+        let result = Self::handle_runtime_message_inner(
+            handler_arc,
+            event_loop_locals_arc,
+            entity_state_manager_arc,
+            runtime_message,
+            tx,
+        )
+        .await;
+        if let Some((manager, route_id, registration_id)) = route_registration {
+            manager
+                .clear_request_sender_for_route(&route_id, &registration_id)
+                .await;
         }
+        result
+    }
+
+    async fn handle_runtime_message_inner(
+        handler_arc: Arc<Mutex<Option<Py<PyAny>>>>,
+        event_loop_locals_arc: Arc<Mutex<Option<TaskLocals>>>,
+        entity_state_manager_arc: Arc<AsyncMutex<Option<Arc<EntityStateManager>>>>,
+        runtime_message: RuntimeMessage,
+        tx: agnt5_sdk_core::flume::Sender<ServiceMessage>,
+    ) -> Result<Option<ServiceMessage>, agnt5_sdk_core::error::SdkError> {
         // Get the Python handler by cloning it properly
         let handler = {
             let handler_guard = handler_arc.lock().map_err(|e| {

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agnt5._state_adapter import _entity_state_adapter_ctx
+from agnt5._state_adapter import _entity_state_adapter_ctx, _state_request_route_ctx
 from agnt5.tracing import _current_span
 from agnt5.worker._executors import ExecutorMixin
 
@@ -21,14 +21,17 @@ class _DummyExecutor(ExecutorMixin):
 async def test_execute_with_context_resets_span_and_state_adapter_contextvars():
     executor_mixin = _DummyExecutor()
     request = SimpleNamespace(
+        invocation_id="run-123",
         input_data=b"{}",
         runtime_context=SimpleNamespace(trace_id="trace-123", span_id="span-123"),
     )
     initial_span = _current_span.get()
     initial_adapter = _entity_state_adapter_ctx.get()
+    initial_route = _state_request_route_ctx.get()
 
     def create_context(input_dict, req):
         assert _entity_state_adapter_ctx.get() is executor_mixin._entity_state_adapter
+        assert _state_request_route_ctx.get() == "run-123"
         return SimpleNamespace(input=input_dict, request=req)
 
     async def execute(ctx, input_dict, req):
@@ -37,6 +40,7 @@ async def test_execute_with_context_resets_span_and_state_adapter_contextvars():
         assert current_span.trace_id == "trace-123"
         assert current_span.span_id == "span-123"
         assert _entity_state_adapter_ctx.get() is executor_mixin._entity_state_adapter
+        assert _state_request_route_ctx.get() == "run-123"
         return None
 
     await executor_mixin._execute_with_context(
@@ -48,3 +52,4 @@ async def test_execute_with_context_resets_span_and_state_adapter_contextvars():
 
     assert _current_span.get() is initial_span
     assert _entity_state_adapter_ctx.get() is initial_adapter
+    assert _state_request_route_ctx.get() == initial_route

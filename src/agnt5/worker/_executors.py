@@ -220,12 +220,13 @@ class ExecutorMixin:
     ) -> "PyExecuteComponentResponse | None":
         """Common execution wrapper for all component types."""
         from .._core import PyExecuteComponentResponse
-        from .._state_adapter import _entity_state_adapter_ctx
+        from .._state_adapter import _entity_state_adapter_ctx, _state_request_route_ctx
         from ..context import _current_context, get_current_context, set_current_context
 
         token = None
         span_token = None
         state_adapter_token = None
+        state_route_token = None
         try:
             input_dict = deserialize(request.input_data) if request.input_data else {}
             input_dict = _ensure_input_dict(input_dict)
@@ -234,6 +235,7 @@ class ExecutorMixin:
             state_adapter_token = _entity_state_adapter_ctx.set(
                 getattr(self, "_entity_state_adapter", None)
             )
+            state_route_token = _state_request_route_ctx.set(request.invocation_id)
             ctx = context_factory(input_dict, request)
             if getattr(ctx, "_activation_client", None) is None:
                 ctx._activation_client = _resolve_activation_client(
@@ -301,6 +303,8 @@ class ExecutorMixin:
             _reset_current_span_token(span_token)
             if state_adapter_token is not None:
                 _entity_state_adapter_ctx.reset(state_adapter_token)
+            if state_route_token is not None:
+                _state_request_route_ctx.reset(state_route_token)
             if token is not None:
                 _current_context.reset(token)
 
@@ -1506,7 +1510,11 @@ class ExecutorMixin:
         import traceback as _traceback
 
         from .._core import PyExecuteComponentResponse
-        from .._state_adapter import _entity_state_adapter_ctx, _get_state_adapter
+        from .._state_adapter import (
+            _entity_state_adapter_ctx,
+            _get_state_adapter,
+            _state_request_route_ctx,
+        )
         from ..context import set_current_context
         from ..events import Completed, ComponentType, Failed, Started
         from ..exceptions import DurableSleepSuspension, WaitingForUserInputException
@@ -1514,6 +1522,7 @@ class ExecutorMixin:
 
         # Set entity state adapter in context so workflows can use Entities
         state_adapter_token = _entity_state_adapter_ctx.set(self._entity_state_adapter)
+        state_route_token = _state_request_route_ctx.set(request.invocation_id)
 
         # Variables that need to be accessible in exception handlers
         ctx = None
@@ -1983,6 +1992,7 @@ class ExecutorMixin:
             _reset_current_span_token(span_token)
             if state_adapter_token is not None:
                 _entity_state_adapter_ctx.reset(state_adapter_token)
+            _state_request_route_ctx.reset(state_route_token)
             if token is not None:
                 from ..context import _current_context
 
