@@ -31,7 +31,8 @@ dependencies = [
 [[package]]
 name = "agnt5-sdk-core"
 version = "0.2.7"
-source = "git+https://github.com/agnt5dev/sdk-core.git?rev=be7d7f30f6e91de2c30455e0e70888e5514006d5#be7d7f30f6e91de2c30455e0e70888e5514006d5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b239effa10ae0152fe0959e32d32ab04e5b651e58cef4603e7f0960232e75e36"
 dependencies = [
  "anyhow",
  "async-stream",
