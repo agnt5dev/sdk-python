@@ -557,8 +557,11 @@ class ActivationClient:
         if on_admitted is not None:
             on_admitted(decision)
 
+        from ._core_metrics import business_timing
+
         try:
-            result = await execute()
+            with business_timing(request.run_id):
+                result = await execute()
         except Exception as user_error:
             error_data = json.dumps(
                 {"message": str(user_error), "type": type(user_error).__name__},
