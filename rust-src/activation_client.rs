@@ -359,6 +359,7 @@ impl PyActivationClient {
                     ),
                     display_name,
                     input_data,
+                    ..Default::default()
                 })
                 .await
                 .map_err(activation_error)?;
