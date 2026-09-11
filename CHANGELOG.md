@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Share activation counters across sibling agents in one invocation (AGNT5-1111), while isolating durable parents and fresh invocations so skipped replayed steps do not shift later model/tool keys.
+
 ### Changed
 
 - Workers now default to `pull` when `AGNT5_WORKER_MODE` is unset or empty.
