@@ -177,3 +177,22 @@ def test_worker_scorer_registration_uses_canonical_builtin_source(fake_native_co
         assert "builtin" not in custom.config
     finally:
         ScorerRegistry.clear()
+
+
+@pytest.mark.parametrize(
+    "env_mode,expected",
+    [(None, "pull"), ("", "pull"), ("push", "push"), ("pull", "pull")],
+)
+def test_unspecified_worker_mode_defaults_to_pull(
+    fake_native_core, monkeypatch, env_mode, expected
+):
+    if env_mode is not None:
+        monkeypatch.setenv("AGNT5_WORKER_MODE", env_mode)
+    Worker(service_name="py-worker")
+    assert worker_core.os.environ["AGNT5_WORKER_MODE"] == expected
+
+
+def test_explicit_push_overrides_pull_environment(fake_native_core, monkeypatch):
+    monkeypatch.setenv("AGNT5_WORKER_MODE", "pull")
+    Worker(service_name="py-worker", worker_mode="push")
+    assert worker_core.os.environ["AGNT5_WORKER_MODE"] == "push"

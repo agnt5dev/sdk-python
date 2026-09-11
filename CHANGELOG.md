@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Workers now default to `pull` when `AGNT5_WORKER_MODE` is unset or empty.
+  Explicit `push` remains supported; set it before upgrading if your worker
+  relies on coordinator-push dispatch. Schedule this compatibility change for
+  the next minor release (0.12.0; AGNT5-1100).
+
 ## [0.11.2] - 2026-09-08
 
 ### Fixed

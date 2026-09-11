@@ -74,11 +74,15 @@ def _configure_worker_environment(
 
     if worker_mode not in (None, "push", "pull"):
         raise ValueError("worker_mode must be 'push' or 'pull'")
-    if worker_mode == "pull" and parked_polling is False:
+    resolved_mode = (
+        worker_mode
+        or ("pull" if parked_polling else None)
+        or os.environ.get("AGNT5_WORKER_MODE")
+        or "pull"
+    )
+    if resolved_mode == "pull" and parked_polling is False:
         raise ValueError("pull workers always use long polling")
-    resolved_mode = worker_mode or ("pull" if parked_polling else None)
-    if resolved_mode:
-        os.environ["AGNT5_WORKER_MODE"] = resolved_mode
+    os.environ["AGNT5_WORKER_MODE"] = resolved_mode
 
     _set_positive_int_env("AGNT5_MIN_SLOTS", min_slots)
     _set_positive_int_env("AGNT5_MAX_SLOTS", max_slots)
@@ -184,7 +188,7 @@ class Worker(ExecutorMixin):
             deployment_id: Deployment routing key. Sets AGNT5_DEPLOYMENT_ID for parked
                 polling and defaults service metadata `deployment_id` when not already provided.
             worker_mode: Assignment mode. Use "pull" for worker-side polling or "push"
-                for stream dispatch. Defaults to AGNT5_WORKER_MODE, then push.
+                for stream dispatch. Defaults to AGNT5_WORKER_MODE, then pull.
             parked_polling: Deprecated compatibility alias. True implies
                 worker_mode="pull"; pull workers always use long polling.
             min_slots: Minimum parked poll slots to keep open.
