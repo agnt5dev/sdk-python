@@ -201,7 +201,7 @@ class Context:
         self._component_name: Optional[str] = None
         self._memo_namespace = memo_namespace or ""
         self._memo_child_sequences: dict[str, int] = {}
-        self._activation_sequences: dict[str, int] = {}
+        self._activation_sequences: dict[tuple[str, str], int] = {}
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
@@ -252,8 +252,17 @@ class Context:
         """Allocate a deterministic sequential key for compatibility call paths."""
 
         namespace = f"{kind}:{name}"
-        ordinal = self._activation_sequences.get(namespace, 0)
-        self._activation_sequences[namespace] = ordinal + 1
+        active = self.activation
+        parent_id = (
+            active.activation_id
+            if active is not None
+            else (self._trace_metadata or {}).get("parent_activation_id", "")
+        )
+        # Replayed durable parents skip their children, so their allocations must
+        # not shift keys under another parent. Keep the wire key unchanged.
+        counter_key = (parent_id, namespace)
+        ordinal = self._activation_sequences.get(counter_key, 0)
+        self._activation_sequences[counter_key] = ordinal + 1
         return f"{namespace}:{ordinal}"
 
     @property

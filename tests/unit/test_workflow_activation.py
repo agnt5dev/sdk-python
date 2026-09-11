@@ -477,3 +477,79 @@ async def test_function_form_does_not_memoize_when_completion_ack_is_lost():
     assert [type(event) for event in events] == [Started, Completed]
     assert all(event.component_type.value == "function" for event in events)
     assert context._step_event_stack == []
+
+@pytest.mark.asyncio
+async def test_sibling_agents_on_same_model_have_distinct_durable_activations(monkeypatch):
+    from types import SimpleNamespace
+
+    from agnt5.agent import Agent
+
+    transport = WorkflowActivationTransport()
+    context, _entity, _events = activation_context(transport)
+    context._trace_metadata["durable_activation_v1"] = "true"
+    seen = {}
+    original_begin = transport.begin
+
+    async def reject_collisions(request):
+        identity = (request.parent_activation_id, request.kind, request.stable_key)
+        if identity in seen and seen[identity] != request.input_digest:
+            raise ActivationError(
+                ActivationErrorCode.NON_DETERMINISTIC_REPLAY,
+                "stable activation key was reused with different durable semantics",
+            )
+        seen[identity] = request.input_digest
+        return await original_begin(request)
+
+    transport.begin = reject_collisions
+
+    async def generate(**kwargs):
+        return GenerateResponse(text="done")
+
+    def init(self, *args, **kwargs):
+        self._provider = "openai"
+        self._default_model = None
+        self._rust_lm = SimpleNamespace(generate=generate)
+
+    monkeypatch.setattr(LMClient, "__init__", init)
+    monkeypatch.setattr(LMClient, "_convert_response", lambda self, response: response)
+
+    for name in ("context_builder", "code_reviewer"):
+        agent = Agent(name=name, model="openai/gpt-4.1-mini", instructions=name, before_model_callback=lambda ctx, request: None)
+        await agent.run(f"Perform {name}", context=context)
+
+    requests = [r for r in transport.begin_requests if r.kind is ActivationKind.MODEL]
+    assert len(requests) == 2
+    assert [r.stable_key for r in requests] == [
+        "model:openai/gpt-4.1-mini:0", "model:openai/gpt-4.1-mini:1"
+    ]
+
+@pytest.mark.asyncio
+async def test_model_keys_do_not_shift_when_an_earlier_parent_is_replayed():
+    async def execute(skip_first):
+        transport = WorkflowActivationTransport()
+        context, _entity, _events = activation_context(transport)
+        keys = {}
+
+        async def allocate(name):
+            keys[name] = context.allocate_activation_key("model", "shared-model")
+
+        if not skip_first:
+            await context.step("first", lambda: allocate("first"))
+        await context.step("second", lambda: allocate("second"))
+        return keys
+
+    initial = await execute(False)
+    resumed = await execute(True)
+    assert initial["first"] == initial["second"] == resumed["second"] == "model:shared-model:0"
+
+
+def test_agent_allocation_state_is_fresh_for_a_new_invocation():
+    from agnt5.agent.context import AgentContext
+
+    first, _entity, _events = activation_context(WorkflowActivationTransport())
+    replay, _entity, _events = activation_context(WorkflowActivationTransport())
+    for owner in (first, replay):
+        child = AgentContext(run_id=owner.run_id, agent_name="one", parent_context=owner)
+        sibling = AgentContext(run_id=owner.run_id, agent_name="two", parent_context=owner)
+        assert child.allocate_activation_key("tool", "shared") == "tool:shared:0"
+        assert sibling.allocate_activation_key("tool", "shared") == "tool:shared:1"

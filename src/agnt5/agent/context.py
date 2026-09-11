@@ -113,6 +113,10 @@ class AgentContext(Context):
             memo_namespace=memo_namespace,
         )
         self._activation_client = getattr(parent_context, "_activation_client", None)
+        if isinstance(parent_context, Context) and parent_context.run_id == run_id:
+            # Sibling agents share the owning invocation's allocation state.
+            self._activation_sequences = parent_context._activation_sequences
+
 
         self._agent_name = agent_name
         self._session_id = session_id or run_id

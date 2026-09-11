@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Share activation counters across sibling agents in one invocation (AGNT5-1111), while isolating durable parents and fresh invocations so skipped replayed steps do not shift later model/tool keys.
+
+### Changed
+
+- Build the native extension against released `agnt5-sdk-core` 0.3.0.
+
+- Workers now default to `pull` when `AGNT5_WORKER_MODE` is unset or empty.
+  Explicit `push` remains supported; set it before upgrading if your worker
+  relies on coordinator-push dispatch. Schedule this compatibility change for
+  the next minor release (0.12.0; AGNT5-1100).
+
 ## [0.11.2] - 2026-09-08
 
 ### Fixed
