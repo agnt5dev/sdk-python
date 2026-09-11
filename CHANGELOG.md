@@ -13,6 +13,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Build the native extension against released `agnt5-sdk-core` 0.3.0.
+
 - Workers now default to `pull` when `AGNT5_WORKER_MODE` is unset or empty.
   Explicit `push` remains supported; set it before upgrading if your worker
   relies on coordinator-push dispatch. Schedule this compatibility change for
