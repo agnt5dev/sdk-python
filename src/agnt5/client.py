@@ -41,6 +41,19 @@ def _with_idempotency_key(
     return headers
 
 
+def _response_wait_ms(seconds: float) -> int:
+    import math
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, (int, float))
+        or not math.isfinite(seconds)
+        or seconds < 0
+        or seconds > 86400
+    ):
+        raise ValueError("wait_timeout must be a finite number from 0 to 86400 seconds")
+    return math.ceil(seconds * 1000)
+
+
 @dataclass
 class ReceivedEvent:
     """Event received from SSE stream.
@@ -297,6 +310,7 @@ class Client:
         deployment_id: Optional[str] = None,
         *,
         idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
     ) -> RunResponse[Any]:
         """Execute a component synchronously and wait for the result.
 
@@ -314,7 +328,8 @@ class Client:
                 See Client.__init__ docstring for semantics.
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
-            timeout: Request timeout in seconds (optional, defaults to client timeout)
+            timeout: Optional HTTP timeout in seconds. Defaults to at least wait_timeout + 10.
+            wait_timeout: Gateway response wait in seconds (default: 300; maximum: 86400).
             headers: Additional HTTP headers to include in the request (optional, e.g., {"Idempotency-Key": "key"})
             idempotency_key: Stable caller key for safely retrying this invocation.
 
@@ -344,6 +359,8 @@ class Client:
             response = client.run("chat", {"message": "Hello"}, session_id="session-123")
             ```
         """
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
         if input_data is None:
             input_data = {}
 
@@ -363,11 +380,12 @@ class Client:
         _with_idempotency_key(request_headers, idempotency_key)
 
         # Make request with auth and session headers
+        request_headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
         response = self._client.post(
             url,
             json=input_data,
             headers=request_headers,
-            timeout=self.timeout if timeout is None else timeout,
+            timeout=timeout,
         )
 
         # Handle HTTP errors that don't return JSON
@@ -451,54 +469,8 @@ class Client:
             except ValueError:
                 response.raise_for_status()
 
-        # A saturated gateway keeps the run durably queued but detaches the
-        # synchronous Engine tail. Preserve run()'s blocking contract by
-        # waiting through short status/result requests instead of holding the
-        # original gateway request open.
-        data = response.json()
-        parsed = parse_run_response(data)
-        if response.status_code == 202 and parsed.run_id:
-            wait_timeout = self.timeout if timeout is None else timeout
-            return self._wait_for_detached_run(parsed.run_id, wait_timeout)
-        return parsed
+        return parse_run_response(response.json())
 
-    def _wait_for_detached_run(
-        self,
-        run_id: str,
-        timeout: float,
-    ) -> RunResponse[Any]:
-        """Wait for a detached run with bounded, backoff-based polling."""
-        import time
-
-        deadline = time.monotonic() + timeout
-        poll_interval = 0.1
-        terminal_status_observed = False
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return parse_run_response(
-                    {
-                        "run_id": run_id,
-                        "status_code": 500,
-                        "status": "timeout",
-                        "error": {
-                            "code": "TIMEOUT",
-                            "message": f"Timeout waiting for run to complete after {timeout}s",
-                        },
-                    }
-                )
-
-            if not terminal_status_observed:
-                status = self.get_status(run_id)
-                terminal_status_observed = status.is_complete
-
-            if terminal_status_observed:
-                result = self.get_result(run_id)
-                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
-                    return result
-
-            time.sleep(min(poll_interval, remaining))
-            poll_interval = min(poll_interval * 1.5, 2.0)
 
     def submit(
         self,
@@ -948,6 +920,8 @@ class Client:
         deployment_id: Optional[str] = None,
         *,
         idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
+        timeout: Optional[float] = None,
     ):
         """Stream responses from a component using Server-Sent Events (SSE).
 
@@ -977,6 +951,8 @@ class Client:
                 print(chunk, end="", flush=True)
             ```
         """
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
         if input_data is None:
             input_data = {}
 
@@ -992,14 +968,18 @@ class Client:
             ),
             idempotency_key,
         )
+        request_headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
         with self._client.stream(
             "POST",
             url,
             json=input_data,
             headers=request_headers,
-            timeout=300.0,  # 5 minute timeout for streaming
+            timeout=timeout,
         ) as response:
             # Check for errors
+            if response.status_code == 202:
+                data = json.loads(response.read())
+                raise RunError("Response wait ended; run continues", run_id=data.get("run_id"))
             if response.status_code != 200:
                 # For streaming responses, we can't read the full text
                 # Just raise an HTTP error
@@ -1032,6 +1012,9 @@ class Client:
                         # Check for completion
                         if data.get("done") or current_event == "done":
                             return
+
+                        if current_event == "stream.wait_expired":
+                            raise RunError("Response wait ended; run continues", run_id=data.get("run_id"))
 
                         payload = _sse_payload(data)
 
@@ -1070,10 +1053,11 @@ class Client:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         tenant: Optional[str] = None,
-        timeout: float = 300.0,
+        timeout: Optional[float] = None,
         deployment_id: Optional[str] = None,
         *,
         idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
     ) -> Iterator[ReceivedEvent]:
         """Stream events from a component execution.
 
@@ -1090,7 +1074,8 @@ class Client:
             tenant: Sub-tenant override for this call (optional)
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
-            timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+            timeout: Optional HTTP timeout in seconds. Defaults to at least wait_timeout + 10.
+            wait_timeout: Gateway response wait in seconds (default: 300). Zero returns immediately.
             idempotency_key: Stable caller key for safely retrying this invocation.
 
         Yields:
@@ -1116,6 +1101,8 @@ class Client:
                     print(f"\\nDone: {event.data['output']}")
             ```
         """
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
         if timeout <= 0:
             raise ValueError("timeout must be a positive number")
 
@@ -1136,6 +1123,7 @@ class Client:
             ),
             idempotency_key,
         )
+        request_headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
         with self._client.stream(
             "POST",
             url,
@@ -1144,6 +1132,10 @@ class Client:
             timeout=timeout,
         ) as response:
             # Check for errors
+            if response.status_code == 202:
+                data = json.loads(response.read())
+                yield ReceivedEvent(event_type="stream.detached", data=data, run_id=data.get("run_id"))
+                return
             if response.status_code != 200:
                 # Try to get error details from response body
                 try:
@@ -1905,6 +1897,8 @@ class WorkflowProxy:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        wait_timeout: float = 300.0,
+        timeout: Optional[float] = None,
         **kwargs,
     ) -> RunResponse[Any]:
         """Execute the workflow synchronously.
@@ -1933,6 +1927,8 @@ class WorkflowProxy:
             component_type="workflow",
             session_id=session_id,
             user_id=user_id,
+            wait_timeout=wait_timeout,
+            timeout=timeout,
         )
 
     def chat(
@@ -1987,7 +1983,8 @@ class WorkflowProxy:
         self,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        timeout: float = 300.0,
+        timeout: Optional[float] = None,
+        wait_timeout: float = 300.0,
         **kwargs,
     ) -> Iterator[ReceivedEvent]:
         """Stream events from workflow execution.
@@ -2024,6 +2021,7 @@ class WorkflowProxy:
             component_type="workflow",
             session_id=session_id,
             user_id=user_id,
+            wait_timeout=wait_timeout,
             timeout=timeout,
         )
 
@@ -2187,6 +2185,8 @@ class AsyncClient:
         deployment_id: Optional[str] = None,
         *,
         idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
+        timeout: Optional[float] = None,
     ) -> RunResponse[Any]:
         """Execute a component asynchronously and wait for the result.
 
@@ -2207,6 +2207,8 @@ class AsyncClient:
         Raises:
             httpx.HTTPError: If the HTTP request fails
         """
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
         if input_data is None:
             input_data = {}
 
@@ -2223,10 +2225,12 @@ class AsyncClient:
             ),
             idempotency_key,
         )
+        request_headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
         response = await client.post(
             url,
             json=input_data,
             headers=request_headers,
+            timeout=timeout,
         )
 
         # Handle HTTP errors
@@ -2264,51 +2268,8 @@ class AsyncClient:
             except ValueError:
                 response.raise_for_status()
 
-        # Preserve run()'s wait-for-terminal contract when the gateway has
-        # durably detached an excess synchronous waiter.
-        parsed = parse_run_response(response.json())
-        if response.status_code == 202 and parsed.run_id:
-            return await self._wait_for_detached_run(parsed.run_id, self.timeout)
-        return parsed
+        return parse_run_response(response.json())
 
-    async def _wait_for_detached_run(
-        self,
-        run_id: str,
-        timeout: float,
-    ) -> RunResponse[Any]:
-        """Wait for a detached run without blocking the Python event loop."""
-        import asyncio
-        import time
-
-        deadline = time.monotonic() + timeout
-        poll_interval = 0.1
-        terminal_status_observed = False
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return parse_run_response(
-                    {
-                        "run_id": run_id,
-                        "status_code": 500,
-                        "status": "timeout",
-                        "error": {
-                            "code": "TIMEOUT",
-                            "message": f"Timeout waiting for run to complete after {timeout}s",
-                        },
-                    }
-                )
-
-            if not terminal_status_observed:
-                status = await self.get_status(run_id)
-                terminal_status_observed = status.is_complete
-
-            if terminal_status_observed:
-                result = await self.get_result(run_id)
-                if not result.error or result.error.code not in {"NOT_READY", "NOT_FOUND"}:
-                    return result
-
-            await asyncio.sleep(min(poll_interval, remaining))
-            poll_interval = min(poll_interval * 1.5, 2.0)
 
     async def stream_events(
         self,
@@ -2318,10 +2279,11 @@ class AsyncClient:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         tenant: Optional[str] = None,
-        timeout: float = 300.0,
+        timeout: Optional[float] = None,
         deployment_id: Optional[str] = None,
         *,
         idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
     ) -> AsyncIterator[ReceivedEvent]:
         """Async stream events from a component execution.
 
@@ -2338,7 +2300,8 @@ class AsyncClient:
             tenant: Sub-tenant override for this call (optional)
             deployment_id: Explicit deployment ID for this call. Ambient
                 AGNT5_DEPLOYMENT_ID is not used for component execution.
-            timeout: Stream timeout in seconds (default: 300.0 / 5 minutes)
+            timeout: Optional HTTP timeout in seconds. Defaults to at least wait_timeout + 10.
+            wait_timeout: Gateway response wait in seconds (default: 300). Zero returns immediately.
             idempotency_key: Stable caller key for safely retrying this invocation.
 
         Yields:
@@ -2358,6 +2321,8 @@ class AsyncClient:
                         print(event.data['content'], end='', flush=True)
             ```
         """
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
         if timeout <= 0:
             raise ValueError("timeout must be a positive number")
 
@@ -2377,6 +2342,7 @@ class AsyncClient:
             ),
             idempotency_key,
         )
+        request_headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
         async with client.stream(
             "POST",
             url,
@@ -2384,6 +2350,10 @@ class AsyncClient:
             headers=request_headers,
             timeout=timeout,
         ) as response:
+            if response.status_code == 202:
+                data = json.loads(await response.aread())
+                yield ReceivedEvent(event_type="stream.detached", data=data, run_id=data.get("run_id"))
+                return
             if response.status_code != 200:
                 # Try to get error details from response body
                 try:

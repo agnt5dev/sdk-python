@@ -13,7 +13,7 @@ def test_clients_default_to_beta_ha_request_timeout():
     assert AsyncClient("http://gateway.test").timeout == 45.0
 
 
-def test_sync_run_uses_client_timeout_when_call_timeout_is_omitted():
+def test_sync_run_transport_allows_default_gateway_wait():
     seen_timeout = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -35,4 +35,4 @@ def test_sync_run_uses_client_timeout_when_call_timeout_is_omitted():
         client.close()
 
     assert response.is_success
-    assert set(seen_timeout.values()) == {45.0}
+    assert set(seen_timeout.values()) == {310.0}
