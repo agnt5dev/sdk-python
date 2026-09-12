@@ -344,6 +344,73 @@ class AgentContext(Context):
         """Get session identifier for this agent context."""
         return self._session_id
 
+    async def _get_initial_conversation_history(self) -> List[Message]:
+        """Freeze this agent invocation's initial history before changing the session."""
+        if getattr(self, "_session_history_managed", False):
+            return []
+        if (self._trace_metadata or {}).get("durable_activation_v1") != "true":
+            return await self.get_conversation_history()
+
+        from .._serialization import deserialize, serialize
+        from ..activation import (
+            ActivationKind,
+            ActivationRecoveryPolicy,
+            activation_request_from_context,
+        )
+        from ..exceptions import ActivationError, ActivationErrorCode
+        from ..lm import MessageRole
+
+        if self._activation_client is None:
+            raise ActivationError(
+                ActivationErrorCode.DURABILITY_UNAVAILABLE,
+                "runtime negotiated durable_activation_v1 but no activation client is available",
+            )
+
+        # The selector is immutable; the live history belongs in the receipt's
+        # output. This separate allocation family leaves model/tool keys intact.
+        selector = {
+            "schema_version": 1,
+            "agent_name": self._agent_name,
+            "session_id": self._session_id,
+            "storage_mode": self._storage_mode,
+        }
+        request = activation_request_from_context(
+            self,
+            kind=ActivationKind.STEP,
+            stable_key=self.allocate_activation_key("agent_history", self._agent_name),
+            input_value=selector,
+            recovery_policy=ActivationRecoveryPolicy.IDEMPOTENT_RETRY,
+            display_name=f"{self._agent_name}: initial conversation history",
+            input_data=selector,
+        )
+
+        def decode_history(output: bytes) -> List[Message]:
+            return [
+                Message(
+                    role=MessageRole(message["role"]),
+                    content=message["content"],
+                    tool_calls=message.get("tool_calls"),
+                    tool_call_id=message.get("tool_call_id"),
+                )
+                for message in deserialize(output)
+            ]
+
+        started = time.monotonic()
+        # Do not make the snapshot the active parent: subsequent model/tool
+        # activations must retain their existing logical identities. Awaiting the
+        # receipt prevents session writes or model calls after an unknown outcome.
+        messages, _receipt = await self._activation_client.run(
+            request,
+            self.get_conversation_history,
+            encode_output=serialize,
+            decode_output=decode_history,
+            latency_ms=lambda: int((time.monotonic() - started) * 1000),
+            failure_error_code="AGENT_HISTORY_READ_FAILED",
+            failure_retryable=True,
+            failure_external_outcome_certainty="NO_EFFECT",
+        )
+        return messages
+
     async def get_conversation_history(self) -> List[Message]:
         """
         Retrieve conversation history, preferring runs-based history from the platform.
