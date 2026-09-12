@@ -6,14 +6,14 @@ import copy
 from types import SimpleNamespace
 
 import pytest
-from test_worker_agent_streaming import _DummyExecutor, _RecordingWorker
-from test_workflow_activation import WorkflowActivationTransport
 
 from agnt5._serialization import serialize
 from agnt5.activation import (
     ActivationClient,
+    ActivationCompletionReceipt,
     ActivationDecision,
     ActivationDecisionKind,
+    ActivationFailureReceipt,
     ActivationKind,
     activation_id,
     current_activation,
@@ -22,13 +22,16 @@ from agnt5.agent import Agent, AgentContext
 from agnt5.exceptions import ActivationError, ActivationErrorCode
 from agnt5.lm import GenerateResponse, LMClient, Message
 from agnt5.tool import tool
+from agnt5.worker._executors import ExecutorMixin
 
 
-class ReplayTransport(WorkflowActivationTransport):
+class ReplayTransport:
     """Retain accepted receipts across replacement workers; reject changed inputs."""
 
     def __init__(self):
-        super().__init__()
+        self.begin_requests = []
+        self.complete_requests = []
+        self.fail_requests = []
         self.semantics = {}
         self.outputs = {}
         self.history_ids = set()
@@ -60,7 +63,14 @@ class ReplayTransport(WorkflowActivationTransport):
                 accepted_journal_offset=12,
                 replay_output=self.outputs[aid],
             )
-        return await super().begin(request)
+        self.begin_requests.append(request)
+        return ActivationDecision(
+            kind=ActivationDecisionKind.EXECUTE,
+            activation_id=aid,
+            attempt=1,
+            accepted_journal_offset=11,
+            fence_token=b"fence-1",
+        )
 
     async def complete(self, **request):
         is_history = request["activation_id"] in self.history_ids
@@ -68,11 +78,51 @@ class ReplayTransport(WorkflowActivationTransport):
             self.crash_at = None
             raise asyncio.CancelledError("worker died before snapshot acceptance")
         self.outputs[request["activation_id"]] = request["output"]
-        receipt = await super().complete(**request)
+        self.complete_requests.append(request)
+        receipt = ActivationCompletionReceipt(
+            activation_id=request["activation_id"],
+            attempt=request["attempt"],
+            accepted_journal_offset=12,
+        )
         if is_history and self.crash_at == "after_accept":
             self.crash_at = None
             raise asyncio.CancelledError("worker died after snapshot acceptance")
         return receipt
+
+
+    async def fail(self, **request):
+        self.fail_requests.append(request)
+        return ActivationFailureReceipt(
+            activation_id=request["activation_id"],
+            attempt=request["attempt"],
+            accepted_journal_offset=12,
+            status="FAILED",
+        )
+
+
+class RecordingWorker:
+    def __init__(self):
+        self.event_types = []
+
+    def emit_event_sync(self, *, event_type, **kwargs):
+        self.event_types.append(event_type)
+
+    async def emit_event_async(self, *, event_type, **kwargs):
+        self.event_types.append(event_type)
+
+    async def emit_event_batch_async(self, events):
+        self.event_types.extend(event[1] for event in events)
+
+    def queue_event(self, *, event_type, **kwargs):
+        self.event_types.append(event_type)
+
+
+class HostedExecutor(ExecutorMixin):
+    def __init__(self, worker):
+        self._entity_state_adapter = object()
+        self._checkpoint_client = None
+        self._rust_worker = worker
+        self.service_name = "test"
 
 
 class HistoryState:
@@ -170,7 +220,7 @@ def hosted(monkeypatch):
             component_type="agent",
             metadata=metadata(attempt),
         )
-        executor = _DummyExecutor(_RecordingWorker())
+        executor = HostedExecutor(RecordingWorker())
         executor._entity_state_adapter = state
         executor._activation_client_for_metadata = lambda _: ActivationClient(transport)
         return await executor._execute_agent(agent, request.input_data, request)
