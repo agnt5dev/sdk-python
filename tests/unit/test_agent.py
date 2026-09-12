@@ -1324,9 +1324,11 @@ async def test_durable_tool_calls_are_journaled_by_the_activation_not_the_loop()
 
     yielded = [event async for event in agent.stream("bill me", context=ctx)]
 
-    assert [request.kind for request in client.requests] == [ActivationKind.TOOL]
-    assert client.requests[0].display_name == "charge"
-    assert json.loads(client.requests[0].input_data) == {
+    assert [request.kind for request in client.requests] == [ActivationKind.STEP, ActivationKind.TOOL]
+    history_request, tool_request = client.requests
+    assert history_request.stable_key == "agent_history:biller:0"
+    assert tool_request.display_name == "charge"
+    assert json.loads(tool_request.input_data) == {
         "name": "charge",
         "arguments": {"amount": 42},
         "tool_call_id": "call_1",
@@ -1372,7 +1374,8 @@ async def test_legacy_tool_calls_still_emit_lifecycle_under_durable_context():
     async for _ in agent.stream("find a", context=ctx):
         pass
 
-    assert client.requests == []
+    assert [request.kind for request in client.requests] == [ActivationKind.STEP]
+    assert client.requests[0].stable_key == "agent_history:finder:0"
     assert [e.event_type for e in emitted if e.event_type.startswith("tool_call.")] == [
         "tool_call.started",
         "tool_call.completed",
