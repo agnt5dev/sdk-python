@@ -23,7 +23,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Migration from 0.12.x
 
-- Deploy the AGNT5-1108 runtime compatibility fix ([agnt5dev/agnt5#2848](https://github.com/agnt5dev/agnt5/pull/2848)) before upgrading deployed Python workers. It allows the session creation event emitted with durable completion; publishing this package alone does not install that runtime prerequisite.
+- Deploy the AGNT5-1108 runtime compatibility fix before upgrading deployed Python workers. It allows the session creation event emitted with durable completion; publishing this package alone does not install that runtime prerequisite.
 - The history fix protects runs that record the initial-history snapshot after upgrade. It cannot reconstruct a missing snapshot for an already in-flight run started with an older SDK.
 - Check `response.is_pending` before consuming `response.output`. To keep waiting in synchronous code, call `client.wait_for_result(response.run_id, timeout=...)`; asynchronous callers can use `await client.get_status(run_id)` and `await client.get_result(run_id)` under their own bounded polling policy. Retain the run ID after stream detachment or wait expiry; neither event cancels accepted execution.
 - Pass workflow payload fields named `timeout` or `wait_timeout` through the explicit input dictionary of `client.run(name, input_data, component_type="workflow")` or `client.stream_events(...)`, rather than through workflow-proxy keyword arguments.
