@@ -70,3 +70,13 @@ def test_stream_raises_for_enveloped_run_failure() -> None:
 
     assert raised.value.run_id == "run-2"
     assert raised.value.error_code == "FUNCTION_ERROR"
+
+
+def test_chunk_stream_wait_expiry_reports_run_id() -> None:
+    client = streaming_client(gateway_sse(("stream.wait_expired", '{"run_id":"run-wait","status":"pending"}')))
+    try:
+        with pytest.raises(RunError, match="run continues") as error:
+            list(client.stream("generate", wait_timeout=60))
+        assert error.value.run_id == "run-wait"
+    finally:
+        client.close()
