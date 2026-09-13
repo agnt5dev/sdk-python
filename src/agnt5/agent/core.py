@@ -1063,7 +1063,7 @@ class Agent:
                 self.logger.debug(f"Prepended {len(history)} messages from explicit history")
 
             if isinstance(context, AgentContext):
-                stored_messages = await context.get_conversation_history()
+                stored_messages = await context._get_initial_conversation_history()
                 messages.extend(stored_messages)
 
             messages.append(Message.user(user_message))
@@ -2041,7 +2041,7 @@ class Agent:
 
                 # 2. Load conversation history from state (if AgentContext)
                 if isinstance(context, AgentContext):
-                    stored_messages = await context.get_conversation_history()
+                    stored_messages = await context._get_initial_conversation_history()
                     messages.extend(stored_messages)
 
                 # 3. Add new user message
