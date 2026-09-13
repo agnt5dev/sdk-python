@@ -7,6 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-13
+
+### Fixed
+
+- Preserve the initial conversation-history snapshot across durable agent replay, including recovery after snapshot acceptance and before the first model call (AGNT5-1108). Fresh runs still load the session's latest history.
+
+### Changed
+
+- Build the native extension against `agnt5-sdk-core` 0.3.1 for graceful draining of accepted pull work on shutdown, including Unix SIGTERM (AGNT5-1129).
+- **Breaking:** synchronous and asynchronous `run()` return an accepted `202` pending receipt directly instead of polling detached runs to completion. Response waiting defaults to 300 seconds and is configurable with `wait_timeout` from zero to 86400 seconds; accepted execution continues after waiting ends.
+- Default HTTP operation timeouts now allow at least `wait_timeout + 10` seconds (310 seconds by default), or the client timeout if longer. Set the per-call `timeout` explicitly to retain a shorter network timeout.
+- Event streams expose `stream.wait_expired` or `stream.detached`; chunk-only `stream()` raises `RunError` carrying the run ID when response waiting ends.
+- `WorkflowProxy.run()` now reserves `timeout` and `wait_timeout`, and `WorkflowProxy.stream_events()` additionally reserves `wait_timeout`, for response/HTTP waiting rather than forwarding those names as workflow input.
+
+### Migration from 0.12.x
+
+- Deploy the AGNT5-1108 runtime compatibility fix before upgrading deployed Python workers. It allows the session creation event emitted with durable completion; publishing this package alone does not install that runtime prerequisite.
+- The history fix protects runs that record the initial-history snapshot after upgrade. It cannot reconstruct a missing snapshot for an already in-flight run started with an older SDK.
+- Check `response.is_pending` before consuming `response.output`. To keep waiting in synchronous code, call `client.wait_for_result(response.run_id, timeout=...)`; asynchronous callers can use `await client.get_status(run_id)` and `await client.get_result(run_id)` under their own bounded polling policy. Retain the run ID after stream detachment or wait expiry; neither event cancels accepted execution.
+- Pass workflow payload fields named `timeout` or `wait_timeout` through the explicit input dictionary of `client.run(name, input_data, component_type="workflow")` or `client.stream_events(...)`, rather than through workflow-proxy keyword arguments.
+
 ## [0.12.0] - 2026-09-11
 
 ### Fixed
