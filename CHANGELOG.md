@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-13
+
+### Fixed
+
+- Preserve the initial conversation-history snapshot across durable agent replay, including recovery after snapshot acceptance and before the first model call (AGNT5-1108). Fresh runs still load the session's latest history.
+
+### Changed
+
+- Build the native extension against `agnt5-sdk-core` 0.3.1 for graceful draining of accepted pull work on shutdown, including Unix SIGTERM (AGNT5-1129).
+
 ## [0.12.0] - 2026-09-11
 
 ### Fixed
