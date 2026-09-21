@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `Worker(auto_register=True)` now understands `uv_build` projects (`[tool.uv.build-backend]` `module-root` and `module-name`, defaulting to `src/<normalized project name>`) and names every discovered module the way the application imports it: `src/pkg/mod.py` is `pkg.mod`, never `src.pkg.mod`, and a package's `__init__.py` is the package. A module the application already imported is no longer executed a second time, so its components no longer collide with themselves and later modules are no longer dropped (AGNT5-1194). Candidates are deduplicated and imported in a fixed order.
+
+### Changed
+
+- **Breaking:** a module that fails to import during auto-registration now stops the worker with `AutoDiscoveryError`, which lists every failing module with its file, import root and error, instead of being logged and skipped. A worker never reports Ready with only the components that happened to import. Scan only the packages you intend with `auto_register_paths=[...]` if a directory holds modules that are not meant to be imported.
+- Registering the very same function, workflow or scorer object twice is a no-op; a different object under an already registered name is still a collision.
+
 ## [0.13.1] - 2026-09-21
 
 ### Fixed

@@ -89,6 +89,8 @@ class FunctionRegistry:
         # Check for name collision
         if config.name in _FUNCTION_REGISTRY:
             existing_config = _FUNCTION_REGISTRY[config.name]
+            if existing_config.handler is config.handler:
+                return  # the same function, registered again
             existing_module = existing_config.handler.__module__
             new_module = config.handler.__module__
 
@@ -110,6 +112,11 @@ class FunctionRegistry:
     def all() -> dict[str, FunctionConfig]:
         """Get all registered functions."""
         return _FUNCTION_REGISTRY.copy()
+
+    @staticmethod
+    def discard(name: str) -> None:
+        """Forget a registration, if present."""
+        _FUNCTION_REGISTRY.pop(name, None)
 
     @staticmethod
     def clear() -> None:

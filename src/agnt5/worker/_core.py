@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from typing import Any, Literal
 
 from .. import _sentry
@@ -18,6 +17,7 @@ from .._telemetry import (
     run_scope,
     setup_module_logger,
 )
+from ..exceptions import AutoDiscoveryError
 from ..function import FunctionRegistry
 from ..scorer import (
     BUILTIN_DETERMINISTIC_SCORER_NAMES,
@@ -26,6 +26,7 @@ from ..scorer import (
     get_builtin_judge_scorer_config,
     register_builtin_scorer_handlers,
 )
+from ._discovery import discover_source_paths, discovery_candidates, import_candidates
 from ._executors import ExecutorMixin
 from ._prompt_executor import (
     PROMPT_EXECUTOR_COMPONENT_NAME,
@@ -453,118 +454,37 @@ class Worker(ExecutorMixin):
         logger.info(f"Total components now registered: {total}")
 
     def _discover_source_paths(self, pyproject_path: str | None = None) -> list[str]:
-        """Discover source paths from pyproject.toml.
-
-        Reads pyproject.toml to find package source directories using:
-        - Hatch: [tool.hatch.build.targets.wheel] packages
-        - Maturin: [tool.maturin] python-source
-        - Fallback: ["src"] if not found
-
-        Args:
-            pyproject_path: Path to pyproject.toml (default: current directory)
-
-        Returns:
-            List of directory paths to scan (e.g., ["src/agnt5_benchmark"])
-        """
-        try:
-            import tomllib
-        except ImportError:
-            logger.error("tomllib not available (Python 3.11+ required for auto-registration)")
-            return ["src"]
-
-        if pyproject_path:
-            pyproject_file = Path(pyproject_path)
-        else:
-            pyproject_file = Path.cwd() / "pyproject.toml"
-
-        if not pyproject_file.exists():
-            logger.warning(
-                f"pyproject.toml not found at {pyproject_file}, defaulting to 'src/' directory"
-            )
-            return ["src"]
-
-        try:
-            with open(pyproject_file, "rb") as f:
-                import tomllib
-
-                config = tomllib.load(f)
-        except Exception as e:
-            logger.error(f"Failed to parse pyproject.toml: {e}")
-            return ["src"]
-
-        source_paths = []
-
-        # Try Hatch configuration
-        if "tool" in config and "hatch" in config["tool"]:
-            hatch_config = config["tool"]["hatch"]
-            if "build" in hatch_config and "targets" in hatch_config["build"]:
-                wheel_config = hatch_config["build"]["targets"].get("wheel", {})
-                packages = wheel_config.get("packages", [])
-                source_paths.extend(packages)
-
-        # Try Maturin configuration
-        if not source_paths and "tool" in config and "maturin" in config["tool"]:
-            maturin_config = config["tool"]["maturin"]
-            python_source = maturin_config.get("python-source")
-            if python_source:
-                source_paths.append(python_source)
-
-        if not source_paths:
-            source_paths = ["src"]
-
-        return source_paths
+        """Source directories to scan for components (see ``agnt5.worker._discovery``)."""
+        return discover_source_paths(pyproject_path)
 
     def _auto_discover_components(self, source_paths: list[str]) -> None:
-        """Auto-discover components by importing all Python files in source paths.
+        """Import every module under the source paths so their components register.
 
-        Args:
-            source_paths: List of directory paths to scan
+        Raises:
+            AutoDiscoveryError: if any module fails to import. A worker that
+                served only the components it could import would report Ready
+                with the rest silently missing (AGNT5-1194).
         """
-        import importlib.util
-        import sys
-
-        for source_path in source_paths:
-            path = Path(source_path)
-
-            if not path.exists():
-                logger.warning(f"Source path does not exist: {source_path}")
-                continue
-
-            for py_file in path.rglob("*.py"):
-                if "__pycache__" in str(py_file) or py_file.name.startswith("test_"):
-                    continue
-
-                relative_path = py_file.relative_to(path.parent)
-                module_parts = list(relative_path.parts[:-1])
-                module_parts.append(relative_path.stem)
-                module_name = ".".join(module_parts)
-
-                try:
-                    if module_name in sys.modules:
-                        logger.debug(f"Module already imported: {module_name}")
-                    else:
-                        spec = importlib.util.spec_from_file_location(module_name, py_file)
-                        if spec and spec.loader:
-                            module = importlib.util.module_from_spec(spec)
-                            sys.modules[module_name] = module
-                            spec.loader.exec_module(module)
-                            logger.debug(f"Auto-imported: {module_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to import {module_name}: {e}")
-                    _sentry.capture_exception(
-                        e,
-                        context={
-                            "service_name": self.service_name,
-                            "module_name": module_name,
-                            "source_path": str(py_file),
-                            "error_location": "_auto_discover_components",
-                        },
-                        tags={
-                            "sdk_error": "true",
-                            "error_type": "auto_registration_failure",
-                        },
-                        level="warning",
-                    )
+        failures = import_candidates(discovery_candidates(source_paths))
+        for failure in failures:
+            logger.error(f"Failed to import {failure.module_name} from {failure.path}: {failure.error}")
+            _sentry.capture_exception(
+                failure.error,
+                context={
+                    "service_name": self.service_name,
+                    "module_name": failure.module_name,
+                    "source_path": str(failure.path),
+                    "import_root": str(failure.import_root),
+                    "error_location": "_auto_discover_components",
+                },
+                tags={
+                    "sdk_error": "true",
+                    "error_type": "auto_registration_failure",
+                },
+                level="error",
+            )
+        if failures:
+            raise AutoDiscoveryError(failures)
 
         # Collect components from registries
         from ..agent import AgentRegistry

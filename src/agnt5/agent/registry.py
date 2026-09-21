@@ -42,6 +42,11 @@ class AgentRegistry:
         _AGENT_REGISTRY[agent.name] = agent
 
     @staticmethod
+    def discard(name: str) -> None:
+        """Forget a registration, if present."""
+        _AGENT_REGISTRY.pop(name, None)
+
+    @staticmethod
     def get(name: str) -> Optional["Agent"]:
         """Get agent by name.
 

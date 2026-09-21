@@ -597,6 +597,11 @@ class ToolRegistry:
         return cls._tools.copy()
 
     @classmethod
+    def discard(cls, name: str) -> None:
+        """Forget a registration, if present."""
+        cls._tools.pop(name, None)
+
+    @classmethod
     def clear(cls) -> None:
         """Clear all registered tools (for testing)."""
         cls._tools.clear()
