@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-21
+
 ### Fixed
 
 - Durable model, tool and delegated-agent activations begun inside an agent iteration now carry that iteration as a reader-only display parent, so Studio nests them under the iteration instead of beside the owning workflow step (AGNT5-1101). Durable ownership, activation identity, digests and replay are unchanged. `BeginActivationRequest` gains `display_parent_correlation_id`, forwarded by the native extension; runtimes that predate the field ignore it.
