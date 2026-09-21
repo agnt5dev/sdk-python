@@ -322,6 +322,7 @@ impl PyActivationClient {
         child: Option<(String, String, String, Vec<u8>, i32)>,
         display_name: String,
         input_data: Vec<u8>,
+        display_parent_correlation_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
@@ -359,6 +360,7 @@ impl PyActivationClient {
                     ),
                     display_name,
                     input_data,
+                    display_parent_correlation_id,
                     ..Default::default()
                 })
                 .await

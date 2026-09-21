@@ -358,11 +358,12 @@ async def test_native_transport_forwards_display_fields_and_failure_latency():
             **activation_request().__dict__,
             "display_name": "load",
             "input_data": b'{"x":1}',
+            "display_parent_correlation_id": "iteration-1",
         }
     )
     with pytest.raises(ActivationError):
         await transport.begin(request)
-    assert native.begin_args[-2:] == ("load", list(b'{"x":1}'))
+    assert native.begin_args[-3:] == ("load", list(b'{"x":1}'), "iteration-1")
 
     with pytest.raises(ActivationError):
         await transport.complete(
