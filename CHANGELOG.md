@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-21
+
 ### Fixed
 
 - `Worker(auto_register=True)` now understands `uv_build` projects (`[tool.uv.build-backend]` `module-root` and `module-name`, defaulting to `src/<normalized project name>`) and names every discovered module the way the application imports it: `src/pkg/mod.py` is `pkg.mod`, never `src.pkg.mod`, and a package's `__init__.py` is the package. A module the application already imported is no longer executed a second time, so its components no longer collide with themselves and later modules are no longer dropped (AGNT5-1194). Candidates are deduplicated and imported in a fixed order.
