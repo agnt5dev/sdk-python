@@ -16,6 +16,24 @@ class ConfigurationError(AGNT5Error):
     pass
 
 
+class AutoDiscoveryError(ConfigurationError):
+    """Auto-registration could not import every module under the source paths.
+
+    Raised by ``Worker(auto_register=True)`` before the worker reports Ready, so
+    a project never serves only the components that happened to import. Carries
+    every failure, so one start reports all broken modules.
+    """
+
+    def __init__(self, failures) -> None:
+        self.failures = list(failures)
+        lines = [f"Auto-registration failed: {len(self.failures)} module(s) could not be imported."]
+        lines.extend(f"  {failure.describe()}" for failure in self.failures)
+        lines.append(
+            "Fix the imports above, or scan only the packages you intend with auto_register_paths=[...]."
+        )
+        super().__init__("\n".join(lines))
+
+
 class ExecutionError(AGNT5Error):
     """Raised when function or workflow execution fails."""
 

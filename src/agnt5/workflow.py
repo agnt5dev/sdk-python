@@ -2486,6 +2486,8 @@ class WorkflowRegistry:
         """
         if config.name in _WORKFLOW_REGISTRY:
             existing_workflow = _WORKFLOW_REGISTRY[config.name]
+            if existing_workflow.handler is config.handler:
+                return  # the same workflow, registered again
             logger.error(
                 f"Workflow name collision detected: '{config.name}'\n"
                 f"  First defined in:  {existing_workflow.handler.__module__}\n"
@@ -2499,6 +2501,11 @@ class WorkflowRegistry:
 
         _WORKFLOW_REGISTRY[config.name] = config
         logger.debug(f"Registered workflow '{config.name}'")
+
+    @staticmethod
+    def discard(name: str) -> None:
+        """Forget a registration, if present."""
+        _WORKFLOW_REGISTRY.pop(name, None)
 
     @staticmethod
     def get(name: str) -> Optional[WorkflowConfig]:

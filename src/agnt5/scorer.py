@@ -167,6 +167,8 @@ class ScorerRegistry:
 
         if config.name in _SCORER_REGISTRY:
             existing_config = _SCORER_REGISTRY[config.name]
+            if existing_config.handler is config.handler:
+                return  # the same scorer, registered again
             existing_module = existing_config.handler.__module__
             new_module = config.handler.__module__
 
@@ -178,6 +180,11 @@ class ScorerRegistry:
             )
 
         _SCORER_REGISTRY[config.name] = config
+
+    @staticmethod
+    def discard(name: str) -> None:
+        """Forget a registration, if present."""
+        _SCORER_REGISTRY.pop(name, None)
 
     @staticmethod
     def get(name: str) -> Optional[ScorerConfig]:
