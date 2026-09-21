@@ -21,6 +21,7 @@ from ..activation import (
     _set_current_activation,
     child_activation_request_from_context,
     current_activation,
+    display_parent_scope,
 )
 from ..callbacks import (
     AfterAgentCallback,
@@ -79,6 +80,27 @@ class _DefaultTemperature(float):
 
 
 _DEFAULT_AGENT_TEMPERATURE = _DefaultTemperature(0.7)
+
+
+async def _stream_with_display_parent(
+    stream: AsyncGenerator[Any, None],
+    correlation_id: str,
+) -> AsyncGenerator[Any, None]:
+    """Iterate a model stream with the iteration as its display parent.
+
+    The durable model activation begins while the stream's body runs, so the
+    scope must be active during each step of the stream and only then: the
+    consumer receives each event outside the scope, so nothing it starts in
+    between inherits the iteration.
+    """
+
+    while True:
+        with display_parent_scope(correlation_id):
+            try:
+                item = await stream.__anext__()
+            except StopAsyncIteration:
+                return
+        yield item
 
 
 def _is_openai_reasoning_model(model: str) -> bool:
@@ -819,15 +841,20 @@ class Agent:
             return result
         return self._agent_result_from_callback(value, context)
 
-    async def _call_model_generate(self, request: GenerateRequest) -> GenerateResponse:
+    async def _call_model_generate(
+        self,
+        request: GenerateRequest,
+        display_parent_correlation_id: str = "",
+    ) -> GenerateResponse:
         from ..lm import LMClient as _LanguageModel
 
-        if self._language_model is not None:
-            return await self._language_model.generate(request)
+        with display_parent_scope(display_parent_correlation_id):
+            if self._language_model is not None:
+                return await self._language_model.generate(request)
 
-        provider, _model_name = self.model.split('/', 1)
-        internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-        return await internal_lm.generate(request)
+            provider, _model_name = self.model.split('/', 1)
+            internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
+            return await internal_lm.generate(request)
 
     def _validate_model_response(self, response: Any) -> GenerateResponse:
         if not isinstance(response, GenerateResponse):
@@ -843,6 +870,7 @@ class Agent:
         iteration: int,
         messages: List[Message],
         tool_definitions: List[ToolDefinition],
+        display_parent_correlation_id: str = "",
     ) -> GenerateResponse:
         callback_context = ModelCallbackContext(
             agent=self,
@@ -861,7 +889,9 @@ class Agent:
                 response = self._validate_model_response(value)
 
         if response is None:
-            response = await self._call_model_generate(request)
+            response = await self._call_model_generate(
+                request, display_parent_correlation_id
+            )
             self._track_llm_cost(response, context)
 
         after = self.callbacks.after_model
@@ -876,6 +906,7 @@ class Agent:
     async def _invoke_tool_with_callbacks(
         self,
         callback_context: ToolCallbackContext,
+        display_parent_correlation_id: str = "",
     ) -> Any:
         before = self.callbacks.before_tool
         if before is not None:
@@ -887,13 +918,16 @@ class Agent:
         if callback_context.tool is None:
             raise ValueError(f"Tool '{callback_context.tool_name}' not found")
 
-        result = await callback_context.tool.invoke_with_stable_key(
-            callback_context.context,
-            callback_context.arguments,
-            stable_key=callback_context.tool_call_id or None,
-            tool_call_id=callback_context.tool_call_id or None,
-            iteration=callback_context.iteration,
-        )
+        # A durable tool, and any agent it hands off to, is shown under the
+        # iteration that called it.
+        with display_parent_scope(display_parent_correlation_id):
+            result = await callback_context.tool.invoke_with_stable_key(
+                callback_context.context,
+                callback_context.arguments,
+                stable_key=callback_context.tool_call_id or None,
+                tool_call_id=callback_context.tool_call_id or None,
+                iteration=callback_context.iteration,
+            )
 
         after = self.callbacks.after_tool
         if after is not None:
@@ -1301,7 +1335,8 @@ class Agent:
                                             tool_call=tool_call,
                                             arguments=tool_args,
                                             tool=tool,
-                                        )
+                                        ),
+                                        display_parent_correlation_id=iteration_correlation_id,
                                     )
 
                                     if isinstance(result, dict) and result.get("_handoff"):
@@ -1676,9 +1711,12 @@ class Agent:
                     iteration=iteration,
                     messages=messages or request.messages,
                     tool_definitions=tool_definitions or request.tools,
+                    display_parent_correlation_id=parent_correlation_id,
                 )
             else:
-                response = await self._call_model_generate(request)
+                response = await self._call_model_generate(
+                    request, parent_correlation_id
+                )
 
             # Emit synthetic LM events for compatibility
             lm_correlation_id = generate_cid()
@@ -1721,7 +1759,9 @@ class Agent:
             # Use real streaming - properly exposes thinking blocks
             if self._language_model is not None:
                 # Legacy LanguageModel - use stream() method
-                async for event in self._language_model.stream(request):
+                async for event in _stream_with_display_parent(
+                    self._language_model.stream(request), parent_correlation_id
+                ):
                     if isinstance(event, LMCompleted):
                         # Extract final text and usage from completion event
                         output_data = event.output_data or {}
@@ -1748,7 +1788,9 @@ class Agent:
                 # New API: model is a string, create internal LM instance
                 provider, model_name = self.model.split('/', 1)
                 internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                async for event in internal_lm.stream(request):
+                async for event in _stream_with_display_parent(
+                    internal_lm.stream(request), parent_correlation_id
+                ):
                     if isinstance(event, LMCompleted):
                         # Extract final text and usage from completion event
                         output_data = event.output_data or {}
@@ -2128,7 +2170,8 @@ class Agent:
                                 tools=tool_defs if tool_defs else [],
                             )
                             self._apply_generation_config(request)
-                            response = await self._language_model.generate(request)
+                            with display_parent_scope(iteration_correlation_id):
+                                response = await self._language_model.generate(request)
 
                             # Track cost for this LLM call
                             self._track_llm_cost(response, context)
@@ -2146,7 +2189,8 @@ class Agent:
                             from ..lm import LMClient as _LanguageModel
                             provider, model_name = self.model.split('/', 1)
                             internal_lm = _LanguageModel(provider=provider.lower(), default_model=None)
-                            response = await internal_lm.generate(request)
+                            with display_parent_scope(iteration_correlation_id):
+                                response = await internal_lm.generate(request)
 
                             # Track cost for this LLM call
                             self._track_llm_cost(response, context)
@@ -2211,14 +2255,15 @@ class Agent:
                                     if not tool:
                                         result_text = f"Error: Tool '{tool_name}' not found"
                                     else:
-                                        # Execute tool
-                                        result = await tool.invoke_with_stable_key(
-                                            context,
-                                            tool_args,
-                                            stable_key=tool_call_id or None,
-                                            tool_call_id=tool_call_id or None,
-                                            iteration=iteration + 1,
-                                        )
+                                        # Execute tool, shown under this iteration
+                                        with display_parent_scope(iteration_correlation_id):
+                                            result = await tool.invoke_with_stable_key(
+                                                context,
+                                                tool_args,
+                                                stable_key=tool_call_id or None,
+                                                tool_call_id=tool_call_id or None,
+                                                iteration=iteration + 1,
+                                            )
 
                                         # Check if this was a handoff
                                         if isinstance(result, dict) and result.get("_handoff"):

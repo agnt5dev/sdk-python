@@ -7,10 +7,11 @@ import hashlib
 import json
 import math
 import struct
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
-from typing import Any, Awaitable, Callable, Protocol, TypeVar
+from typing import Any, Awaitable, Callable, Iterator, Protocol, TypeVar
 
 from ._serialization import serialize
 from .exceptions import ActivationError, ActivationErrorCode
@@ -106,6 +107,7 @@ class BeginActivationRequest:
     child: ChildActivationLinkage | None = None
     display_name: str = ""
     input_data: bytes = b""
+    display_parent_correlation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -187,18 +189,52 @@ def current_activation() -> ActivationExecution | None:
     return _current_activation.get()
 
 
-def _set_current_activation(decision: ActivationDecision) -> Token:
-    return _current_activation.set(
+_display_parent_correlation_id: ContextVar[str] = ContextVar(
+    "agnt5_display_parent_correlation_id",
+    default="",
+)
+
+
+def current_display_parent_correlation_id() -> str:
+    """Return the reader-only parent describing where this work is shown.
+
+    Agent iterations are journal events rather than admitted activations, so
+    they cannot be a durable parent. This carries the iteration a model, tool
+    or delegated agent call was issued from, for display only.
+    """
+
+    return _display_parent_correlation_id.get()
+
+
+@contextmanager
+def display_parent_scope(correlation_id: str) -> Iterator[None]:
+    """Describe activations begun in this scope as shown under ``correlation_id``."""
+
+    token = _display_parent_correlation_id.set(correlation_id or "")
+    try:
+        yield
+    finally:
+        _display_parent_correlation_id.reset(token)
+
+
+def _set_current_activation(decision: ActivationDecision) -> tuple[Token, Token]:
+    activation_token = _current_activation.set(
         ActivationExecution(
             activation_id=decision.activation_id,
             attempt=decision.attempt,
             idempotency_key=f"agnt5:{decision.activation_id}",
         )
     )
+    # The admitted activation now owns the work nested inside it, so a tool's
+    # own model call hangs off the tool rather than the iteration that
+    # described this activation.
+    return activation_token, _display_parent_correlation_id.set("")
 
 
-def _reset_current_activation(token: Token) -> None:
-    _current_activation.reset(token)
+def _reset_current_activation(token: tuple[Token, Token]) -> None:
+    activation_token, display_parent_token = token
+    _display_parent_correlation_id.reset(display_parent_token)
+    _current_activation.reset(activation_token)
 
 
 class ActivationTransport(Protocol):
@@ -293,6 +329,7 @@ class NativeActivationTransport:
                 ),
                 request.display_name,
                 list(request.input_data),
+                request.display_parent_correlation_id,
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -671,6 +708,7 @@ def activation_request_from_context(
         child=child,
         display_name=display_name,
         input_data=encode_activation_input(input_data),
+        display_parent_correlation_id=current_display_parent_correlation_id(),
     )
 
 
