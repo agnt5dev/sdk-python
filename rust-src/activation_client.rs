@@ -9,6 +9,7 @@ use agnt5_sdk_core::pb::{
 };
 use agnt5_sdk_core::runtime_adapter::{ActivationAdapter, ActivationDecision};
 use agnt5_sdk_core::worker::Worker as CoreWorker;
+use futures::FutureExt;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -182,6 +183,24 @@ impl PyActivationClient {
     }
 }
 
+/// Awaits one activation call, dropping the cached engine connection if it
+/// panics so the next call reconnects instead of reusing a channel the panic
+/// may have left broken (AGNT5-1260). The panic then continues, and
+/// pyo3-async-runtimes raises it to Python as "rust future panicked: <message>".
+async fn reconnect_after_panic<A, T>(
+    adapter: Arc<Mutex<Option<A>>>,
+    call: impl std::future::Future<Output = T>,
+) -> T {
+    match std::panic::AssertUnwindSafe(call).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => {
+            tracing::error!("native activation call panicked; reconnecting the engine client");
+            *adapter.lock().await = None;
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
 fn decision_to_python(decision: ActivationDecision) -> PyResult<PyActivationDecision> {
     match decision {
         ActivationDecision::Execute(receipt) => Ok(PyActivationDecision {
@@ -327,46 +346,49 @@ impl PyActivationClient {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
         let worker = self.worker.clone();
-        future_into_py(py, async move {
-            Self::flush_worker_events(worker, &run_id).await?;
-            let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
-            let decision = adapter
-                .begin(BeginActivationRequest {
-                    project_id,
-                    run_id,
-                    parent_activation_id,
-                    kind,
-                    stable_key,
-                    input_digest,
-                    definition_digest,
-                    recovery_policy,
-                    worker_session_id,
-                    run_authority,
-                    lease_authority,
-                    child: child.map(
-                        |(
-                            child_key,
-                            child_run_id,
-                            child_session_id,
-                            child_definition_digest,
-                            join_policy,
-                        )| ChildActivationLinkage {
-                            child_key,
-                            child_run_id,
-                            child_session_id,
-                            child_definition_digest,
-                            join_policy,
-                        },
-                    ),
-                    display_name,
-                    input_data,
-                    display_parent_correlation_id,
-                    ..Default::default()
-                })
-                .await
-                .map_err(activation_error)?;
-            decision_to_python(decision)
-        })
+        future_into_py(
+            py,
+            reconnect_after_panic(self.adapter.clone(), async move {
+                Self::flush_worker_events(worker, &run_id).await?;
+                let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
+                let decision = adapter
+                    .begin(BeginActivationRequest {
+                        project_id,
+                        run_id,
+                        parent_activation_id,
+                        kind,
+                        stable_key,
+                        input_digest,
+                        definition_digest,
+                        recovery_policy,
+                        worker_session_id,
+                        run_authority,
+                        lease_authority,
+                        child: child.map(
+                            |(
+                                child_key,
+                                child_run_id,
+                                child_session_id,
+                                child_definition_digest,
+                                join_policy,
+                            )| ChildActivationLinkage {
+                                child_key,
+                                child_run_id,
+                                child_session_id,
+                                child_definition_digest,
+                                join_policy,
+                            },
+                        ),
+                        display_name,
+                        input_data,
+                        display_parent_correlation_id,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(activation_error)?;
+                decision_to_python(decision)
+            }),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -392,42 +414,45 @@ impl PyActivationClient {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
         let worker = self.worker.clone();
-        future_into_py(py, async move {
-            Self::flush_worker_events(worker, &run_id).await?;
-            let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
-            let receipt = adapter
-                .complete(CompleteActivationRequest {
-                    project_id,
-                    run_id,
-                    activation_id,
-                    attempt,
-                    fence_token,
-                    output: Some(ActivationPayload {
-                        value: Some(activation_payload::Value::InlineData(output)),
-                    }),
-                    output_digest,
-                    state_mutations: Vec::new(),
-                    outbox_intents: Vec::new(),
-                    usage: Some(ActivationUsage {
-                        tokens_in,
-                        tokens_out,
-                        cost_usd,
-                        latency_ms,
-                        provider,
-                        model,
-                        cached_tokens,
-                    }),
-                    evidence: inline_evidence(evidence),
+        future_into_py(
+            py,
+            reconnect_after_panic(self.adapter.clone(), async move {
+                Self::flush_worker_events(worker, &run_id).await?;
+                let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
+                let receipt = adapter
+                    .complete(CompleteActivationRequest {
+                        project_id,
+                        run_id,
+                        activation_id,
+                        attempt,
+                        fence_token,
+                        output: Some(ActivationPayload {
+                            value: Some(activation_payload::Value::InlineData(output)),
+                        }),
+                        output_digest,
+                        state_mutations: Vec::new(),
+                        outbox_intents: Vec::new(),
+                        usage: Some(ActivationUsage {
+                            tokens_in,
+                            tokens_out,
+                            cost_usd,
+                            latency_ms,
+                            provider,
+                            model,
+                            cached_tokens,
+                        }),
+                        evidence: inline_evidence(evidence),
+                    })
+                    .await
+                    .map_err(activation_error)?;
+                Ok(PyActivationCompletionReceipt {
+                    activation_id: receipt.activation_id,
+                    attempt: receipt.attempt,
+                    accepted_journal_offset: receipt.accepted_journal_offset,
+                    replayed: receipt.replayed,
                 })
-                .await
-                .map_err(activation_error)?;
-            Ok(PyActivationCompletionReceipt {
-                activation_id: receipt.activation_id,
-                attempt: receipt.attempt,
-                accepted_journal_offset: receipt.accepted_journal_offset,
-                replayed: receipt.replayed,
-            })
-        })
+            }),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -457,35 +482,39 @@ impl PyActivationClient {
         let adapter = self.adapter.clone();
         let endpoint = self.endpoint.clone();
         let worker = self.worker.clone();
-        future_into_py(py, async move {
-            Self::flush_worker_events(worker, &run_id).await?;
-            let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
-            let receipt = adapter
-                .fail(FailActivationRequest {
-                    project_id,
-                    run_id,
-                    activation_id,
-                    attempt,
-                    fence_token,
-                    error_code,
-                    error_data: Some(ActivationPayload {
-                        value: Some(activation_payload::Value::InlineData(error_data)),
-                    }),
-                    retryable,
-                    external_outcome_certainty: ActivationExternalOutcomeCertainty::Unknown as i32,
-                    evidence: inline_evidence(evidence),
-                    latency_ms,
+        future_into_py(
+            py,
+            reconnect_after_panic(self.adapter.clone(), async move {
+                Self::flush_worker_events(worker, &run_id).await?;
+                let mut adapter = Self::connected_adapter(adapter, endpoint).await?;
+                let receipt = adapter
+                    .fail(FailActivationRequest {
+                        project_id,
+                        run_id,
+                        activation_id,
+                        attempt,
+                        fence_token,
+                        error_code,
+                        error_data: Some(ActivationPayload {
+                            value: Some(activation_payload::Value::InlineData(error_data)),
+                        }),
+                        retryable,
+                        external_outcome_certainty: ActivationExternalOutcomeCertainty::Unknown
+                            as i32,
+                        evidence: inline_evidence(evidence),
+                        latency_ms,
+                    })
+                    .await
+                    .map_err(activation_error)?;
+                Ok(PyActivationFailureReceipt {
+                    activation_id: receipt.activation_id,
+                    attempt: receipt.attempt,
+                    accepted_journal_offset: receipt.accepted_journal_offset,
+                    status: status_name(receipt.status).to_string(),
+                    replayed: receipt.replayed,
                 })
-                .await
-                .map_err(activation_error)?;
-            Ok(PyActivationFailureReceipt {
-                activation_id: receipt.activation_id,
-                attempt: receipt.attempt,
-                accepted_journal_offset: receipt.accepted_journal_offset,
-                status: status_name(receipt.status).to_string(),
-                replayed: receipt.replayed,
-            })
-        })
+            }),
+        )
     }
 }
 
@@ -500,6 +529,28 @@ pub fn register_activation_client(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_activation_call_drops_the_cached_connection() {
+        let adapter = Arc::new(Mutex::new(Some("engine client")));
+
+        let ok = reconnect_after_panic(adapter.clone(), async { 7 }).await;
+        assert_eq!(ok, 7);
+        assert!(adapter.lock().await.is_some());
+
+        let panicked = tokio::spawn(reconnect_after_panic(adapter.clone(), async {
+            panic!("engine channel poisoned: {}", std::hint::black_box(3))
+        }))
+        .await
+        .unwrap_err();
+        let payload = panicked.into_panic();
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some("engine channel poisoned: 3"),
+            "the panic reaches Python unchanged"
+        );
+        assert!(adapter.lock().await.is_none(), "the next call reconnects");
+    }
 
     #[test]
     fn wait_message_does_not_expose_worker_session_authority() {
