@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-09-22
+
+### Fixed
+
+- A panic in the native core during a durable activation now drops the cached engine connection, so the next activation reconnects instead of reusing a channel the panic may have left broken. The panic still reaches Python as `rust future panicked: <message>`. Matches TypeScript 0.10.4 (AGNT5-1260).
+
 ## [0.13.4] - 2026-09-22
 
 ### Fixed
