@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-09-22
+
+### Fixed
+
+- Use core 0.3.3 to preserve the certificate-assigned worker ID through pull execution and lifecycle checkpoints, reconnect pull workers and retained engine clients after certificate rotation, and keep discovery authority scoped to each connection. Fixes opt-in mTLS execution and renewal recovery; bearer authentication remains the default.
+
 ## [0.13.3] - 2026-09-22
 
 ### Added
