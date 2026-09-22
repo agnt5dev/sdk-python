@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-22
+
+### Added
+
+- Opt-in external-worker mTLS with persistent authentication selection, certificate-bound tokens and restart-safe certificate renewal after a lost response.
+- Independent server certificate trust through system roots or `AGNT5_WORKER_SERVER_CA_FILE`.
+
+### Upgrade
+
+- Existing bearer workers retain their default behavior. Enable `AGNT5_WORKER_MTLS_ENABLED=true` only after commissioning the compatible control plane and dedicated runtime mTLS endpoint, with a private persistent `AGNT5_WORKER_SESSION_DIR`. A worker already pinned to mTLS cannot silently fall back to bearer authentication.
+
 ## [0.13.2] - 2026-09-21
 
 ### Fixed
