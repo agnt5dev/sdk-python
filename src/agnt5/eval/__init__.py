@@ -123,6 +123,7 @@ ScorerResult = _eval.ScorerResult
 TraceAssertion = _eval.TraceAssertion
 exact_match = _eval.exact_match
 contains = _eval.contains
+structured_assertions = _eval.structured_assertions
 json_valid = _eval.json_valid
 json_schema = _eval.json_schema
 numeric_range = _eval.numeric_range
@@ -136,6 +137,7 @@ __all__ = [
     "TraceAssertion",
     "exact_match",
     "contains",
+    "structured_assertions",
     "json_valid",
     "json_schema",
     "numeric_range",

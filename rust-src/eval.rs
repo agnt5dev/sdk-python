@@ -374,6 +374,21 @@ fn json_valid(input: &PyScorerInput) -> PyScorerResult {
     deterministic::json_valid(&input.inner).into()
 }
 
+/// Execute bounded SDK-core assertions over input, output, and expected JSON.
+#[pyfunction]
+fn structured_assertions(
+    py: Python<'_>,
+    input: &PyScorerInput,
+    config: Bound<'_, PyAny>,
+) -> PyResult<PyScorerResult> {
+    let config = py_to_value(py, &config)?;
+    let payload = serde_json::json!({"output":input.inner.output,"input":input.inner.input,"expected":input.inner.expected,"config":config});
+    let result: RustScorerResult =
+        serde_json::from_value(agnt5_sdk_core::eval::structured_assertions(&payload))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(result.into())
+}
+
 /// Check if output matches a regex pattern.
 ///
 /// Args:
@@ -585,6 +600,7 @@ pub fn register_eval(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<(
     eval_module.add_function(wrap_pyfunction!(exact_match, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(contains, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(json_valid, &eval_module)?)?;
+    eval_module.add_function(wrap_pyfunction!(structured_assertions, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(regex_match, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(levenshtein, &eval_module)?)?;
     eval_module.add_function(wrap_pyfunction!(json_schema, &eval_module)?)?;

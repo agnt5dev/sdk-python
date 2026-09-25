@@ -147,3 +147,25 @@ Chunk-only `stream` raises `RunError` with the run ID when waiting ends.
 The default HTTP timeout allows at least the wait plus 10 seconds, or the client
 timeout if longer. Pass `timeout=75` to set it explicitly. Python's HTTP timeout
 limits individual network operations; `wait_timeout` bounds the gateway wait.
+
+## Structured assertions
+
+`structured_assertions` is a reserved built-in scorer, so workers need no user
+registration. The local helper uses the same SDK-core implementation as the runtime:
+
+```python
+from agnt5.eval import ScorerInput, structured_assertions
+
+result = structured_assertions(
+    ScorerInput(output=[1, 2, 3], expected={"expected_length": 3}),
+    {"assertions": [
+        {"name": "unique_ids", "expr": "unique(output_json)"},
+        {"name": "count", "expr": "size(output_json) == expected.expected_length"},
+    ]},
+)
+```
+
+The score is the fraction of assertions that pass; `score_threshold` defaults to
+1. Configuration and input errors always fail. See the
+[SDK-core contract](https://github.com/agnt5dev/sdk-core/tree/82e98e984749f80a31ff6302ba508d55974c608d/crates/eval-scorers)
+for supported expressions and execution limits. Requires the matching native extension.
