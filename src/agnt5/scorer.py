@@ -38,6 +38,7 @@ ScorerHandler = Callable[..., ScorerResult]
 _SCORER_REGISTRY: Dict[str, "ScorerConfig"] = {}
 _BUILTIN_JUDGE_SCORER_REGISTRY: Dict[str, "ScorerConfig"] = {}
 BUILTIN_DETERMINISTIC_SCORER_NAMES = (
+    "structured_assertions",
     "exact_match",
     "contains",
     "regex_match",
@@ -932,6 +933,22 @@ async def run_scorer(
     Raises:
         ValueError: If scorer is not found
     """
+    if scorer_name == "structured_assertions":
+        from .eval import ScorerInput, structured_assertions
+
+        try:
+            request, binding_metadata = _apply_scorer_field_bindings(request)
+        except (KeyError, TypeError) as error:
+            return _config_error(f"structured_assertions field binding error: {error}")
+        result = structured_assertions(
+            ScorerInput(output=request.output, input=request.input, expected=request.expected),
+            request.config,
+        )
+        return ScorerResult(
+            score=result.score, passed=result.passed, label=result.label,
+            explanation=result.explanation,
+            metadata={**(result.metadata or {}), **binding_metadata},
+        )
     scorer_config = get_builtin_judge_scorer_config(scorer_name) or ScorerRegistry.get(
         scorer_name
     )
