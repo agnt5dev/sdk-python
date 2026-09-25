@@ -31,7 +31,7 @@ dependencies = [
 [[package]]
 name = "agnt5-eval-scorers"
 version = "0.1.0"
-source = "git+https://github.com/agnt5dev/sdk-core?rev=82e98e984749f80a31ff6302ba508d55974c608d#82e98e984749f80a31ff6302ba508d55974c608d"
+source = "git+https://github.com/agnt5dev/sdk-core?rev=6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221#6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221"
 dependencies = [
  "serde_json",
 ]
@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "agnt5-sdk-core"
 version = "0.3.3"
-source = "git+https://github.com/agnt5dev/sdk-core?rev=82e98e984749f80a31ff6302ba508d55974c608d#82e98e984749f80a31ff6302ba508d55974c608d"
+source = "git+https://github.com/agnt5dev/sdk-core?rev=6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221#6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221"
 dependencies = [
  "agnt5-eval-scorers",
  "anyhow",
