@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-09-25
+
+- Add SDK-core structured assertions to local scorer APIs and automatic native worker routing.
+
 ## [0.13.5] - 2026-09-22
 
 ### Fixed

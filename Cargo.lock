@@ -31,15 +31,17 @@ dependencies = [
 [[package]]
 name = "agnt5-eval-scorers"
 version = "0.1.0"
-source = "git+https://github.com/agnt5dev/sdk-core?rev=6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221#6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24e18896c688a2b60762440150bb3aa7066603765a889403650c43d3644ee0ef"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "agnt5-sdk-core"
-version = "0.3.3"
-source = "git+https://github.com/agnt5dev/sdk-core?rev=6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221#6531a6693df5c3a8aeeaf22dd8b6c84c31d9f221"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7343293a8d3f24330b46e334c27ef218ad3702fd788e96bb2a201d7f30dd483f"
 dependencies = [
  "agnt5-eval-scorers",
  "anyhow",
@@ -101,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "agnt5-sdk-python"
-version = "0.13.5"
+version = "0.13.6"
 dependencies = [
  "agnt5-sdk-core",
  "anyhow",
