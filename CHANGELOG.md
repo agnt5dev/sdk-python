@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- An `Agent` on a gpt-6 model (such as `openai/gpt-6-luna`) no longer sends its default `temperature` of 0.7. gpt-6 rejects any temperature with a 400, so every agent call to it failed. The gpt-6 family now counts as an OpenAI reasoning model, like gpt-5 and the o-series; an explicit temperature is still sent. Matches TypeScript (AGNT5-1323).
+
 ## [0.13.7] - 2026-10-01
 
 ### Fixed

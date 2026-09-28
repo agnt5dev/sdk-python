@@ -110,6 +110,7 @@ def _is_openai_reasoning_model(model: str) -> bool:
     model_name = model.split("/", 1)[1]
     return (
         model_name.startswith("gpt-5")
+        or model_name.startswith("gpt-6")
         or model_name == "o1"
         or model_name.startswith("o1-")
         or model_name == "o3"
