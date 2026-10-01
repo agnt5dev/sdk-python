@@ -452,6 +452,7 @@ async def generate(
         system_prompt=system_prompt,
         config=config,
         response_schema=response_schema_json,
+        _response_format=response_format,
     )
 
     return await client.generate(request)

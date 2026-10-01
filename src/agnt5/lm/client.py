@@ -227,6 +227,15 @@ class LMClient(LanguageModel):
 
     async def generate(self, request: GenerateRequest) -> GenerateResponse:
         """Generate completion from LLM."""
+        response = await self._generate(request)
+        if request.response_schema is not None or request._response_format is not None:
+            # Bound after every path (provider call, memo cache hit, durable
+            # replay) so structured_output never depends on a provider-parsed
+            # object surviving serialization.
+            response._bind_structured_output(request._response_format)
+        return response
+
+    async def _generate(self, request: GenerateRequest) -> GenerateResponse:
         if request.prompt_ref is not None:
             return await self._run_managed_prompt(request)
 

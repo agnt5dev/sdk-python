@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .._schema_utils import coerce_structured_output, parse_structured_text
+
+_UNSET: Any = object()
+
 
 class MessageRole(str, Enum):
     """Message role in conversation."""
@@ -193,6 +197,11 @@ class GenerateResponse:
     tool_calls: Optional[List[Dict[str, Any]]] = None
     response_id: Optional[str] = None
     _rust_response: Optional[Any] = field(default=None, repr=False)
+    # Structured-output binding (set by LMClient.generate). Never serialized:
+    # replay re-derives the parsed value from `text`.
+    _response_format: Optional[Any] = field(default=None, repr=False, compare=False)
+    _structured_requested: bool = field(default=False, repr=False, compare=False)
+    _structured_cache: Any = field(default=_UNSET, init=False, repr=False, compare=False)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GenerateResponse":
@@ -229,10 +238,39 @@ class GenerateResponse:
 
     @property
     def structured_output(self) -> Optional[Any]:
-        """Parsed structured output (Pydantic model, dataclass, or dict)."""
-        if self._rust_response and hasattr(self._rust_response, 'object'):
-            return self._rust_response.object
-        return None
+        """Parsed structured output (Pydantic model, dataclass, or dict).
+
+        Populated when the request asked for structured output
+        (``response_format`` / ``response_schema``). Prefers the provider's
+        parsed object and falls back to parsing ``text`` as JSON, so it is also
+        available after checkpoint replay. Returns ``None`` when the output is
+        not valid JSON or fails validation against ``response_format``.
+        """
+        if self._structured_cache is _UNSET:
+            self._structured_cache = self._compute_structured_output()
+        return self._structured_cache
+
+    def _bind_structured_output(
+        self, response_format: Any = None, *, requested: bool = True
+    ) -> "GenerateResponse":
+        """Attach the requested output format so ``structured_output`` can be derived."""
+        self._response_format = response_format
+        self._structured_requested = requested or response_format is not None
+        self._structured_cache = _UNSET
+        return self
+
+    def _compute_structured_output(self) -> Optional[Any]:
+        raw: Any = None
+        if self._rust_response is not None:
+            raw = getattr(self._rust_response, "object", None)
+        if not self._structured_requested:
+            # Legacy behavior: surface whatever the provider parsed, untouched.
+            return raw
+        if isinstance(raw, str):
+            raw = parse_structured_text(raw)
+        if raw is None:
+            raw = parse_structured_text(self.text)
+        return coerce_structured_output(raw, self._response_format)
 
     @property
     def parsed(self) -> Optional[Any]:
@@ -278,3 +316,6 @@ class GenerateRequest:
     tool_choice: Optional[ToolChoice] = None
     config: GenerationConfig = field(default_factory=GenerationConfig)
     response_schema: Optional[str] = None
+    # Original `response_format` (Pydantic model, dataclass, or schema dict)
+    # used to coerce `GenerateResponse.structured_output`. Not sent to providers.
+    _response_format: Optional[Any] = field(default=None, repr=False, compare=False)
