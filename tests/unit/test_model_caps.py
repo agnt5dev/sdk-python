@@ -32,6 +32,7 @@ from agnt5.lm.model_caps import (
         "anthropic/claude-sonnet-5",
         "anthropic/claude-opus-5",
         "anthropic/claude-fable-5-1",
+        "anthropic/claude-haiku-4-6",
         "bedrock/us-east-1/us.anthropic.claude-opus-4-7-20260115-v1:0",
     ],
 )

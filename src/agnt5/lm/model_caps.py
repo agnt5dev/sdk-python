@@ -37,13 +37,14 @@ def is_openai_reasoning_model(model: str) -> bool:
 
 def claude_rejects_sampling_params(model: str) -> bool:
     """Claude models that reject ``temperature``/``top_p``: everything after
-    Opus 4.6 / Sonnet 4.6 / Haiku 4.5, including Fable. New or unrecognised
-    Claude models count as rejecting."""
+    Opus 4.6 / Sonnet 4.6 / Haiku 4.5 (the cutoff is per family), including
+    Fable. New or unrecognised Claude models count as rejecting."""
     name = _bare_model(model)
     if not name.startswith("claude-"):
         return False
 
     version: list[int] = []
+    family = None
     for token in re.split(r"[-.]", name[len("claude-"):]):
         if token.isdigit() and len(token) <= 2:
             version.append(int(token))
@@ -52,12 +53,15 @@ def claude_rejects_sampling_params(model: str) -> bool:
             return True
         if version:
             break
+        family = token
 
     if not version:
         return True
-    if len(version) == 1:
-        return version[0] > 4
-    return (version[0], version[1]) > (4, 6)
+    # Newest accepting version per family: Haiku 4.5, Opus/Sonnet 4.6.
+    # Version-first ids (claude-3-5-haiku) are all 3.x or older.
+    last_accepting = (4, 5) if family == "haiku" else (4, 6)
+    minor = version[1] if len(version) > 1 else 0
+    return (version[0], minor) > last_accepting
 
 
 def rejects_sampling_params(model: str) -> bool:
