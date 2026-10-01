@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
+import logging
 from typing import (
     Annotated,
     Any,
@@ -333,3 +335,65 @@ def extract_function_metadata(func: Callable[..., Any]) -> Dict[str, str]:
             metadata["description"] = first_line
 
     return metadata
+
+
+_structured_logger = logging.getLogger(__name__)
+
+
+def parse_structured_text(text: Optional[str]) -> Any:
+    """Parse model text as JSON for structured output.
+
+    Tolerates surrounding whitespace and a single Markdown code fence. Returns
+    ``None`` (and logs) when the text is empty or not valid JSON.
+    """
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            stripped = "\n".join(lines[1:-1]).strip()
+    if not stripped:
+        _structured_logger.warning("Structured output requested but model returned empty text")
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        _structured_logger.warning("Structured output is not valid JSON: %s", exc)
+        return None
+
+
+def coerce_structured_output(value: Any, response_format: Any) -> Any:
+    """Coerce a parsed JSON value into the requested ``response_format`` type.
+
+    Returns a Pydantic model instance for a Pydantic model class, a dataclass
+    instance for a dataclass type, and the value unchanged otherwise (raw JSON
+    schema or no format). Validation failures are logged and return ``None``.
+    """
+    if value is None or response_format is None:
+        return value
+    try:
+        if (
+            BaseModel is not None
+            and isinstance(response_format, type)
+            and issubclass(response_format, BaseModel)
+        ):
+            if isinstance(value, response_format):
+                return value
+            if hasattr(response_format, "model_validate"):
+                return response_format.model_validate(value)
+            return response_format.parse_obj(value)  # Pydantic v1
+        if isinstance(response_format, type) and dataclasses.is_dataclass(response_format):
+            if isinstance(value, response_format):
+                return value
+            if not isinstance(value, dict):
+                raise TypeError(f"expected a JSON object, got {type(value).__name__}")
+            return response_format(**value)
+    except Exception as exc:
+        _structured_logger.warning(
+            "Structured output failed validation against %s: %s",
+            getattr(response_format, "__name__", response_format),
+            exc,
+        )
+        return None
+    return value

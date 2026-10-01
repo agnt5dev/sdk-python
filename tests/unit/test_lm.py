@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from agnt5 import lm
 from agnt5._serialization import serialize
@@ -1028,10 +1029,10 @@ async def test_generate_structured_output_dataclass():
         assert "age" in schema["properties"]
         assert "email" in schema["properties"]
 
-        # Access structured output
-        assert response.structured_output is not None
-        assert response.structured_output["name"] == "Alice"
-        assert response.structured_output["age"] == 30
+        # Access structured output: coerced to the requested dataclass
+        assert response.structured_output == Person(
+            name="Alice", age=30, email="alice@example.com"
+        )
 
         # Test aliases
         assert response.parsed == response.structured_output
@@ -1066,6 +1067,182 @@ async def test_generate_structured_output_dict_schema():
         assert response.structured_output is not None
         assert response.structured_output["title"] == "Great Movie"
         assert response.structured_output["rating"] == 9.5
+
+
+class Movie(BaseModel):
+    """Test Pydantic model for structured output."""
+
+    title: str
+    rating: float
+
+
+MOVIE_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}, "rating": {"type": "number"}},
+    "required": ["title", "rating"],
+}
+
+
+def _rust_text_only(text: str) -> MagicMock:
+    """Rust response as returned by OpenAI non-streaming: no parsed `object`."""
+    mock_response = MagicMock()
+    mock_response.content = text
+    mock_response.usage = None
+    mock_response.tool_calls = None
+    mock_response.id = None
+    mock_response.object = None
+    return mock_response
+
+
+async def _generate_with_text(text: str, response_format):
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=_rust_text_only(text))
+        mock_rust_class.return_value = mock_instance
+        return await lm.generate(
+            model="openai/gpt-4o",
+            prompt="Rate this movie: Inception",
+            response_format=response_format,
+        )
+
+
+@pytest.mark.asyncio
+async def test_structured_output_pydantic_parsed_from_text_when_object_missing():
+    response = await _generate_with_text('{"title": "Inception", "rating": 9.5}', Movie)
+
+    assert isinstance(response.structured_output, Movie)
+    assert response.structured_output == Movie(title="Inception", rating=9.5)
+    assert response.parsed is response.structured_output
+    assert response.object is response.structured_output
+
+
+@pytest.mark.asyncio
+async def test_structured_output_pydantic_from_rust_object_is_coerced():
+    mock_response = _rust_text_only('{"title": "Inception", "rating": 9.5}')
+    mock_response.object = {"title": "Inception", "rating": 9.5}
+    with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+        mock_instance = MagicMock()
+        mock_instance.generate = AsyncMock(return_value=mock_response)
+        mock_rust_class.return_value = mock_instance
+        response = await lm.generate(
+            model="anthropic/claude-sonnet-4-5", prompt="Rate", response_format=Movie
+        )
+
+    assert response.structured_output == Movie(title="Inception", rating=9.5)
+
+
+@pytest.mark.asyncio
+async def test_structured_output_schema_parsed_from_text_when_object_missing():
+    response = await _generate_with_text(
+        '```json\n{"title": "Inception", "rating": 9.5}\n```', MOVIE_SCHEMA
+    )
+
+    assert response.structured_output == {"title": "Inception", "rating": 9.5}
+
+
+@pytest.mark.asyncio
+async def test_structured_output_dataclass_parsed_from_text_when_object_missing():
+    response = await _generate_with_text(
+        '{"name": "Alice", "age": 30, "email": "alice@example.com"}', Person
+    )
+
+    assert response.structured_output == Person(name="Alice", age=30, email="alice@example.com")
+
+
+@pytest.mark.asyncio
+async def test_structured_output_invalid_json_returns_none():
+    response = await _generate_with_text("Sorry, I can't do that.", Movie)
+
+    assert response.text == "Sorry, I can't do that."
+    assert response.structured_output is None
+    assert response.parsed is None
+
+
+@pytest.mark.asyncio
+async def test_structured_output_validation_failure_returns_none():
+    response = await _generate_with_text('{"title": "Inception"}', Movie)
+
+    assert response.structured_output is None
+
+
+@pytest.mark.asyncio
+async def test_structured_output_absent_without_response_format():
+    response = await _generate_with_text('{"title": "Inception", "rating": 9.5}', None)
+
+    assert response.structured_output is None
+
+
+def test_structured_output_survives_to_dict_from_dict_round_trip():
+    original = GenerateResponse(text='{"title": "Inception", "rating": 9.5}')
+    original._bind_structured_output(Movie)
+    assert original.structured_output == Movie(title="Inception", rating=9.5)
+
+    payload = original.to_dict()
+    # Only text is persisted; the model instance is never serialized.
+    assert "structured_output" not in payload
+
+    restored = GenerateResponse.from_dict(payload)._bind_structured_output(Movie)
+    assert restored.structured_output == Movie(title="Inception", rating=9.5)
+
+    schema_restored = GenerateResponse.from_dict(payload)._bind_structured_output(MOVIE_SCHEMA)
+    assert schema_restored.structured_output == {"title": "Inception", "rating": 9.5}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        (Movie, Movie(title="Inception", rating=9.5)),
+        (MOVIE_SCHEMA, {"title": "Inception", "rating": 9.5}),
+    ],
+)
+async def test_structured_output_on_durable_replay(response_format, expected):
+    replay = GenerateResponse(text='{"title": "Inception", "rating": 9.5}', finish_reason="stop")
+    transport = ModelActivationTransport(replay)
+    ctx = durable_lm_context(transport)
+    ctx.emit = lambda _event: None
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(side_effect=AssertionError("provider called"))
+            mock_rust_class.return_value = mock_instance
+            response = await lm.generate(
+                model="openai/gpt-4o-mini",
+                prompt="Rate this movie: Inception",
+                response_format=response_format,
+            )
+
+        mock_instance.generate.assert_not_called()
+        assert response.structured_output == expected
+        assert type(response.structured_output) is type(expected)
+    finally:
+        token.var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_structured_output_durable_first_call_commits_text_only():
+    transport = ModelActivationTransport()
+    ctx = durable_lm_context(transport)
+    ctx.emit = lambda _event: None
+    token = set_current_context(ctx)
+    try:
+        with patch("agnt5.lm.client.RustLanguageModel") as mock_rust_class:
+            mock_instance = MagicMock()
+            mock_instance.generate = AsyncMock(
+                return_value=_rust_text_only('{"title": "Inception", "rating": 9.5}')
+            )
+            mock_rust_class.return_value = mock_instance
+            response = await lm.generate(
+                model="openai/gpt-4o-mini",
+                prompt="Rate this movie: Inception",
+                response_format=Movie,
+            )
+
+        assert response.structured_output == Movie(title="Inception", rating=9.5)
+        assert len(transport.complete_requests) == 1
+    finally:
+        token.var.reset(token)
 
 
 # ============================================================================

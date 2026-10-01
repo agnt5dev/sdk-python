@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-10-01
+
+### Fixed
+
+- Use core 0.3.5, which parses JSON and JSON-schema output into the structured object for non-streaming OpenAI responses (AGNT5-1371, AGNT5-1416).
+- `lm.generate(..., response_format=X)` now returns the parsed value in `GenerateResponse.structured_output` (and `.parsed` / `.object`) on the first call and after checkpoint replay. The value is a Pydantic model instance for a Pydantic `response_format`, a dataclass instance for a dataclass, and a dict for a JSON schema. It is parsed from the response text when the provider leaves it unset; invalid JSON or a validation failure logs a warning and returns `None` (AGNT5-1371).
+
+### Changed
+
+- A dataclass `response_format` now yields a dataclass instance in `structured_output` instead of a dict. Code that indexes the result like a dict must use attribute access.
+
 ## [0.13.6] - 2026-09-25
 
 - Add SDK-core structured assertions to local scorer APIs and automatic native worker routing.
