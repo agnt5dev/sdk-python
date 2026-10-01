@@ -7,10 +7,10 @@ use agnt5_sdk_core::lm::{
     AnthropicProvider, AzureOpenAiProvider, BasetenProvider, BedrockProvider, BuiltInTool,
     ContentBlockType, DeepSeekProvider, FireworksProvider, GenerateRequest, GenerateResponse,
     GenerationConfig, GoogleProvider, GroqProvider, HuggingFaceProvider, JsonSchemaFormat,
-    LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, MoonshotProvider,
-    OllamaProvider, OpenAiProvider, OpenRouterProvider, PromptCacheConfig, ResponseFormat,
-    StreamChunk, StreamHandle, StreamRequest, TogetherProvider, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, XaiProvider,
+    LanguageModel, LeptonProvider, Message, MessageRole, MistralProvider, Modality,
+    MoonshotProvider, OllamaProvider, OpenAiProvider, OpenRouterProvider, PromptCacheConfig,
+    ReasoningEffort, ResponseFormat, StreamChunk, StreamHandle, StreamRequest, TogetherProvider,
+    TokenUsage, ToolCall, ToolChoice, ToolDefinition, XaiProvider,
 };
 use futures::StreamExt;
 use opentelemetry::Context as OtelContext;
@@ -262,6 +262,7 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+        apply_response_options(&mut request.config, kwargs_ref)?;
 
         apply_prompt_cache_config(
             &mut request.config,
@@ -418,6 +419,7 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+        apply_response_options(&mut request.config, kwargs_ref)?;
 
         apply_prompt_cache_config(
             &mut request.config,
@@ -570,6 +572,7 @@ impl PyLanguageModel {
         if !built_in_tools.is_empty() {
             request.config.built_in_tools = built_in_tools;
         }
+        apply_response_options(&mut request.config, kwargs_ref)?;
 
         apply_prompt_cache_config(
             &mut request.config,
@@ -1280,6 +1283,42 @@ fn apply_prompt_cache_config(
         }
         config.prompt_cache = Some(cache);
     }
+}
+
+/// Apply `reasoning_effort` and `modalities` from the Python kwargs. The client
+/// has always sent both, but nothing read them, so OpenAI never received the
+/// requested effort (AGNT5-1456).
+fn apply_response_options(
+    config: &mut GenerationConfig,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    if let Some(effort) = get_optional_string(kwargs, "reasoning_effort")? {
+        config.reasoning_effort = Some(match effort.as_str() {
+            "none" => ReasoningEffort::None,
+            "minimal" => ReasoningEffort::Minimal,
+            "low" => ReasoningEffort::Low,
+            "medium" => ReasoningEffort::Medium,
+            "high" => ReasoningEffort::High,
+            other => return Err(PyValueError::new_err(format!(
+                "Unknown reasoning_effort: {other} (expected none, minimal, low, medium or high)"
+            ))),
+        });
+    }
+    if let Some(raw) = get_optional_string(kwargs, "modalities")? {
+        let names: Vec<String> = serde_json::from_str(&raw)
+            .map_err(|err| PyValueError::new_err(format!("Failed to parse modalities: {err}")))?;
+        let modalities = names
+            .iter()
+            .map(|name| match name.as_str() {
+                "text" => Ok(Modality::Text),
+                "audio" => Ok(Modality::Audio),
+                "image" => Ok(Modality::Image),
+                other => Err(PyValueError::new_err(format!("Unknown modality: {other}"))),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        config.modalities = Some(modalities);
+    }
+    Ok(())
 }
 
 fn parse_built_in_tools_json(json: Option<&str>) -> PyResult<Vec<BuiltInTool>> {

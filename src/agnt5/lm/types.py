@@ -112,9 +112,15 @@ def built_in_tool_names(tools) -> "set[str]":
 
 
 class ReasoningEffort(str, Enum):
-    """Reasoning effort level for o-series models."""
+    """How much a reasoning model thinks before answering.
 
+    Models accept different subsets: gpt-6 takes none/low/medium/high and
+    rejects minimal; gpt-5 takes minimal/low/medium/high.
+    """
+
+    NONE = "none"
     MINIMAL = "minimal"
+    LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 

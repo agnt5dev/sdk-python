@@ -913,10 +913,16 @@ class LMClient(LanguageModel):
         if hasattr(rust_response, "id") and rust_response.id:
             response_id = rust_response.id
 
+        # Surface the provider's stop reason so a max_tokens stop is visible
+        # (AGNT5-1403); it used to be hard-coded to None.
+        finish_reason = getattr(rust_response, "finish_reason", None)
+        if not isinstance(finish_reason, str):
+            finish_reason = None
+
         return GenerateResponse(
             text=rust_response.content,
             usage=usage,
-            finish_reason=None,
+            finish_reason=finish_reason,
             tool_calls=tool_calls,
             response_id=response_id,
             _rust_response=rust_response,

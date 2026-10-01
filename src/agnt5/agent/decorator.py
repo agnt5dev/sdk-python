@@ -6,7 +6,7 @@ import functools
 from typing import Any, Callable, List, Optional
 
 from ..lm import LanguageModel
-from .core import Agent
+from .core import _DEFAULT_AGENT_TEMPERATURE, Agent
 from .registry import AgentRegistry
 
 
@@ -18,7 +18,9 @@ def agent(
     instructions: Optional[str] = None,
     tools: Optional[List[Any]] = None,
     model_name: str = "gpt-4o-mini",
-    temperature: float = 0.7,
+    # The Agent's default sentinel, not a plain 0.7: a plain value counts as
+    # explicit and would be sent to models that reject temperature.
+    temperature: Optional[float] = _DEFAULT_AGENT_TEMPERATURE,
     max_iterations: int = 10,
 ) -> Callable:
     """

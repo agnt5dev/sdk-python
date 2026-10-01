@@ -10,6 +10,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - An `Agent` on a gpt-6 model (such as `openai/gpt-6-luna`) no longer sends its default `temperature` of 0.7. gpt-6 rejects any temperature with a 400, so every agent call to it failed. The gpt-6 family now counts as an OpenAI reasoning model, like gpt-5 and the o-series; an explicit temperature is still sent. Matches TypeScript (AGNT5-1323).
+- An `Agent` on Claude Opus 4.7 and later, Sonnet 5, Opus 5 or Fable no longer sends its default `temperature`; these models reject it with a 400, so every default Agent call to them failed. `@agent(...)` agents now get the same default instead of a plain 0.7 that counted as explicit (AGNT5-1403).
+- `reasoning_effort` now reaches the provider. The client passed it to the native binding, which never read it, so OpenAI never received the requested effort; `modalities` was dropped the same way (AGNT5-1456).
+- `GenerateResponse.finish_reason` is now the provider's stop reason for non-streaming calls instead of always `None`, so a `max_tokens` stop is visible (AGNT5-1403).
+
+### Added
+
+- `Agent(reasoning_effort=...)`, and `ReasoningEffort.NONE` / `ReasoningEffort.LOW`. gpt-6 accepts `none`/`low`/`medium`/`high` and rejects `minimal`; gpt-5 accepts `minimal` (AGNT5-1456).
 
 ## [0.13.7] - 2026-10-01
 
