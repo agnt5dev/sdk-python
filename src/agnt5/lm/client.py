@@ -265,10 +265,13 @@ class LMClient(LanguageModel):
                 "temperature": request.config.temperature,
                 "max_tokens": request.config.max_tokens,
             }
-            # Effort changes the response, so a changed effort must not replay
-            # the old one. Added only when set, so existing keys are unchanged.
+            # Effort and modalities change the response, so a change must not
+            # replay the old one. Added only when set, so existing keys are
+            # unchanged.
             if request.config.reasoning_effort is not None:
                 memo_config["reasoning_effort"] = request.config.reasoning_effort.value
+            if request.config.modalities is not None:
+                memo_config["modalities"] = [m.value for m in request.config.modalities]
             step_key, content_hash = memo.lm_call_key(
                 model=request.model,
                 messages=request.messages,

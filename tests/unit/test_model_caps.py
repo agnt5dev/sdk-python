@@ -222,3 +222,20 @@ async def test_memo_key_includes_reasoning_effort_only_when_set(monkeypatch, eff
         assert memo.configs == [{"temperature": None, "max_tokens": None}]
     else:
         assert memo.configs[0]["reasoning_effort"] == "low"
+
+
+async def test_memo_key_includes_modalities_when_set(monkeypatch):
+    from types import SimpleNamespace
+
+    from agnt5.lm import Modality
+    from agnt5.lm import client as lm_client
+    from agnt5.lm.client import LMClient
+
+    memo = _RecordingMemo()
+    monkeypatch.setattr(lm_client, "get_current_context", lambda: SimpleNamespace(_memo=memo))
+    request = GenerateRequest(model="openai/gpt-6-luna")
+    request.config.modalities = [Modality.TEXT, Modality.AUDIO]
+
+    await LMClient.__new__(LMClient)._generate(request)
+
+    assert memo.configs[0]["modalities"] == ["text", "audio"]
