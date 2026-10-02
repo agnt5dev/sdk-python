@@ -14,6 +14,7 @@ _BEDROCK_VERSION_SUFFIX = re.compile(r"-v\d+:\d+$")
 _OPENAI_GPT = re.compile(r"^gpt-(\d+)")
 _OPENAI_O_SERIES = re.compile(r"^o\d+(-|$)")
 _CLAUDE_FAMILIES = frozenset({"opus", "sonnet", "haiku", "instant"})
+_LEGACY_VERSION = re.compile(r"^v(\d{1,2})$")
 
 
 def _bare_model(model: str) -> str:
@@ -48,6 +49,11 @@ def claude_rejects_sampling_params(model: str) -> bool:
     for token in re.split(r"[-.]", name[len("claude-"):]):
         if token.isdigit() and len(token) <= 2:
             version.append(int(token))
+            continue
+        legacy = _LEGACY_VERSION.match(token)
+        if legacy and not version:
+            # Bedrock's legacy ids: claude-v2, claude-instant-v1.
+            version.append(int(legacy.group(1)))
             continue
         if not version and token not in _CLAUDE_FAMILIES:
             return True

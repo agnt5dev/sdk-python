@@ -261,13 +261,18 @@ class LMClient(LanguageModel):
             and current_ctx._memo
         ):
             memo = current_ctx._memo
+            memo_config = {
+                "temperature": request.config.temperature,
+                "max_tokens": request.config.max_tokens,
+            }
+            # Effort changes the response, so a changed effort must not replay
+            # the old one. Added only when set, so existing keys are unchanged.
+            if request.config.reasoning_effort is not None:
+                memo_config["reasoning_effort"] = request.config.reasoning_effort.value
             step_key, content_hash = memo.lm_call_key(
                 model=request.model,
                 messages=request.messages,
-                config={
-                    "temperature": request.config.temperature,
-                    "max_tokens": request.config.max_tokens,
-                },
+                config=memo_config,
             )
             cached = await memo.get_cached_lm_result(step_key, content_hash)
             if cached:

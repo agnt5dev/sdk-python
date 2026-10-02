@@ -51,6 +51,8 @@ def test_models_that_reject_sampling(model):
         "anthropic/claude-opus-4-20250514",
         "anthropic/claude-3-5-sonnet-20241022",
         "claude-2.1",
+        "bedrock/anthropic.claude-v2",
+        "bedrock/us-east-1/anthropic.claude-instant-v1",
     ],
 )
 def test_models_that_accept_sampling(model):
@@ -183,3 +185,40 @@ async def test_reasoning_effort_is_sent_to_openai(openai_capture):
     assert body["reasoning"]["effort"] == "low"
     assert "temperature" not in body
     assert response.text == "391"
+
+
+class _RecordingMemo:
+    def __init__(self):
+        self.configs = []
+
+    def lm_call_key(self, model, messages, config):
+        self.configs.append(dict(config))
+        return "lm.0", "hash"
+
+    async def get_cached_lm_result(self, step_key, content_hash):
+        from agnt5.lm import GenerateResponse
+
+        return GenerateResponse(text="cached")
+
+
+@pytest.mark.parametrize("effort", [None, ReasoningEffort.LOW])
+async def test_memo_key_includes_reasoning_effort_only_when_set(monkeypatch, effort):
+    """A changed effort must not replay the old response; an unset effort
+    leaves existing memo keys unchanged."""
+    from types import SimpleNamespace
+
+    from agnt5.lm import client as lm_client
+    from agnt5.lm.client import LMClient
+
+    memo = _RecordingMemo()
+    monkeypatch.setattr(lm_client, "get_current_context", lambda: SimpleNamespace(_memo=memo))
+    request = GenerateRequest(model="openai/gpt-6-luna")
+    request.config.reasoning_effort = effort
+
+    response = await LMClient.__new__(LMClient)._generate(request)
+
+    assert response.text == "cached"
+    if effort is None:
+        assert memo.configs == [{"temperature": None, "max_tokens": None}]
+    else:
+        assert memo.configs[0]["reasoning_effort"] == "low"
