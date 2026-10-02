@@ -1618,6 +1618,8 @@ class TestLLMJudge:
         prompt = CORRECTNESS_JUDGE_SYSTEM_PROMPT
         assert prompt.index('"answer"') < prompt.index('"label"') < prompt.index('"score"')
         assert "a longer output that gives the same answer is fully correct" in prompt
+        # Reference-free judging is supported, so the prompt must not assume a reference.
+        assert "when no expected output is given, check whether the output correctly" in prompt
         assert Correctness().to_config().system_prompt == prompt
         assert Helpfulness().to_config().system_prompt == EVALUATOR_SYSTEM_PROMPT
 
