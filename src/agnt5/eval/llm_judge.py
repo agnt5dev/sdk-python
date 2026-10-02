@@ -106,6 +106,8 @@ class EvaluatorPreset:
     preset_name: ClassVar[str] = "evaluator_preset"
     scorer_name: ClassVar[str] = "llm_judge"
     criteria: ClassVar[str] = ""
+    # None means EVALUATOR_SYSTEM_PROMPT; a preset may set its own.
+    judge_system_prompt: ClassVar[Optional[str]] = None
     preset_version: ClassVar[str] = EVALUATOR_PRESET_VERSION
     choice_scores: ClassVar[Dict[str, float]] = {
         "fail": 0.0,
@@ -126,7 +128,7 @@ class EvaluatorPreset:
         return LLMJudgeConfig(
             criteria=self.criteria,
             model=self.model,
-            system_prompt=EVALUATOR_SYSTEM_PROMPT,
+            system_prompt=self.judge_system_prompt or EVALUATOR_SYSTEM_PROMPT,
             temperature=self.temperature,
             include_input=self.include_input,
             choice_scores=dict(self.choice_scores),
@@ -236,6 +238,23 @@ Respond with a JSON object containing:
 Respond ONLY with the JSON object, no other text."""
 
 
+# System prompt for the correctness judge, used by the worker's built-in
+# `correctness` scorer and by `Correctness.evaluate()`. The judge quotes the
+# output's answer before it labels it: without that step, small judge models
+# marked long, right answers partial or fail for their length. Keep it identical
+# to the TypeScript SDK's.
+CORRECTNESS_JUDGE_SYSTEM_PROMPT = """You are an expert evaluator. Your task is to check whether the output gives the same answer as the expected output, following the provided criteria. The expected output is a short reference answer; a longer output that gives the same answer is fully correct, however much it adds around that answer.
+
+Respond with a JSON object containing:
+- "answer": the answer the output gives, quoted in a few words
+- "label": exactly one of "pass", "partial", or "fail"
+- "score": a number between 0.0 and 1.0
+- "passed": boolean (true if score >= 0.7)
+- "explanation": brief explanation of your evaluation
+
+Respond ONLY with the JSON object, no other text."""
+
+
 @dataclass
 class Correctness(EvaluatorPreset):
     """Managed correctness judge preset for client.eval() scorers."""
@@ -244,6 +263,7 @@ class Correctness(EvaluatorPreset):
 
     preset_name: ClassVar[str] = "correctness"
     scorer_name: ClassVar[str] = "correctness"
+    judge_system_prompt: ClassVar[Optional[str]] = CORRECTNESS_JUDGE_SYSTEM_PROMPT
     # Same text as `agnt5.scorer.CORRECTNESS_JUDGE_CRITERIA`, which the worker's
     # built-in `correctness` scorer uses; keep them identical.
     criteria: ClassVar[str] = (

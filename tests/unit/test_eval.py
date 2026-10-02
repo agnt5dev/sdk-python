@@ -1607,6 +1607,20 @@ class TestLLMJudge:
             "pass": 1.0,
         }
 
+    def test_correctness_judge_quotes_the_answer_before_labelling_it(self):
+        """The correctness system prompt asks for the answer first; other presets keep theirs."""
+        from agnt5.eval import Correctness, Helpfulness
+        from agnt5.eval.llm_judge import (
+            CORRECTNESS_JUDGE_SYSTEM_PROMPT,
+            EVALUATOR_SYSTEM_PROMPT,
+        )
+
+        prompt = CORRECTNESS_JUDGE_SYSTEM_PROMPT
+        assert prompt.index('"answer"') < prompt.index('"label"') < prompt.index('"score"')
+        assert "a longer output that gives the same answer is fully correct" in prompt
+        assert Correctness().to_config().system_prompt == prompt
+        assert Helpfulness().to_config().system_prompt == EVALUATOR_SYSTEM_PROMPT
+
     @pytest.mark.parametrize(
         ("label", "score", "passed"),
         [("pass", 1.0, True), ("partial", 0.5, False), ("fail", 0.0, False)],
@@ -1615,7 +1629,7 @@ class TestLLMJudge:
         self, monkeypatch, label, score, passed
     ):
         """Correctness asks for a pass/partial/fail label and maps it to a score."""
-        from agnt5.eval.llm_judge import EVALUATOR_SYSTEM_PROMPT
+        from agnt5.eval.llm_judge import CORRECTNESS_JUDGE_SYSTEM_PROMPT
         from agnt5.eval.types import ScorerRequest
 
         scorer_mod = importlib.import_module("agnt5.scorer")
@@ -1626,7 +1640,7 @@ class TestLLMJudge:
             captured["messages"] = kwargs["messages"]
 
             class Response:
-                text = f'{{"label":"{label}","explanation":"judged"}}'
+                text = f'{{"answer":"Augustus","label":"{label}","explanation":"judged"}}'
 
             return Response()
 
@@ -1644,7 +1658,7 @@ class TestLLMJudge:
         result = asyncio.run(scorer_mod.run_scorer("correctness", request))
 
         system, user = (m["content"] for m in captured["messages"])
-        assert system == EVALUATOR_SYSTEM_PROMPT
+        assert system == CORRECTNESS_JUDGE_SYSTEM_PROMPT
         assert scorer_mod.CORRECTNESS_JUDGE_CRITERIA in user
         assert "Choose exactly one label from: fail, partial, pass" in user
         assert result.score == score
@@ -1652,6 +1666,7 @@ class TestLLMJudge:
         assert result.label == label
         assert result.metadata["judge_preset"] == "correctness"
         assert result.metadata["selected_label"] == label
+        assert result.metadata["answer"] == "Augustus"
 
     def test_correctness_builtin_handler_allows_reference_free_judging(self, monkeypatch):
         """Correctness can judge output against input without expected output."""

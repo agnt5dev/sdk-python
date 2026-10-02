@@ -225,7 +225,7 @@ def all_builtin_judge_scorers() -> Dict[str, ScorerConfig]:
 # The correctness rubric judges agreement with the reference answer, not
 # similarity to it: an answer that explains itself must not be marked partial.
 # It is the same text as `agnt5.eval.Correctness.criteria` and as the
-# TypeScript and Go SDKs' correctness rubric; keep all of them identical.
+# TypeScript SDK's correctness rubric; keep them identical.
 CORRECTNESS_JUDGE_CRITERIA = (
     "Evaluate whether the output's answer agrees with the expected output. The "
     "expected output is a reference answer: it says what the right answer is, not "
@@ -691,7 +691,7 @@ def register_builtin_scorer_handlers() -> None:
     if "correctness" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
 
         async def _correctness_handler(ctx: "ScorerContext", request: Any) -> Any:
-            from .eval.llm_judge import EVALUATOR_SYSTEM_PROMPT, LLMJudgeConfig, llm_judge
+            from .eval.llm_judge import CORRECTNESS_JUDGE_SYSTEM_PROMPT, LLMJudgeConfig, llm_judge
 
             config = request.config or {}
             try:
@@ -701,15 +701,16 @@ def register_builtin_scorer_handlers() -> None:
                 )
             except KeyError as e:
                 return _config_error(f"correctness field selector not found: {e.args[0]}")
-            # The judge picks a pass / partial / fail label, mapped to 1.0 / 0.5 /
-            # 0.0, the same way the `Correctness` preset judges locally. A bare
-            # 0-1 score let small judge models mark explained answers partial.
+            # The judge quotes the output's answer, then picks a pass / partial /
+            # fail label mapped to 1.0 / 0.5 / 0.0, the same way the `Correctness`
+            # preset judges locally. With a bare 0-1 score and no quoted answer,
+            # small judge models marked explained answers partial.
             result = await llm_judge(
                 output=output,
                 config=LLMJudgeConfig(
                     criteria=CORRECTNESS_JUDGE_CRITERIA,
                     model=_judge_model(config),
-                    system_prompt=EVALUATOR_SYSTEM_PROMPT,
+                    system_prompt=CORRECTNESS_JUDGE_SYSTEM_PROMPT,
                     temperature=_judge_temperature(config),
                     include_input=_judge_include_input(config, True),
                     choice_scores=dict(CORRECTNESS_JUDGE_CHOICE_SCORES),
