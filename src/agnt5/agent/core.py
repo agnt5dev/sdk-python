@@ -55,6 +55,7 @@ from ..lm.events import (
     LMContentBlockDelta,
     LMContentBlockStarted,
 )
+from ..lm.model_caps import rejects_sampling_params
 from ..tool import Tool, ToolRegistry
 from .agents_md import AgentsMdSource, load_agents_md, render_guidance
 from .context import AgentContext
@@ -101,22 +102,6 @@ async def _stream_with_display_parent(
             except StopAsyncIteration:
                 return
         yield item
-
-
-def _is_openai_reasoning_model(model: str) -> bool:
-    if not model.startswith("openai/"):
-        return False
-
-    model_name = model.split("/", 1)[1]
-    return (
-        model_name.startswith("gpt-5")
-        or model_name == "o1"
-        or model_name.startswith("o1-")
-        or model_name == "o3"
-        or model_name.startswith("o3-")
-        or model_name == "o4"
-        or model_name.startswith("o4-")
-    )
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -222,6 +207,7 @@ class Agent:
         temperature: Optional[float] = _DEFAULT_AGENT_TEMPERATURE,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
+        reasoning_effort: Optional[Union[lm.ReasoningEffort, str]] = None,
         cache: Optional[Union[bool, lm.PromptCache, lm.ContextCache, str]] = None,
         # Deprecated compatibility aliases. Prefer cache=True or
         # cache=lm.PromptCache(...).
@@ -261,6 +247,10 @@ class Agent:
             temperature: LLM temperature (0-1). Legacy parameter - prefer model_config.
             max_tokens: Maximum tokens in response. Legacy parameter - prefer model_config.
             top_p: Top-p sampling. Legacy parameter - prefer model_config.
+            reasoning_effort: How much the model reasons before answering:
+                "none", "minimal", "low", "medium" or "high". Which values a
+                model accepts varies: gpt-6 takes none/low/medium/high, gpt-5
+                takes minimal/low/medium/high.
             cache: Enable provider-native prompt caching with ``True``, pass
                 ``lm.PromptCache(...)`` for TTL/key/retention hints, or pass a
                 Gemini ``lm.ContextCache`` for reusable explicit caches.
@@ -312,6 +302,9 @@ class Agent:
         self.temperature = None if temperature is None else float(temperature)
         self.max_tokens = max_tokens
         self.top_p = top_p
+        self.reasoning_effort = (
+            None if reasoning_effort is None else lm.ReasoningEffort(reasoning_effort)
+        )
         self.cache = lm._coerce_prompt_cache(cache)
         if cache_control or cache_ttl is not None:
             if self.cache is None:
@@ -424,7 +417,9 @@ class Agent:
     def _temperature_for_request(self) -> Optional[float]:
         if self._temperature_explicit:
             return self.temperature
-        if _is_openai_reasoning_model(self.model):
+        # The default must not reach models that reject sampling parameters
+        # (OpenAI reasoning models, Claude after 4.6): they return a 400.
+        if rejects_sampling_params(self.model):
             return None
         return self.temperature
 
@@ -441,6 +436,8 @@ class Agent:
             request.config.max_tokens = self.max_tokens
         if self.top_p is not None:
             request.config.top_p = self.top_p
+        if self.reasoning_effort is not None:
+            request.config.reasoning_effort = self.reasoning_effort
         if self.cache is not None:
             request.config.cache = self.cache
         if include_built_in_tools and self._built_in_tools:
@@ -461,6 +458,9 @@ class Agent:
             "temperature": self._temperature_for_request(),
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
+            "reasoning_effort": (
+                self.reasoning_effort.value if self.reasoning_effort is not None else None
+            ),
             "cache": cache,
         }
 

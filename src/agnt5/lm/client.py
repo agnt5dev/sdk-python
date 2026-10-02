@@ -261,13 +261,21 @@ class LMClient(LanguageModel):
             and current_ctx._memo
         ):
             memo = current_ctx._memo
+            memo_config = {
+                "temperature": request.config.temperature,
+                "max_tokens": request.config.max_tokens,
+            }
+            # Effort and modalities change the response, so a change must not
+            # replay the old one. Added only when set, so existing keys are
+            # unchanged.
+            if request.config.reasoning_effort is not None:
+                memo_config["reasoning_effort"] = request.config.reasoning_effort.value
+            if request.config.modalities is not None:
+                memo_config["modalities"] = [m.value for m in request.config.modalities]
             step_key, content_hash = memo.lm_call_key(
                 model=request.model,
                 messages=request.messages,
-                config={
-                    "temperature": request.config.temperature,
-                    "max_tokens": request.config.max_tokens,
-                },
+                config=memo_config,
             )
             cached = await memo.get_cached_lm_result(step_key, content_hash)
             if cached:
@@ -913,10 +921,16 @@ class LMClient(LanguageModel):
         if hasattr(rust_response, "id") and rust_response.id:
             response_id = rust_response.id
 
+        # Surface the provider's stop reason so a max_tokens stop is visible
+        # (AGNT5-1403); it used to be hard-coded to None.
+        finish_reason = getattr(rust_response, "finish_reason", None)
+        if not isinstance(finish_reason, str):
+            finish_reason = None
+
         return GenerateResponse(
             text=rust_response.content,
             usage=usage,
-            finish_reason=None,
+            finish_reason=finish_reason,
             tool_calls=tool_calls,
             response_id=response_id,
             _rust_response=rust_response,

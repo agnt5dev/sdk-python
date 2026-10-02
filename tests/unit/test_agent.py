@@ -310,11 +310,15 @@ def test_agent_configuration(mock_lm):
     assert agent.max_iterations == 20
 
 
-def test_agent_omits_implicit_temperature_for_openai_reasoning_models():
-    """OpenAI reasoning models should not inherit Agent's legacy temperature default."""
+@pytest.mark.parametrize("model", ["openai/gpt-5-mini", "openai/gpt-6-luna"])
+def test_agent_omits_implicit_temperature_for_openai_reasoning_models(model):
+    """OpenAI reasoning models should not inherit Agent's legacy temperature default.
+
+    gpt-6 rejects any temperature with a 400, so it must be covered too (AGNT5-1323).
+    """
     agent = Agent(
         name="reasoning_agent",
-        model="openai/gpt-5-mini",
+        model=model,
         instructions="Test",
     )
     request = GenerateRequest(model=agent.model)
@@ -325,11 +329,12 @@ def test_agent_omits_implicit_temperature_for_openai_reasoning_models():
     assert request.config.temperature is None
 
 
-def test_agent_preserves_explicit_temperature_for_openai_reasoning_models():
+@pytest.mark.parametrize("model", ["openai/gpt-5-mini", "openai/gpt-6-luna"])
+def test_agent_preserves_explicit_temperature_for_openai_reasoning_models(model):
     """Explicit temperatures stay configured so the provider layer can warn/drop them."""
     agent = Agent(
         name="reasoning_agent",
-        model="openai/gpt-5-mini",
+        model=model,
         instructions="Test",
         temperature=0.2,
     )
