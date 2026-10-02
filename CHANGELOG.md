@@ -7,8 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-10-02
+
 ### Fixed
 
+- Use core 0.3.7, which exports spans with the worker resource so Python traces appear in trace listing, drops sampling parameters for gpt-6 and Claude models that reject them, raises the Claude `max_tokens` default, and adds the `none`/`low` reasoning efforts.
 - An `Agent` on a gpt-6 model (such as `openai/gpt-6-luna`) no longer sends its default `temperature` of 0.7. gpt-6 rejects any temperature with a 400, so every agent call to it failed. The gpt-6 family now counts as an OpenAI reasoning model, like gpt-5 and the o-series; an explicit temperature is still sent. Matches TypeScript.
 - An `Agent` on Claude Opus 4.7 and later, Sonnet 5, Opus 5 or Fable no longer sends its default `temperature`; these models reject it with a 400, so every default Agent call to them failed. `@agent(...)` agents now get the same default instead of a plain 0.7 that counted as explicit.
 - `reasoning_effort` now reaches the provider. The client passed it to the native binding, which never read it, so OpenAI never received the requested effort; `modalities` was dropped the same way.
