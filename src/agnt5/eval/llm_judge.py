@@ -244,10 +244,19 @@ class Correctness(EvaluatorPreset):
 
     preset_name: ClassVar[str] = "correctness"
     scorer_name: ClassVar[str] = "correctness"
+    # Same text as `agnt5.scorer.CORRECTNESS_JUDGE_CRITERIA`, which the worker's
+    # built-in `correctness` scorer uses; keep them identical.
     criteria: ClassVar[str] = (
-        "Evaluate whether the output correctly answers the input and matches the expected "
-        "output. Award pass for fully correct answers, partial for incomplete or partially "
-        "correct answers, and fail for incorrect or unsupported answers."
+        "Evaluate whether the output's answer agrees with the expected output. The "
+        "expected output is a reference answer: it says what the right answer is, not "
+        "what the output must look like, so the output does not need to match its "
+        "length, wording, or format. An output that gives the right answer and also "
+        "explains it, shows working, or restates the question is fully correct and is "
+        'a pass, not partial; for example, "3 + 4 = 7, because 3 and 4 make 7." is a '
+        'pass against "7". Award partial only when the expected output has several '
+        "required parts and the output leaves one out. Award fail when the answer is "
+        "wrong, contradicts the expected output, or is missing. If there is no expected "
+        "output, judge whether the output correctly answers the input."
     )
 
 

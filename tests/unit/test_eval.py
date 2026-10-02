@@ -1580,6 +1580,79 @@ class TestLLMJudge:
         assert result.metadata["context_fields"] == ["input.context"]
         assert "## Context" in captured["messages"][1]["content"]
 
+    def test_correctness_rubric_judges_agreement_not_similarity(self):
+        """The built-in and the preset share one rubric that accepts explained answers."""
+        from agnt5.eval import Correctness
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        criteria = scorer_mod.CORRECTNESS_JUDGE_CRITERIA
+
+        assert Correctness.criteria == criteria
+        assert criteria.startswith(
+            "Evaluate whether the output's answer agrees with the expected output."
+        )
+        assert "does not need to match its length, wording, or format" in criteria
+        assert "is fully correct and is a pass, not partial" in criteria
+        assert "Award partial only when the expected output has several required parts" in (
+            criteria
+        )
+        assert "Award fail when the answer is wrong, contradicts the expected output" in (
+            criteria
+        )
+        # The old rubric asked for a match and gave partial credit for anything else.
+        assert "matches the expected output" not in criteria
+        assert scorer_mod.CORRECTNESS_JUDGE_CHOICE_SCORES == {
+            "fail": 0.0,
+            "partial": 0.5,
+            "pass": 1.0,
+        }
+
+    @pytest.mark.parametrize(
+        ("label", "score", "passed"),
+        [("pass", 1.0, True), ("partial", 0.5, False), ("fail", 0.0, False)],
+    )
+    def test_correctness_builtin_handler_scores_judge_labels(
+        self, monkeypatch, label, score, passed
+    ):
+        """Correctness asks for a pass/partial/fail label and maps it to a score."""
+        from agnt5.eval.llm_judge import EVALUATOR_SYSTEM_PROMPT
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = f'{{"label":"{label}","explanation":"judged"}}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            input={"message": "Who was the first emperor of Rome?"},
+            output={"output": "**Augustus** was the first Roman emperor, from 27 BCE."},
+            expected={"output": "Augustus"},
+            config={},
+        )
+        result = asyncio.run(scorer_mod.run_scorer("correctness", request))
+
+        system, user = (m["content"] for m in captured["messages"])
+        assert system == EVALUATOR_SYSTEM_PROMPT
+        assert scorer_mod.CORRECTNESS_JUDGE_CRITERIA in user
+        assert "Choose exactly one label from: fail, partial, pass" in user
+        assert result.score == score
+        assert result.passed is passed
+        assert result.label == label
+        assert result.metadata["judge_preset"] == "correctness"
+        assert result.metadata["selected_label"] == label
+
     def test_correctness_builtin_handler_allows_reference_free_judging(self, monkeypatch):
         """Correctness can judge output against input without expected output."""
         from agnt5.eval.types import ScorerRequest
