@@ -151,7 +151,7 @@ class EvaluatorPreset:
         }
         if self.scorer_name == "llm_judge":
             config["criteria"] = self.criteria
-            config["system_prompt"] = EVALUATOR_SYSTEM_PROMPT
+            config["system_prompt"] = self.judge_system_prompt or EVALUATOR_SYSTEM_PROMPT
             config["choice_scores"] = dict(self.choice_scores)
         if self.answer_field:
             config["answer_field"] = self.answer_field

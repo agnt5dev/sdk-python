@@ -1622,6 +1622,21 @@ class TestLLMJudge:
         assert "when no expected output is given, check whether the output correctly" in prompt
         assert Correctness().to_config().system_prompt == prompt
         assert Helpfulness().to_config().system_prompt == EVALUATOR_SYSTEM_PROMPT
+        assert Helpfulness().to_scorer_spec()["config"]["system_prompt"] == EVALUATOR_SYSTEM_PROMPT
+
+    def test_preset_system_prompt_hook_reaches_the_scorer_spec(self):
+        """A preset's own judge prompt is used locally and sent to the platform alike."""
+        from typing import ClassVar, Optional
+
+        from agnt5.eval.llm_judge import EvaluatorPreset
+
+        class Terse(EvaluatorPreset):
+            preset_name: ClassVar[str] = "terse"
+            criteria: ClassVar[str] = "Is it terse?"
+            judge_system_prompt: ClassVar[Optional[str]] = "Custom judge prompt."
+
+        assert Terse().to_config().system_prompt == "Custom judge prompt."
+        assert Terse().to_scorer_spec()["config"]["system_prompt"] == "Custom judge prompt."
 
     @pytest.mark.parametrize(
         ("label", "score", "passed"),
