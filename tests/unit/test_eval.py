@@ -1580,6 +1580,111 @@ class TestLLMJudge:
         assert result.metadata["context_fields"] == ["input.context"]
         assert "## Context" in captured["messages"][1]["content"]
 
+    def test_correctness_rubric_judges_agreement_not_similarity(self):
+        """The built-in and the preset share one rubric that accepts explained answers."""
+        from agnt5.eval import Correctness
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        criteria = scorer_mod.CORRECTNESS_JUDGE_CRITERIA
+
+        assert Correctness.criteria == criteria
+        assert criteria.startswith(
+            "Evaluate whether the output's answer agrees with the expected output."
+        )
+        assert "does not need to match its length, wording, or format" in criteria
+        assert "is fully correct and is a pass, not partial" in criteria
+        assert "Award partial only when the expected output has several required parts" in (
+            criteria
+        )
+        assert "Award fail when the answer is wrong, contradicts the expected output" in (
+            criteria
+        )
+        # The old rubric asked for a match and gave partial credit for anything else.
+        assert "matches the expected output" not in criteria
+        assert scorer_mod.CORRECTNESS_JUDGE_CHOICE_SCORES == {
+            "fail": 0.0,
+            "partial": 0.5,
+            "pass": 1.0,
+        }
+
+    def test_correctness_judge_quotes_the_answer_before_labelling_it(self):
+        """The correctness system prompt asks for the answer first; other presets keep theirs."""
+        from agnt5.eval import Correctness, Helpfulness
+        from agnt5.eval.llm_judge import (
+            CORRECTNESS_JUDGE_SYSTEM_PROMPT,
+            EVALUATOR_SYSTEM_PROMPT,
+        )
+
+        prompt = CORRECTNESS_JUDGE_SYSTEM_PROMPT
+        assert prompt.index('"answer"') < prompt.index('"label"') < prompt.index('"score"')
+        assert "a longer output that gives the same answer is fully correct" in prompt
+        # Reference-free judging is supported, so the prompt must not assume a reference.
+        assert "when no expected output is given, check whether the output correctly" in prompt
+        assert Correctness().to_config().system_prompt == prompt
+        assert Helpfulness().to_config().system_prompt == EVALUATOR_SYSTEM_PROMPT
+        assert Helpfulness().to_scorer_spec()["config"]["system_prompt"] == EVALUATOR_SYSTEM_PROMPT
+
+    def test_preset_system_prompt_hook_reaches_the_scorer_spec(self):
+        """A preset's own judge prompt is used locally and sent to the platform alike."""
+        from typing import ClassVar, Optional
+
+        from agnt5.eval.llm_judge import EvaluatorPreset
+
+        class Terse(EvaluatorPreset):
+            preset_name: ClassVar[str] = "terse"
+            criteria: ClassVar[str] = "Is it terse?"
+            judge_system_prompt: ClassVar[Optional[str]] = "Custom judge prompt."
+
+        assert Terse().to_config().system_prompt == "Custom judge prompt."
+        assert Terse().to_scorer_spec()["config"]["system_prompt"] == "Custom judge prompt."
+
+    @pytest.mark.parametrize(
+        ("label", "score", "passed"),
+        [("pass", 1.0, True), ("partial", 0.5, False), ("fail", 0.0, False)],
+    )
+    def test_correctness_builtin_handler_scores_judge_labels(
+        self, monkeypatch, label, score, passed
+    ):
+        """Correctness asks for a pass/partial/fail label and maps it to a score."""
+        from agnt5.eval.llm_judge import CORRECTNESS_JUDGE_SYSTEM_PROMPT
+        from agnt5.eval.types import ScorerRequest
+
+        scorer_mod = importlib.import_module("agnt5.scorer")
+        judge_module = importlib.import_module("agnt5.eval.llm_judge")
+        captured = {}
+
+        async def fake_generate(**kwargs):
+            captured["messages"] = kwargs["messages"]
+
+            class Response:
+                text = f'{{"answer":"Augustus","label":"{label}","explanation":"judged"}}'
+
+            return Response()
+
+        monkeypatch.setattr(judge_module, "_get_generate", lambda: fake_generate)
+        scorer_mod.ScorerRegistry.clear()
+        scorer_mod._builtin_handlers_registered = False
+        scorer_mod.register_builtin_scorer_handlers()
+
+        request = ScorerRequest(
+            input={"message": "Who was the first emperor of Rome?"},
+            output={"output": "**Augustus** was the first Roman emperor, from 27 BCE."},
+            expected={"output": "Augustus"},
+            config={},
+        )
+        result = asyncio.run(scorer_mod.run_scorer("correctness", request))
+
+        system, user = (m["content"] for m in captured["messages"])
+        assert system == CORRECTNESS_JUDGE_SYSTEM_PROMPT
+        assert scorer_mod.CORRECTNESS_JUDGE_CRITERIA in user
+        assert "Choose exactly one label from: fail, partial, pass" in user
+        assert result.score == score
+        assert result.passed is passed
+        assert result.label == label
+        assert result.metadata["judge_preset"] == "correctness"
+        assert result.metadata["selected_label"] == label
+        assert result.metadata["answer"] == "Augustus"
+
     def test_correctness_builtin_handler_allows_reference_free_judging(self, monkeypatch):
         """Correctness can judge output against input without expected output."""
         from agnt5.eval.types import ScorerRequest
