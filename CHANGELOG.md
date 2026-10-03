@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- A `Worker` given `workflows=[...]` now registers and runs only those workflows. `@workflow` registers every workflow in a module as soon as it is imported, and the worker served all of them, so a cron workflow removed from the list kept its schedule and kept running after the deploy that removed it. A run for a workflow the worker doesn't serve now fails with "Component '<name>' of type 'workflow' not found". A worker given no `workflows=` list still serves every imported workflow, as the serverless entrypoint does (AGNT5-1401).
+- A `Worker` given `functions=[...]` now registers only those functions and runs only those when called directly; an unlisted `@function` could be called through the API. Workflow steps can still call any `@function`, and the built-in prompt executor is always served. A worker given no `functions=` list still serves every imported function.
+
 ## [0.13.8] - 2026-10-02
 
 ### Fixed

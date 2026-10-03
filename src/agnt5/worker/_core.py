@@ -171,8 +171,11 @@ class Worker(ExecutorMixin):
             coordinator_endpoint: Coordinator endpoint URL (default: from env AGNT5_COORDINATOR_ENDPOINT)
             runtime: Runtime type - "standalone", "docker", "kubernetes", etc.
             metadata: Optional service-level metadata
-            functions: List of @function decorated handlers (explicit mode)
-            workflows: List of @workflow decorated handlers (explicit mode)
+            functions: List of @function decorated handlers (explicit mode). Only these
+                are registered and callable directly; omit it to serve every imported
+                @function. A workflow step can call any @function either way.
+            workflows: List of @workflow decorated handlers (explicit mode). Only these
+                are registered and run; omit it to serve every imported @workflow.
             entities: List of Entity classes (explicit mode)
             agents: List of Agent instances (explicit mode)
             tools: List of Tool instances (explicit mode)
@@ -360,6 +363,9 @@ class Worker(ExecutorMixin):
             logger.warning("third-party capture auto-enable failed", exc_info=True)
 
         # Component registration
+        # Component kinds whose list (`functions=`, `workflows=`) names what to
+        # serve; see _served.
+        self._listed_kinds: set[str] = set()
         if auto_register:
             if any([functions, workflows, entities, agents, tools, scorers]):
                 logger.warning(
@@ -397,6 +403,11 @@ class Worker(ExecutorMixin):
                 "tools": list(tools or []),
                 "scorers": list(scorers or []),
             }
+            self._listed_kinds = {
+                kind
+                for kind, given in (("functions", functions), ("workflows", workflows))
+                if given is not None
+            }
 
             total_explicit = sum(len(v) for v in self._explicit_components.values())
             logger.debug(
@@ -428,10 +439,12 @@ class Worker(ExecutorMixin):
         """
         if functions:
             self._explicit_components["functions"].extend(functions)
+            self._listed_kinds.add("functions")
             logger.debug(f"Registered {len(functions)} functions")
 
         if workflows:
             self._explicit_components["workflows"].extend(workflows)
+            self._listed_kinds.add("workflows")
             logger.debug(f"Registered {len(workflows)} workflows")
 
         if entities:
@@ -551,6 +564,43 @@ class Worker(ExecutorMixin):
             triggers=py_triggers,
         )
 
+    def _served(self, kind: str, registry: Any) -> dict[str, Any]:
+        """The functions or workflows this worker registers and runs, by name.
+
+        ``@function`` and ``@workflow`` register every component a module
+        defines as soon as it is imported. When ``functions=`` or ``workflows=``
+        names the ones to serve, only those count: a workflow left out of the
+        list used to register anyway, cron schedule included, and kept running
+        after a deploy dropped it (AGNT5-1401). Without a list, every registered
+        one is served, as the serverless entrypoint does. A listed component is
+        matched by identity, not function name, so ``name="custom"`` works.
+        """
+        registered = registry.all()
+        if kind not in self._listed_kinds:
+            return registered
+        listed = self._explicit_components[kind]
+        return {
+            name: config
+            for name, config in registered.items()
+            if any(
+                handler is config.handler or getattr(handler, "_agnt5_config", None) is config
+                for handler in listed
+            )
+        }
+
+    def _served_functions(self) -> dict[str, Any]:
+        return self._served("functions", FunctionRegistry)
+
+    def _served_workflows(self) -> dict[str, Any]:
+        from ..workflow import WorkflowRegistry
+
+        return self._served("workflows", WorkflowRegistry)
+
+    def _log_unserved(self, kind: str, registry: Any, served: dict[str, Any]) -> None:
+        unserved = sorted(registry.all().keys() - served.keys())
+        if unserved:
+            logger.info(f"Not serving {kind} left out of Worker({kind}=...): {', '.join(unserved)}")
+
     def _discover_components(self) -> list:
         """Discover explicit components (functions, entities, workflows, agents, tools).
 
@@ -559,9 +609,10 @@ class Worker(ExecutorMixin):
         """
         components = []
 
-        # Process functions — match by handler identity, not by name,
-        # so @function(name="custom") works correctly.
-        for config in FunctionRegistry.all().values():
+        # Process functions
+        served_functions = self._served_functions()
+        self._log_unserved("functions", FunctionRegistry, served_functions)
+        for config in served_functions.values():
 
             config_dict = {}
             if config.retries:
@@ -591,7 +642,7 @@ class Worker(ExecutorMixin):
                 )
             )
 
-        if not FunctionRegistry.get(PROMPT_EXECUTOR_COMPONENT_NAME):
+        if PROMPT_EXECUTOR_COMPONENT_NAME not in served_functions:
             components.append(
                 self._create_component_info(
                     name=PROMPT_EXECUTOR_COMPONENT_NAME,
@@ -607,9 +658,10 @@ class Worker(ExecutorMixin):
 
         from ..workflow import WorkflowRegistry
 
-        # Process workflows — iterate registry directly,
-        # so @workflow(name="custom") works correctly.
-        for config in WorkflowRegistry.all().values():
+        # Process workflows
+        served_workflows = self._served_workflows()
+        self._log_unserved("workflows", WorkflowRegistry, served_workflows)
+        for config in served_workflows.values():
 
             components.append(
                 self._create_component_info(
@@ -755,7 +807,7 @@ class Worker(ExecutorMixin):
 
             # Functions
             if component_type == "function":
-                function_config = FunctionRegistry.get(component_name)
+                function_config = self._served_functions().get(component_name)
                 if function_config:
                     return self._execute_function(function_config, input_data, request)
                 if is_prompt_executor_component(component_name):
@@ -774,9 +826,7 @@ class Worker(ExecutorMixin):
 
             # Workflows
             elif component_type == "workflow":
-                from ..workflow import WorkflowRegistry
-
-                workflow_config = WorkflowRegistry.get(component_name)
+                workflow_config = self._served_workflows().get(component_name)
                 if workflow_config:
                     return self._execute_workflow(workflow_config, input_data, request)
 
