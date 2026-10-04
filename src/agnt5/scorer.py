@@ -222,11 +222,25 @@ def all_builtin_judge_scorers() -> Dict[str, ScorerConfig]:
     register_builtin_scorer_handlers()
     return _BUILTIN_JUDGE_SCORER_REGISTRY.copy()
 
+# The correctness rubric judges agreement with the reference answer, not
+# similarity to it: an answer that explains itself must not be marked partial.
+# It is the same text as `agnt5.eval.Correctness.criteria` and as the
+# TypeScript SDK's correctness rubric; keep them identical.
 CORRECTNESS_JUDGE_CRITERIA = (
-    "Evaluate whether the output correctly answers the input and matches the expected "
-    "output. Score 1.0 for fully correct answers, 0.5 for partially correct answers, "
-    "and 0.0 for incorrect or unsupported answers."
+    "Evaluate whether the output's answer agrees with the expected output. The "
+    "expected output is a reference answer: it says what the right answer is, not "
+    "what the output must look like, so the output does not need to match its "
+    "length, wording, or format. An output that gives the right answer and also "
+    "explains it, shows working, or restates the question is fully correct and is "
+    'a pass, not partial; for example, "3 + 4 = 7, because 3 and 4 make 7." is a '
+    'pass against "7". Award partial only when the expected output has several '
+    "required parts and the output leaves one out. Award fail when the answer is "
+    "wrong, contradicts the expected output, or is missing. If there is no expected "
+    "output, judge whether the output correctly answers the input."
 )
+
+# Labels the correctness judge picks from, and the scores they map to.
+CORRECTNESS_JUDGE_CHOICE_SCORES = {"fail": 0.0, "partial": 0.5, "pass": 1.0}
 
 FAITHFULNESS_JUDGE_CRITERIA = (
     "Evaluate whether the output is faithful to the provided context. Penalize claims "
@@ -677,7 +691,7 @@ def register_builtin_scorer_handlers() -> None:
     if "correctness" not in _BUILTIN_JUDGE_SCORER_REGISTRY:
 
         async def _correctness_handler(ctx: "ScorerContext", request: Any) -> Any:
-            from .eval.llm_judge import LLMJudgeConfig, llm_judge
+            from .eval.llm_judge import CORRECTNESS_JUDGE_SYSTEM_PROMPT, LLMJudgeConfig, llm_judge
 
             config = request.config or {}
             try:
@@ -687,13 +701,19 @@ def register_builtin_scorer_handlers() -> None:
                 )
             except KeyError as e:
                 return _config_error(f"correctness field selector not found: {e.args[0]}")
+            # The judge quotes the output's answer, then picks a pass / partial /
+            # fail label mapped to 1.0 / 0.5 / 0.0, the same way the `Correctness`
+            # preset judges locally. With a bare 0-1 score and no quoted answer,
+            # small judge models marked explained answers partial.
             result = await llm_judge(
                 output=output,
                 config=LLMJudgeConfig(
                     criteria=CORRECTNESS_JUDGE_CRITERIA,
                     model=_judge_model(config),
+                    system_prompt=CORRECTNESS_JUDGE_SYSTEM_PROMPT,
                     temperature=_judge_temperature(config),
                     include_input=_judge_include_input(config, True),
+                    choice_scores=dict(CORRECTNESS_JUDGE_CHOICE_SCORES),
                 ),
                 expected=expected,
                 input_data=request.input,
