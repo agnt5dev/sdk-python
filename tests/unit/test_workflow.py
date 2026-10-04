@@ -290,13 +290,13 @@ async def test_workflow_parallel_tasks():
     @function
     async def fast_task(ctx: FunctionContext) -> str:
         """Fast task."""
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
         return "fast"
 
     @function
     async def slow_task(ctx: FunctionContext) -> str:
         """Slow task."""
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
         return "slow"
 
     @workflow
@@ -316,8 +316,9 @@ async def test_workflow_parallel_tasks():
         elapsed = time.time() - start
 
         assert results == ["fast", "slow"]
-        # Should take ~0.02s (slow task time), not 0.03s (sequential)
-        assert elapsed < 0.04
+        # ~0.2s (the slow task) in parallel, 0.3s in sequence. Sleeps long
+        # enough that scheduling jitter on a shared CI runner can't blur them.
+        assert elapsed < 0.28
 
     await run_test()
 
