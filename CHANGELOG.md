@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-04
+
+### Added
+
+- Hosted MCP servers (AGNT5-1569). An `MCPServer` that publishes tools with `add_function`, `add_workflow` or `add_agent` now registers with its deployment, and AGNT5 serves it at `/mcp/{project}/{env}/{server}`, where each tool call runs as a durable run of that function, workflow or agent. Each tool takes an optional `title`, `description`, `mode` (`sync`, `auto` or `background`; functions default to `sync`, workflows and agents to `auto`), `visibility` (`model` and/or `app`) and MCP `annotations`; its input schema comes from the component's signature. `MCPServer(id, title=..., instructions=...)` describes the server. The server id is part of its URL, so it must be lowercase letters, digits, `-` and `_` (up to 63 characters); a worker logs an error at startup for an id the platform will refuse. An invalid `mode` or `visibility` raises `ValueError` when the tool is added.
+- Input schemas keep plain parameter defaults (`"default": ...`), so MCP clients and Studio show them.
+
 ### Fixed
 
 - A `Worker` given `workflows=[...]` now registers and runs only those workflows. `@workflow` registers every workflow in a module as soon as it is imported, and the worker served all of them, so a cron workflow removed from the list kept its schedule and kept running after the deploy that removed it. A run for a workflow the worker doesn't serve now fails with "Component '<name>' of type 'workflow' not found". A worker given no `workflows=` list still serves every imported workflow, as the serverless entrypoint does (AGNT5-1401).
