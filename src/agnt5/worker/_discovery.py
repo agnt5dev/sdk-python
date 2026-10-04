@@ -210,11 +210,12 @@ def import_candidates(candidates: list[DiscoveryCandidate]) -> list[DiscoveryFai
 def _registries():
     from ..agent import AgentRegistry
     from ..function import FunctionRegistry
+    from ..mcp.publish import MCPServerRegistry
     from ..scorer import ScorerRegistry
     from ..tool import ToolRegistry
     from ..workflow import WorkflowRegistry
 
-    return (FunctionRegistry, WorkflowRegistry, ScorerRegistry, ToolRegistry, AgentRegistry)
+    return (FunctionRegistry, WorkflowRegistry, ScorerRegistry, ToolRegistry, AgentRegistry, MCPServerRegistry)
 
 
 def _registered_names() -> list[set[str]]:

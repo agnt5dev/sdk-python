@@ -106,6 +106,8 @@ class EvaluatorPreset:
     preset_name: ClassVar[str] = "evaluator_preset"
     scorer_name: ClassVar[str] = "llm_judge"
     criteria: ClassVar[str] = ""
+    # None means EVALUATOR_SYSTEM_PROMPT; a preset may set its own.
+    judge_system_prompt: ClassVar[Optional[str]] = None
     preset_version: ClassVar[str] = EVALUATOR_PRESET_VERSION
     choice_scores: ClassVar[Dict[str, float]] = {
         "fail": 0.0,
@@ -126,7 +128,7 @@ class EvaluatorPreset:
         return LLMJudgeConfig(
             criteria=self.criteria,
             model=self.model,
-            system_prompt=EVALUATOR_SYSTEM_PROMPT,
+            system_prompt=self.judge_system_prompt or EVALUATOR_SYSTEM_PROMPT,
             temperature=self.temperature,
             include_input=self.include_input,
             choice_scores=dict(self.choice_scores),
@@ -149,7 +151,7 @@ class EvaluatorPreset:
         }
         if self.scorer_name == "llm_judge":
             config["criteria"] = self.criteria
-            config["system_prompt"] = EVALUATOR_SYSTEM_PROMPT
+            config["system_prompt"] = self.judge_system_prompt or EVALUATOR_SYSTEM_PROMPT
             config["choice_scores"] = dict(self.choice_scores)
         if self.answer_field:
             config["answer_field"] = self.answer_field
@@ -236,6 +238,23 @@ Respond with a JSON object containing:
 Respond ONLY with the JSON object, no other text."""
 
 
+# System prompt for the correctness judge, used by the worker's built-in
+# `correctness` scorer and by `Correctness.evaluate()`. The judge quotes the
+# output's answer before it labels it: without that step, small judge models
+# marked long, right answers partial or fail for their length. Keep it identical
+# to the TypeScript SDK's.
+CORRECTNESS_JUDGE_SYSTEM_PROMPT = """You are an expert evaluator. Your task is to check whether the output gives the same answer as the expected output, following the provided criteria; when no expected output is given, check whether the output correctly answers the input. The expected output is a short reference answer; a longer output that gives the same answer is fully correct, however much it adds around that answer.
+
+Respond with a JSON object containing:
+- "answer": the answer the output gives, quoted in a few words
+- "label": exactly one of "pass", "partial", or "fail"
+- "score": a number between 0.0 and 1.0
+- "passed": boolean (true if score >= 0.7)
+- "explanation": brief explanation of your evaluation
+
+Respond ONLY with the JSON object, no other text."""
+
+
 @dataclass
 class Correctness(EvaluatorPreset):
     """Managed correctness judge preset for client.eval() scorers."""
@@ -244,10 +263,20 @@ class Correctness(EvaluatorPreset):
 
     preset_name: ClassVar[str] = "correctness"
     scorer_name: ClassVar[str] = "correctness"
+    judge_system_prompt: ClassVar[Optional[str]] = CORRECTNESS_JUDGE_SYSTEM_PROMPT
+    # Same text as `agnt5.scorer.CORRECTNESS_JUDGE_CRITERIA`, which the worker's
+    # built-in `correctness` scorer uses; keep them identical.
     criteria: ClassVar[str] = (
-        "Evaluate whether the output correctly answers the input and matches the expected "
-        "output. Award pass for fully correct answers, partial for incomplete or partially "
-        "correct answers, and fail for incorrect or unsupported answers."
+        "Evaluate whether the output's answer agrees with the expected output. The "
+        "expected output is a reference answer: it says what the right answer is, not "
+        "what the output must look like, so the output does not need to match its "
+        "length, wording, or format. An output that gives the right answer and also "
+        "explains it, shows working, or restates the question is fully correct and is "
+        'a pass, not partial; for example, "3 + 4 = 7, because 3 and 4 make 7." is a '
+        'pass against "7". Award partial only when the expected output has several '
+        "required parts and the output leaves one out. Award fail when the answer is "
+        "wrong, contradicts the expected output, or is missing. If there is no expected "
+        "output, judge whether the output correctly answers the input."
     )
 
 

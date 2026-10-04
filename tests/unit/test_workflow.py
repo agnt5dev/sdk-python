@@ -286,17 +286,30 @@ async def test_workflow_sequential_tasks():
 @pytest.mark.asyncio
 async def test_workflow_parallel_tasks():
     """Test workflow with parallel execution using ctx.parallel()."""
+    # Each task waits until both have started. Run in sequence, the first
+    # would wait forever, so this proves concurrency without timing it:
+    # wall-clock bounds flake on shared CI runners.
+    started = 0
+    both_started = asyncio.Event()
+
+    async def meet() -> None:
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=5)
 
     @function
     async def fast_task(ctx: FunctionContext) -> str:
         """Fast task."""
-        await asyncio.sleep(0.01)
+        await meet()
         return "fast"
 
     @function
     async def slow_task(ctx: FunctionContext) -> str:
         """Slow task."""
-        await asyncio.sleep(0.02)
+        await meet()
+        await asyncio.sleep(0.01)
         return "slow"
 
     @workflow
@@ -307,17 +320,12 @@ async def test_workflow_parallel_tasks():
         )
         return results
 
-    import time
-
     @with_entity_context
     async def run_test():
-        start = time.time()
         results = await parallel_workflow()
-        elapsed = time.time() - start
-
+        # Results keep argument order, whatever order the tasks finish in.
         assert results == ["fast", "slow"]
-        # Should take ~0.02s (slow task time), not 0.03s (sequential)
-        assert elapsed < 0.04
+        assert both_started.is_set()
 
     await run_test()
 
