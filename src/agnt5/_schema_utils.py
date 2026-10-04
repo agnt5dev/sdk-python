@@ -237,6 +237,17 @@ def is_pydantic_model(type_hint: Any) -> bool:
         return False
 
 
+def _is_json_value(value: Any) -> bool:
+    """Whether a parameter default can be written into a JSON Schema as is."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_json_value(v) for v in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_json_value(v) for k, v in value.items())
+    return False
+
+
 def extract_function_schemas(func: Callable[..., Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Extract input and output schemas from function type hints.
 
@@ -280,6 +291,10 @@ def extract_function_schemas(func: Callable[..., Any]) -> Tuple[Optional[Dict[st
             # Check if parameter is required (no default value)
             if param.default is inspect.Parameter.empty:
                 required_params.append(param_name)
+            elif _is_json_value(param.default) and "default" not in input_properties[param_name]:
+                # Keep plain defaults: MCP clients and Studio show them, and
+                # the model can leave the argument out.
+                input_properties[param_name] = {**input_properties[param_name], "default": param.default}
 
         input_schema = None
         if input_properties:

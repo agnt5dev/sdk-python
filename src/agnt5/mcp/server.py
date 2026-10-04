@@ -16,6 +16,15 @@ from .._serialization import serialize_to_str
 from ..agent import Agent
 from ..function import FunctionContext
 from ..tool import Tool
+from .publish import (
+    AGENT_INPUT_SCHEMA,
+    SCHEMA_VERSION,
+    MCPServerRegistry,
+    PublishedTool,
+    check_tool_options,
+    first_line,
+    object_schema,
+)
 from .types import Prompt, Resource
 
 
@@ -44,17 +53,28 @@ class _NetworkServerHandle:
 
 
 class MCPServer:
-    """Expose AGNT5 primitives as an MCP server.
+    """An MCP server built from AGNT5 functions, workflows and agents.
 
-    This is a stdio-first v1 intended for local developer workflows.
+    Published with the deployment: tools added with ``add_function``,
+    ``add_workflow`` or ``add_agent`` are served at
+    ``https://api.agnt5.com/mcp/{project}/{env}/{name}``, each call running as
+    a durable AGNT5 run::
+
+        support = MCPServer("support", instructions="Order and ticket tools.")
+        support.add_function("lookup_order", lookup_order, annotations={"readOnlyHint": True})
+        support.add_workflow("triage_ticket", triage_ticket)  # mode="auto"
+
+    The server's name is part of its URL: lowercase letters, digits, ``-``
+    and ``_``. ``run_stdio()`` still serves it locally for development.
     """
 
     def __init__(
         self,
         id: str,
-        name: str,
-        version: str,
+        name: Optional[str] = None,
+        version: Optional[str] = None,
         *,
+        title: Optional[str] = None,
         tools: Optional[dict[str, Tool]] = None,
         agents: Optional[dict[str, Agent]] = None,
         workflows: Optional[dict[str, Any]] = None,
@@ -65,25 +85,146 @@ class MCPServer:
     ) -> None:
         self.info = _ServerInfo(
             id=id,
-            name=name,
-            version=version,
+            name=name or id,
+            version=version or "0.1.0",
             instructions=instructions,
             metadata=metadata or {},
         )
+        self.title = title
         self._tools: dict[str, Tool] = dict(tools or {})
         self._agents: dict[str, Agent] = dict(agents or {})
         self._workflows: dict[str, Any] = dict(workflows or {})
         self._prompts: dict[str, Prompt] = dict(prompts or {})
         self._resources: dict[str, Resource] = dict(resources or {})
+        self._published: dict[str, PublishedTool] = {}
+        MCPServerRegistry.register(self)
 
     def add_tool(self, name: str, tool: Tool) -> None:
+        """Serve a tool over ``run_stdio`` only; it is not published."""
         self._tools[name] = tool
 
-    def add_agent(self, name: str, agent: Agent) -> None:
-        self._agents[name] = agent
+    def add_function(
+        self,
+        name: str,
+        function: Any,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        mode: Optional[str] = None,
+        visibility: Optional[list[str]] = None,
+        annotations: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Publish an ``@function`` as a tool. Functions wait for their result
+        (``mode="sync"``) unless told otherwise."""
+        config = getattr(function, "_agnt5_config", None)
+        if config is None or getattr(config, "handler", None) is None:
+            raise TypeError(f"add_function({name!r}, ...) needs a function decorated with @function")
+        self._publish(
+            name, "function", config.name,
+            input_schema=config.input_schema,
+            output_schema=config.output_schema,
+            default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
+            title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+        )
 
-    def add_workflow(self, name: str, workflow: Any) -> None:
+    def add_workflow(
+        self,
+        name: str,
+        workflow: Any,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        mode: Optional[str] = None,
+        visibility: Optional[list[str]] = None,
+        annotations: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Publish a ``@workflow`` as a tool. By default a call waits up to the
+        server's call budget, then hands back a run handle (``mode="auto"``)."""
         self._workflows[name] = workflow
+        config = getattr(workflow, "_agnt5_config", None)
+        if config is None:
+            # A plain callable still serves over run_stdio; only @workflow
+            # handlers are registered components the platform can run.
+            return
+        self._publish(
+            name, "workflow", config.name,
+            input_schema=config.input_schema,
+            output_schema=config.output_schema,
+            default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
+            title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+        )
+
+    def add_agent(
+        self,
+        name: str,
+        agent: Agent,
+        *,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        mode: Optional[str] = None,
+        visibility: Optional[list[str]] = None,
+        annotations: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Publish an agent as a tool that takes a message (and optionally a
+        session to continue)."""
+        self._agents[name] = agent
+        self._publish(
+            name, "agent", agent.name,
+            input_schema=AGENT_INPUT_SCHEMA,
+            output_schema=None,
+            default_description=first_line(getattr(agent, "description", None))
+            or first_line(getattr(agent, "instructions", None)),
+            title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+        )
+
+    def _publish(
+        self,
+        name: str,
+        component_type: str,
+        component_name: str,
+        *,
+        input_schema: Any,
+        output_schema: Any,
+        default_description: Optional[str],
+        title: Optional[str],
+        description: Optional[str],
+        mode: Optional[str],
+        visibility: Optional[list[str]],
+        annotations: Optional[dict[str, Any]],
+    ) -> None:
+        clean = check_tool_options(name, mode=mode, visibility=visibility, annotations=annotations)
+        if name in self._published:
+            raise ValueError(f"MCP server {self.info.id!r} already has a tool named {name!r}")
+        self._published[name] = PublishedTool(
+            name=name,
+            component_type=component_type,
+            component_name=component_name,
+            input_schema=object_schema(input_schema) or {"type": "object", "properties": {}},
+            output_schema=object_schema(output_schema),
+            title=title,
+            description=description or default_description,
+            mode=mode,
+            visibility=list(visibility) if visibility else None,
+            annotations=clean,
+        )
+
+    @property
+    def published(self) -> bool:
+        """Whether the worker publishes this server with the deployment."""
+        return bool(self._published)
+
+    def definition(self) -> dict[str, Any]:
+        """The definition the worker registers (platform contract, version 1)."""
+        definition: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "name": self.info.id,
+            "tools": [tool.to_definition() for tool in self._published.values()],
+        }
+        if self.title:
+            definition["title"] = self.title
+        if self.info.instructions:
+            definition["instructions"] = self.info.instructions
+        return definition
 
     def add_prompt(self, name: str, prompt: Prompt) -> None:
         self._prompts[name] = prompt

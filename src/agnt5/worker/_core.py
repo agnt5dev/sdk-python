@@ -734,6 +734,29 @@ class Worker(ExecutorMixin):
             )
             registered_scorer_names.add(config.name)
 
+        # MCP servers defined in code (AGNT5-1569): each registers as an "mcp"
+        # component whose definition names the tools above. The platform
+        # validates it and publishes the server whole or not at all.
+        from ..mcp.publish import MCPServerRegistry, valid_server_name
+
+        for server in MCPServerRegistry.all().values():
+            if not server.published:
+                continue
+            if not valid_server_name(server.info.id):
+                logger.error(
+                    f"MCP server {server.info.id!r} will be refused: its name is part of its URL, "
+                    "so use lowercase letters, digits, '-' and '_' (up to 63 characters)"
+                )
+            components.append(
+                self._create_component_info(
+                    name=server.info.id,
+                    component_type="mcp",
+                    metadata={},
+                    config={},
+                    definition=server.definition(),
+                )
+            )
+
         return components
 
     def _create_message_handler(self) -> Any:
