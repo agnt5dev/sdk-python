@@ -25,6 +25,13 @@ VISIBILITIES = ("model", "app")
 ANNOTATION_HINTS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
 RESERVED_TOOL_NAMES = frozenset({"get_run", "cancel_run"})
 
+#: The default ``view``: the AGNT5 run card that MCP Apps hosts (ChatGPT,
+#: Claude, Cursor, VS Code) show for ``auto`` and ``background`` tools while
+#: their run goes on. Pass ``view=None`` to turn it off for a tool.
+RUN_VIEW = "run"
+#: How a definition says a tool has no view.
+_NO_VIEW = "none"
+
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _SERVER_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
@@ -54,6 +61,8 @@ class PublishedTool:
     mode: Optional[str] = None
     visibility: Optional[list[str]] = None
     annotations: dict[str, Any] = field(default_factory=dict)
+    #: ``RUN_VIEW`` (the default, left out of the definition) or None (off).
+    view: Optional[str] = RUN_VIEW
 
     def to_definition(self) -> dict[str, Any]:
         tool: dict[str, Any] = {
@@ -73,6 +82,8 @@ class PublishedTool:
         ):
             if value:
                 tool[key] = value
+        if self.view is None:
+            tool["view"] = _NO_VIEW
         return tool
 
 
@@ -82,9 +93,12 @@ def check_tool_options(
     mode: Optional[str],
     visibility: Optional[list[str]],
     annotations: Optional[dict[str, Any]],
+    view: Optional[str] = RUN_VIEW,
 ) -> dict[str, Any]:
     """Validate ``add_*`` options where the developer wrote them, so a typo
     fails at import time rather than as a rejected deployment."""
+    if view is not None and view != RUN_VIEW:
+        raise ValueError(f"view must be {RUN_VIEW!r} (the AGNT5 run card) or None (no view), not {view!r}")
     if not _TOOL_NAME.match(name):
         raise ValueError(f"MCP tool name {name!r} must be 1 to 128 letters, digits, '_', '-' or '.'")
     if name in RESERVED_TOOL_NAMES:
