@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from agnt5 import MCPServer, Worker, function, workflow
 from agnt5.function import FunctionContext, FunctionRegistry
-from agnt5.mcp.publish import MCPServerRegistry
+from agnt5.mcp.publish import RUN_VIEW, MCPServerRegistry
 from agnt5.workflow import WorkflowContext, WorkflowRegistry
 
 
@@ -104,6 +104,23 @@ def test_options_are_checked_where_they_are_written():
     server.add_function("lookup", lookup_order)
     with pytest.raises(ValueError, match="already has a tool"):
         server.add_workflow("lookup", triage)
+
+
+def test_view_none_turns_the_run_card_off():
+    server = MCPServer("support")
+    server.add_workflow("triage_ticket", triage)
+    server.add_workflow("quiet_triage", triage, view=None)
+    server.add_agent("support_agent", SimpleNamespace(name="mcp_test_agent", instructions="Help."), view=None)
+    server.add_function("lookup", lookup_order, mode="background", view=RUN_VIEW)
+    tools = {tool["name"]: tool for tool in server.definition()["tools"]}
+
+    assert "view" not in tools["triage_ticket"], "the default (the run card) is left to the platform"
+    assert "view" not in tools["lookup"]
+    assert tools["quiet_triage"]["view"] == "none"
+    assert tools["support_agent"]["view"] == "none"
+
+    with pytest.raises(ValueError, match="view must be"):
+        server.add_workflow("custom", triage, view="board")
 
 
 def test_stdio_only_servers_are_not_published():

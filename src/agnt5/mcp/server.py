@@ -16,6 +16,7 @@ from ..function import FunctionContext
 from ..tool import Tool
 from .publish import (
     AGENT_INPUT_SCHEMA,
+    RUN_VIEW,
     SCHEMA_VERSION,
     MCPServerRegistry,
     PublishedTool,
@@ -121,9 +122,11 @@ class MCPServer:
         mode: Optional[str] = None,
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
+        view: Optional[str] = RUN_VIEW,
     ) -> None:
         """Publish an ``@function`` as a tool. Functions wait for their result
-        (``mode="sync"``) unless told otherwise."""
+        (``mode="sync"``) unless told otherwise; with ``mode="auto"`` or
+        ``"background"`` they get the run card too (see ``add_workflow``)."""
         config = getattr(function, "_agnt5_config", None)
         if config is None or getattr(config, "handler", None) is None:
             raise TypeError(f"add_function({name!r}, ...) needs a function decorated with @function")
@@ -133,6 +136,7 @@ class MCPServer:
             output_schema=config.output_schema,
             default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+            view=view,
         )
 
     def add_workflow(
@@ -145,9 +149,14 @@ class MCPServer:
         mode: Optional[str] = None,
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
+        view: Optional[str] = RUN_VIEW,
     ) -> None:
         """Publish a ``@workflow`` as a tool. By default a call waits up to the
-        server's call budget, then hands back a run handle (``mode="auto"``)."""
+        server's call budget, then hands back a run handle (``mode="auto"``).
+
+        Clients that render MCP Apps (ChatGPT, Claude, Cursor, VS Code) show
+        such calls as an AGNT5 run card with live status, steps and output;
+        ``view=None`` turns the card off for this tool."""
         self._workflows[name] = workflow
         config = getattr(workflow, "_agnt5_config", None)
         if config is None:
@@ -160,6 +169,7 @@ class MCPServer:
             output_schema=config.output_schema,
             default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+            view=view,
         )
 
     def add_agent(
@@ -172,9 +182,11 @@ class MCPServer:
         mode: Optional[str] = None,
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
+        view: Optional[str] = RUN_VIEW,
     ) -> None:
         """Publish an agent as a tool that takes a message (and optionally a
-        session to continue)."""
+        session to continue). Like workflows, its calls show the run card
+        in MCP Apps clients unless ``view=None``."""
         self._agents[name] = agent
         self._publish(
             name, "agent", agent.name,
@@ -183,6 +195,7 @@ class MCPServer:
             default_description=first_line(getattr(agent, "description", None))
             or first_line(getattr(agent, "instructions", None)),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
+            view=view,
         )
 
     def _publish(
@@ -199,8 +212,9 @@ class MCPServer:
         mode: Optional[str],
         visibility: Optional[list[str]],
         annotations: Optional[dict[str, Any]],
+        view: Optional[str],
     ) -> None:
-        clean = check_tool_options(name, mode=mode, visibility=visibility, annotations=annotations)
+        clean = check_tool_options(name, mode=mode, visibility=visibility, annotations=annotations, view=view)
         if name in self._published:
             raise ValueError(f"MCP server {self.info.id!r} already has a tool named {name!r}")
         self._published[name] = PublishedTool(
@@ -214,6 +228,7 @@ class MCPServer:
             mode=mode,
             visibility=list(visibility) if visibility else None,
             annotations=clean,
+            view=view,
         )
 
     @property

@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `view=` on `MCPServer.add_function`, `add_workflow` and `add_agent` (AGNT5-1571). Hosted `auto` and `background` tools now show an AGNT5 run card in clients that render MCP Apps (ChatGPT, Claude, Cursor, VS Code), with live status, steps, progress, output, **Open in AGNT5** and **Cancel run**. `view=None` turns the card off for a tool and publishes `"view": "none"`; the default (`RUN_VIEW`) publishes nothing, so definitions are unchanged. Text-only clients still get the run handle as text. Needs a runtime with the run view; older control planes reject `"view": "none"`.
+
 ## [0.14.1] - 2026-10-05
 
 ### Removed
