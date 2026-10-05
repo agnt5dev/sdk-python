@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import secrets
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
 
 from .._ids import generate_cid
 from .._serialization import serialize_to_str
@@ -27,9 +25,30 @@ from .publish import (
 )
 from .types import Prompt, Resource
 
+# JSON-RPC 2.0 and MCP error codes.
+PARSE_ERROR = -32700
+INVALID_REQUEST = -32600
+METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
+RESOURCE_NOT_FOUND = -32002
+
 
 class MCPServerError(Exception):
-    """MCP server-specific error."""
+    """MCP server-specific error, answered with its JSON-RPC error ``code``."""
+
+    def __init__(self, message: str, *, code: int = INTERNAL_ERROR) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _error_response(req_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def _is_valid_id(value: Any) -> bool:
+    # MCP request ids are strings or integers, never null.
+    return isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool))
 
 
 @dataclass
@@ -39,17 +58,6 @@ class _ServerInfo:
     version: str
     instructions: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class _NetworkServerHandle:
-    host: str
-    port: int
-    server: asyncio.Server
-
-    async def close(self) -> None:
-        self.server.close()
-        await self.server.wait_closed()
 
 
 class MCPServer:
@@ -236,36 +244,51 @@ class MCPServer:
         """Serve MCP JSON-RPC over stdio using newline-delimited JSON."""
         await asyncio.to_thread(self._serve_stdio_sync)
 
-    async def run_http(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 0,
-        path: str = "/mcp",
-    ) -> None:
-        handle = await self._start_http_server(host, port, path)
-        await handle.server.serve_forever()
+    async def dispatch(self, request: Any) -> Optional[dict[str, Any]]:
+        """Handle one JSON-RPC message and return the response to send.
 
-    async def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Dispatch a JSON-RPC request. Exposed for tests and embeddings."""
+        Returns ``None`` for a notification (a message without an ``id``) and
+        for a response from the client: neither gets a reply. Exposed for
+        tests and embeddings.
+        """
+        if not isinstance(request, dict):
+            return _error_response(None, INVALID_REQUEST, "Invalid Request: expected a JSON object")
+        has_id = "id" in request
         req_id = request.get("id")
+        if has_id and not _is_valid_id(req_id):
+            return _error_response(None, INVALID_REQUEST, "Invalid Request: id must be a string or an integer")
+        if request.get("jsonrpc") != "2.0":
+            return _error_response(req_id, INVALID_REQUEST, 'Invalid Request: "jsonrpc" must be "2.0"')
         method = request.get("method")
-        params = request.get("params") or {}
+        if method is None and ("result" in request or "error" in request):
+            # A response to a request this server never sends.
+            return None
+        if not isinstance(method, str) or not method:
+            return _error_response(req_id, INVALID_REQUEST, 'Invalid Request: "method" must be a string')
+        if not has_id:
+            # Notifications (notifications/initialized, notifications/cancelled,
+            # ...) are never answered, not even with an error.
+            return None
+        params = request.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return _error_response(req_id, INVALID_PARAMS, 'Invalid params: "params" must be an object')
         try:
             result = await self._handle_request(method, params)
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": result,
-            }
+        except MCPServerError as exc:
+            return _error_response(req_id, exc.code, str(exc))
         except Exception as exc:
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {
-                    "code": -32603,
-                    "message": str(exc),
-                },
-            }
+            return _error_response(req_id, INTERNAL_ERROR, str(exc) or type(exc).__name__)
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    async def _handle_line(self, line: bytes) -> Optional[dict[str, Any]]:
+        """Parse one stdio line and dispatch it."""
+        try:
+            message = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return _error_response(None, PARSE_ERROR, f"Parse error: {exc}")
+        return await self.dispatch(message)
 
     def _serve_stdio_sync(self) -> None:
         input_stream = sys.stdin.buffer
@@ -274,8 +297,11 @@ class MCPServer:
             raw = self._read_message(input_stream)
             if raw is None:
                 return
-            request = json.loads(raw.decode("utf-8"))
-            response = asyncio.run(self.dispatch(request))
+            if not raw.strip():
+                continue
+            response = asyncio.run(self._handle_line(raw))
+            if response is None:
+                continue
             payload = json.dumps(response).encode("utf-8")
             self._write_message(output_stream, payload)
 
@@ -290,129 +316,6 @@ class MCPServer:
     def _write_message(stream: Any, payload: bytes) -> None:
         stream.write(payload + b"\n")
         stream.flush()
-
-    async def _start_http_server(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 0,
-        path: str = "/mcp",
-    ) -> _NetworkServerHandle:
-        normalized_path = self._normalize_path(path)
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            await self._handle_http_connection(reader, writer, normalized_path)
-
-        server = await asyncio.start_server(handler, host, port)
-        bound_port = server.sockets[0].getsockname()[1]
-        return _NetworkServerHandle(host=host, port=bound_port, server=server)
-
-    async def _handle_http_connection(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        path: str,
-    ) -> None:
-        try:
-            method, target, headers, body = await self._read_http_request(reader)
-            if not self._is_allowed_origin(headers.get("origin"), headers.get("host")):
-                await self._write_http_response(writer, 403, b"forbidden origin", "text/plain")
-                return
-
-            url = urlsplit(target)
-            if url.path != path:
-                await self._write_http_response(writer, 404, b"not found", "text/plain")
-                return
-            if method == "GET":
-                await self._write_http_response(writer, 405, b"GET stream is not supported", "text/plain")
-                return
-            if method != "POST":
-                await self._write_http_response(writer, 405, b"method not allowed", "text/plain")
-                return
-
-            request = json.loads(body.decode("utf-8"))
-            if "id" not in request:
-                await self.dispatch(request)
-                await self._write_http_response(writer, 202, b"", "text/plain")
-                return
-
-            response = await self.dispatch(request)
-            await self._write_json_response(writer, 200, response)
-        finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-    async def _read_http_request(
-        self,
-        reader: asyncio.StreamReader,
-    ) -> tuple[str, str, dict[str, str], bytes]:
-        header_bytes = await reader.readuntil(b"\r\n\r\n")
-        header_text = header_bytes.decode("iso-8859-1")
-        lines = header_text.split("\r\n")
-        method, target, _version = lines[0].split(" ", 2)
-        headers: dict[str, str] = {}
-        for line in lines[1:]:
-            if not line or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            headers[key.strip().lower()] = value.strip()
-
-        content_length = int(headers.get("content-length", "0") or "0")
-        body = await reader.readexactly(content_length) if content_length else b""
-        return method.upper(), target, headers, body
-
-    async def _write_json_response(
-        self,
-        writer: asyncio.StreamWriter,
-        status: int,
-        payload: dict[str, Any],
-    ) -> None:
-        await self._write_http_response(
-            writer,
-            status,
-            json.dumps(payload).encode("utf-8"),
-            "application/json",
-        )
-
-    async def _write_http_response(
-        self,
-        writer: asyncio.StreamWriter,
-        status: int,
-        body: bytes,
-        content_type: str,
-    ) -> None:
-        reason = {
-            200: "OK",
-            202: "Accepted",
-            403: "Forbidden",
-            404: "Not Found",
-            405: "Method Not Allowed",
-            500: "Internal Server Error",
-        }.get(status, "OK")
-        header = (
-            f"HTTP/1.1 {status} {reason}\r\n"
-            f"Content-Type: {content_type}\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-        )
-        writer.write(header.encode("utf-8") + body)
-        await writer.drain()
-
-    @staticmethod
-    def _normalize_path(path: str) -> str:
-        return path if path.startswith("/") else f"/{path}"
-
-    @staticmethod
-    def _is_allowed_origin(origin: Optional[str], host: Optional[str]) -> bool:
-        if not origin:
-            return True
-        if not host:
-            return False
-        try:
-            return urlsplit(origin).netloc == host
-        except Exception:
-            return False
 
     async def _handle_request(self, method: str, params: dict[str, Any]) -> Any:
         if method == "initialize":
@@ -429,17 +332,19 @@ class MCPServer:
                 },
             }
 
-        if method in ("notifications/initialized", "initialized"):
-            return {"ok": True}
-
         if method in ("tools/list", "tools.list"):
             return {"tools": self._list_tools()}
 
         if method in ("tools/call", "tools.call"):
-            return await self._call_tool(
-                params.get("name", ""),
-                params.get("arguments") or {},
-            )
+            name = params.get("name")
+            if not isinstance(name, str) or not name:
+                raise MCPServerError('Invalid params: "name" must be a tool name', code=INVALID_PARAMS)
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                raise MCPServerError('Invalid params: "arguments" must be an object', code=INVALID_PARAMS)
+            return await self._call_tool(name, arguments)
 
         if method in ("prompts/list", "prompts.list"):
             return {"prompts": self._list_prompts()}
@@ -457,9 +362,9 @@ class MCPServer:
             return await self._read_resource(params.get("uri", ""))
 
         if method == "ping":
-            return {"pong": True}
+            return {}
 
-        raise MCPServerError(f"method not found: {method}")
+        raise MCPServerError(f"Method not found: {method}", code=METHOD_NOT_FOUND)
 
     def _list_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -504,15 +409,20 @@ class MCPServer:
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name in self._tools:
-            result = await self._invoke_tool(self._tools[name], arguments)
-            return self._wrap_text_result(result)
-        if name in self._agents:
-            result = await self._invoke_agent(self._agents[name], arguments)
-            return self._wrap_text_result(result)
-        if name in self._workflows:
-            result = await self._invoke_workflow(self._workflows[name], arguments)
-            return self._wrap_text_result(result)
-        raise MCPServerError(f"unknown tool: {name}")
+            call = self._invoke_tool(self._tools[name], arguments)
+        elif name in self._agents:
+            call = self._invoke_agent(self._agents[name], arguments)
+        elif name in self._workflows:
+            call = self._invoke_workflow(self._workflows[name], arguments)
+        else:
+            raise MCPServerError(f"Unknown tool: {name}", code=INVALID_PARAMS)
+        try:
+            result = await call
+        except Exception as exc:
+            # A tool execution error, not a protocol one, so the model can
+            # read it and correct the call (as the hosted server does).
+            return self._wrap_text_result(f"{name} failed: {exc}", is_error=True)
+        return self._wrap_text_result(result)
 
     def _list_prompts(self) -> list[dict[str, Any]]:
         prompts: list[dict[str, Any]] = []
@@ -541,7 +451,7 @@ class MCPServer:
     async def _get_prompt(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         prompt = self._prompts.get(name)
         if prompt is None or prompt.handler is None:
-            raise MCPServerError(f"unknown prompt: {name}")
+            raise MCPServerError(f"Unknown prompt: {name}", code=INVALID_PARAMS)
         result = await prompt.handler(**arguments)
         if isinstance(result, str):
             messages = [{"role": "user", "content": {"type": "text", "text": result}}]
@@ -577,7 +487,7 @@ class MCPServer:
     async def _read_resource(self, uri: str) -> dict[str, Any]:
         resource = next((r for r in self._resources.values() if r.uri == uri), None)
         if resource is None:
-            raise MCPServerError(f"unknown resource: {uri}")
+            raise MCPServerError(f"Resource not found: {uri}", code=RESOURCE_NOT_FOUND)
         result = await resource.read()
         if isinstance(result, bytes):
             text = result.decode("utf-8")
@@ -619,7 +529,7 @@ class MCPServer:
         return await workflow(**arguments)
 
     @staticmethod
-    def _wrap_text_result(result: Any) -> dict[str, Any]:
+    def _wrap_text_result(result: Any, *, is_error: bool = False) -> dict[str, Any]:
         if isinstance(result, str):
             text = result
         else:
@@ -631,7 +541,7 @@ class MCPServer:
                     "text": text,
                 }
             ],
-            "isError": False,
+            "isError": is_error,
         }
 
     @staticmethod

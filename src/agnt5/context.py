@@ -83,6 +83,48 @@ class RuntimeContext:
     prompts: dict[str, LLMRuntimeOptions] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class Caller:
+    """Who called this run through a hosted MCP server.
+
+    ``ctx.caller`` is set when a tool call on a hosted MCP server started the
+    run, and ``None`` otherwise. AGNT5 verifies the caller before the run
+    starts; no token or credential is ever exposed here.
+    """
+
+    server: str
+    """The hosted MCP server that took the call."""
+    tool: str
+    """The tool that was called."""
+    subject: str
+    """The verified caller: an AGNT5 user id for OAuth, ``service_key:{id}`` for an API key."""
+    auth_method: str
+    """How the caller authenticated: ``"oauth"`` or ``"api_key"``."""
+    client: str
+    """The MCP client: its OAuth client id, or its User-Agent."""
+
+
+def caller_from_metadata(metadata: Optional[dict[str, Any]]) -> Optional[Caller]:
+    """Read the MCP caller from a run's dispatch metadata.
+
+    The runtime stamps ``trigger_type=mcp`` and the ``mcp.*`` keys on a run a
+    hosted MCP server starts, and rejects ``mcp.*`` keys from anyone else, so
+    a run without ``mcp.server`` has no MCP caller.
+    """
+    if not metadata or metadata.get("trigger_type") != "mcp":
+        return None
+    server = metadata.get("mcp.server")
+    if not server:
+        return None
+    return Caller(
+        server=str(server),
+        tool=str(metadata.get("mcp.tool") or ""),
+        subject=str(metadata.get("mcp.subject") or ""),
+        auth_method=str(metadata.get("mcp.auth_method") or ""),
+        client=str(metadata.get("mcp.client") or ""),
+    )
+
+
 def _parse_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -239,6 +281,12 @@ class Context:
     def metadata(self) -> dict[str, str]:
         """Runtime dispatch metadata for this invocation."""
         return dict(self._trace_metadata or {})
+
+    @property
+    def caller(self) -> Optional[Caller]:
+        """Who called this run through a hosted MCP server, or ``None`` when
+        the run wasn't started by an MCP tool call."""
+        return caller_from_metadata(self._trace_metadata)
 
     @property
     def activation(self):
