@@ -1,8 +1,9 @@
 """Tests for the developer-facing MCPServer API."""
 
 import io
+import json
+import sys
 
-import httpx
 import pytest
 
 from agnt5 import Agent, Context, MCPServer, Prompt, Resource, tool, workflow
@@ -220,37 +221,189 @@ def test_mcp_server_stdio_helpers_use_jsonl_framing():
     assert b"Content-Length" not in output
 
 
+def _serve_stdio(server: MCPServer, monkeypatch, *messages) -> list[dict]:
+    """Run the stdio loop over the given lines and return the replies."""
+    lines = []
+    for message in messages:
+        lines.append(message if isinstance(message, str) else json.dumps(message))
+    stdin = io.TextIOWrapper(io.BytesIO(("\n".join(lines) + "\n").encode("utf-8")))
+    stdout = io.TextIOWrapper(io.BytesIO())
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    server._serve_stdio_sync()
+    output = stdout.buffer.getvalue().decode("utf-8")
+    return [json.loads(line) for line in output.splitlines() if line]
+
+
+def test_stdio_does_not_reply_to_notifications(monkeypatch):
+    server = MCPServer(id="test-mcp", tools={"echo": echo})
+    replies = _serve_stdio(
+        server,
+        monkeypatch,
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}},
+        {"jsonrpc": "2.0", "method": "no/such/notification"},
+        {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+    )
+    assert [reply["id"] for reply in replies] == [1, 2]
+    assert replies[0]["result"]["serverInfo"]["name"] == "test-mcp"
+    assert replies[1]["result"] == {}
+
+
+def test_stdio_ignores_responses_from_the_client(monkeypatch):
+    server = MCPServer(id="test-mcp")
+    replies = _serve_stdio(
+        server,
+        monkeypatch,
+        {"jsonrpc": "2.0", "id": "srv-1", "result": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+    )
+    assert [reply["id"] for reply in replies] == [3]
+
+
 @pytest.mark.asyncio
-async def test_mcp_server_run_http_serves_json_rpc():
-    server = MCPServer(id="test-mcp", name="Test MCP", version="1.0.0")
-    handle = await server._start_http_server(host="127.0.0.1", port=0, path="/mcp")
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"http://{handle.host}:{handle.port}/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-                headers={"Accept": "application/json, text/event-stream"},
-            )
-
-        assert response.status_code == 200
-        assert response.json()["result"]["serverInfo"]["name"] == "Test MCP"
-        assert response.json()["result"]["protocolVersion"] == "2025-11-25"
-    finally:
-        await handle.close()
+async def test_unknown_method_is_method_not_found():
+    server = MCPServer(id="test-mcp")
+    response = await server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/nope"})
+    assert response["id"] == 1
+    assert response["error"]["code"] == -32601
 
 
 @pytest.mark.asyncio
-async def test_mcp_server_run_http_rejects_cross_origin_requests():
-    server = MCPServer(id="test-mcp", name="Test MCP", version="1.0.0")
-    handle = await server._start_http_server(host="127.0.0.1", port=0, path="/mcp")
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"http://{handle.host}:{handle.port}/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
-                headers={"Origin": "https://evil.example"},
-            )
+async def test_unknown_tool_is_invalid_params():
+    server = MCPServer(id="test-mcp", tools={"echo": echo})
+    response = await server.dispatch(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}
+    )
+    assert response["error"]["code"] == -32602
+    assert "nope" in response["error"]["message"]
 
-        assert response.status_code == 403
-    finally:
-        await handle.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"name": "echo", "arguments": "hello"},
+        {"name": "echo", "arguments": ["hello"]},
+        {"arguments": {"message": "hello"}},
+        {"name": 7, "arguments": {}},
+    ],
+)
+async def test_malformed_tool_call_is_invalid_params(params):
+    server = MCPServer(id="test-mcp", tools={"echo": echo})
+    response = await server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
+    assert response["error"]["code"] == -32602
+
+
+@pytest.mark.asyncio
+async def test_params_that_are_not_an_object_are_invalid_params():
+    server = MCPServer(id="test-mcp")
+    response = await server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1]})
+    assert response["error"]["code"] == -32602
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tool_is_a_tool_error_not_a_protocol_error():
+    @tool
+    async def explode(ctx: Context) -> str:
+        """Always fails."""
+        raise RuntimeError("boom")
+
+    server = MCPServer(id="test-mcp", tools={"explode": explode})
+    response = await server.dispatch(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "explode", "arguments": {}}}
+    )
+    assert "error" not in response
+    assert response["result"]["isError"] is True
+    assert "boom" in response["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_prompt_and_resource_errors():
+    server = MCPServer(id="test-mcp")
+    prompt = await server.dispatch(
+        {"jsonrpc": "2.0", "id": 1, "method": "prompts/get", "params": {"name": "nope"}}
+    )
+    assert prompt["error"]["code"] == -32602
+    resource = await server.dispatch(
+        {"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": "docs://nope"}}
+    )
+    assert resource["error"]["code"] == -32002
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"id": 1, "method": "ping"},
+        {"jsonrpc": "1.0", "id": 1, "method": "ping"},
+        {"jsonrpc": 2.0, "id": 1, "method": "ping"},
+    ],
+)
+async def test_request_without_jsonrpc_2_is_invalid_request(request_):
+    server = MCPServer(id="test-mcp")
+    response = await server.dispatch(request_)
+    assert response["id"] == 1
+    assert response["error"]["code"] == -32600
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_",
+    [
+        [{"jsonrpc": "2.0", "id": 1, "method": "ping"}],
+        "ping",
+        {"jsonrpc": "2.0", "id": None, "method": "ping"},
+        {"jsonrpc": "2.0", "id": True, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 1},
+        {"jsonrpc": "2.0", "id": 1, "method": 5},
+    ],
+)
+async def test_malformed_requests_are_invalid_request(request_):
+    server = MCPServer(id="test-mcp")
+    response = await server.dispatch(request_)
+    assert response["error"]["code"] == -32600
+
+
+def test_stdio_answers_unparseable_lines_with_parse_error(monkeypatch):
+    server = MCPServer(id="test-mcp")
+    replies = _serve_stdio(
+        server,
+        monkeypatch,
+        "{not json",
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+    assert replies[0] == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": replies[0]["error"]["message"]},
+    }
+    assert replies[1]["id"] == 1 and replies[1]["result"] == {}
+
+
+def test_stdio_error_codes_end_to_end(monkeypatch):
+    server = MCPServer(id="test-mcp", tools={"echo": echo})
+    replies = _serve_stdio(
+        server,
+        monkeypatch,
+        {"jsonrpc": "2.0", "id": 1, "method": "nope"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "nope"}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": 1}},
+        {"id": 4, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "echo", "arguments": {"message": "hi"}}},
+    )
+    assert [(reply["id"], reply.get("error", {}).get("code")) for reply in replies] == [
+        (1, -32601),
+        (2, -32602),
+        (3, -32602),
+        (4, -32600),
+        (5, None),
+    ]
+    assert replies[4]["result"]["content"][0]["text"] == "echo:hi"
+
+
+def test_the_post_only_http_transport_is_gone():
+    server = MCPServer(id="test-mcp")
+    assert not hasattr(server, "run_http")
+    assert not hasattr(server, "_start_http_server")

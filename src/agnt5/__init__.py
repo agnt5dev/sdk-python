@@ -81,7 +81,7 @@ from .callbacks import (
 )
 from .chat import ChatBot, SlackConfig
 from .client import AsyncClient, Client, ReceivedEvent, RunError
-from .context import Context, LLMRuntimeOptions, RuntimeContext
+from .context import Caller, Context, LLMRuntimeOptions, RuntimeContext
 from .eval.types import ScorerRequest, ScorerResult
 
 # Entity API was removed in v0.4.0
@@ -295,6 +295,7 @@ __all__ = [
     "ChatBot",
     "SlackConfig",
     # Core components
+    "Caller",
     "Context",
     "LLMRuntimeOptions",
     "RuntimeContext",

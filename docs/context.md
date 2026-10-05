@@ -388,6 +388,27 @@ ctx.object_id        # Entity key (for entities)
 ctx.method_name      # Entity method name (for entities)
 ```
 
+### MCP Caller
+
+When a tool call on a hosted MCP server starts the run, `ctx.caller` says who
+made it. It is `None` for runs started any other way (API, cron, events).
+
+```python
+@function
+async def lookup_order(ctx: FunctionContext, order_id: str) -> dict:
+    if ctx.caller:
+        ctx.caller.server       # "support": the hosted MCP server
+        ctx.caller.tool         # "lookup_order": the tool that was called
+        ctx.caller.subject      # AGNT5 user id (OAuth) or "service_key:{id}" (API key)
+        ctx.caller.auth_method  # "oauth" or "api_key"
+        ctx.caller.client       # OAuth client id, or the client's User-Agent
+    ...
+```
+
+AGNT5 verifies the caller before the run starts, and no token or credential
+reaches the run. A `@function` a workflow runs with `ctx.step` sees
+the workflow's caller.
+
 ## Common Patterns
 
 ### Parallel with Error Handling

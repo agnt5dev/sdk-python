@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** `MCPServer.run_http()` is gone (AGNT5-1569). It answered single JSON-RPC POSTs only (no `GET` stream, sessions or SSE), so it wasn't a compliant Streamable HTTP server. Publish tools with `add_function`, `add_workflow` or `add_agent` and AGNT5 serves them over Streamable HTTP at `/mcp/{project}/{env}/{server}`; use `run_stdio()` to serve a server locally.
+
+### Added
+
+- `ctx.caller` on function and workflow contexts (AGNT5-1569): who called the run through a hosted MCP server, as a frozen `Caller` with `server`, `tool`, `subject` (an AGNT5 user id for OAuth, `service_key:{id}` for an API key), `auth_method` (`oauth` or `api_key`) and `client` (the OAuth client id or the client's User-Agent). It is `None` when the run wasn't started by an MCP tool call. It reads the `trigger_type=mcp` and `mcp.*` keys the runtime stamps on the run; no token reaches the run.
+
+### Fixed
+
+- `MCPServer.run_stdio()` follows JSON-RPC 2.0 and MCP (AGNT5-1569). It no longer replies to notifications (any message without an `id`, such as `notifications/initialized`) or to responses from the client. An unknown method is `-32601`; an unknown tool or prompt, `params` or `arguments` that aren't an object, or a missing tool name is `-32602`; an unknown resource is `-32002`; a message without `"jsonrpc": "2.0"`, a method or a string/integer `id` is `-32600`; a line that isn't JSON is `-32700` instead of stopping the server. All of these were `-32603`, and a request without `jsonrpc` was served. A tool that raises now returns a result with `isError: true` and the error text, as hosted servers do, so the model can read it; it was a `-32603` protocol error. `ping` returns `{}`. `dispatch()` returns `None` for messages that get no reply, and `MCPServerError` takes a JSON-RPC `code`.
+
 ## [0.14.0] - 2026-10-04
 
 ### Added
