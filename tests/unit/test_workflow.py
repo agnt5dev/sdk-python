@@ -84,6 +84,22 @@ def test_workflow_event_triggers_registered():
     assert config.triggers[0].event_name == "user.created"
 
 
+@pytest.mark.parametrize("field,value", [
+    ("filter_expression", "true"),
+    ("input_mapping", "data"),
+    ("batch_window_ms", 1),
+    ("delay_expression", "1s"),
+])
+def test_workflow_rejects_unsupported_trigger_options(field, value):
+    trigger = event("created")
+    setattr(trigger, field, value)
+    with pytest.raises(ValueError, match=rf"{field}.*not supported"):
+        @workflow(triggers=[trigger])
+        async def unsupported(ctx: WorkflowContext) -> None:
+            pass
+    assert WorkflowRegistry.get("unsupported") is None
+
+
 def test_workflow_decorator_wrong_signature():
     """Test @workflow fails without ctx parameter."""
     with pytest.raises(ValueError, match="must have 'ctx"):
