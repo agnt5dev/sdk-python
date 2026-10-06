@@ -240,17 +240,11 @@ async def execute_function_callable(
         call_kwargs = dict(kwargs)
         try:
             try:
-                if not args and "input" in call_kwargs:
-                    input_data = call_kwargs.pop("input")
-                    handler_result = func_config.handler(func_context, input_data, **call_kwargs)
-                else:
-                    handler_result = func_config.handler(func_context, *args, **call_kwargs)
-                if inspect.isasyncgen(handler_result):
-                    result = await context._consume_streaming_result(handler_result, step_name)
-                elif inspect.iscoroutine(handler_result):
-                    result = await handler_result
-                else:
-                    result = handler_result
+                from ._workflow_function import call_workflow_function
+
+                result = await call_workflow_function(
+                    context, func_config, func_context, step_name, args, call_kwargs
+                )
             finally:
                 _current_context.reset(context_token)
 
@@ -349,6 +343,22 @@ async def run_durable_step(
             {"step_name": name, "handler_name": handler_name, "input": input_value}
         ),
     )
+    function_config = FunctionRegistry.get(handler_name)
+    retry_policy = function_config.retries if function_config is not None else None
+    max_attempts = retry_policy.max_attempts if retry_policy is not None else 1
+
+    async def retry_delay(attempt: int) -> None:
+        import asyncio
+
+        from ._retry_utils import calculate_backoff_delay
+        from .types import BackoffPolicy
+
+        await asyncio.sleep(
+            calculate_backoff_delay(
+                attempt - 1, retry_policy, function_config.backoff or BackoffPolicy()
+            )
+        )
+
     started_at = time.monotonic()
     # The runtime journals the activation itself as the step boundary record
     # (workflow.step.started/completed/failed keyed by the activation id), so
@@ -391,6 +401,9 @@ async def run_durable_step(
             on_admitted=on_admitted,
             on_completed=lambda _decision, _receipt: release(),
             on_failed=lambda _decision, _receipt, _error: release(),
+            failure_retryable=max_attempts > 1,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay if retry_policy is not None else None,
         )
     finally:
         release()
