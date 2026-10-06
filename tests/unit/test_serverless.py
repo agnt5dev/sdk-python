@@ -145,7 +145,7 @@ async def test_serverless_manifest_includes_python_workflows_and_functions() -> 
     async def hello(ctx, name: str = "world") -> dict[str, str]:
         return {"message": f"hello {name}"}
 
-    app = serve(service_name="python-workerless", service_version="test")
+    app = serve(allow_unsigned=True, service_name="python-workerless", service_version="test")
 
     status, body, _headers = await call_asgi(app, "GET", "/.well-known/agnt5")
 
@@ -173,7 +173,7 @@ async def test_serverless_invokes_python_workflow() -> None:
     async def hello(ctx, name: str = "world") -> dict[str, str]:
         return {"message": f"hello {name}"}
 
-    app = serve(service_name="python-workerless")
+    app = serve(allow_unsigned=True, service_name="python-workerless")
 
     status, body, _headers = await call_asgi(
         app,
@@ -239,7 +239,7 @@ def test_serverless_mount_starlette_registers_protocol_routes() -> None:
         def add_route(self, path, _handler, *, methods, include_in_schema):
             routes.append((path, methods, include_in_schema))
 
-    app = serve(workflows=[])
+    app = serve(allow_unsigned=True, workflows=[])
     app.mount_starlette(FakeStarlette())
 
     assert routes == [
@@ -335,7 +335,7 @@ async def test_serverless_exposes_and_invokes_selected_tools() -> None:
     async def hidden_tool(ctx) -> dict[str, bool]:
         return {"hidden": True}
 
-    app = serve(tools=[selected_tool], agents=[])
+    app = serve(allow_unsigned=True, tools=[selected_tool], agents=[])
     manifest_status, manifest, _headers = await call_asgi(app, "GET", "/.well-known/agnt5")
 
     assert manifest_status == 200
@@ -391,7 +391,7 @@ async def test_serverless_agent_checkpoint_resume() -> None:
     hidden_agent = cast(Agent, FakeAgent("hidden-agent"))
     AgentRegistry.register(selected_agent)
     AgentRegistry.register(hidden_agent)
-    app = serve(tools=[], agents=[selected_agent])
+    app = serve(allow_unsigned=True, tools=[], agents=[selected_agent])
 
     manifest_status, manifest, _headers = await call_asgi(app, "GET", "/.well-known/agnt5")
     assert manifest_status == 200
@@ -453,7 +453,7 @@ async def test_serverless_invokes_sdk_agent_without_platform_session_io() -> Non
         model_name="serverless-test-model",
         instructions="Answer briefly.",
     )
-    app = serve(functions=[], workflows=[], tools=[], agents=[agent])
+    app = serve(allow_unsigned=True, functions=[], workflows=[], tools=[], agents=[agent])
 
     status, body, _headers = await call_asgi(
         app,
@@ -528,7 +528,7 @@ async def test_serverless_budget_suspension_and_checkpoint_resume() -> None:
             await ctx.yield_if_needed()
         return {"summary": f"summary:{page['title']}", "fetch_count": page["fetch_count"]}
 
-    app = serve(service_name="python-workerless")
+    app = serve(allow_unsigned=True, service_name="python-workerless")
 
     suspended_status, suspended, _headers = await call_asgi(
         app,
@@ -678,3 +678,116 @@ def signed_headers(secret: str, payload: dict[str, Any]) -> dict[str, str]:
         "x-agnt5-attempt-id": attempt_id,
         "x-agnt5-signature": f"sha256={signature}",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signing_secret", [None, "", " \t\n", lambda: None, lambda _headers: ""])
+async def test_serverless_missing_signing_secret_rejects_invokes(signing_secret) -> None:
+    calls = 0
+
+    @workflow
+    async def probe(ctx) -> str:
+        nonlocal calls
+        calls += 1
+        return "executed"
+
+    app = serve(workflows=[probe], signing_secret=signing_secret)
+    manifest_status, _, _ = await call_asgi(app, "GET", "/.well-known/agnt5")
+    assert manifest_status == 200
+    status, body, _ = await call_asgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "protocol_version": "workerless.v1",
+            "run_id": "probe",
+            "component_type": "workflow",
+            "component_name": "probe",
+            "input": {},
+        },
+    )
+    assert status == 503
+    assert body["error"]["code"] == "WORKERLESS_SIGNING_SECRET_REQUIRED"
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signing_secret", [None, "", " \t\n", lambda: None])
+async def test_serverless_allow_unsigned_warns_and_does_not_bypass_configured_secret(
+    caplog, signing_secret
+) -> None:
+    @workflow
+    async def probe(ctx) -> str:
+        return "executed"
+
+    payload = {
+        "component_type": "workflow",
+        "component_name": "probe",
+        "run_id": "probe",
+        "input": {},
+    }
+    app = serve(workflows=[probe], signing_secret=signing_secret, allow_unsigned=True)
+    assert "allow_unsigned=True permits unsigned invokes" in caplog.text
+    status, body, _ = await call_asgi(app, "POST", "/agnt5/invoke", payload)
+    assert status == 200
+    assert body["output"] == "executed"
+
+    signed_app = serve(workflows=[probe], signing_secret="fixture-secret", allow_unsigned=True)
+    unsigned_status, _, _ = await call_asgi(signed_app, "POST", "/agnt5/invoke", payload)
+    assert unsigned_status == 401
+    signed_status, _, _ = await call_asgi(
+        signed_app,
+        "POST",
+        "/agnt5/invoke",
+        payload,
+        headers=signed_headers("fixture-secret", payload),
+    )
+    assert signed_status == 200
+    bad_headers = signed_headers("wrong-secret", payload)
+    invalid_status, _, _ = await call_asgi(
+        signed_app, "POST", "/agnt5/invoke", payload, headers=bad_headers
+    )
+    assert invalid_status == 401
+
+
+@pytest.mark.asyncio
+async def test_serverless_async_missing_secret_warns_once(caplog) -> None:
+    async def secret():
+        return None
+
+    app = serve(workflows=[], signing_secret=secret)
+    caplog.clear()
+    for _ in range(2):
+        status, _, _ = await call_asgi(app, "POST", "/agnt5/invoke", {})
+        assert status == 503
+    assert caplog.text.count("signing secret is missing") == 1
+
+
+def test_serverless_missing_secret_warns_at_startup(caplog) -> None:
+    serve(workflows=[])
+    assert "signing secret is missing; invokes are rejected" in caplog.text
+
+
+def test_serverless_wsgi_rejects_missing_signing_secret() -> None:
+    calls = 0
+
+    @workflow
+    async def probe(ctx) -> str:
+        nonlocal calls
+        calls += 1
+        return "executed"
+
+    app = serve(workflows=[probe])
+    status, body, _ = call_wsgi(
+        app,
+        "POST",
+        "/agnt5/invoke",
+        {
+            "component_type": "workflow",
+            "component_name": "probe",
+            "input": {},
+        },
+    )
+    assert status == 503
+    assert body["error"]["code"] == "WORKERLESS_SIGNING_SECRET_REQUIRED"
+    assert calls == 0
