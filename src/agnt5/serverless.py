@@ -399,11 +399,23 @@ class ServerlessApp:
         tools: list[Any] | None = None,
         agents: list[Any] | None = None,
         signing_secret: SigningSecretResolver | None = None,
+        allow_unsigned: bool = False,
         enabled: EnabledResolver = True,
     ) -> None:
         self.service_name = service_name
         self.service_version = service_version
         self.signing_secret = signing_secret
+        self.allow_unsigned = allow_unsigned is True
+        self._missing_signing_secret_warned = False
+        if self.allow_unsigned:
+            logger.warning(
+                "AGNT5 serverless allow_unsigned=True permits unsigned invokes when no "
+                "signing secret is configured; use only for local development"
+            )
+        elif signing_secret is None or (
+            isinstance(signing_secret, str) and not signing_secret.strip()
+        ):
+            self._warn_missing_signing_secret()
         self.enabled = enabled
         self.components = _collect_components(
             functions=functions,
@@ -421,6 +433,14 @@ class ServerlessApp:
         except Exception:
             logging.getLogger(__name__).warning(
                 "third-party capture auto-enable failed", exc_info=True
+            )
+
+    def _warn_missing_signing_secret(self) -> None:
+        if not self._missing_signing_secret_warned:
+            self._missing_signing_secret_warned = True
+            logger.warning(
+                "AGNT5 serverless signing secret is missing; invokes are rejected. "
+                "Configure signing_secret or set allow_unsigned=True for local development"
             )
 
     def manifest(self) -> dict[str, Any]:
@@ -631,8 +651,12 @@ class ServerlessApp:
         body: bytes,
         url: str,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        signature_failure = await _verify_signature(headers, body, self.signing_secret)
+        signature_failure = await _verify_signature(
+            headers, body, self.signing_secret, allow_unsigned=self.allow_unsigned
+        )
         if signature_failure:
+            if signature_failure[1]["error"]["code"] == "WORKERLESS_SIGNING_SECRET_REQUIRED":
+                self._warn_missing_signing_secret()
             return signature_failure
 
         try:
@@ -765,8 +789,10 @@ def serve(
     tools: list[Any] | None = None,
     agents: list[Any] | None = None,
     signing_secret: SigningSecretResolver | None = None,
+    allow_unsigned: bool = False,
     enabled: EnabledResolver = True,
 ) -> ServerlessApp:
+    """Serve signed invokes; allow_unsigned=True permits local unsigned development."""
     return ServerlessApp(
         service_name=service_name,
         service_version=service_version,
@@ -775,6 +801,7 @@ def serve(
         tools=tools,
         agents=agents,
         signing_secret=signing_secret,
+        allow_unsigned=allow_unsigned,
         enabled=enabled,
     )
 
@@ -1250,10 +1277,19 @@ async def _verify_signature(
     headers: HeaderMap,
     body: bytes,
     signing_secret: SigningSecretResolver | None,
+    *,
+    allow_unsigned: bool = False,
 ) -> tuple[int, dict[str, Any], dict[str, str]] | None:
     secret = await _resolve_signing_secret(signing_secret, headers)
-    if not secret:
-        return None
+    if not secret or not secret.strip():
+        if allow_unsigned:
+            return None
+        return _failed(
+            "WORKERLESS_SIGNING_SECRET_REQUIRED",
+            "serverless signing secret is required; configure signing_secret "
+            "or set allow_unsigned=True for local development",
+            503,
+        )
 
     signature_version = headers.get("x-agnt5-signature-version")
     signature = headers.get("x-agnt5-signature")
