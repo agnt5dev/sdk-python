@@ -236,6 +236,14 @@ def test_worker_refuses_to_register_past_the_views_budget():
         FunctionRegistry.discard("mcp_budget_test_lookup")
 
 
+def test_html_with_unpaired_surrogates_is_refused():
+    server = MCPServer("support")
+    for html in ["<p>\ud800</p>", "<p>\udc00</p>"]:
+        with pytest.raises(ValueError, match="unpaired UTF-16 surrogates"):
+            server.add_view("order", html)
+    assert server.add_view("order", "<p>😀</p>").size == len("<p>😀</p>".encode())
+
+
 def test_names_must_match_whole(tmp_path):
     server = MCPServer("support")
     with pytest.raises(ValueError, match="lowercase"):

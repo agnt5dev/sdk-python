@@ -193,7 +193,11 @@ def load_view(
             raise ValueError(f"view {name!r}: {os.fspath(path)} is not UTF-8 text") from None
     if not isinstance(html, str) or not html.strip():
         raise ValueError(f"view {name!r} has no HTML")
-    data = html.encode("utf-8")
+    try:
+        data = html.encode("utf-8")
+    except UnicodeEncodeError:
+        # Lone surrogates: not text UTF-8 (or the registration) can carry.
+        raise ValueError(f"view {name!r}: its HTML contains unpaired UTF-16 surrogates") from None
     if len(data) > MAX_VIEW_BYTES:
         raise ValueError(f"view {name!r} is {len(data)} bytes; the limit is {MAX_VIEW_BYTES}")
     return MCPView(
