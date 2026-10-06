@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Use core 0.3.8 so a worker returns a failure response when a Python `BaseException` escapes an executor. Previously the native core logged the error and dropped the response, leaving the invocation waiting for its lease to expire.
+
 ### Security
 
 - **Breaking:** serverless invokes now require a non-empty signing secret. A
