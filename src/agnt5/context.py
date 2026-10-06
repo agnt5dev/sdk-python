@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -16,7 +17,8 @@ from typing import (
 )
 
 from ._telemetry import ContextLogger, get_execution_logger
-from .events import Event, EventEmitter, EventEnvelope
+from .events import Event, EventEmitter, EventEnvelope, is_terminal_event
+from .progress import current_execution, drain, progress_payload, reporter_for
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
@@ -247,6 +249,15 @@ class Context:
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
+        # ctx.progress sends from the loop the run executes on, also when a
+        # sync handler reports from its worker thread.
+        try:
+            self._progress_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._progress_loop = None
+        # The dispatch this context belongs to: its contexts share a
+        # reporter, which closes for good when the dispatch ends.
+        self._progress_execution = current_execution()
 
         if enable_memoization:
             from .memoization import MemoizationManager
@@ -287,6 +298,64 @@ class Context:
         """Who called this run through a hosted MCP server, or ``None`` when
         the run wasn't started by an MCP tool call."""
         return caller_from_metadata(self._trace_metadata)
+
+    def progress(
+        self,
+        progress: float,
+        total: Optional[float] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Report how far this run has got.
+
+        ``progress`` is how far, out of ``total`` when you know it (a
+        positive number); ``message`` says what is happening now::
+
+            for i, doc in enumerate(docs, start=1):
+                await embed(doc)
+                ctx.progress(i, total=len(docs), message=f"Embedded {doc.name}")
+
+        Studio and ``get_run`` show the latest report, the AGNT5 run card
+        draws a bar when ``total`` is known, and an MCP client that asked
+        for progress on the tool call hears each report as
+        ``notifications/progress``.
+
+        Call it as often as you like: it never blocks, and each run writes
+        at most one report a second, always the latest, however many
+        contexts (workflow, ``ctx.task`` children, agents) report for it.
+        When the run completes or fails, the latest report is written before
+        the record that ends it; a cancelled execution writes nothing more. Progress never goes backwards, as
+        MCP requires: a report below the last one is dropped, and one with
+        the same figure is sent only when its message or total changed. The
+        SDK applies that within one execution; across executions of the same
+        run (a retry, a resumed workflow) the MCP edge and ``get_run`` ignore
+        a report below the run's last figure. Reports never feed back into
+        the run, so replaying a workflow can't change what it does. Locally,
+        without a worker, a report goes nowhere.
+
+        Raises ``TypeError`` for a ``progress`` or ``total`` that isn't a
+        number or a ``message`` that isn't a string, and ``ValueError`` for
+        a value that isn't finite or a ``total`` that isn't positive.
+        """
+        payload = progress_payload(progress, total, message)
+        if self._worker is None:
+            return
+        reporter = reporter_for(
+            self._run_id, _send_progress, self._progress_loop, self._progress_execution
+        )
+        # Where the report sits in the event tree, as of this call.
+        source = (
+            self,
+            # An agent context names its agent only in _agent_name.
+            self._component_name or getattr(self, "_agent_name", None) or "",
+            self._correlation_id,
+            self._parent_correlation_id,
+        )
+        reporter.report(payload, source)
+
+    async def _end_progress(self, event: Event) -> None:
+        """Write the waiting report before the record that finishes the run."""
+        if is_terminal_event(event.event_type):
+            await drain(self._run_id, self._progress_execution)
 
     @property
     def activation(self):
@@ -443,6 +512,7 @@ class Context:
 
         Checkpoint gRPC runs on the tokio runtime natively, avoiding thread pool overhead.
         """
+        await self._end_progress(event)
         emitter = self._get_emitter()
         return await emitter.emit_async(event)
 
@@ -534,6 +604,21 @@ class Context:
     def restore_parent(self, original_parent: str) -> None:
         """Restore the parent correlation ID to a previous value."""
         self._parent_correlation_id = original_parent
+
+
+async def _send_progress(payload: dict[str, Any], source: Any) -> None:
+    from .events import ProgressUpdate
+
+    ctx, name, correlation_id, parent_correlation_id = source
+    event = ProgressUpdate(
+        name=name,
+        correlation_id=correlation_id,
+        parent_correlation_id=parent_correlation_id,
+        progress=payload["progress"],
+        total=payload.get("total"),
+        message=payload.get("message"),
+    )
+    await ctx._get_emitter().emit_now_async(event)
 
 
 def get_current_context() -> Optional[Context]:

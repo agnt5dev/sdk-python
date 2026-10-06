@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from .._ids import generate_cid
 from .._serialization import deserialize, serialize
 from .._telemetry import setup_module_logger
+from ..progress import discard_execution as discard_progress_execution
 from ._memory import record_worker_memory
 from ._utils import create_failed_response, format_error_message
 
@@ -419,7 +420,11 @@ class ExecutorMixin:
                 # The user's finally/async-with cleanup has already run as the
                 # CancelledError propagated up. The gateway authored
                 # run.cancelled as the terminal event, so do NOT emit
-                # run.failed — stop cleanly with no response.
+                # run.failed — stop cleanly with no response. A ctx.progress
+                # report still waiting would land after that terminal: drop it.
+                execution = getattr(ctx, "_progress_execution", None)
+                if execution is not None:
+                    discard_progress_execution(execution)
                 duration_ms = (time.time_ns() - start_time_ns) // 1_000_000
                 logger.info(
                     f"run.cancelled | run_id={req.invocation_id} component={config.name} "
