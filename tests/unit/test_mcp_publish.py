@@ -1,6 +1,7 @@
 """Publishing MCPServer definitions with the deployment (AGNT5-1569)."""
 
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 
 from agnt5 import MCPServer, Worker, function, workflow
 from agnt5.function import FunctionContext, FunctionRegistry
-from agnt5.mcp.publish import RUN_VIEW, MCPServerRegistry
+from agnt5.mcp.publish import MAX_VIEW_BYTES, MAX_VIEWS_BYTES, RUN_VIEW, MCPServerRegistry
 from agnt5.workflow import WorkflowContext, WorkflowRegistry
 
 
@@ -123,6 +124,75 @@ def test_view_none_turns_the_run_card_off():
         server.add_workflow("custom", triage, view="board")
 
 
+BOARD = "<!doctype html><title>Order</title><p>An order board ✓</p>"
+
+
+def test_add_view_ships_a_view_tools_name(tmp_path):
+    server = MCPServer("support")
+    board = server.add_view("order", BOARD)
+    assert (board.name, board.server, board.size) == ("order", "support", len(BOARD.encode()))
+    assert board.sha256 == hashlib.sha256(BOARD.encode()).hexdigest()
+    assert BOARD not in repr(board), "the bundle stays out of reprs"
+
+    built = tmp_path / "receipt.html"
+    built.write_text("<!doctype html><p>Receipt</p>", encoding="utf-8")
+    receipt = server.add_view("receipt", path=built)
+
+    # Any mode may show a view: sync tools too. By handle or by name.
+    server.add_function("lookup", lookup_order, view=board)
+    server.add_workflow("triage_ticket", triage, view="receipt")
+    server.add_workflow("plain", triage)
+    definition = server.definition()
+    tools = {tool["name"]: tool for tool in definition["tools"]}
+    assert tools["lookup"]["view"] == "order"
+    assert tools["triage_ticket"]["view"] == "receipt"
+    assert "view" not in tools["plain"]
+    assert definition["views"] == [
+        {"name": "order", "sha256": board.sha256, "size": board.size, "html": BOARD},
+        {"name": "receipt", "sha256": receipt.sha256, "size": receipt.size, "html": receipt.html},
+    ]
+    assert server.views == {"order": board, "receipt": receipt}
+    json.dumps(definition)
+
+
+def test_add_view_is_checked_where_it_is_written(tmp_path):
+    server = MCPServer("support")
+    with pytest.raises(ValueError, match="lowercase"):
+        server.add_view("Order Board", BOARD)
+    for reserved in ("run", "none"):
+        with pytest.raises(ValueError, match="reserved"):
+            server.add_view(reserved, BOARD)
+    with pytest.raises(ValueError, match="one of html= or path="):
+        server.add_view("order")
+    with pytest.raises(ValueError, match="one of html= or path="):
+        server.add_view("order", BOARD, path=tmp_path / "x.html")
+    with pytest.raises(ValueError, match="does not exist. Build it first"):
+        server.add_view("order", path=tmp_path / "missing.html")
+    with pytest.raises(ValueError, match="no HTML"):
+        server.add_view("order", "  ")
+    with pytest.raises(ValueError, match="the limit is 2097152"):
+        server.add_view("order", "x" * (MAX_VIEW_BYTES + 1))
+    server.add_view("order", BOARD)
+    with pytest.raises(ValueError, match="already has a view"):
+        server.add_view("order", BOARD)
+
+    # A tool names one of its own server's views, added first.
+    other = MCPServer("billing")
+    invoice = other.add_view("invoice", BOARD)
+    with pytest.raises(ValueError, match="belongs to MCP server 'billing'"):
+        server.add_function("lookup", lookup_order, view=invoice)
+    with pytest.raises(ValueError, match="view must be"):
+        server.add_function("lookup", lookup_order, view="chart")
+
+
+def test_a_workers_views_share_one_budget():
+    big = "x" * MAX_VIEW_BYTES
+    MCPServer("one").add_view("a", big)
+    with pytest.raises(ValueError, match="views .* bytes together"):
+        MCPServer("two").add_view("b", big)
+    assert MAX_VIEWS_BYTES < 4 * 1024 * 1024, "registrations are accepted up to 4 MB"
+
+
 def test_stdio_only_servers_are_not_published():
     stdio = MCPServer("legacy", "Legacy", "1.0.0", workflows={"plain": lambda **_: None})
     stdio.add_workflow("also_plain", lambda **_: None)
@@ -142,7 +212,8 @@ def test_worker_registers_published_servers_as_mcp_components():
 
     try:
         server = MCPServer("support")
-        server.add_function("lookup_order", lookup)
+        board = server.add_view("board", BOARD)
+        server.add_function("lookup_order", lookup, view=board)
         server.add_workflow("triage_ticket", triage_wf)
         MCPServer("stdio-only")  # nothing published: not registered
         components = Worker(service_name="py-worker")._discover_components()
@@ -154,6 +225,9 @@ def test_worker_registers_published_servers_as_mcp_components():
             "mcp_worker_test_lookup",
             "mcp_worker_test_triage",
         ]
+        # The bundle travels with the registration, byte for byte.
+        assert definition["views"][0]["html"] == BOARD
+        assert definition["views"][0]["sha256"] == hashlib.sha256(BOARD.encode()).hexdigest()
         names = {c.name for c in components}
         assert {"mcp_worker_test_lookup", "mcp_worker_test_triage"} <= names, (
             "the tools' components register alongside the server"

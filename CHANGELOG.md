@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `MCPServer.add_view(name, html=... | path=...)` (AGNT5-1569): ship your own MCP App view with a hosted server and show it for a tool's results in clients that render MCP Apps (ChatGPT, Claude, Cursor, VS Code). A view is one self-contained HTML file (for example built with Vite and `vite-plugin-singlefile`), read when it is added. `add_view` returns an `MCPView` (`name`, `sha256`, `size`); pass it, or its name, as `view=` to `add_function`, `add_workflow` or `add_agent`. Any mode can show a view, `sync` tools too, and it replaces the run card for that tool. The view gets the tool's `structuredContent` and text; a call that hands off gives it the run handle in `_meta["com.agnt5/run"]`, and it can poll `get_run` through the host. Clients without MCP Apps still read the text. Up to 2 MB per view and 3 MB for all the views a worker publishes; view names follow the server-name rule, and `run` and `none` are reserved. A missing file, an oversized bundle, or a `view=` naming a view the server doesn't have raises `ValueError` where it is written. The bundle travels in the server's definition (`views[].html`) with its SHA-256; needs a control plane and runtime with custom views, and older control planes refuse servers that publish one.
+
 ## [0.14.2] - 2026-10-05
 
 ### Added
