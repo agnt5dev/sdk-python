@@ -600,6 +600,14 @@ class Worker(ExecutorMixin):
 
         return self._served("workflows", WorkflowRegistry)
 
+    def _served_agents(self) -> dict[str, Any]:
+        """Serve listed agents; nested calls still execute through their object references."""
+        return {agent.name: agent for agent in self._explicit_components["agents"]}
+
+    def _served_tools(self) -> dict[str, Any]:
+        """Serve listed tools, preserving the omitted-list default of no direct tools."""
+        return {tool.name: tool for tool in self._explicit_components["tools"]}
+
     def _log_unserved(self, kind: str, registry: Any, served: dict[str, Any]) -> None:
         unserved = sorted(registry.all().keys() - served.keys())
         if unserved:
@@ -680,7 +688,7 @@ class Worker(ExecutorMixin):
             )
 
         # Process agents
-        for agent in self._explicit_components["agents"]:
+        for agent in self._served_agents().values():
             # Build agent definition with tool schemas
             tool_schemas = []
             for tool_name, tool in agent.tools.items():
@@ -714,7 +722,7 @@ class Worker(ExecutorMixin):
             )
 
         # Process tools
-        for tool in self._explicit_components["tools"]:
+        for tool in self._served_tools().values():
             components.append(
                 self._create_component_info(
                     name=tool.name,
@@ -861,9 +869,7 @@ class Worker(ExecutorMixin):
 
             # Tools
             elif component_type == "tool":
-                from ..tool import ToolRegistry
-
-                tool = ToolRegistry.get(component_name)
+                tool = self._served_tools().get(component_name)
                 if tool:
                     return self._execute_tool(tool, input_data, request)
 
@@ -877,9 +883,7 @@ class Worker(ExecutorMixin):
                 if chatbot is not None and self._is_inbound_event(input_data):
                     return self._execute_chat_webhook(chatbot, input_data, request)
 
-                from ..agent import AgentRegistry
-
-                agent = AgentRegistry.get(component_name)
+                agent = self._served_agents().get(component_name)
                 if agent:
                     return self._execute_agent(agent, input_data, request)
 

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agnt5 import Agent, Context, Sandbox, tool
+from agnt5 import Agent, Context, Sandbox, Worker, tool
 from agnt5.activation import (
     ActivationDecision,
     ActivationDecisionKind,
@@ -487,7 +487,7 @@ async def test_agent_run_with_agent_context(mock_lm):
 
 
 @pytest.mark.asyncio
-async def test_agent_with_tool_execution(sample_tool):
+async def test_agent_with_tool_execution(sample_tool, fake_native_core):
     """Test agent executing a tool."""
     # Mock LLM that calls a tool, then provides final response
     mock_lm = MockLanguageModel(
@@ -507,6 +507,9 @@ async def test_agent_with_tool_execution(sample_tool):
         instructions="Use tools when needed",
         tools=[sample_tool],
     )
+
+    worker = Worker(service_name="nested-tools", agents=[agent], tools=[])
+    assert worker._served_tools() == {}
 
     result = await agent.run("Double the number 10")
 
@@ -700,7 +703,7 @@ async def test_agent_as_tool():
 
 
 @pytest.mark.asyncio
-async def test_agent_with_agent_tools():
+async def test_agent_with_agent_tools(fake_native_core):
     """Test coordinator agent using another agent as a tool."""
     specialist_lm = MockLanguageModel(responses=["Specialist answer"])
     coordinator_lm = MockLanguageModel(
@@ -724,6 +727,9 @@ async def test_agent_with_agent_tools():
         tools=[specialist],  # Pass agent directly as tool
     )
 
+    worker = Worker(service_name="nested-agents", agents=[coordinator], tools=[])
+    assert set(worker._served_agents()) == {"coordinator"}
+
     result = await coordinator.run("Need specialist help")
 
     assert len(result.tool_calls) == 1
@@ -734,7 +740,7 @@ async def test_agent_with_agent_tools():
 
 
 @pytest.mark.asyncio
-async def test_agent_handoff():
+async def test_agent_handoff(fake_native_core):
     """Test agent handoff mechanism."""
     target_lm = MockLanguageModel(responses=["I am the target agent"])
     source_lm = MockLanguageModel(
@@ -756,6 +762,8 @@ async def test_agent_handoff():
         instructions="I coordinate tasks",
         handoffs=[handoff(target_agent, "Transfer to target agent")],
     )
+    worker = Worker(service_name="handoffs", agents=[source_agent], tools=[])
+    assert set(worker._served_agents()) == {"source"}
     ctx = AgentContext(run_id="run-handoff", agent_name="source")
     emitted = []
     ctx.emit = emitted.append
