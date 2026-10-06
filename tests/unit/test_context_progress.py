@@ -396,3 +396,47 @@ async def test_a_task_function_names_itself_on_its_reports():
     assert await workflow_ctx.step(embed_one, "a.md") == "a.md"
     await settle()
     assert [p["name"] for p in worker.progress()] == ["embed_one"]
+
+
+async def test_a_function_cancelled_mid_run_writes_nothing_more(monkeypatch):
+    # Through the worker's real function executor, whose cancellation path
+    # returns normally (the gateway already wrote run.cancelled).
+    from agnt5.worker._executors import ExecutorMixin
+
+    async def quiet(self, event):  # lifecycle records aren't under test
+        return None
+
+    monkeypatch.setattr(FunctionContext, "emit_async", quiet)
+    monkeypatch.setattr(FunctionContext, "emit_batch_async", quiet)
+
+    class Executor(ExecutorMixin):
+        def __init__(self, worker) -> None:
+            self._entity_state_adapter = object()
+            self._checkpoint_client = None
+            self._rust_worker = worker
+            self.service_name = "test"
+
+    worker = FakeWorker()
+
+    async def handler(ctx):
+        ctx.progress(1, total=3)
+        await settle()
+        ctx.progress(2, total=3)  # waiting out the interval
+        raise asyncio.CancelledError()  # CancelExecution → task.cancel()
+
+    request = SimpleNamespace(
+        invocation_id="run_1",
+        input_data=b"{}",
+        runtime_context=None,
+        metadata={},
+        session_id="",
+        user_id="",
+        attempt=0,
+        is_streaming=False,
+        component_name="embed_docs",
+    )
+    config = SimpleNamespace(name="embed_docs", handler=handler, retries=None, timeout_ms=None)
+    result = await dispatch(Executor(worker)._execute_function(config, request.input_data, request))
+    assert result is None
+    await settle(0.08)
+    assert figures(worker) == [(1.0, 3.0, None)]
