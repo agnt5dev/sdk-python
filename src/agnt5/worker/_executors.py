@@ -1638,7 +1638,7 @@ class ExecutorMixin:
                 logger.debug(f"Restored {len(step_events)} step events into workflow entity")
 
             # Inject user response if resuming from pause
-            if user_response:
+            if user_response is not None:
                 if dispatch_metadata:
                     pause_index_str = dispatch_metadata.get("pause_index", "0")
                     try:

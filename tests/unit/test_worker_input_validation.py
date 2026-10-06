@@ -142,6 +142,36 @@ async def test_non_object_inputs_fail_before_workflow_handler(payload):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("answer,expected", [("", ""), ("__skipped__", None), ('["a","c"]', '["a","c"]')])
+async def test_resumed_workflow_consumes_answer_without_pausing_again(monkeypatch, answer, expected):
+    from agnt5.workflow import WorkflowContext
+
+    executor = _DummyExecutor()
+    observed = []
+    emitted = []
+
+    async def capture_event(self, event):
+        emitted.append(event.event_type)
+
+    async def capture_batch(self, events):
+        emitted.extend(event.event_type for event in events)
+
+    monkeypatch.setattr(WorkflowContext, "emit_async", capture_event)
+    monkeypatch.setattr(WorkflowContext, "emit_batch_async", capture_batch)
+
+    async def handler(ctx):
+        observed.append(await ctx.wait_for_user("Choose?"))
+
+    request = _request({})
+    request.metadata = {"user_response": answer, "pause_index": "0", "dispatch_mode": "pull", "lease_id": "lease-hitl"}
+    await executor._execute_workflow(
+        SimpleNamespace(name="answer_workflow", handler=handler), request.input_data, request,
+    )
+    assert observed == [expected]
+    assert "workflow.paused" not in emitted
+
+
+@pytest.mark.asyncio
 async def test_workflow_lifecycle_uses_async_emission(monkeypatch):
     from agnt5.workflow import WorkflowContext
 
