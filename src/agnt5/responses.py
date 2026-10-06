@@ -65,6 +65,17 @@ class SubmitLinks:
 
 
 @dataclass
+class OutputRef:
+    """Reference to a large run output stored outside the result response."""
+
+    ref: str
+    kind: Optional[str] = None
+    size_bytes: Optional[int] = None
+    sha256: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+@dataclass
 class RunResponse(Generic[T]):
     """Response from run(), get_result(), wait_for_result().
 
@@ -88,6 +99,7 @@ class RunResponse(Generic[T]):
         status_code: HTTP-style status code: 200=completed, 202=in-progress, 500=failed.
         status: Granular execution status.
         output: The function/workflow output (None if not completed or failed).
+        output_ref: Reference to output stored out of band; use client.resolve_output().
         error: Error details if the run failed (None if successful).
         duration_ms: Execution duration in milliseconds.
         trace_id: OpenTelemetry trace ID for distributed tracing.
@@ -115,6 +127,12 @@ class RunResponse(Generic[T]):
     session_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     _raw: Dict[str, Any] = field(default_factory=dict, repr=False)
+    output_ref: Optional[OutputRef] = None
+
+    @property
+    def has_output_ref(self) -> bool:
+        """True when the output can be fetched through the run output endpoint."""
+        return self.output_ref is not None and bool(self.output_ref.ref)
 
     @property
     def is_success(self) -> bool:
@@ -512,6 +530,17 @@ def parse_run_response(data: Dict[str, Any]) -> RunResponse[Any]:
         status_code=status_code,
         status=_parse_status(data.get("status", "unknown")),
         output=output,
+        output_ref=(
+            OutputRef(
+                **{
+                    key: data["output_ref"][key]
+                    for key in OutputRef.__dataclass_fields__
+                    if key in data["output_ref"]
+                }
+            )
+            if isinstance(data.get("output_ref"), dict) and data["output_ref"].get("ref")
+            else None
+        ),
         error=error,
         duration_ms=data.get("duration_ms"),
         trace_id=data.get("trace_id"),
