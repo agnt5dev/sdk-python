@@ -317,8 +317,10 @@ class Context:
         ``notifications/progress``.
 
         Call it as often as you like: it never blocks, and each run writes
-        at most one report a second, always the latest; the latest is always
-        written before the run finishes. Progress never goes backwards, as
+        at most one report a second, always the latest, however many
+        contexts (workflow, ``ctx.task`` children, agents) report for it.
+        When the run completes or fails, the latest report is written before
+        the record that ends it; a cancelled execution writes nothing more. Progress never goes backwards, as
         MCP requires: a report below the last one is dropped, and one with
         the same figure is sent only when its message or total changed. The
         SDK applies that within one execution; across executions of the same
@@ -338,7 +340,8 @@ class Context:
         # Where the report sits in the event tree, as of this call.
         source = (
             self,
-            self._component_name or "",
+            # An agent context names its agent only in _agent_name.
+            self._component_name or getattr(self, "_agent_name", None) or "",
             self._correlation_id,
             self._parent_correlation_id,
         )

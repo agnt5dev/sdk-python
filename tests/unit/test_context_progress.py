@@ -274,3 +274,70 @@ async def test_a_reporter_without_a_loop_keeps_the_latest_for_later():
     reporter.report({"progress": 2.0})
     await settle()
     assert sent == [{"progress": 2.0}]
+
+
+async def test_a_run_shares_one_reporter_across_its_contexts():
+    # A workflow and its ctx.task children report for the same run: one
+    # interval and one never-backwards rule between them.
+    worker = FakeWorker()
+    parent = WorkflowContext(WorkflowEntity("run_1"), run_id="run_1", worker=worker)
+    children = [function_ctx(worker) for _ in range(3)]
+    parent.progress(4, total=10)
+    await settle()
+    for i, child in enumerate(children):
+        child.progress(5 + i, total=10)
+    children[0].progress(2, total=10)  # below the run's last figure: dropped
+    await settle()
+    assert figures(worker) == [(4.0, 10.0, None)], "one record, not one per context"
+    await settle(0.08)
+    assert figures(worker) == [(4.0, 10.0, None), (7.0, 10.0, None)]
+
+
+async def test_a_cancelled_execution_writes_nothing_more():
+    worker = FakeWorker()
+    ctx = function_ctx(worker)
+    reported = asyncio.Event()
+
+    async def handler():
+        ctx.progress(1, total=3)
+        await settle()
+        ctx.progress(2, total=3)  # waiting out the interval
+        reported.set()
+        await asyncio.sleep(10)
+
+    fake = SimpleNamespace(_inflight={})
+    task = asyncio.ensure_future(Worker._track_invocation(fake, "run_1", handler()))
+    await reported.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await settle(0.08)
+    assert figures(worker) == [(1.0, 3.0, None)]
+    assert progress_module._reporters == {}
+
+
+async def test_a_failed_execution_still_writes_its_last_report():
+    # Executors turn a handler's exception into a failed terminal response;
+    # the last report goes ahead of it.
+    worker = FakeWorker()
+    ctx = function_ctx(worker)
+
+    async def handler():
+        ctx.progress(1, total=3)
+        ctx.progress(2, total=3)
+        return "run.failed response"
+
+    fake = SimpleNamespace(_inflight={})
+    assert await Worker._track_invocation(fake, "run_1", handler()) == "run.failed response"
+    # Both came before the reporter's first turn: only the latest is written.
+    assert figures(worker) == [(2.0, 3.0, None)]
+
+
+async def test_an_agent_names_itself_on_its_reports():
+    from agnt5.agent.context import AgentContext
+
+    worker = FakeWorker()
+    ctx = AgentContext(run_id="run_1", agent_name="researcher", worker=worker)
+    ctx.progress(1, total=2, message="Searching")
+    await settle()
+    assert worker.progress()[0]["name"] == "researcher"
