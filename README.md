@@ -85,6 +85,12 @@ Configuration can be supplied explicitly or through `AGNT5_GATEWAY_URL`,
 | `Client` / `AsyncClient` | Invoke and observe deployed components |
 | `Worker` | Register components and serve runtime dispatch |
 
+Functions called inside workflow steps honor their declared retry and backoff
+policy. With negotiated durable activations, each attempt is admitted and
+recorded by the runtime; compatibility execution applies the same attempt
+budget locally. Completed steps replay their recorded output. Make external
+side effects idempotent so an interrupted attempt can safely run again.
+
 In async workflows, use `await ctx.state.set_async(key, value)` and
 `await ctx.state.delete_async(key)`. These await the runtime's durable
 acknowledgment while allowing other workflows to run. Reads remain local via

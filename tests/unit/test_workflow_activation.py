@@ -478,6 +478,7 @@ async def test_function_form_does_not_memoize_when_completion_ack_is_lost():
     assert all(event.component_type.value == "function" for event in events)
     assert context._step_event_stack == []
 
+
 @pytest.mark.asyncio
 async def test_sibling_agents_on_same_model_have_distinct_durable_activations(monkeypatch):
     from types import SimpleNamespace
@@ -514,14 +515,21 @@ async def test_sibling_agents_on_same_model_have_distinct_durable_activations(mo
     monkeypatch.setattr(LMClient, "_convert_response", lambda self, response: response)
 
     for name in ("context_builder", "code_reviewer"):
-        agent = Agent(name=name, model="openai/gpt-4.1-mini", instructions=name, before_model_callback=lambda ctx, request: None)
+        agent = Agent(
+            name=name,
+            model="openai/gpt-4.1-mini",
+            instructions=name,
+            before_model_callback=lambda ctx, request: None,
+        )
         await agent.run(f"Perform {name}", context=context)
 
     requests = [r for r in transport.begin_requests if r.kind is ActivationKind.MODEL]
     assert len(requests) == 2
     assert [r.stable_key for r in requests] == [
-        "model:openai/gpt-4.1-mini:0", "model:openai/gpt-4.1-mini:1"
+        "model:openai/gpt-4.1-mini:0",
+        "model:openai/gpt-4.1-mini:1",
     ]
+
 
 @pytest.mark.asyncio
 async def test_model_keys_do_not_shift_when_an_earlier_parent_is_replayed():
@@ -553,3 +561,73 @@ def test_agent_allocation_state_is_fresh_for_a_new_invocation():
         sibling = AgentContext(run_id=owner.run_id, agent_name="two", parent_context=owner)
         assert child.allocate_activation_key("tool", "shared") == "tool:shared:0"
         assert sibling.allocate_activation_key("tool", "shared") == "tool:shared:1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_registered_step_retries_until_success(managed):
+    class RetryTransport(WorkflowActivationTransport):
+        async def begin(self, request):
+            decision = await super().begin(request)
+            from dataclasses import replace
+
+            return replace(decision, attempt=len(self.fail_requests) + 1)
+
+        async def fail(self, **request):
+            receipt = await super().fail(**request)
+            from dataclasses import replace
+
+            return replace(receipt, status="RETRY_READY" if request["retryable"] else "FAILED")
+
+    transport = RetryTransport()
+    context, _, _ = activation_context(transport)
+    if not managed:
+        context._activation_client = None
+    attempts = []
+
+    @function(name="retry_step", retries={"max_attempts": 3, "initial_interval_ms": 0})
+    async def flaky(ctx):
+        attempts.append(ctx.attempt)
+        if len(attempts) < 3:
+            raise ValueError("temporary")
+        return 42
+
+    assert await context.step(flaky, key="once") == 42
+    assert attempts == [0, 1, 2]
+    if managed:
+        assert [request["retryable"] for request in transport.fail_requests] == [True, True]
+        assert {request.stable_key for request in transport.begin_requests} == {
+            "step:retry_step:once"
+        }
+        assert len(transport.complete_requests) == 1
+    else:
+        assert attempts == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_preserves_exception_and_marks_final_attempt_nonretryable():
+    from dataclasses import replace
+
+    class RetryTransport(WorkflowActivationTransport):
+        async def begin(self, request):
+            return replace(await super().begin(request), attempt=len(self.fail_requests) + 1)
+
+        async def fail(self, **request):
+            return replace(
+                await super().fail(**request),
+                status="RETRY_READY" if request["retryable"] else "FAILED",
+            )
+
+    transport = RetryTransport()
+    context, _, _ = activation_context(transport)
+    error = ValueError("permanent")
+
+    @function(name="always_fails", retries={"max_attempts": 2, "initial_interval_ms": 0})
+    async def failing(ctx):
+        raise error
+
+    with pytest.raises(ValueError) as caught:
+        await context.step(failing)
+    assert caught.value is error
+    assert [request["retryable"] for request in transport.fail_requests] == [True, False]
+    assert not transport.complete_requests

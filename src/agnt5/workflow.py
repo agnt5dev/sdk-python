@@ -768,24 +768,11 @@ class WorkflowContext(Context):
             context_token = set_current_context(func_ctx)
             try:
                 try:
-                    # Execute function with arguments
-                    # Support legacy pattern: ctx.task("func_name", input=data) or ctx.task(func_ref, input=data)
-                    if len(args) == 0 and "input" in kwargs:
-                        # Legacy pattern - single input parameter
-                        input_data = kwargs.pop("input")  # Remove from kwargs
-                        handler_result = func_config.handler(func_ctx, input_data, **kwargs)
-                    else:
-                        # Type-safe pattern - pass all args/kwargs
-                        handler_result = func_config.handler(func_ctx, *args, **kwargs)
+                    from ._workflow_function import call_workflow_function
 
-                    # Check if result is an async generator (streaming function or agent)
-                    # If so, consume it while forwarding events via delta queue
-                    if inspect.isasyncgen(handler_result):
-                        result = await self._consume_streaming_result(handler_result, step_name)
-                    elif inspect.iscoroutine(handler_result):
-                        result = await handler_result
-                    else:
-                        result = handler_result
+                    result = await call_workflow_function(
+                        self, func_config, func_ctx, step_name, args, kwargs
+                    )
                 finally:
                     from .context import _current_context
 

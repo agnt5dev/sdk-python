@@ -374,10 +374,7 @@ class NativeActivationTransport:
                 usage.provider,
                 usage.model,
                 usage.cached_tokens,
-                [
-                    (item.evidence_type, list(item.payload), list(item.sha256))
-                    for item in evidence
-                ],
+                [(item.evidence_type, list(item.payload), list(item.sha256)) for item in evidence],
             )
         except Exception as error:
             raise _native_activation_error(error) from error
@@ -414,10 +411,7 @@ class NativeActivationTransport:
                 list(error_data),
                 retryable,
                 external_outcome_certainty,
-                [
-                    (item.evidence_type, list(item.payload), list(item.sha256))
-                    for item in evidence
-                ],
+                [(item.evidence_type, list(item.payload), list(item.sha256)) for item in evidence],
                 latency_ms,
             )
         except Exception as error:
@@ -567,6 +561,8 @@ class ActivationClient:
         | None = None,
         failure_error_code: str = "STEP_FAILED",
         failure_retryable: bool = False,
+        max_attempts: int | None = None,
+        retry_delay: Callable[[int], Awaitable[None]] | None = None,
         failure_external_outcome_certainty: str = "UNKNOWN",
         completion_usage: Callable[[T], ActivationUsage] | None = None,
         completion_evidence: Callable[[T], tuple[ActivationEvidence, ...]] | None = None,
@@ -574,64 +570,85 @@ class ActivationClient:
     ) -> tuple[T, ActivationDecision | ActivationCompletionReceipt]:
         """Execute or replay one activation, returning only after durable acceptance."""
 
-        decision = await self.begin(request)
-        if decision.kind is ActivationDecisionKind.REPLAY:
-            if decision.replay_output is None:
-                raise ActivationError(
-                    ActivationErrorCode.UNKNOWN_OUTCOME,
-                    "REPLAY receipt is missing its canonical output",
-                    activation_id=decision.activation_id,
-                    attempt=decision.attempt,
-                )
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        while True:
+            decision = await self.begin(request)
+            if decision.kind is ActivationDecisionKind.REPLAY:
+                if decision.replay_output is None:
+                    raise ActivationError(
+                        ActivationErrorCode.UNKNOWN_OUTCOME,
+                        "REPLAY receipt is missing its canonical output",
+                        activation_id=decision.activation_id,
+                        attempt=decision.attempt,
+                    )
+                if on_admitted is not None:
+                    on_admitted(decision)
+                result = decode_output(decision.replay_output)
+                if on_completed is not None:
+                    on_completed(decision, decision)
+                return result, decision
+            if decision.kind is not ActivationDecisionKind.EXECUTE:
+                raise _decision_error(decision)
             if on_admitted is not None:
                 on_admitted(decision)
-            result = decode_output(decision.replay_output)
-            if on_completed is not None:
-                on_completed(decision, decision)
-            return result, decision
-        if decision.kind is not ActivationDecisionKind.EXECUTE:
-            raise _decision_error(decision)
-        if on_admitted is not None:
-            on_admitted(decision)
 
-        from ._core_metrics import business_timing
+            from ._core_metrics import business_timing
 
-        try:
-            with business_timing(request.run_id):
-                result = await execute()
-        except Exception as user_error:
-            error_data = json.dumps(
-                {"message": str(user_error), "type": type(user_error).__name__},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            receipt = await self.fail(
+            try:
+                with business_timing(request.run_id):
+                    result = await execute()
+            except Exception as user_error:
+                if type(user_error).__name__ in {
+                    "ActivationError",
+                    "WaitingForUserInputException",
+                    "DurableSleepSuspension",
+                    "SuspensionRequestedException",
+                }:
+                    raise
+                retryable = failure_retryable and (
+                    max_attempts is None or decision.attempt < max_attempts
+                )
+                error_data = json.dumps(
+                    {"message": str(user_error), "type": type(user_error).__name__},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                receipt = await self.fail(
+                    request,
+                    decision,
+                    error_code=failure_error_code,
+                    error_data=error_data,
+                    retryable=retryable,
+                    external_outcome_certainty=failure_external_outcome_certainty,
+                    evidence=failure_evidence(user_error) if failure_evidence is not None else (),
+                    latency_ms=latency_ms(),
+                )
+                if on_failed is not None:
+                    on_failed(decision, receipt, user_error)
+                if (
+                    max_attempts is not None
+                    and retryable
+                    and receipt.status.upper() == "RETRY_READY"
+                ):
+                    if retry_delay is not None:
+                        await retry_delay(decision.attempt)
+                    continue
+                raise
+
+            output = encode_output(result)
+            usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
+            usage = replace(usage, latency_ms=latency_ms())
+            receipt = await self.complete(
                 request,
                 decision,
-                error_code=failure_error_code,
-                error_data=error_data,
-                retryable=failure_retryable,
-                external_outcome_certainty=failure_external_outcome_certainty,
-                evidence=failure_evidence(user_error) if failure_evidence is not None else (),
-                latency_ms=latency_ms(),
+                output=output,
+                usage=usage,
+                evidence=completion_evidence(result) if completion_evidence is not None else (),
             )
-            if on_failed is not None:
-                on_failed(decision, receipt, user_error)
-            raise
-
-        output = encode_output(result)
-        usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
-        usage = replace(usage, latency_ms=latency_ms())
-        receipt = await self.complete(
-            request,
-            decision,
-            output=output,
-            usage=usage,
-            evidence=completion_evidence(result) if completion_evidence is not None else (),
-        )
-        if on_completed is not None:
-            on_completed(decision, receipt)
-        return result, receipt
+            if on_completed is not None:
+                on_completed(decision, receipt)
+            return result, receipt
 
 
 def activation_request_from_context(
@@ -676,17 +693,13 @@ def activation_request_from_context(
             ActivationErrorCode.DURABILITY_UNAVAILABLE,
             "durable activation requires project, run, worker-session, run, lease, component, and definition authority",
         )
-    canonical_config = metadata.get("activation_definition_config", '["object",[]]').encode(
-        "utf-8"
-    )
+    canonical_config = metadata.get("activation_definition_config", '["object",[]]').encode("utf-8")
     active = current_activation()
     return BeginActivationRequest(
         project_id=project_id,
         run_id=run_id,
         parent_activation_id=(
-            active.activation_id
-            if active is not None
-            else metadata.get("parent_activation_id", "")
+            active.activation_id if active is not None else metadata.get("parent_activation_id", "")
         ),
         kind=kind,
         stable_key=stable_key,
