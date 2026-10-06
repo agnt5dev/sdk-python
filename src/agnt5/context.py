@@ -18,7 +18,7 @@ from typing import (
 
 from ._telemetry import ContextLogger, get_execution_logger
 from .events import Event, EventEmitter, EventEnvelope, is_terminal_event
-from .progress import drain_run, progress_payload, reporter_for
+from .progress import current_execution, drain, progress_payload, reporter_for
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
@@ -255,6 +255,9 @@ class Context:
             self._progress_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
         except RuntimeError:
             self._progress_loop = None
+        # The dispatch this context belongs to: its contexts share a
+        # reporter, which closes for good when the dispatch ends.
+        self._progress_execution = current_execution()
 
         if enable_memoization:
             from .memoization import MemoizationManager
@@ -336,7 +339,9 @@ class Context:
         payload = progress_payload(progress, total, message)
         if self._worker is None:
             return
-        reporter = reporter_for(self._run_id, _send_progress, self._progress_loop)
+        reporter = reporter_for(
+            self._run_id, _send_progress, self._progress_loop, self._progress_execution
+        )
         # Where the report sits in the event tree, as of this call.
         source = (
             self,
@@ -350,7 +355,7 @@ class Context:
     async def _end_progress(self, event: Event) -> None:
         """Write the waiting report before the record that finishes the run."""
         if is_terminal_event(event.event_type):
-            await drain_run(self._run_id)
+            await drain(self._run_id, self._progress_execution)
 
     @property
     def activation(self):

@@ -19,8 +19,10 @@ from .._telemetry import (
 )
 from ..exceptions import AutoDiscoveryError
 from ..function import FunctionRegistry
-from ..progress import discard_run as discard_progress_run
-from ..progress import finish_run as finish_progress_run
+from ..progress import begin_execution as begin_progress_execution
+from ..progress import discard_execution as discard_progress_execution
+from ..progress import end_execution_scope as end_progress_execution_scope
+from ..progress import finish_execution as finish_progress_execution
 from ..scorer import (
     BUILTIN_DETERMINISTIC_SCORER_NAMES,
     ScorerRegistry,
@@ -921,6 +923,9 @@ class Worker(ExecutorMixin):
             task = asyncio.current_task()
             if task is not None:
                 self._inflight[run_id] = task
+            # ctx.progress reports of this dispatch share one reporter, which
+            # closes when it ends; a retry of the run gets a new one.
+            execution, execution_token = begin_progress_execution()
             try:
                 # Binds run_id for every log record emitted while the handler
                 # runs, so SDK-internal lines are attributable to the run and
@@ -929,12 +934,13 @@ class Worker(ExecutorMixin):
                     result = await coro
                     # A pull run's terminal rides in the response: write the
                     # run's last ctx.progress report before handing it back.
-                    await finish_progress_run(run_id)
+                    await finish_progress_execution(execution)
                     return result
             except BaseException:
-                discard_progress_run(run_id)
+                discard_progress_execution(execution)
                 raise
             finally:
+                end_progress_execution_scope(execution_token)
                 self._inflight.pop(run_id, None)
 
         return _tracked()

@@ -741,6 +741,8 @@ class WorkflowContext(Context):
                 trace_metadata=self._trace_metadata,
                 memo_namespace=step_memo_namespace,
             )
+            # Named like its function.started event (ctx.progress reports too).
+            func_ctx._component_name = handler_name
 
             # Emit function.started event
             # Normalize input for event data

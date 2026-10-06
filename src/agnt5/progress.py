@@ -19,6 +19,7 @@ SDK drops a report below the last one; across executions of the same run
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import math
 import threading
@@ -213,8 +214,8 @@ class ProgressReporter:
                 self._scheduled = False
 
 
-# One reporter per run on this worker, shared by every context of the run,
-# so the interval and the never-backwards rule hold across them.
+# Contexts made outside a worker dispatch (tests, embedding) share one
+# reporter per run id instead of one per execution.
 _reporters: dict[str, ProgressReporter] = {}
 _reporters_lock = threading.Lock()
 
@@ -224,12 +225,76 @@ def run_key(run_id: str) -> str:
     return run_id.split(":", 1)[0]
 
 
+class Execution:
+    """One execution of a run on this worker: a dispatch, from the worker
+    handing it to the handler until the response goes back. Its contexts
+    share one reporter. Once it has finished, the reporter stays closed, so
+    a report from code the handler left running (a stray task or thread)
+    is dropped; a retry of the run is a new execution and starts clean."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reporter: Optional[ProgressReporter] = None
+        self._finished = False
+
+    def reporter(self, send: Send, loop: Optional[asyncio.AbstractEventLoop]) -> ProgressReporter:
+        with self._lock:
+            if self._reporter is None:
+                self._reporter = ProgressReporter(send, loop=loop)
+                if self._finished:
+                    self._reporter.close()
+            return self._reporter
+
+    def _end(self) -> Optional[ProgressReporter]:
+        with self._lock:
+            self._finished = True
+            return self._reporter
+
+
+_execution: contextvars.ContextVar[Optional[Execution]] = contextvars.ContextVar(
+    "agnt5_progress_execution", default=None
+)
+
+
+def begin_execution() -> tuple[Execution, contextvars.Token[Optional[Execution]]]:
+    """Start an execution for the task that runs a dispatch. Contexts made
+    in it (and tasks it spawns) belong to it."""
+    execution = Execution()
+    return execution, _execution.set(execution)
+
+
+def end_execution_scope(token: contextvars.Token[Optional[Execution]]) -> None:
+    _execution.reset(token)
+
+
+def current_execution() -> Optional[Execution]:
+    return _execution.get()
+
+
+async def finish_execution(execution: Execution) -> None:
+    """Write the execution's waiting report, then take no more."""
+    reporter = execution._end()
+    if reporter is not None:
+        await reporter.drain()
+
+
+def discard_execution(execution: Execution) -> None:
+    """End the execution without writing anything more (it was cancelled)."""
+    reporter = execution._end()
+    if reporter is not None:
+        reporter.close()
+
+
 def reporter_for(
-    run_id: str, send: Send, loop: Optional[asyncio.AbstractEventLoop]
+    run_id: str,
+    send: Send,
+    loop: Optional[asyncio.AbstractEventLoop],
+    execution: Optional[Execution] = None,
 ) -> ProgressReporter:
-    """The run's reporter, made on first use. It stays (drained, refusing
-    reports) until the execution ends with ``finish_run``, so a later
-    execution of the same run starts afresh."""
+    """The reporter for a context's report: its execution's, or for a
+    context made outside a worker dispatch, one per run id."""
+    if execution is not None:
+        return execution.reporter(send, loop)
     key = run_key(run_id)
     with _reporters_lock:
         reporter = _reporters.get(key)
@@ -239,28 +304,15 @@ def reporter_for(
         return reporter
 
 
-async def drain_run(run_id: str) -> None:
-    """Write the run's waiting report, if any, before the run finishes."""
-    with _reporters_lock:
-        reporter = _reporters.get(run_key(run_id))
+async def drain(run_id: str, execution: Optional[Execution] = None) -> None:
+    """Write the waiting report before the record that finishes the run."""
+    if execution is not None:
+        reporter = execution._reporter
+    else:
+        with _reporters_lock:
+            reporter = _reporters.get(run_key(run_id))
     if reporter is not None:
         await reporter.drain()
-
-
-async def finish_run(run_id: str) -> None:
-    """Drain the run's reporter and forget it: the execution is over."""
-    with _reporters_lock:
-        reporter = _reporters.pop(run_key(run_id), None)
-    if reporter is not None:
-        await reporter.drain()
-
-
-def discard_run(run_id: str) -> None:
-    """Forget the run's reporter without writing anything more."""
-    with _reporters_lock:
-        reporter = _reporters.pop(run_key(run_id), None)
-    if reporter is not None:
-        reporter.close()
 
 
 def _running_loop() -> Optional[asyncio.AbstractEventLoop]:

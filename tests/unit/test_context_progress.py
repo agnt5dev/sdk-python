@@ -58,6 +58,11 @@ def function_ctx(worker=None) -> FunctionContext:
     return ctx
 
 
+async def dispatch(coro):
+    """Run a handler coroutine the way the worker runs a dispatch."""
+    return await Worker._track_invocation(SimpleNamespace(_inflight={}), "run_1", coro)
+
+
 async def settle(seconds: float = 0.0) -> None:
     await asyncio.sleep(seconds)
     for _ in range(5):
@@ -197,28 +202,65 @@ async def test_a_report_made_just_before_returning_is_written():
     # A pull run returns its terminal in the response: the worker drains the
     # run's reporter before handing it back, with no chance to yield first.
     worker = FakeWorker()
-    ctx = function_ctx(worker)
 
     async def handler():
-        ctx.progress(4, total=4, message="Done")
+        function_ctx(worker).progress(4, total=4, message="Done")
         return "ok"
 
-    fake = SimpleNamespace(_inflight={})
-    result = await Worker._track_invocation(fake, "run_1", handler())
-    assert result == "ok"
+    assert await dispatch(handler()) == "ok"
     assert figures(worker) == [(4.0, 4.0, "Done")]
-    # The run's reporter is gone: a later execution starts afresh.
-    assert progress_module._reporters == {}
+    assert progress_module._reporters == {}, "dispatch contexts use their execution"
 
 
 async def test_a_throttled_report_is_written_when_the_execution_ends():
     worker = FakeWorker()
-    ctx = function_ctx(worker)
-    ctx.progress(1, total=2)
-    await settle()
-    ctx.progress(2, total=2)
-    await progress_module.finish_run("run_1")
+
+    async def handler():
+        ctx = function_ctx(worker)
+        ctx.progress(1, total=2)
+        await settle()
+        ctx.progress(2, total=2)
+        return "ok"
+
+    await dispatch(handler())
     assert figures(worker) == [(1.0, 2.0, None), (2.0, 2.0, None)]
+
+
+async def test_a_report_after_the_execution_ended_is_dropped():
+    # Code the handler left running (a stray task) reports after the end.
+    worker = FakeWorker()
+    leftover: list[asyncio.Task] = []
+
+    async def handler():
+        ctx = function_ctx(worker)
+        ctx.progress(1, total=3)
+
+        async def stray():
+            await asyncio.sleep(0.02)
+            ctx.progress(2, total=3)  # a context that reported before
+            function_ctx(worker).progress(3, total=3)  # and a fresh one
+
+        leftover.append(asyncio.create_task(stray()))
+        return "ok"
+
+    await dispatch(handler())
+    await leftover[0]
+    await settle(0.08)
+    assert figures(worker) == [(1.0, 3.0, None)]
+
+
+async def test_a_retry_of_the_run_starts_clean():
+    worker = FakeWorker()
+
+    async def attempt(figure: float):
+        function_ctx(worker).progress(figure, total=10)
+        return "ok"
+
+    await dispatch(attempt(8))
+    # The same run again, starting lower: not held back by the last attempt
+    # (the runtime keeps the run's own figure from going backwards).
+    await dispatch(attempt(2))
+    assert figures(worker) == [(8.0, 10.0, None), (2.0, 10.0, None)]
 
 
 async def test_a_report_carries_the_context_that_made_it():
@@ -295,40 +337,37 @@ async def test_a_run_shares_one_reporter_across_its_contexts():
 
 async def test_a_cancelled_execution_writes_nothing_more():
     worker = FakeWorker()
-    ctx = function_ctx(worker)
     reported = asyncio.Event()
 
     async def handler():
+        ctx = function_ctx(worker)
         ctx.progress(1, total=3)
         await settle()
         ctx.progress(2, total=3)  # waiting out the interval
         reported.set()
         await asyncio.sleep(10)
 
-    fake = SimpleNamespace(_inflight={})
-    task = asyncio.ensure_future(Worker._track_invocation(fake, "run_1", handler()))
+    task = asyncio.ensure_future(dispatch(handler()))
     await reported.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     await settle(0.08)
     assert figures(worker) == [(1.0, 3.0, None)]
-    assert progress_module._reporters == {}
 
 
 async def test_a_failed_execution_still_writes_its_last_report():
     # Executors turn a handler's exception into a failed terminal response;
     # the last report goes ahead of it.
     worker = FakeWorker()
-    ctx = function_ctx(worker)
 
     async def handler():
+        ctx = function_ctx(worker)
         ctx.progress(1, total=3)
         ctx.progress(2, total=3)
         return "run.failed response"
 
-    fake = SimpleNamespace(_inflight={})
-    assert await Worker._track_invocation(fake, "run_1", handler()) == "run.failed response"
+    assert await dispatch(handler()) == "run.failed response"
     # Both came before the reporter's first turn: only the latest is written.
     assert figures(worker) == [(2.0, 3.0, None)]
 
@@ -341,3 +380,19 @@ async def test_an_agent_names_itself_on_its_reports():
     ctx.progress(1, total=2, message="Searching")
     await settle()
     assert worker.progress()[0]["name"] == "researcher"
+
+
+async def test_a_task_function_names_itself_on_its_reports():
+    from agnt5.function import function
+
+    worker = FakeWorker()
+
+    @function(name="embed_one")
+    async def embed_one(ctx: FunctionContext, doc: str) -> str:
+        ctx.progress(1, total=1, message=f"Embedded {doc}")
+        return doc
+
+    workflow_ctx = WorkflowContext(WorkflowEntity("run_1"), run_id="run_1", worker=worker)
+    assert await workflow_ctx.step(embed_one, "a.md") == "a.md"
+    await settle()
+    assert [p["name"] for p in worker.progress()] == ["embed_one"]

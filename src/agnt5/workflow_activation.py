@@ -215,6 +215,8 @@ async def execute_function_callable(
             memo_namespace=context.allocate_memo_child_scope("step", step_key),
             activation_client=context._activation_client,
         )
+        # Named like its function.started event (ctx.progress reports too).
+        func_context._component_name = handler_name
         if len(args) == 1 and isinstance(args[0], dict):
             function_input = args[0]
         elif kwargs.get("input") and isinstance(kwargs.get("input"), dict):
