@@ -19,6 +19,8 @@ from .._telemetry import (
 )
 from ..exceptions import AutoDiscoveryError
 from ..function import FunctionRegistry
+from ..progress import discard_run as discard_progress_run
+from ..progress import finish_run as finish_progress_run
 from ..scorer import (
     BUILTIN_DETERMINISTIC_SCORER_NAMES,
     ScorerRegistry,
@@ -924,7 +926,14 @@ class Worker(ExecutorMixin):
                 # runs, so SDK-internal lines are attributable to the run and
                 # not only the ones that happen to print the id (AGNT5-1070).
                 with run_scope(run_id):
-                    return await coro
+                    result = await coro
+                    # A pull run's terminal rides in the response: write the
+                    # run's last ctx.progress report before handing it back.
+                    await finish_progress_run(run_id)
+                    return result
+            except BaseException:
+                discard_progress_run(run_id)
+                raise
             finally:
                 self._inflight.pop(run_id, None)
 

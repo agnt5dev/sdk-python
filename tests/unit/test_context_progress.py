@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from agnt5 import progress as progress_module
 from agnt5.events import Completed, ComponentType
 from agnt5.function import FunctionContext
 from agnt5.progress import ProgressReporter, progress_payload
+from agnt5.worker._core import Worker
 from agnt5.workflow import WorkflowContext, WorkflowEntity
 
 
@@ -40,6 +42,8 @@ class FakeWorker:
 @pytest.fixture(autouse=True)
 def fast_interval(monkeypatch):
     monkeypatch.setattr(progress_module, "MIN_INTERVAL_SECONDS", 0.05)
+    # Reporters live per run; tests reuse run ids.
+    monkeypatch.setattr(progress_module, "_reporters", {})
 
 
 def function_ctx(worker=None) -> FunctionContext:
@@ -165,7 +169,7 @@ async def test_a_sync_handler_reports_from_its_worker_thread():
     assert figures(worker) == [(1.0, 2.0, "from a thread")]
 
 
-async def test_a_finished_run_sends_nothing_more():
+async def test_the_last_report_is_written_before_the_run_finishes():
     worker = FakeWorker()
     ctx = function_ctx(worker)
     ctx.progress(1, total=3)
@@ -179,10 +183,61 @@ async def test_a_finished_run_sends_nothing_more():
             component_type=ComponentType.RUN,
         )
     )
-    ctx.progress(3, total=3)
+    ctx.progress(3, total=3)  # after the end: dropped
     await settle(0.08)
-    assert figures(worker) == [(1.0, 3.0, None)]
-    assert worker.appended[-1]["event_type"] == "run.completed"
+    assert figures(worker) == [(1.0, 3.0, None), (2.0, 3.0, None)]
+    assert [c["event_type"] for c in worker.appended] == [
+        "progress.update",
+        "progress.update",
+        "run.completed",
+    ]
+
+
+async def test_a_report_made_just_before_returning_is_written():
+    # A pull run returns its terminal in the response: the worker drains the
+    # run's reporter before handing it back, with no chance to yield first.
+    worker = FakeWorker()
+    ctx = function_ctx(worker)
+
+    async def handler():
+        ctx.progress(4, total=4, message="Done")
+        return "ok"
+
+    fake = SimpleNamespace(_inflight={})
+    result = await Worker._track_invocation(fake, "run_1", handler())
+    assert result == "ok"
+    assert figures(worker) == [(4.0, 4.0, "Done")]
+    # The run's reporter is gone: a later execution starts afresh.
+    assert progress_module._reporters == {}
+
+
+async def test_a_throttled_report_is_written_when_the_execution_ends():
+    worker = FakeWorker()
+    ctx = function_ctx(worker)
+    ctx.progress(1, total=2)
+    await settle()
+    ctx.progress(2, total=2)
+    await progress_module.finish_run("run_1")
+    assert figures(worker) == [(1.0, 2.0, None), (2.0, 2.0, None)]
+
+
+async def test_a_report_carries_the_context_that_made_it():
+    worker = FakeWorker()
+    workflow_ctx = function_ctx(worker)
+    step_ctx = function_ctx(worker)
+    step_ctx._correlation_id = "step_cid"
+    step_ctx._component_name = "embed_one"
+
+    workflow_ctx.progress(5, total=10)
+    await settle()
+    step_ctx.progress(7, total=10)  # accepted, waiting out the interval
+    workflow_ctx.progress(3, total=10)  # backwards: dropped, changes nothing
+    await settle(0.08)
+    sent = worker.progress()
+    assert [(p["progress"], p["correlation_id"], p["name"]) for p in sent] == [
+        (5.0, "fn_cid", "embed_docs"),
+        (7.0, "step_cid", "embed_one"),
+    ]
 
 
 async def test_a_report_that_cannot_be_sent_never_fails_the_run():
@@ -209,7 +264,7 @@ async def test_workflows_report_the_same_way():
 async def test_a_reporter_without_a_loop_keeps_the_latest_for_later():
     sent = []
 
-    async def send(payload):
+    async def send(payload, _source):
         sent.append(payload)
 
     reporter = ProgressReporter(send, loop=None, interval=0)

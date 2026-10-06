@@ -7,8 +7,13 @@ tool with a progress token hears each one as ``notifications/progress``.
 Reports are side-band: nothing reads them back into the run, so they can't
 change what a workflow does when it replays. They are cheap to make often:
 each run writes at most one record a second, always the latest report, and
-sends it without holding up the run. Progress never goes backwards: a
-report below the last one is dropped, as MCP requires.
+sends it without holding up the run. The latest report is always written
+before the run finishes.
+
+Progress never goes backwards, as MCP requires. Within one execution the
+SDK drops a report below the last one; across executions of the same run
+(a retry, a resumed workflow) the runtime enforces it: the MCP edge and
+``get_run`` ignore a report below the run's last figure.
 """
 
 from __future__ import annotations
@@ -28,6 +33,8 @@ MIN_INTERVAL_SECONDS = 1.0
 
 #: The longest message a report keeps.
 MAX_MESSAGE_CHARS = 1000
+
+Send = Callable[[dict[str, Any], Any], Awaitable[None]]
 
 
 def _number(name: str, value: Any) -> float:
@@ -68,14 +75,15 @@ class ProgressReporter:
 
     ``report`` never blocks and may be called from any thread (a sync
     function runs in a worker thread). The first report goes out at once;
-    later ones wait out the interval and only the latest is sent. ``close``
-    drops anything not yet sent: once a run has finished, a report would
-    only say something stale.
+    later ones wait out the interval and only the latest is sent. Each
+    report travels with its ``source`` (the context that made it), which is
+    kept only when the report is accepted. ``drain`` writes the report still
+    waiting and stops the reporter: call it before the run finishes.
     """
 
     def __init__(
         self,
-        send: Callable[[dict[str, Any]], Awaitable[None]],
+        send: Send,
         *,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         interval: Optional[float] = None,
@@ -85,8 +93,9 @@ class ProgressReporter:
         self._interval = MIN_INTERVAL_SECONDS if interval is None else interval
         self._lock = threading.Lock()
         self._last: Optional[dict[str, Any]] = None
-        self._pending: Optional[dict[str, Any]] = None
+        self._pending: Optional[tuple[dict[str, Any], Any]] = None
         self._scheduled = False
+        self._sleeping = False
         self._closed = False
         self._next_at = 0.0
         self._task: Optional[asyncio.Task[None]] = None
@@ -95,25 +104,43 @@ class ProgressReporter:
     def closed(self) -> bool:
         return self._closed
 
-    def report(self, payload: dict[str, Any]) -> bool:
+    def report(self, payload: dict[str, Any], source: Any = None) -> bool:
         """Queue a report. False when it was dropped: it went backwards,
         repeated the last one, or the run has finished."""
         with self._lock:
             if self._closed or not self._moves_on(payload):
                 return False
             self._last = payload
-            self._pending = payload
+            self._pending = (payload, source)
             if self._scheduled:
                 return True
             loop = self._loop_for_caller()
             if loop is None or loop.is_closed():
-                # Nowhere to send from; keep the latest for the next try.
+                # Nowhere to send from yet; drain or the next report sends it.
                 return True
             self._scheduled = True
         self._start(loop)
         return True
 
+    async def drain(self) -> None:
+        """Write the report still waiting, if any, and stop. A send already
+        under way finishes first, so the last report is written last."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            pending, self._pending = self._pending, None
+            sleeping = self._sleeping
+        task = self._task
+        if task is not None and not task.done() and task.get_loop() is _running_loop():
+            if sleeping:
+                task.cancel()
+            await asyncio.wait({task})
+        if pending is not None:
+            await self._deliver(*pending)
+
     def close(self) -> None:
+        """Stop without writing what is waiting (for a caller that can't wait)."""
         with self._lock:
             self._closed = True
             self._pending = None
@@ -156,27 +183,84 @@ class ProgressReporter:
             with self._lock:
                 self._scheduled = False
 
+    async def _deliver(self, payload: dict[str, Any], source: Any) -> None:
+        try:
+            await self._send(payload, source)
+        except Exception:
+            # Progress is best effort: never fail the run over it.
+            logger.debug("ctx.progress: report not delivered", exc_info=True)
+
     async def _pump(self) -> None:
         loop = asyncio.get_running_loop()
         try:
             while True:
                 delay = self._next_at - loop.time()
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    self._sleeping = True
+                    try:
+                        await asyncio.sleep(delay)
+                    finally:
+                        self._sleeping = False
                 with self._lock:
-                    payload, self._pending = self._pending, None
-                    if payload is None or self._closed:
+                    pending, self._pending = self._pending, None
+                    if pending is None or self._closed:
                         self._scheduled = False
                         return
                 self._next_at = loop.time() + self._interval
-                try:
-                    await self._send(payload)
-                except Exception:
-                    # Progress is best effort: never fail the run over it.
-                    logger.debug("ctx.progress: report not delivered", exc_info=True)
+                await self._deliver(*pending)
         finally:
             with self._lock:
                 self._scheduled = False
+
+
+# One reporter per run on this worker, shared by every context of the run,
+# so the interval and the never-backwards rule hold across them.
+_reporters: dict[str, ProgressReporter] = {}
+_reporters_lock = threading.Lock()
+
+
+def run_key(run_id: str) -> str:
+    """The run an invocation id belongs to, dropping any ``:suffix``."""
+    return run_id.split(":", 1)[0]
+
+
+def reporter_for(
+    run_id: str, send: Send, loop: Optional[asyncio.AbstractEventLoop]
+) -> ProgressReporter:
+    """The run's reporter, made on first use. It stays (drained, refusing
+    reports) until the execution ends with ``finish_run``, so a later
+    execution of the same run starts afresh."""
+    key = run_key(run_id)
+    with _reporters_lock:
+        reporter = _reporters.get(key)
+        if reporter is None:
+            reporter = ProgressReporter(send, loop=loop)
+            _reporters[key] = reporter
+        return reporter
+
+
+async def drain_run(run_id: str) -> None:
+    """Write the run's waiting report, if any, before the run finishes."""
+    with _reporters_lock:
+        reporter = _reporters.get(run_key(run_id))
+    if reporter is not None:
+        await reporter.drain()
+
+
+async def finish_run(run_id: str) -> None:
+    """Drain the run's reporter and forget it: the execution is over."""
+    with _reporters_lock:
+        reporter = _reporters.pop(run_key(run_id), None)
+    if reporter is not None:
+        await reporter.drain()
+
+
+def discard_run(run_id: str) -> None:
+    """Forget the run's reporter without writing anything more."""
+    with _reporters_lock:
+        reporter = _reporters.pop(run_key(run_id), None)
+    if reporter is not None:
+        reporter.close()
 
 
 def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
