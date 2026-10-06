@@ -6,6 +6,7 @@ Uses a language model to evaluate outputs based on custom criteria.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
@@ -494,6 +495,8 @@ class LLMJudgeResult:
     explanation: Optional[str] = None
     label: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _has_score: bool = field(default=True, repr=False)
+    _has_passed: bool = field(default=True, repr=False)
 
 
 DEFAULT_SYSTEM_PROMPT = """You are an expert evaluator. Your task is to evaluate the given output based on the provided criteria.
@@ -526,6 +529,10 @@ async def llm_judge(
     Returns:
         LLMJudgeResult with score, passed status, and explanation
 
+    Raises:
+        ValueError: A classification judge has an unusable response or configuration.
+        Exception: The model call fails for a classification judge.
+
     Example:
         >>> config = LLMJudgeConfig(
         ...     criteria="Is the response helpful and accurate?",
@@ -534,7 +541,28 @@ async def llm_judge(
         >>> result = await llm_judge("The capital of France is Paris.", config)
         >>> print(f"Score: {result.score}, Passed: {result.passed}")
     """
+    if config.choice_scores is not None:
+        if not isinstance(config.choice_scores, dict) or not config.choice_scores:
+            raise ValueError("Judge choice_scores must contain at least one label")
+        for label, score in config.choice_scores.items():
+            if not isinstance(label, str) or not label.strip():
+                raise ValueError("Judge choice_scores labels must be non-empty strings")
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not 0 <= score <= 1
+            ):
+                raise ValueError(f"Judge choice score for {label!r} must be between 0 and 1")
     system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
+    if config.choice_scores:
+        system_prompt = config.system_prompt or (
+            "You are an expert evaluator. Evaluate the output using the provided criteria."
+        )
+        system_prompt += (
+            '\n\nRespond ONLY with a JSON object containing "label" and "explanation". '
+            f"Choose exactly one label from: {json.dumps(sorted(config.choice_scores))}. "
+            "The platform maps the selected label to its configured score."
+        )
 
     user_content, render_error = _build_judge_prompt(
         output=output,
@@ -544,6 +572,8 @@ async def llm_judge(
         context_data=context_data,
     )
     if render_error:
+        if config.choice_scores:
+            raise ValueError(f"Judge configuration error: {render_error}")
         return LLMJudgeResult(
             score=0.0,
             passed=False,
@@ -562,16 +592,17 @@ async def llm_judge(
             temperature=config.temperature,
         )
 
-        result = _parse_llm_response(response.text)
-        return _apply_choice_scores(result, config.choice_scores)
-
     except Exception as e:
+        if config.choice_scores:
+            raise
         return LLMJudgeResult(
             score=0.0,
             passed=False,
             explanation=f"LLM call failed: {str(e)}",
             metadata={"error": str(e)},
         )
+    result = _parse_llm_response(response.text)
+    return _apply_choice_scores(result, config.choice_scores)
 
 
 def _build_judge_prompt(
@@ -694,25 +725,26 @@ def _apply_choice_scores(
     result: LLMJudgeResult,
     choice_scores: Optional[Dict[str, float]],
 ) -> LLMJudgeResult:
-    if not choice_scores or result.label in {"parse_error", "config_error"}:
+    if not choice_scores:
         return result
+    if result.label in {"parse_error", "config_error"}:
+        raise ValueError(f"Judge response error: {result.explanation}")
     labels = sorted(choice_scores)
     label = result.label
     if not label:
-        label = _label_for_choice_score(result.score, choice_scores)
+        if (
+            len(choice_scores) == 2
+            and set(choice_scores.values()) == {0.0, 1.0}
+            and result._has_passed
+        ):
+            label = next(
+                name for name, score in choice_scores.items() if score == float(result.passed)
+            )
+        elif result._has_score:
+            label = _label_for_choice_score(result.score, choice_scores)
     if not label or label not in choice_scores:
-        metadata = dict(result.metadata or {})
-        metadata["allowed_labels"] = labels
-        if result.label:
-            metadata["invalid_label"] = result.label
-        return LLMJudgeResult(
-            score=0.0,
-            passed=False,
-            label="invalid_label",
-            explanation=(
-                f"Judge returned label {result.label!r}; expected one of: " f"{', '.join(labels)}"
-            ),
-            metadata=metadata,
+        raise ValueError(
+            f"Judge returned label {result.label!r}; expected one of: {', '.join(labels)}"
         )
     score = max(0.0, min(1.0, float(choice_scores[label])))
     metadata = dict(result.metadata or {})
@@ -728,10 +760,11 @@ def _apply_choice_scores(
 
 
 def _label_for_choice_score(score: float, choice_scores: Dict[str, float]) -> Optional[str]:
+    distance = min(abs(float(choice_score) - score) for choice_score in choice_scores.values())
     matches = [
         label
         for label, choice_score in choice_scores.items()
-        if abs(float(choice_score) - float(score)) < 1e-9
+        if abs(abs(float(choice_score) - score) - distance) < 1e-9
     ]
     if len(matches) == 1:
         return matches[0]
@@ -754,11 +787,17 @@ def _parse_llm_response(content: str) -> LLMJudgeResult:
 
     try:
         data = json.loads(json_str)
+        if not isinstance(data, dict):
+            raise ValueError("Judge response must be a JSON object")
 
-        score = float(data.get("score", 0.0))
+        score = float(data["score"]) if data.get("score") is not None else 0.0
+        if not math.isfinite(score):
+            raise ValueError("Judge score must be finite")
         score = max(0.0, min(1.0, score))  # Clamp to [0, 1]
 
         passed = data.get("passed")
+        if passed is not None and not isinstance(passed, bool):
+            raise ValueError("Judge passed must be a boolean")
         if passed is None:
             passed = score >= 0.7
 
@@ -786,6 +825,8 @@ def _parse_llm_response(content: str) -> LLMJudgeResult:
             explanation=explanation,
             label=label,
             metadata=extra,
+            _has_score=data.get("score") is not None,
+            _has_passed=isinstance(data.get("passed"), bool),
         )
 
     except (json.JSONDecodeError, ValueError, TypeError) as e:
