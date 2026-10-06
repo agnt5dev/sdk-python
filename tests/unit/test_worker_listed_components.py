@@ -12,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from agnt5 import Context, WorkflowContext, function, workflow
+from agnt5 import Agent, Context, WorkflowContext, function, tool, workflow
+from agnt5.agent import AgentRegistry
 from agnt5.function import FunctionRegistry
+from agnt5.tool import ToolRegistry
 from agnt5.worker._core import Worker
 from agnt5.worker._prompt_executor import PROMPT_EXECUTOR_COMPONENT_NAME
 from agnt5.workflow import WorkflowRegistry
@@ -25,9 +27,13 @@ def isolated_registries(monkeypatch):
     monkeypatch.delenv("AGNT5_WORKER_MODE", raising=False)
     WorkflowRegistry.clear()
     FunctionRegistry.clear()
+    AgentRegistry.clear()
+    ToolRegistry.clear()
     yield
     WorkflowRegistry.clear()
     FunctionRegistry.clear()
+    AgentRegistry.clear()
+    ToolRegistry.clear()
 
 
 def define_workflows():
@@ -191,3 +197,34 @@ def test_a_worker_given_no_functions_list_serves_every_imported_function(fake_na
         "refund_order",
         PROMPT_EXECUTOR_COMPONENT_NAME,
     }
+
+
+@pytest.mark.parametrize("kind", ["tool", "agent"])
+@pytest.mark.parametrize("listed", [True, False])
+async def test_unlisted_tool_or_agent_is_refused(fake_native_core, monkeypatch, kind, listed):
+    @tool(name="served_tool")
+    async def served_tool(ctx: Context) -> str:
+        return "served"
+
+    @tool(name="unlisted_tool")
+    async def unlisted_tool(ctx: Context) -> str:
+        return "unlisted"
+
+    served_agent = Agent(name="served_agent", model="openai/gpt-test", instructions="Serve")
+    Agent(name="unlisted_agent", model="openai/gpt-test", instructions="Unlisted")
+    components = {"tools": [served_tool], "agents": [served_agent]} if listed else {}
+    worker = Worker(service_name="restricted", **components)
+    executed = []
+
+    async def execute(component, input_data, request):
+        executed.append(component.name)
+        return "executed"
+
+    monkeypatch.setattr(worker, f"_execute_{kind}", execute)
+    handler = worker._create_message_handler()
+    refused = await handler(request(f"unlisted_{kind}", kind))
+    assert refused.success is False
+    assert executed == []
+    if listed:
+        assert await handler(request(f"served_{kind}", kind)) == "executed"
+        assert set(registered(worker, kind)) == {f"served_{kind}"}

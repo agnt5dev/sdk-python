@@ -1,5 +1,6 @@
 """AGNT5 Client SDK for invoking components."""
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ if TYPE_CHECKING:
     from .batch import BatchItemInput, BatchResult, BatchStatusResult, CancelBatchResult
     from .batch_eval import BatchEvalItem, BatchEvalResult
     from .eval import Correctness, Faithfulness, LLMJudge
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
@@ -43,6 +44,7 @@ def _with_idempotency_key(
 
 def _response_wait_ms(seconds: float) -> int:
     import math
+
     if (
         isinstance(seconds, bool)
         or not isinstance(seconds, (int, float))
@@ -471,7 +473,6 @@ class Client:
 
         return parse_run_response(response.json())
 
-
     def submit(
         self,
         component: str,
@@ -653,6 +654,30 @@ class Client:
                 response.raise_for_status()
 
         return parse_run_response(response.json())
+
+    def get_output(self, run_id: str) -> Any:
+        """Fetch a completed run's output, including payloads stored out of band."""
+        url = urljoin(self.gateway_url + "/", f"v1/runs/{quote(run_id, safe='')}/output")
+        response = self._client.get(url, headers=self._build_headers())
+        response.raise_for_status()
+        return response.json().get("output")
+
+    def resolve_output(self, result: RunResponse[Any]) -> Any:
+        """Return a successful result's output, fetching its output_ref when present."""
+        result.raise_for_status()
+        if not result.is_success:
+            return None
+        if result.has_output_ref:
+            if not result.run_id:
+                raise RunError("Run output reference cannot be resolved without a run ID")
+            return self.get_output(result.run_id)
+        return result.output
+
+    def wait_for_output(
+        self, run_id: str, timeout: float = 300.0, poll_interval: float = 1.0
+    ) -> Any:
+        """Wait for completion and resolve the final output."""
+        return self.resolve_output(self.wait_for_result(run_id, timeout, poll_interval))
 
     def wait_for_result(
         self,
@@ -1014,7 +1039,9 @@ class Client:
                             return
 
                         if current_event == "stream.wait_expired":
-                            raise RunError("Response wait ended; run continues", run_id=data.get("run_id"))
+                            raise RunError(
+                                "Response wait ended; run continues", run_id=data.get("run_id")
+                            )
 
                         payload = _sse_payload(data)
 
@@ -1134,7 +1161,9 @@ class Client:
             # Check for errors
             if response.status_code == 202:
                 data = json.loads(response.read())
-                yield ReceivedEvent(event_type="stream.detached", data=data, run_id=data.get("run_id"))
+                yield ReceivedEvent(
+                    event_type="stream.detached", data=data, run_id=data.get("run_id")
+                )
                 return
             if response.status_code != 200:
                 # Try to get error details from response body
@@ -2270,7 +2299,6 @@ class AsyncClient:
 
         return parse_run_response(response.json())
 
-
     async def stream_events(
         self,
         component: str,
@@ -2352,7 +2380,9 @@ class AsyncClient:
         ) as response:
             if response.status_code == 202:
                 data = json.loads(await response.aread())
-                yield ReceivedEvent(event_type="stream.detached", data=data, run_id=data.get("run_id"))
+                yield ReceivedEvent(
+                    event_type="stream.detached", data=data, run_id=data.get("run_id")
+                )
                 return
             if response.status_code != 200:
                 # Try to get error details from response body
@@ -2531,6 +2561,136 @@ class AsyncClient:
                 response.raise_for_status()
 
         return parse_run_response(response.json())
+
+    async def get_output(self, run_id: str) -> Any:
+        """Fetch a completed run's output, including payloads stored out of band."""
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/runs/{quote(run_id, safe='')}/output")
+        response = await client.get(url, headers=self._build_headers())
+        response.raise_for_status()
+        return response.json().get("output")
+
+    async def resolve_output(self, result: RunResponse[Any]) -> Any:
+        """Return a successful result's output, fetching its output_ref when present."""
+        result.raise_for_status()
+        if not result.is_success:
+            return None
+        if result.has_output_ref:
+            if not result.run_id:
+                raise RunError("Run output reference cannot be resolved without a run ID")
+            return await self.get_output(result.run_id)
+        return result.output
+
+    async def wait_for_output(
+        self, run_id: str, timeout: float = 300.0, poll_interval: float = 1.0
+    ) -> Any:
+        """Wait for completion and resolve the final output."""
+        return await self.resolve_output(await self.wait_for_result(run_id, timeout, poll_interval))
+
+    async def wait_for_result(
+        self, run_id: str, timeout: float = 300.0, poll_interval: float = 1.0
+    ) -> RunResponse[Any]:
+        """Poll asynchronously until a run completes or the timeout expires."""
+        import time
+
+        started = time.monotonic()
+        while True:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": f"Timeout waiting for run to complete after {timeout}s",
+                        },
+                    }
+                )
+            status = await self.get_status(run_id)
+            if status.is_complete:
+                return await self.get_result(run_id)
+            await asyncio.sleep(min(poll_interval, remaining))
+
+    def entity(self, entity_type: str, key: str) -> "AsyncEntityProxy":
+        """Get an asynchronous proxy for entity methods."""
+        return AsyncEntityProxy(self, entity_type, key)
+
+    def session(self, session_type: str, key: str) -> "AsyncSessionProxy":
+        """Get an asynchronous conversation session proxy."""
+        return AsyncSessionProxy(self, session_type, key)
+
+    def workflow(self, workflow_name: str) -> "AsyncWorkflowProxy":
+        """Get an asynchronous workflow proxy."""
+        return AsyncWorkflowProxy(self, workflow_name)
+
+    async def stream(
+        self,
+        component: str,
+        input_data: Optional[Dict[str, Any]] = None,
+        component_type: str = "function",
+        tenant: Optional[str] = None,
+        deployment_id: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
+        wait_timeout: float = 300.0,
+        timeout: Optional[float] = None,
+    ) -> AsyncIterator[str]:
+        """Yield output chunks from the component's SSE stream asynchronously."""
+        wait_ms = _response_wait_ms(wait_timeout)
+        timeout = max(self.timeout, wait_timeout + 10.0) if timeout is None else timeout
+        client = await self._ensure_client()
+        url = urljoin(self.gateway_url + "/", f"v1/{component_type}s/{component}/stream")
+        headers = _with_idempotency_key(
+            self._build_headers(
+                tenant_override=tenant,
+                deployment_id=deployment_id,
+                include_ambient_deployment_id=False,
+            ),
+            idempotency_key,
+        )
+        headers["X-AGNT5-Wait-Timeout-Ms"] = str(wait_ms)
+        async with client.stream(
+            "POST", url, json=input_data or {}, headers=headers, timeout=timeout
+        ) as response:
+            if response.status_code == 202:
+                data = json.loads(await response.aread())
+                raise RunError("Response wait ended; run continues", run_id=data.get("run_id"))
+            if response.status_code != 200:
+                raise RunError(f"HTTP {response.status_code}: Streaming request failed")
+            current_event = None
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if line.startswith("event: "):
+                    current_event = line[7:]
+                elif line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("done") or current_event == "done":
+                        return
+                    if current_event == "stream.wait_expired":
+                        raise RunError(
+                            "Response wait ended; run continues", run_id=data.get("run_id")
+                        )
+                    payload = _sse_payload(data)
+                    if current_event in {"error", "run.failed"} or "error" in data:
+                        error_data = payload if payload else data
+                        if "error" not in error_data and error_data.get("error_message"):
+                            error_data = {**error_data, "error": error_data["error_message"]}
+                        raise _parse_error_response(
+                            error_data, run_id=data.get("runId") or data.get("run_id")
+                        )
+                    if current_event == "output.delta":
+                        output = _stream_chunk(payload)
+                        if isinstance(output, str):
+                            yield output
+                        elif output is not None:
+                            yield json.dumps(output)
+                    elif "chunk" in payload:
+                        yield payload["chunk"]
 
     async def get_events(self, run_id: str) -> EventsResponse:
         """Get all journal events for a run.
@@ -3048,6 +3208,134 @@ class AsyncClient:
         response.raise_for_status()
 
         return CancelBatchResult.from_dict(response.json())
+
+
+class AsyncEntityProxy:
+    """Entity proxy whose method calls return awaitable run responses."""
+
+    def __init__(self, client: AsyncClient, entity_type: str, key: str):
+        self._client = client
+        self._entity_type = entity_type
+        self._key = key
+
+    def __getattr__(self, method_name: str):
+        async def call(*args, **kwargs) -> RunResponse[Any]:
+            if args:
+                raise ValueError(f"Entity method '{method_name}' requires keyword arguments")
+            client = await self._client._ensure_client()
+            url = urljoin(
+                self._client.gateway_url + "/",
+                f"v1/entity/{self._entity_type}/{self._key}/{method_name}",
+            )
+            response = await client.post(url, json=kwargs, headers=self._client._build_headers())
+            if response.status_code == 504:
+                try:
+                    run_id = response.json().get("run_id", "")
+                except ValueError:
+                    run_id = ""
+                return parse_run_response(
+                    {
+                        "run_id": run_id,
+                        "status_code": 500,
+                        "status": "timeout",
+                        "error": {"code": "TIMEOUT", "message": "Execution timeout"},
+                    }
+                )
+            if response.status_code >= 400:
+                try:
+                    return parse_run_response(response.json())
+                except ValueError:
+                    response.raise_for_status()
+            return parse_run_response(response.json())
+
+        return call
+
+
+class AsyncSessionProxy(AsyncEntityProxy):
+    """Asynchronous session helpers matching SessionProxy."""
+
+    async def chat(self, message: str, **kwargs) -> str:
+        response = await self.__getattr__("chat")(message=message, **kwargs)
+        output = response.output
+        if isinstance(output, dict) and "response" in output:
+            return output["response"]
+        return str(output) if output is not None else ""
+
+    async def get_history(self) -> list:
+        response = await self.__getattr__("get_history")()
+        return response.output if isinstance(response.output, list) else []
+
+    async def add_message(self, role: str, content: str) -> RunResponse[Any]:
+        return await self.__getattr__("add_message")(role=role, content=content)
+
+    async def clear_history(self) -> RunResponse[Any]:
+        return await self.__getattr__("clear_history")()
+
+
+class AsyncWorkflowProxy:
+    """Workflow proxy with asynchronous runs and event streaming."""
+
+    def __init__(self, client: AsyncClient, workflow_name: str):
+        self._client = client
+        self._workflow_name = workflow_name
+
+    async def run(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        wait_timeout: float = 300.0,
+        timeout: Optional[float] = None,
+        **kwargs,
+    ) -> RunResponse[Any]:
+        return await self._client.run(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+            wait_timeout=wait_timeout,
+            timeout=timeout,
+        )
+
+    async def chat(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        **kwargs,
+    ) -> RunResponse[Any]:
+        return await self._client.run(
+            component=self._workflow_name,
+            input_data={"message": message, **kwargs},
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    def stream_events(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+        wait_timeout: float = 300.0,
+        **kwargs,
+    ) -> AsyncIterator[ReceivedEvent]:
+        return self._client.stream_events(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+            session_id=session_id,
+            user_id=user_id,
+            wait_timeout=wait_timeout,
+            timeout=timeout,
+        )
+
+    async def submit(self, **kwargs) -> SubmitResponse:
+        return await self._client.submit(
+            component=self._workflow_name,
+            input_data=kwargs,
+            component_type="workflow",
+        )
 
 
 class RunError(Exception):
