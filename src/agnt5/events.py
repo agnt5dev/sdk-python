@@ -672,10 +672,16 @@ class ProgressUpdate(Event):
     """Progress indicator event.
 
     Standalone event for reporting progress - not a lifecycle event.
+    ``ctx.progress(progress, total, message)`` writes ``progress``, ``total``
+    and ``message``; ``percent`` and ``current`` are the older shape, which
+    readers still accept.
     """
 
     # Progress message
     message: Optional[str] = None
+
+    # How far the run has got, out of ``total`` when that is known
+    progress: Optional[float] = None
 
     # Completion percentage (0-100)
     percent: Optional[float] = None
@@ -683,8 +689,8 @@ class ProgressUpdate(Event):
     # Current item number
     current: Optional[int] = None
 
-    # Total items
-    total: Optional[int] = None
+    # Total items, or the total ``progress`` counts towards
+    total: Optional[float] = None
 
     event_type: str = field(default="progress.update", init=False)
 
@@ -940,6 +946,34 @@ class EventEmitter:
             source_timestamp_ns=event.timestamp_ns,
             content_index=getattr(event, "index", 0),
             metadata=dict(event.metadata) if event.metadata else None,
+        )
+
+    async def emit_now_async(self, event: Event) -> None:
+        """Append an event to the run's journal now, whatever its type.
+
+        For side-band records someone reads while the run is still going
+        (``progress.update``). Queued events of a non-streaming pull run are
+        held until the run completes, so a queued report would arrive too
+        late. Unlike a lifecycle checkpoint, this append neither waits for
+        nor flushes anything queued before it.
+        """
+        if self._worker is None:
+            return
+        event_data = event.to_dict()
+        metadata = self._event_metadata(event.metadata)
+        if event.correlation_id:
+            metadata["correlation_id"] = event.correlation_id
+        if event.parent_correlation_id:
+            metadata["parent_correlation_id"] = event.parent_correlation_id
+        self._sequence += 1
+        await self._worker.emit_event_async(
+            run_id=self._run_id,
+            event_type=event.event_type,
+            event_data=serialize(event_data),
+            sequence_number=self._sequence,
+            metadata=metadata,
+            source_timestamp_ns=event.timestamp_ns,
+            timeout_ms=5000,
         )
 
     async def emit_batch_async(self, events: list[Event]) -> None:

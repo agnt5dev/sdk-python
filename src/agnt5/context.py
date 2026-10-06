@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import logging
@@ -16,7 +17,8 @@ from typing import (
 )
 
 from ._telemetry import ContextLogger, get_execution_logger
-from .events import Event, EventEmitter, EventEnvelope
+from .events import Event, EventEmitter, EventEnvelope, is_terminal_event
+from .progress import ProgressReporter, progress_payload
 
 if TYPE_CHECKING:
     from .memoization import MemoizationManager
@@ -247,6 +249,13 @@ class Context:
 
         self._emitter: Optional[EventEmitter] = None
         self._sandbox: Optional["Sandbox"] = None
+        # ctx.progress sends from the loop the run executes on, also when a
+        # sync handler reports from its worker thread.
+        self._progress_reporter: Optional[ProgressReporter] = None
+        try:
+            self._progress_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._progress_loop = None
 
         if enable_memoization:
             from .memoization import MemoizationManager
@@ -287,6 +296,65 @@ class Context:
         """Who called this run through a hosted MCP server, or ``None`` when
         the run wasn't started by an MCP tool call."""
         return caller_from_metadata(self._trace_metadata)
+
+    def progress(
+        self,
+        progress: float,
+        total: Optional[float] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Report how far this run has got.
+
+        ``progress`` is how far, out of ``total`` when you know it (a
+        positive number); ``message`` says what is happening now::
+
+            for i, doc in enumerate(docs, start=1):
+                await embed(doc)
+                ctx.progress(i, total=len(docs), message=f"Embedded {doc.name}")
+
+        Studio and ``get_run`` show the latest report, the AGNT5 run card
+        draws a bar when ``total`` is known, and an MCP client that asked
+        for progress on the tool call hears each report as
+        ``notifications/progress``.
+
+        Call it as often as you like: it never blocks, and each run writes
+        at most one report a second, always the latest. Progress never goes
+        backwards, as MCP requires: a report below the last one is dropped,
+        and one with the same figure is sent only when its message or total
+        changed. Reports never feed back into the run, so replaying a
+        workflow can't change what it does. Locally, without a worker, a
+        report goes nowhere.
+
+        Raises ``TypeError`` for a ``progress`` or ``total`` that isn't a
+        number or a ``message`` that isn't a string, and ``ValueError`` for
+        a value that isn't finite or a ``total`` that isn't positive.
+        """
+        payload = progress_payload(progress, total, message)
+        if self._worker is None:
+            return
+        if self._progress_reporter is None:
+            self._progress_reporter = ProgressReporter(
+                self._send_progress, loop=self._progress_loop
+            )
+        self._progress_reporter.report(payload)
+
+    async def _send_progress(self, payload: dict[str, Any]) -> None:
+        from .events import ProgressUpdate
+
+        event = ProgressUpdate(
+            name=self._component_name or "",
+            correlation_id=self._correlation_id,
+            parent_correlation_id=self._parent_correlation_id,
+            progress=payload["progress"],
+            total=payload.get("total"),
+            message=payload.get("message"),
+        )
+        await self._get_emitter().emit_now_async(event)
+
+    def _end_progress(self, event: Event) -> None:
+        """Once the run has finished, a report not yet sent is stale."""
+        if self._progress_reporter is not None and is_terminal_event(event.event_type):
+            self._progress_reporter.close()
 
     @property
     def activation(self):
@@ -427,6 +495,7 @@ class Context:
 
         The event already contains correlation_id and parent_correlation_id.
         """
+        self._end_progress(event)
         emitter = self._get_emitter()
         return emitter.emit(event)
 
@@ -443,6 +512,7 @@ class Context:
 
         Checkpoint gRPC runs on the tokio runtime natively, avoiding thread pool overhead.
         """
+        self._end_progress(event)
         emitter = self._get_emitter()
         return await emitter.emit_async(event)
 
