@@ -44,6 +44,7 @@ For integration with AGNT5 agents:
 """
 
 from .client import MCPClient, MCPError
+from .publish import MCPView
 from .server import MCPServer, MCPServerError
 from .types import (
     CallToolResult,
@@ -67,6 +68,7 @@ __all__ = [
     # Server
     "MCPServer",
     "MCPServerError",
+    "MCPView",
     # Types
     "CallToolResult",
     "McpTool",

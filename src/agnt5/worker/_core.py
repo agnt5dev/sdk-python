@@ -793,11 +793,13 @@ class Worker(ExecutorMixin):
         # MCP servers defined in code (AGNT5-1569): each registers as an "mcp"
         # component whose definition names the tools above. The platform
         # validates it and publishes the server whole or not at all.
-        from ..mcp.publish import MCPServerRegistry, valid_server_name
+        from ..mcp.publish import MCPServerRegistry, check_views_budget, valid_server_name
 
-        for server in MCPServerRegistry.all().values():
-            if not server.published:
-                continue
+        published_servers = [s for s in MCPServerRegistry.all().values() if s.published]
+        # Their views ride in this registration; past the budget it would be
+        # refused whole, so say why here instead.
+        check_views_budget(published_servers)
+        for server in published_servers:
             if not valid_server_name(server.info.id):
                 logger.error(
                     f"MCP server {server.info.id!r} will be refused: its name is part of its URL, "
