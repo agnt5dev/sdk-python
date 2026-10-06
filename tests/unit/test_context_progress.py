@@ -440,3 +440,25 @@ async def test_a_function_cancelled_mid_run_writes_nothing_more(monkeypatch):
     assert result is None
     await settle(0.08)
     assert figures(worker) == [(1.0, 3.0, None)]
+
+
+async def test_a_drain_during_a_send_does_not_wait_out_the_interval():
+    release = asyncio.Event()
+    sent = []
+
+    async def send(payload, _source):
+        sent.append(payload)
+        await release.wait()  # a slow append
+
+    reporter = ProgressReporter(send, interval=5.0)
+    reporter.report({"progress": 1.0})
+    await settle()
+    assert sent == [{"progress": 1.0}], "the send is under way"
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    draining = asyncio.ensure_future(reporter.drain())
+    await settle()
+    release.set()
+    await asyncio.wait_for(draining, timeout=1.0)
+    assert loop.time() - started < 0.5, "not held up by the 5 s interval"

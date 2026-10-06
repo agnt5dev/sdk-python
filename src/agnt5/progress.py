@@ -195,6 +195,13 @@ class ProgressReporter:
         loop = asyncio.get_running_loop()
         try:
             while True:
+                # Nothing to wait for (a drain took it, or nothing came in
+                # during the last send): stop now rather than sleep out the
+                # interval, which would hold up a drain waiting on this task.
+                with self._lock:
+                    if self._pending is None or self._closed:
+                        self._scheduled = False
+                        return
                 delay = self._next_at - loop.time()
                 if delay > 0:
                     self._sleeping = True
