@@ -10,7 +10,15 @@ from pydantic import BaseModel
 
 from agnt5 import MCPServer, Worker, function, workflow
 from agnt5.function import FunctionContext, FunctionRegistry
-from agnt5.mcp.publish import MAX_VIEW_BYTES, MAX_VIEWS_BYTES, RUN_VIEW, MCPServerRegistry
+from agnt5.mcp.publish import (
+    MAX_VIEW_BYTES,
+    MAX_VIEWS_BYTES,
+    RUN_VIEW,
+    MCPServerRegistry,
+    check_views_budget,
+    registration_size,
+    valid_server_name,
+)
 from agnt5.workflow import WorkflowContext, WorkflowRegistry
 
 
@@ -185,12 +193,70 @@ def test_add_view_is_checked_where_it_is_written(tmp_path):
         server.add_function("lookup", lookup_order, view="chart")
 
 
-def test_a_workers_views_share_one_budget():
-    big = "x" * MAX_VIEW_BYTES
-    MCPServer("one").add_view("a", big)
-    with pytest.raises(ValueError, match="views .* bytes together"):
-        MCPServer("two").add_view("b", big)
+def test_views_are_budgeted_as_they_travel():
+    # The definition is a JSON string inside a JSON webhook: escaped twice.
+    for html in [BOARD, '<script>const a = "x\\y";</script>', "line\none\ttab\x01", "✓ é 注 😀"]:
+        twice = json.dumps(json.dumps(html, ensure_ascii=False)[1:-1], ensure_ascii=False)[1:-1]
+        assert registration_size(html) == len(twice.encode()), html
+
+    # Within 2 MB, but four times that escaped twice: refused for the server.
+    quotes = '"' * (1024 * 1024)
+    server = MCPServer("one")
+    with pytest.raises(ValueError, match="take 4194304 bytes of the registration"):
+        server.add_view("a", quotes)
     assert MAX_VIEWS_BYTES < 4 * 1024 * 1024, "registrations are accepted up to 4 MB"
+
+
+def test_the_worker_budgets_the_views_of_published_servers_only():
+    big = "x" * MAX_VIEW_BYTES
+    one, two, stdio = MCPServer("one"), MCPServer("two"), MCPServer("stdio-only")
+    one.add_view("a", big)
+    two.add_view("b", big)  # each server is within its own budget
+    stdio.add_view("c", big)
+    check_views_budget([one])  # unpublished servers' views don't count
+    with pytest.raises(ValueError, match=r"take 4194304 bytes .* \(one/a 2097152, two/b 2097152\)"):
+        check_views_budget([one, two])
+
+
+def test_worker_refuses_to_register_past_the_views_budget():
+    @function(name="mcp_budget_test_lookup")
+    async def lookup(ctx: FunctionContext, order_id: str) -> dict:
+        return {}
+
+    try:
+        for name in ("one", "two"):
+            server = MCPServer(name)
+            server.add_function("lookup", lookup, view=server.add_view("big", "x" * MAX_VIEW_BYTES))
+        MCPServer("stdio-only").add_view("big", "x" * MAX_VIEW_BYTES)
+        with pytest.raises(ValueError, match="bytes of its registration together"):
+            Worker(service_name="py-worker")._discover_components()
+        MCPServerRegistry.discard("two")
+        Worker(service_name="py-worker")._discover_components()  # the unpublished one doesn't count
+    finally:
+        FunctionRegistry.discard("mcp_budget_test_lookup")
+
+
+def test_names_must_match_whole(tmp_path):
+    server = MCPServer("support")
+    with pytest.raises(ValueError, match="lowercase"):
+        server.add_view("order\n", BOARD)
+    with pytest.raises(ValueError, match="1 to 128"):
+        server.add_function("lookup\n", lookup_order)
+    assert not valid_server_name("support\n")
+    assert valid_server_name("support")
+
+
+def test_oversized_files_are_refused_before_they_are_read(tmp_path, monkeypatch):
+    huge = tmp_path / "huge.html"
+    with open(huge, "wb") as f:
+        f.truncate(MAX_VIEW_BYTES + 1)
+
+    def no_read(*args, **kwargs):
+        raise AssertionError("the file was opened")
+
+    monkeypatch.setattr("builtins.open", no_read)
+    with pytest.raises(ValueError, match="the limit is 2097152"):
+        MCPServer("support").add_view("order", path=huge)
 
 
 def test_stdio_only_servers_are_not_published():

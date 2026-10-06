@@ -142,9 +142,12 @@ class MCPServer:
         A view is one self-contained HTML file: give its text as ``html`` or
         the built file as ``path`` (for example Vite with
         ``vite-plugin-singlefile``). It is read now, so a missing build fails
-        at import. Up to 2 MB per view, and 3 MB for all the views a worker
-        publishes; ``name`` follows the server-name rule, and ``run`` and
-        ``none`` are reserved.
+        at import. Up to 2 MB per view. Views travel in the worker's
+        registration, so the views of all the servers it publishes may take
+        up to 3 MB of it, measured JSON-escaped as they travel
+        (``registration_size``); a worker past that refuses to register.
+        ``name`` follows the server-name rule, and ``run`` and ``none`` are
+        reserved.
 
         The view gets the tool's result over the MCP Apps bridge: its
         ``structuredContent`` (the output, when it is an object) and its
@@ -156,11 +159,13 @@ class MCPServer:
         view = load_view(self.info.id, name, html, path)
         if name in self._views:
             raise ValueError(f"MCP server {self.info.id!r} already has a view named {name!r}")
-        published = sum(v.size for server in MCPServerRegistry.all().values() for v in server._views.values())
-        if published + view.size > MAX_VIEWS_BYTES:
+        # The server's own views; the worker checks those of every server it
+        # publishes together when it registers.
+        taken = sum(v.registration_bytes for v in self._views.values()) + view.registration_bytes
+        if taken > MAX_VIEWS_BYTES:
             raise ValueError(
-                f"view {name!r} would make this worker's MCP views {published + view.size} bytes together; "
-                f"the limit is {MAX_VIEWS_BYTES}"
+                f"view {name!r} would make MCP server {self.info.id!r}'s views take {taken} bytes of the "
+                f"registration; the limit is {MAX_VIEWS_BYTES}"
             )
         self._views[name] = view
         return view

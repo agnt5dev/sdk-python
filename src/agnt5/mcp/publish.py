@@ -36,8 +36,9 @@ _NO_VIEW = "none"
 
 #: The most one view's HTML may weigh, in bytes.
 MAX_VIEW_BYTES = 2 * 1024 * 1024
-#: The most the views of all servers a worker publishes may weigh together:
-#: they travel in the worker's registration, which AGNT5 accepts up to 4 MB.
+#: The most the views of the servers a worker publishes may take of its
+#: registration together, measured as they travel there (``registration_size``):
+#: AGNT5 accepts a registration up to 4 MB.
 MAX_VIEWS_BYTES = 3 * 1024 * 1024
 _RESERVED_VIEW_NAMES = frozenset({RUN_VIEW, _NO_VIEW})
 
@@ -116,9 +117,48 @@ class MCPView:
     #: The server that ships it.
     server: str
     html: str = field(repr=False)
+    #: What the bundle takes of the worker's registration (``registration_size``).
+    registration_bytes: int = 0
 
     def to_definition(self) -> dict[str, Any]:
         return {"name": self.name, "sha256": self.sha256, "size": self.size, "html": self.html}
+
+
+def registration_size(html: str) -> int:
+    """How many bytes a view bundle takes in the worker's registration.
+
+    The definition carrying it travels as a JSON string inside a JSON
+    webhook, so the HTML is JSON-escaped twice: ``"`` and ``\\`` take 4 bytes,
+    ``\\b \\f \\n \\r \\t`` take 3, other control characters 7, everything else
+    its UTF-8 length. The platform measures the same way
+    (``ViewRegistrationBytes``), whatever JSON encoder either side uses.
+    """
+    size = len(html.encode("utf-8"))
+    for ch in html:
+        if ch in ('"', "\\"):
+            size += 3
+        elif ch in "\b\f\n\r\t":
+            size += 2
+        elif ch < "\x20":
+            size += 6
+    return size
+
+
+def check_views_budget(servers: "list[MCPServer]") -> None:
+    """Refuse a worker whose published servers' views together pass
+    ``MAX_VIEWS_BYTES`` of its registration: the registration would be
+    rejected whole, taking every component with it."""
+    total = 0
+    sizes = []
+    for server in servers:
+        for view in server.views.values():
+            total += view.registration_bytes
+            sizes.append(f"{server.info.id}/{view.name} {view.registration_bytes}")
+    if total > MAX_VIEWS_BYTES:
+        raise ValueError(
+            f"this worker's MCP views take {total} bytes of its registration together; the limit is "
+            f"{MAX_VIEWS_BYTES} ({', '.join(sizes)})"
+        )
 
 
 def load_view(
@@ -130,7 +170,7 @@ def load_view(
     """Check a view where the developer added it, so a missing build or an
     oversized bundle fails at import time rather than as a rejected
     deployment."""
-    if not isinstance(name, str) or not _SERVER_NAME.match(name):
+    if not isinstance(name, str) or not _SERVER_NAME.fullmatch(name):
         raise ValueError(f"view name {name!r} must be lowercase letters, digits, '-' and '_' (up to 63 characters)")
     if name in _RESERVED_VIEW_NAMES:
         raise ValueError(f"view name {name!r} is reserved ({RUN_VIEW!r} is the AGNT5 run card, {_NO_VIEW!r} means no view)")
@@ -138,6 +178,10 @@ def load_view(
         raise ValueError(f"add_view({name!r}, ...) takes one of html= or path=")
     if path is not None:
         try:
+            # Too big is refused before anything is read.
+            on_disk = os.stat(path).st_size
+            if on_disk > MAX_VIEW_BYTES:
+                raise ValueError(f"view {name!r} is {on_disk} bytes; the limit is {MAX_VIEW_BYTES}")
             with open(path, encoding="utf-8") as f:
                 html = f.read()
         except FileNotFoundError:
@@ -152,7 +196,14 @@ def load_view(
     data = html.encode("utf-8")
     if len(data) > MAX_VIEW_BYTES:
         raise ValueError(f"view {name!r} is {len(data)} bytes; the limit is {MAX_VIEW_BYTES}")
-    return MCPView(name=name, sha256=hashlib.sha256(data).hexdigest(), size=len(data), server=server, html=html)
+    return MCPView(
+        name=name,
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=len(data),
+        server=server,
+        html=html,
+        registration_bytes=registration_size(html),
+    )
 
 
 def check_tool_options(
@@ -164,7 +215,7 @@ def check_tool_options(
 ) -> dict[str, Any]:
     """Validate ``add_*`` options where the developer wrote them, so a typo
     fails at import time rather than as a rejected deployment."""
-    if not _TOOL_NAME.match(name):
+    if not _TOOL_NAME.fullmatch(name):
         raise ValueError(f"MCP tool name {name!r} must be 1 to 128 letters, digits, '_', '-' or '.'")
     if name in RESERVED_TOOL_NAMES:
         raise ValueError(f"MCP tool name {name!r} is reserved for the built-in run tools")
@@ -205,7 +256,7 @@ def first_line(text: Optional[str]) -> Optional[str]:
 
 def valid_server_name(name: str) -> bool:
     """A published server's name is a URL segment: /mcp/{project}/{env}/{name}."""
-    return bool(_SERVER_NAME.match(name))
+    return bool(_SERVER_NAME.fullmatch(name))
 
 
 _lock = threading.Lock()
