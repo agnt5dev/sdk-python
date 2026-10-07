@@ -2473,6 +2473,13 @@ class WorkflowRegistry:
         Raises:
             ValueError: If a workflow with this name is already registered
         """
+        for trigger in config.triggers or []:
+            for field in ("filter_expression", "input_mapping", "batch_window_ms", "delay_expression"):
+                value = getattr(trigger, field)
+                if isinstance(value, str):
+                    value = value.strip()
+                if value:
+                    raise ValueError(f"trigger {field} is not supported; leave it unset")
         if config.name in _WORKFLOW_REGISTRY:
             existing_workflow = _WORKFLOW_REGISTRY[config.name]
             if existing_workflow.handler is config.handler:

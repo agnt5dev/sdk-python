@@ -7,9 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-10-07
+
 ### Fixed
 
-- Use core 0.3.8 so a worker returns a failure response when a Python `BaseException` escapes an executor. Previously the native core logged the error and dropped the response, leaving the invocation waiting for its lease to expire.
+- Use core 0.3.9 so a worker returns a failure response when a Python `BaseException` escapes an executor. Previously the native core logged the error and dropped the response, leaving the invocation waiting for its lease to expire.
+- Preserve empty-string answers when resuming human input. Reject unsupported trigger filters, input mappings, batching and delays during workflow registration instead of allowing the runtime to skip them.
+- Apply function retry policies inside workflow steps.
+- Resolve output references in client results, add asynchronous output and result-waiting helpers, and return output values from chat helpers.
+- Surface classification judge failures instead of returning a zero score, and recover missing classification labels when the response contains a supported label.
+- Restrict direct agent and tool dispatch to explicitly listed worker components.
 
 ### Security
 

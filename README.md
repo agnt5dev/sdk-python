@@ -102,6 +102,14 @@ The shared Rust runtime foundation lives in
 adapters live in
 [`agnt5dev/sdk-integrations`](https://github.com/agnt5dev/sdk-integrations).
 
+## Event triggers
+
+Use `event(...)` or `webhook(...)` in a workflow's `triggers` declarations.
+Filtering, input mapping, batching, and delays are not supported yet. Leave
+`filter_expression`, `input_mapping`, `batch_window_ms`, and `delay_expression`
+unset; workflow registration rejects nonempty expressions and nonzero batch
+windows with an error naming the option.
+
 ## Examples and documentation
 
 - [`examples/`](examples/) contains functions, workflows, agents, tools,
