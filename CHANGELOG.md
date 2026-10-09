@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Run agents published as MCP tools. A hosted MCP server forwards the tool's `{"input", "session_id"}` arguments unchanged, and the agent executor rejected them because it only read `message`. It now uses a string `input` when `message` is absent; `message` still takes precedence.
+
 ## [0.14.4] - 2026-10-07
 
 ### Fixed
