@@ -219,3 +219,82 @@ async def test_execute_agent_does_not_duplicate_persisted_lm_failure():
         "agent.failed",
         "run.failed",
     ]
+
+
+class _EchoAgent:
+    name = "echo_agent"
+
+    def __init__(self) -> None:
+        self.messages: list = []
+        self.session_ids: list = []
+
+    async def stream(self, message, context):
+        self.messages.append(message)
+        self.session_ids.append(context.session_id)
+        yield AgentCompleted(
+            name=self.name,
+            correlation_id="agent-1",
+            parent_correlation_id="run-1",
+            output_data={"output": f"echo: {message}", "tool_calls": []},
+        )
+
+
+def _request_with(input_data):
+    return SimpleNamespace(
+        invocation_id="run-echo-agent",
+        input_data=serialize(input_data),
+        runtime_context=None,
+        metadata={},
+        session_id="",
+        user_id="",
+        attempt=0,
+        is_streaming=True,
+        component_name="echo_agent",
+    )
+
+
+def _component_events(worker: _RecordingWorker) -> list[str]:
+    return [event_type for event_type in worker.event_types if not event_type.startswith("log")]
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_accepts_mcp_tool_input():
+    # A hosted MCP server forwards an agent tool's arguments unchanged as the
+    # run input: {"input": ..., "session_id"?: ...} (AGENT_INPUT_SCHEMA).
+    worker = _RecordingWorker()
+    agent = _EchoAgent()
+
+    response = await _DummyExecutor(worker)._execute_agent(
+        agent, b"", _request_with({"input": "hello", "session_id": "mcp-session"})
+    )
+
+    assert response is None
+    assert agent.messages == ["hello"]
+    assert agent.session_ids == ["mcp-session"]
+    events = _component_events(worker)
+    assert "run.failed" not in events
+    assert events[-2:] == ["run.completed", "session.created"]
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_prefers_message_over_input():
+    worker = _RecordingWorker()
+    agent = _EchoAgent()
+
+    await _DummyExecutor(worker)._execute_agent(
+        agent, b"", _request_with({"message": "hello", "input": "ignored"})
+    )
+
+    assert agent.messages == ["hello"]
+    assert "run.completed" in _component_events(worker)
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_without_message_or_input_fails():
+    worker = _RecordingWorker()
+    agent = _EchoAgent()
+
+    await _DummyExecutor(worker)._execute_agent(agent, b"", _request_with({"input": {"k": 1}}))
+
+    assert agent.messages == []
+    assert "run.failed" in _component_events(worker)

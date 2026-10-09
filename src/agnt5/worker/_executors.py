@@ -90,9 +90,26 @@ def _resolve_session_user_ids(request: Any, input_dict: Any) -> tuple[str, str |
     return session_id, user_id
 
 
+def _agent_user_message(input_dict: dict) -> Any:
+    """The user message an agent run carries.
+
+    ``message`` is the native key. Agents published as MCP tools take
+    ``{"input": ..., "session_id"?: ...}`` (``AGENT_INPUT_SCHEMA``), and the
+    hosted MCP server forwards those arguments unchanged as the run input, so
+    a string ``input`` is the message when ``message`` is absent.
+    """
+    message = input_dict.get("message")
+    if message:
+        return message
+    fallback = input_dict.get("input")
+    if isinstance(fallback, str) and fallback:
+        return fallback
+    return message or ""
+
+
 def _agent_missing_message_error(input_dict: dict) -> str:
     return (
-        f"Agent invocation requires a 'message' key in the input dict. "
+        f"Agent invocation requires a 'message' key (or a string 'input') in the input dict. "
         f"Received keys: {list(input_dict.keys())}. "
         f"Check that your dataset input matches the component's expected schema."
     )
@@ -991,7 +1008,7 @@ class ExecutorMixin:
             return context
 
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
-            user_message = input_dict.get("message", "")
+            user_message = _agent_user_message(input_dict)
             if not user_message:
                 raise ValueError(_agent_missing_message_error(input_dict))
 
