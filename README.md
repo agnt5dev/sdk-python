@@ -1,11 +1,19 @@
+<p align="center">
+  <a href="https://agnt5.com"><img src="https://agnt5.com/images/github/github-repo-sdk-banner.png" alt="AGNT5: the reliable platform for AI agents and workflows" width="100%"></a>
+</p>
+
 # AGNT5 Python SDK
 
-[![CI](https://github.com/agnt5dev/agnt5/actions/workflows/sdk-python-tests.yml/badge.svg)](https://github.com/agnt5dev/agnt5/actions/workflows/sdk-python-tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/agnt5)](https://pypi.org/project/agnt5/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Build reliable AI agents and durable workflows in Python. The AGNT5 SDK
-provides typed components, workflow checkpoints, retries, streaming, tools,
-human-in-the-loop coordination, evaluation, and runtime observability.
+Build reliable AI agents and durable workflows in Python. AGNT5 checkpoints
+each workflow step, so a run that fails partway resumes from its last completed
+step instead of starting over. The SDK provides typed functions and workflows,
+retries, streaming, tool calling, multi-agent handoffs, human-in-the-loop
+(HITL) approvals, MCP, evals, and runtime observability.
+
+[Documentation](https://agnt5.com/docs) · [Starter templates](https://github.com/agnt5dev/templates) · [Website](https://agnt5.com)
 
 ## Requirements
 
@@ -118,27 +126,6 @@ windows with an error naming the option.
 - [AGNT5 documentation](https://agnt5.com/docs) covers platform concepts and
   deployment.
 
-## Development
-
-```bash
-uv sync --all-groups
-uv run ruff check src tests
-uv run pytest tests/unit -q
-uv build --sdist
-```
-
-Development builds use a sibling checkout of
-[`sdk-core`](https://github.com/agnt5dev/sdk-core).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues according to
-[SECURITY.md](SECURITY.md).
-
-## License
-
-Licensed under the [Apache License 2.0](LICENSE).
-
 ## Response wait
 
 Run and stream calls wait up to **5 minutes** by default. Set the per-call wait
@@ -197,3 +184,24 @@ when no secret resolves and logs a warning at startup. It still verifies request
 when a secret is configured. Missing static secrets warn at startup; an empty
 request-time resolver warns on its first failed invoke. AGNT5 activation and
 dispatch still require a signing secret, regardless of this SDK option.
+
+## Development
+
+```bash
+uv sync --all-groups
+uv run ruff check src tests
+uv run pytest tests/unit -q
+uv build --sdist
+```
+
+Development builds use a sibling checkout of
+[`sdk-core`](https://github.com/agnt5dev/sdk-core).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues according to
+[SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
