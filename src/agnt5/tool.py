@@ -127,6 +127,23 @@ def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
     return None
 
 
+def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
+    """Refuse a tool's pause where a resumed run can't replay it correctly.
+
+    Inside a durable activation, such as a delegated agent, a pause would
+    leave that activation open and the resumed run would wait on it forever.
+    Inside a step, a later replay returns the step's cached result without
+    asking again, so the pause count falls behind and later pauses read
+    earlier answers.
+    """
+    if current_activation() is not None or workflow_ctx._step_event_stack:
+        raise ConfigurationError(
+            f"{what} pauses the run for a person, but it was called inside a "
+            "delegated agent or a step, which cannot pause yet. Give the tool to "
+            "the top-level agent, or call it between workflow steps."
+        )
+
+
 def _find_workflow_context(ctx: Any) -> Any:
     """The workflow context a tool call can pause in, if there is one.
 
@@ -409,18 +426,8 @@ class Tool:
                 "for a person's approval. Call it from a workflow, or remove "
                 "confirmation=True."
             )
-        # Inside a durable activation, such as a delegated agent, a pause would
-        # leave that activation open and the resumed run would wait on it
-        # forever. Inside a step, a later replay returns the step's cached
-        # result without asking again, so the pause count falls behind and
-        # later pauses read earlier answers. Refuse instead of running the
-        # tool without approval.
-        if current_activation() is not None or workflow_ctx._step_event_stack:
-            raise ConfigurationError(
-                f"Tool '{self.name}' requires confirmation, but it was called inside "
-                "a delegated agent or a step, which cannot pause for approval yet. "
-                "Give the tool to the top-level agent, or call it between workflow steps."
-            )
+        # Refuse rather than run the tool without approval.
+        _require_pause_boundary(workflow_ctx, f"Tool '{self.name}' requires confirmation, which")
 
         question = f"Allow `{self.name}` to run?"
         if arguments:
@@ -933,6 +940,7 @@ class AskUserTool(Tool):
                 "AskUserTool requires WorkflowContext. "
                 "Either pass context to __init__ or ensure tool is used within a workflow."
             )
+        _require_pause_boundary(workflow_ctx, "AskUserTool")
 
         return await workflow_ctx.wait_for_user(question, input_type="text")
 
@@ -1027,6 +1035,7 @@ class RequestApprovalTool(Tool):
                 "RequestApprovalTool requires WorkflowContext. "
                 "Either pass context to __init__ or ensure tool is used within a workflow."
             )
+        _require_pause_boundary(workflow_ctx, "RequestApprovalTool")
 
         question = f"Action: {action}"
         if details:

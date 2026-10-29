@@ -855,7 +855,7 @@ async def test_confirmation_inside_an_activation_refuses_to_run():
         )
     )
     try:
-        with pytest.raises(ConfigurationError, match="cannot pause for approval"):
+        with pytest.raises(ConfigurationError, match="cannot pause yet"):
             await probe.invoke(ctx, record_id="r1")
     finally:
         _reset_current_activation(token)
@@ -967,7 +967,27 @@ async def test_confirmation_inside_a_step_refuses_to_run():
     async def enclosing_step():
         return await probe.invoke(ctx, record_id="r1")
 
-    with pytest.raises(ConfigurationError, match="cannot pause for approval"):
+    with pytest.raises(ConfigurationError, match="cannot pause yet"):
         await ctx.step("cleanup", enclosing_step)
 
     assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_class,arguments", [
+    ("AskUserTool", {"question": "Which focus?"}),
+    ("RequestApprovalTool", {"action": "Close the ticket"}),
+])
+async def test_built_in_pause_tools_inside_a_step_refuse_to_pause(tool_class, arguments):
+    """A replayed step skips its pause, so a later approval would read this answer."""
+    from agnt5.tool import AskUserTool, RequestApprovalTool
+
+    classes = {"AskUserTool": AskUserTool, "RequestApprovalTool": RequestApprovalTool}
+    ctx = _workflow_ctx([])
+    pause_tool = classes[tool_class](ctx)
+
+    async def intake():
+        return await pause_tool.invoke(ctx, **arguments)
+
+    with pytest.raises(ConfigurationError, match="cannot pause yet"):
+        await ctx.step("intake", intake)
