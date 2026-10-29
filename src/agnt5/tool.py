@@ -33,6 +33,7 @@ from .activation import (
     _reset_current_activation,
     _set_current_activation,
     activation_request_from_context,
+    current_activation,
 )
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
@@ -394,6 +395,15 @@ class Tool:
                 f"Tool '{self.name}' requires confirmation, which pauses the run "
                 "for a person's approval. Call it from a workflow, or remove "
                 "confirmation=True."
+            )
+        # Inside a durable activation, such as a delegated agent or a step, a
+        # pause would leave that activation open and the resumed run would wait
+        # on it forever. Refuse instead of running the tool without approval.
+        if current_activation() is not None:
+            raise ConfigurationError(
+                f"Tool '{self.name}' requires confirmation, but it was called inside "
+                "a delegated agent or a step, which cannot pause for approval yet. "
+                "Give the tool to the top-level agent, or call it between workflow steps."
             )
 
         question = f"Allow `{self.name}` to run?"

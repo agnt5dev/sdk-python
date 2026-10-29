@@ -828,3 +828,33 @@ async def test_confirmation_from_an_agent_pauses_its_workflow():
 
     assert approved is True
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_inside_an_activation_refuses_to_run():
+    """A pause inside a delegated agent or step would leave its activation open."""
+    from agnt5.activation import (
+        ActivationDecision,
+        ActivationDecisionKind,
+        _reset_current_activation,
+        _set_current_activation,
+    )
+
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["approve"])
+    token = _set_current_activation(
+        ActivationDecision(
+            kind=ActivationDecisionKind.EXECUTE,
+            activation_id="actv1_child",
+            attempt=1,
+            fence_token=b"fence",
+            accepted_journal_offset=1,
+        )
+    )
+    try:
+        with pytest.raises(ConfigurationError, match="cannot pause for approval"):
+            await probe.invoke(ctx, record_id="r1")
+    finally:
+        _reset_current_activation(token)
+
+    assert calls == []
