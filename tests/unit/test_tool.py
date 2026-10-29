@@ -991,3 +991,55 @@ async def test_built_in_pause_tools_inside_a_step_refuse_to_pause(tool_class, ar
 
     with pytest.raises(ConfigurationError, match="cannot pause yet"):
         await ctx.step("intake", intake)
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_carry_an_approval_to_another_pause_position():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await first.wait_for_user("Start the cleanup?")
+
+    second = _resumed_ctx(first, ["approve"])
+    await second.wait_for_user("Start the cleanup?")
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(second, record_id="r1")
+
+    # The deletion was rejected at pause 1, but the resumed model skips the
+    # first question, so the deletion now reaches pause 0 and its approval.
+    result = await probe.invoke(_resumed_ctx(second, ["approve", "reject"]), record_id="r1")
+
+    assert calls == []
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_tool_that_returned_nothing_does_not_run_again():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    sent = []
+
+    @tool(confirmation=True)
+    async def send_email(ctx: Context, to: str) -> None:
+        """Send an email."""
+        sent.append(to)
+
+    send_tool = ToolRegistry.get("send_email")
+
+    async def workflow(ctx):
+        await send_tool.invoke(ctx, to="a@example.com")
+        return await probe.invoke(ctx, record_id="r1")
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(first)
+    second = _resumed_ctx(first, ["approve"])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(second)
+    third = _resumed_ctx(second, ["approve", "approve"])
+
+    assert await workflow(third) == "deleted r1"
+    assert sent == ["a@example.com"]

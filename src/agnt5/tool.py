@@ -438,8 +438,15 @@ class Tool:
         # is asked to approve. The step is keyed by the confirmation's position,
         # not the tool, so on resume it returns the recorded proposal whichever
         # tool the model picks now.
+        # The pause position is part of the proposal too, so if the resumed run
+        # reaches this approval at another position, for example because the
+        # model skipped an earlier question, the approval doesn't carry over.
         proposal = json.dumps(
-            {"tool": self.name, "arguments": arguments},
+            {
+                "tool": self.name,
+                "arguments": arguments,
+                "pause": workflow_ctx._workflow_entity._pause_index,
+            },
             sort_keys=True,
             separators=(",", ":"),
             default=str,
@@ -464,7 +471,14 @@ class Tool:
         # approved effect again.
         if self._activation_enabled(ctx):
             return await execute()
-        return await workflow_ctx.step(f"confirmed:{ordinal}", execute)
+
+        # Wrapped so a tool that returns nothing still leaves a checkpoint that
+        # reads as done.
+        async def run_once() -> Dict[str, Any]:
+            return {"result": await execute()}
+
+        done = await workflow_ctx.step(f"confirmed:{ordinal}", run_once)
+        return done["result"]
 
     def _activation_enabled(self, ctx: Any) -> bool:
         """Whether an invocation on this context runs through a TOOL activation.
