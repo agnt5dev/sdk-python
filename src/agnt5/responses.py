@@ -33,6 +33,23 @@ class RunStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+# A run waiting for a person is still in progress, not failed: it continues
+# once someone answers.
+_PAUSED_STATUSES = (
+    RunStatus.PAUSED,
+    RunStatus.AWAITING_INPUT,
+    RunStatus.AWAITING_USER_INPUT,
+)
+_IN_PROGRESS_STATUSES = (
+    "pending",
+    "enqueued",
+    "queued",
+    "running",
+    "started",
+    *(status.value for status in _PAUSED_STATUSES),
+)
+
+
 @dataclass(frozen=True)
 class RunErrorDetail:
     """Structured error information from a failed run.
@@ -143,6 +160,11 @@ class RunResponse(Generic[T]):
     def is_pending(self) -> bool:
         """True if the run is still in progress (status_code 202)."""
         return self.status_code == 202
+
+    @property
+    def is_paused(self) -> bool:
+        """True if the run is waiting for a person's answer."""
+        return self.status in _PAUSED_STATUSES
 
     @property
     def is_error(self) -> bool:
@@ -265,6 +287,11 @@ class StatusResponse:
     def is_running(self) -> bool:
         """True if the run is currently executing."""
         return self.status in (RunStatus.RUNNING, RunStatus.STARTED)
+
+    @property
+    def is_paused(self) -> bool:
+        """True if the run is waiting for a person's answer."""
+        return self.status in _PAUSED_STATUSES
 
 
 @dataclass
@@ -520,7 +547,7 @@ def parse_run_response(data: Dict[str, Any]) -> RunResponse[Any]:
         status_str = data.get("status", "unknown")
         if status_str == "completed":
             status_code = 200
-        elif status_str in ("pending", "enqueued", "queued", "running", "started"):
+        elif status_str in _IN_PROGRESS_STATUSES:
             status_code = 202
         else:
             status_code = 500

@@ -1664,6 +1664,7 @@ class ExecutorMixin:
                         workflow_entity._pause_index = 0
 
                 workflow_entity.inject_user_response(user_response)
+                workflow_entity._resumed_pause_index = workflow_entity._pause_index
                 workflow_entity._pause_index = 0  # Reset for replay
 
                 # Store resumed step info for proper event pairing

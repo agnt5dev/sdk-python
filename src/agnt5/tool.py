@@ -33,6 +33,7 @@ from .activation import (
     _reset_current_activation,
     _set_current_activation,
     activation_request_from_context,
+    current_activation,
 )
 from .context import Context, set_current_context
 from .exceptions import ConfigurationError
@@ -123,6 +124,47 @@ def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
         ).strip()
         message = str(spec.get("message") or f"simulated eval tool fault for {tool_name}").strip()
         return f"{code}: {message}"
+    return None
+
+
+def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
+    """Refuse a tool's pause where a resumed run can't replay it correctly.
+
+    Inside a durable activation, such as a delegated agent, a pause would
+    leave that activation open and the resumed run would wait on it forever.
+    Inside a step, a later replay returns the step's cached result without
+    asking again, so the pause count falls behind and later pauses read
+    earlier answers.
+    """
+    if current_activation() is not None or workflow_ctx._step_event_stack:
+        raise ConfigurationError(
+            f"{what} pauses the run for a person, but it was called inside a "
+            "delegated agent or a step, which cannot pause yet. Give the tool to "
+            "the top-level agent, or call it between workflow steps."
+        )
+
+
+def _find_workflow_context(ctx: Any) -> Any:
+    """The workflow context a tool call can pause in, if there is one.
+
+    An agent's context links to the workflow that runs it through
+    ``parent_context``; a tool called straight from a workflow gets it directly.
+    """
+    from .context import get_current_context
+
+    seen = set()
+    candidate = ctx
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        if getattr(candidate, "_workflow_entity", None) is not None and hasattr(
+            candidate, "wait_for_user"
+        ):
+            return candidate
+        candidate = getattr(candidate, "parent_context", None)
+
+    current = get_current_context()
+    if getattr(current, "_workflow_entity", None) is not None and hasattr(current, "wait_for_user"):
+        return current
     return None
 
 
@@ -262,6 +304,13 @@ class Tool:
     a structured interface for agent invocation.
     """
 
+    # A tool that asks a person (wait_for_user) must run its handler on every
+    # replay. Its answer is already recorded on the workflow, and calling
+    # wait_for_user again is what moves the workflow's pause counter on.
+    # Returning a cached tool result instead leaves the counter behind, so
+    # every later pause would read the answer meant for the one before it.
+    waits_for_user: bool = False
+
     def __init__(
         self,
         name: str,
@@ -325,6 +374,10 @@ class Tool:
             )
 
     async def invoke(self, ctx: Context, **kwargs) -> Any:
+        if self.confirmation:
+            return await self._run_confirmed(
+                ctx, kwargs, lambda: self._invoke(ctx, kwargs, stable_key=None)
+            )
         return await self._invoke(ctx, kwargs, stable_key=None)
 
     async def invoke_with_stable_key(
@@ -338,13 +391,94 @@ class Tool:
     ) -> Any:
         """Invoke using a provider/tool-call identity when one is available."""
 
-        return await self._invoke(
-            ctx,
-            arguments,
-            stable_key=stable_key,
-            tool_call_id=tool_call_id,
-            iteration=iteration,
+        def execute() -> Awaitable[Any]:
+            return self._invoke(
+                ctx,
+                arguments,
+                stable_key=stable_key,
+                tool_call_id=tool_call_id,
+                iteration=iteration,
+            )
+
+        if self.confirmation:
+            return await self._run_confirmed(ctx, arguments, execute)
+        return await execute()
+
+    async def _run_confirmed(
+        self,
+        ctx: Any,
+        arguments: Dict[str, Any],
+        execute: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Ask a person to approve this call, and run ``execute`` only once approved.
+
+        The question is asked before any cached or durable result is used, so
+        on replay it reads its recorded answer and the workflow's later pauses
+        keep their own answers.
+
+        Returns ``execute``'s result, or what the caller, usually an agent,
+        gets instead when the call must not run.
+        """
+        workflow_ctx = _find_workflow_context(ctx)
+        if workflow_ctx is None:
+            raise ConfigurationError(
+                f"Tool '{self.name}' requires confirmation, which pauses the run "
+                "for a person's approval. Call it from a workflow, or remove "
+                "confirmation=True."
+            )
+        # Refuse rather than run the tool without approval.
+        _require_pause_boundary(workflow_ctx, f"Tool '{self.name}' requires confirmation, which")
+
+        question = f"Allow `{self.name}` to run?"
+        if arguments:
+            question += "\n\nArguments:\n" + json.dumps(arguments, indent=2, default=str)
+        # Answers are matched to pauses by position only. Without durable model
+        # replay, an agent resumed after the pause asks the model again and may
+        # propose another tool or other arguments, so record what the person
+        # is asked to approve. The step is keyed by the confirmation's position,
+        # not the tool, so on resume it returns the recorded proposal whichever
+        # tool the model picks now.
+        # The pause position is part of the proposal too, so if the resumed run
+        # reaches this approval at another position, for example because the
+        # model skipped an earlier question, the approval doesn't carry over.
+        proposal = json.dumps(
+            {
+                "tool": self.name,
+                "arguments": arguments,
+                "pause": workflow_ctx._workflow_entity._pause_index,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
         )
+        ordinal = getattr(workflow_ctx, "_confirmation_count", 0)
+        workflow_ctx._confirmation_count = ordinal + 1
+        approved_proposal = await workflow_ctx.step(f"confirm:{ordinal}", lambda: proposal)
+        decision = await workflow_ctx.wait_for_user(
+            question,
+            input_type="approval",
+            options=[{"id": "approve", "label": "Approve"}, {"id": "reject", "label": "Reject"}],
+        )
+        # Older Studio versions answer approval pauses with "approved".
+        if not (
+            isinstance(decision, str) and decision.strip().lower() in ("approve", "approved")
+        ):
+            return f"The user rejected the call to '{self.name}', so it did not run."
+        if approved_proposal != proposal:
+            return f"The call to '{self.name}' differs from the one the user approved, so it did not run."
+        # A durable activation records the result itself. Otherwise checkpoint
+        # it, so a replay for a later pause returns it instead of running the
+        # approved effect again.
+        if self._activation_enabled(ctx):
+            return await execute()
+
+        # Wrapped so a tool that returns nothing still leaves a checkpoint that
+        # reads as done.
+        async def run_once() -> Dict[str, Any]:
+            return {"result": await execute()}
+
+        done = await workflow_ctx.step(f"confirmed:{ordinal}", run_once)
+        return done["result"]
 
     def _activation_enabled(self, ctx: Any) -> bool:
         """Whether an invocation on this context runs through a TOOL activation.
@@ -382,14 +516,15 @@ class Tool:
             Tool execution result
 
         Raises:
-            ConfigurationError: If tool requires confirmation (not yet implemented)
+            ConfigurationError: If the tool requires confirmation and there is no
+                workflow to pause in
 
         Note:
             If memoization is enabled on the context, this method will check
             the journal for cached results before executing and cache results
             after successful execution.
         """
-        if allow_activation and self._activation_enabled(ctx):
+        if allow_activation and not self.waits_for_user and self._activation_enabled(ctx):
             return await self._invoke_durable(
                 ctx,
                 kwargs,
@@ -408,7 +543,7 @@ class Tool:
         content_hash = None
         memo = None
 
-        if allow_memo and hasattr(ctx, "_memo") and ctx._memo:
+        if allow_memo and not self.waits_for_user and hasattr(ctx, "_memo") and ctx._memo:
             memo = ctx._memo
             step_key, content_hash = memo.tool_call_key(self.name, kwargs)
 
@@ -417,11 +552,6 @@ class Tool:
             if found:
                 logger.debug(f"Tool call {step_key} served from memoization cache")
                 return cached_result
-
-        if self.confirmation:
-            logger.warning(
-                f"Tool '{self.name}' requires confirmation; no approval handler is configured"
-            )
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -789,6 +919,7 @@ class AskUserTool(Tool):
             auto_schema=True,
             durable=False,
         )
+        self.waits_for_user = True
         self.context = context
 
     async def _handler(self, ctx: Context, question: str) -> str:
@@ -823,6 +954,7 @@ class AskUserTool(Tool):
                 "AskUserTool requires WorkflowContext. "
                 "Either pass context to __init__ or ensure tool is used within a workflow."
             )
+        _require_pause_boundary(workflow_ctx, "AskUserTool")
 
         return await workflow_ctx.wait_for_user(question, input_type="text")
 
@@ -881,6 +1013,7 @@ class RequestApprovalTool(Tool):
             auto_schema=True,
             durable=False,
         )
+        self.waits_for_user = True
         self.context = context
 
     async def _handler(self, ctx: Context, action: str, details: str = "") -> str:
@@ -916,6 +1049,7 @@ class RequestApprovalTool(Tool):
                 "RequestApprovalTool requires WorkflowContext. "
                 "Either pass context to __init__ or ensure tool is used within a workflow."
             )
+        _require_pause_boundary(workflow_ctx, "RequestApprovalTool")
 
         question = f"Action: {action}"
         if details:

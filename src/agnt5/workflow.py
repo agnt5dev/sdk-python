@@ -1747,9 +1747,16 @@ class WorkflowContext(Context):
             self._logger.debug(f"Replaying user response from checkpoint (pause {pause_index})")
 
             # Use the ORIGINAL step correlation ID from the pause, not a new one
-            # This ensures step.started and step.completed have matching correlation IDs
-            original_step_correlation_id = self._workflow_entity._resumed_step_correlation_id
-            original_step_name = self._workflow_entity._resumed_step_name or step_name
+            # This ensures step.started and step.completed have matching correlation IDs.
+            # Only the pause this resume answered has them; earlier pauses replay
+            # first and would otherwise report their answers under its name.
+            is_resumed_pause = pause_index == self._workflow_entity._resumed_pause_index
+            original_step_correlation_id = (
+                self._workflow_entity._resumed_step_correlation_id if is_resumed_pause else None
+            )
+            original_step_name = (
+                self._workflow_entity._resumed_step_name if is_resumed_pause else None
+            ) or step_name
 
             if original_step_correlation_id:
                 self._logger.debug(
@@ -1791,8 +1798,9 @@ class WorkflowContext(Context):
             await self.emit_async(step_completed)
 
             # Clear the resumed step info after use
-            self._workflow_entity._resumed_step_correlation_id = None
-            self._workflow_entity._resumed_step_name = None
+            if is_resumed_pause:
+                self._workflow_entity._resumed_step_correlation_id = None
+                self._workflow_entity._resumed_step_name = None
 
             # Decode wire format
             if response in {"__skipped__", "__skip__"}:
@@ -2064,6 +2072,9 @@ class WorkflowEntity:
         # Resumed step info for proper event pairing after HITL resume
         self._resumed_step_correlation_id: Optional[str] = None
         self._resumed_step_name: Optional[str] = None
+        # The pause the current resume answered; only its replay reuses the
+        # step name and correlation ID saved from that pause.
+        self._resumed_pause_index: Optional[int] = None
 
         # State change tracking for debugging/audit (AI workflows)
         self._state_changes: list[Dict[str, Any]] = []

@@ -736,3 +736,310 @@ def test_activation_enabled_requires_durable_tool_and_negotiated_context():
     assert Tool("durable", "", handler)._activation_enabled(durable_ctx) is True
     assert Tool("durable", "", handler)._activation_enabled(plain_ctx) is False
     assert Tool("legacy", "", handler, durable=False)._activation_enabled(durable_ctx) is False
+
+
+# Confirmation
+
+
+def _confirmation_probe():
+    calls = []
+
+    @tool(confirmation=True)
+    async def delete_record(ctx: Context, record_id: str) -> str:
+        """Delete a record."""
+        calls.append(record_id)
+        return f"deleted {record_id}"
+
+    return ToolRegistry.get("delete_record"), calls
+
+
+def _workflow_ctx(answers):
+    from agnt5.workflow import WorkflowContext, WorkflowEntity
+
+    entity = WorkflowEntity(run_id="confirm-run")
+    for index, answer in enumerate(answers):
+        entity._completed_steps[f"user_response:confirm-run:{index}"] = answer
+    ctx = WorkflowContext(workflow_entity=entity, run_id="confirm-run")
+    ctx._is_replay = bool(answers)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_pauses_before_running():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx([])
+
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(ctx, record_id="r1")
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["approve", "approved"])
+async def test_confirmation_tool_runs_once_approved(answer):
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx([answer, "next answer"])
+
+    result = await probe.invoke(ctx, record_id="r1")
+
+    assert result == "deleted r1"
+    assert calls == ["r1"]
+    # The approval used pause 0, so the workflow's next question reads pause 1.
+    assert await ctx.wait_for_user("Next?") == "next answer"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_does_not_run_when_rejected():
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["reject"])
+
+    result = await probe.invoke(ctx, record_id="r1")
+
+    assert calls == []
+    assert "rejected" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_without_a_workflow_refuses_to_run():
+    probe, calls = _confirmation_probe()
+
+    with pytest.raises(ConfigurationError, match="requires confirmation"):
+        await probe.invoke(
+            Context(run_id="plain-run", correlation_id="c", parent_correlation_id="p"),
+            record_id="r1",
+        )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_from_an_agent_pauses_its_workflow():
+    """An agent's context reaches the workflow through parent_context."""
+    from types import SimpleNamespace
+
+    probe, calls = _confirmation_probe()
+    workflow_ctx = _workflow_ctx(["approve"])
+    agent_ctx = SimpleNamespace(parent_context=workflow_ctx)
+
+    async def execute():
+        return "ran"
+
+    result = await probe._run_confirmed(agent_ctx, {"record_id": "r1"}, execute)
+
+    assert result == "ran"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_inside_an_activation_refuses_to_run():
+    """A pause inside a delegated agent or step would leave its activation open."""
+    from agnt5.activation import (
+        ActivationDecision,
+        ActivationDecisionKind,
+        _reset_current_activation,
+        _set_current_activation,
+    )
+
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["approve"])
+    token = _set_current_activation(
+        ActivationDecision(
+            kind=ActivationDecisionKind.EXECUTE,
+            activation_id="actv1_child",
+            attempt=1,
+            fence_token=b"fence",
+            accepted_journal_offset=1,
+        )
+    )
+    try:
+        with pytest.raises(ConfigurationError, match="cannot pause yet"):
+            await probe.invoke(ctx, record_id="r1")
+    finally:
+        _reset_current_activation(token)
+
+    assert calls == []
+
+
+def _resumed_ctx(first_ctx, answers):
+    """A context for the resumed run: the first run's steps plus the answers."""
+    ctx = _workflow_ctx(answers)
+    for key, value in first_ctx._workflow_entity._completed_steps.items():
+        ctx._workflow_entity._completed_steps.setdefault(key, value)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_run_when_arguments_changed_after_approval():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(first, record_id="r1")
+
+    # The run resumes with the approval, and the model, asked again, proposes another record.
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r2")
+
+    assert calls == []
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_run_another_tool_the_model_picks_after_approval():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+
+    @tool(confirmation=True)
+    async def archive_record(ctx: Context, record_id: str) -> str:
+        """Archive a record."""
+        return f"archived {record_id}"
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await ToolRegistry.get("archive_record").invoke(first, record_id="r1")
+
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r1")
+
+    assert calls == []
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_tool_does_not_run_again_when_a_later_approval_resumes():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    charges = []
+
+    @tool(confirmation=True)
+    async def charge(ctx: Context, amount: str) -> str:
+        """Charge a card."""
+        charges.append(amount)
+        return f"charged {amount}"
+
+    charge_tool = ToolRegistry.get("charge")
+
+    async def workflow(ctx):
+        await charge_tool.invoke(ctx, amount="10")
+        return await probe.invoke(ctx, record_id="r1")
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(first)
+
+    second = _resumed_ctx(first, ["approve"])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(second)
+    assert charges == ["10"]
+
+    third = _resumed_ctx(second, ["approve", "approve"])
+    assert await workflow(third) == "deleted r1"
+
+    assert charges == ["10"]
+    assert calls == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_runs_on_resume_with_the_approved_arguments():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(first, record_id="r1")
+
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r1")
+
+    assert result == "deleted r1"
+    assert calls == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_inside_a_step_refuses_to_run():
+    """A replayed step skips its pauses, so later pauses would read earlier answers."""
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["approve"])
+
+    async def enclosing_step():
+        return await probe.invoke(ctx, record_id="r1")
+
+    with pytest.raises(ConfigurationError, match="cannot pause yet"):
+        await ctx.step("cleanup", enclosing_step)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_class,arguments", [
+    ("AskUserTool", {"question": "Which focus?"}),
+    ("RequestApprovalTool", {"action": "Close the ticket"}),
+])
+async def test_built_in_pause_tools_inside_a_step_refuse_to_pause(tool_class, arguments):
+    """A replayed step skips its pause, so a later approval would read this answer."""
+    from agnt5.tool import AskUserTool, RequestApprovalTool
+
+    classes = {"AskUserTool": AskUserTool, "RequestApprovalTool": RequestApprovalTool}
+    ctx = _workflow_ctx([])
+    pause_tool = classes[tool_class](ctx)
+
+    async def intake():
+        return await pause_tool.invoke(ctx, **arguments)
+
+    with pytest.raises(ConfigurationError, match="cannot pause yet"):
+        await ctx.step("intake", intake)
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_carry_an_approval_to_another_pause_position():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await first.wait_for_user("Start the cleanup?")
+
+    second = _resumed_ctx(first, ["approve"])
+    await second.wait_for_user("Start the cleanup?")
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(second, record_id="r1")
+
+    # The deletion was rejected at pause 1, but the resumed model skips the
+    # first question, so the deletion now reaches pause 0 and its approval.
+    result = await probe.invoke(_resumed_ctx(second, ["approve", "reject"]), record_id="r1")
+
+    assert calls == []
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_tool_that_returned_nothing_does_not_run_again():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    sent = []
+
+    @tool(confirmation=True)
+    async def send_email(ctx: Context, to: str) -> None:
+        """Send an email."""
+        sent.append(to)
+
+    send_tool = ToolRegistry.get("send_email")
+
+    async def workflow(ctx):
+        await send_tool.invoke(ctx, to="a@example.com")
+        return await probe.invoke(ctx, record_id="r1")
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(first)
+    second = _resumed_ctx(first, ["approve"])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(second)
+    third = _resumed_ctx(second, ["approve", "approve"])
+
+    assert await workflow(third) == "deleted r1"
+    assert sent == ["a@example.com"]
