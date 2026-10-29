@@ -824,9 +824,9 @@ async def test_confirmation_from_an_agent_pauses_its_workflow():
     workflow_ctx = _workflow_ctx(["approve"])
     agent_ctx = SimpleNamespace(parent_context=workflow_ctx)
 
-    approved = await probe._confirm(agent_ctx, {"record_id": "r1"})
+    refusal = await probe._confirm(agent_ctx, {"record_id": "r1"})
 
-    assert approved is True
+    assert refusal is None
     assert calls == []
 
 
@@ -856,5 +856,59 @@ async def test_confirmation_inside_an_activation_refuses_to_run():
             await probe.invoke(ctx, record_id="r1")
     finally:
         _reset_current_activation(token)
+
+    assert calls == []
+
+
+def _resumed_ctx(first_ctx, answers):
+    """A context for the resumed run: the first run's steps plus the answers."""
+    ctx = _workflow_ctx(answers)
+    for key, value in first_ctx._workflow_entity._completed_steps.items():
+        ctx._workflow_entity._completed_steps.setdefault(key, value)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_run_when_arguments_changed_after_approval():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(first, record_id="r1")
+
+    # The run resumes with the approval, and the model, asked again, proposes another record.
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r2")
+
+    assert calls == []
+    assert "changed after the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmation_runs_on_resume_with_the_approved_arguments():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(first, record_id="r1")
+
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r1")
+
+    assert result == "deleted r1"
+    assert calls == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_inside_a_step_refuses_to_run():
+    """A replayed step skips its pauses, so later pauses would read earlier answers."""
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["approve"])
+
+    async def enclosing_step():
+        return await probe.invoke(ctx, record_id="r1")
+
+    with pytest.raises(ConfigurationError, match="cannot pause for approval"):
+        await ctx.step("cleanup", enclosing_step)
 
     assert calls == []

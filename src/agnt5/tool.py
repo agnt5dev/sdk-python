@@ -357,8 +357,9 @@ class Tool:
             )
 
     async def invoke(self, ctx: Context, **kwargs) -> Any:
-        if self.confirmation and not await self._confirm(ctx, kwargs):
-            return self._rejected_result()
+        refusal = await self._confirm(ctx, kwargs) if self.confirmation else None
+        if refusal is not None:
+            return refusal
         return await self._invoke(ctx, kwargs, stable_key=None)
 
     async def invoke_with_stable_key(
@@ -372,8 +373,9 @@ class Tool:
     ) -> Any:
         """Invoke using a provider/tool-call identity when one is available."""
 
-        if self.confirmation and not await self._confirm(ctx, arguments):
-            return self._rejected_result()
+        refusal = await self._confirm(ctx, arguments) if self.confirmation else None
+        if refusal is not None:
+            return refusal
         return await self._invoke(
             ctx,
             arguments,
@@ -382,12 +384,15 @@ class Tool:
             iteration=iteration,
         )
 
-    async def _confirm(self, ctx: Any, arguments: Dict[str, Any]) -> bool:
+    async def _confirm(self, ctx: Any, arguments: Dict[str, Any]) -> Optional[str]:
         """Ask a person to approve this call before it runs.
 
         The question is asked before any cached or durable result is used, so
         on replay it reads its recorded answer and the workflow's later pauses
         keep their own answers.
+
+        Returns what the caller, usually an agent, gets instead of the result
+        when the call must not run, or None when it was approved.
         """
         workflow_ctx = _find_workflow_context(ctx)
         if workflow_ctx is None:
@@ -396,10 +401,13 @@ class Tool:
                 "for a person's approval. Call it from a workflow, or remove "
                 "confirmation=True."
             )
-        # Inside a durable activation, such as a delegated agent or a step, a
-        # pause would leave that activation open and the resumed run would wait
-        # on it forever. Refuse instead of running the tool without approval.
-        if current_activation() is not None:
+        # Inside a durable activation, such as a delegated agent, a pause would
+        # leave that activation open and the resumed run would wait on it
+        # forever. Inside a step, a later replay returns the step's cached
+        # result without asking again, so the pause count falls behind and
+        # later pauses read earlier answers. Refuse instead of running the
+        # tool without approval.
+        if current_activation() is not None or workflow_ctx._step_event_stack:
             raise ConfigurationError(
                 f"Tool '{self.name}' requires confirmation, but it was called inside "
                 "a delegated agent or a step, which cannot pause for approval yet. "
@@ -409,17 +417,37 @@ class Tool:
         question = f"Allow `{self.name}` to run?"
         if arguments:
             question += "\n\nArguments:\n" + json.dumps(arguments, indent=2, default=str)
+        # Answers are matched to pauses by position only. Without durable model
+        # replay, an agent resumed after the pause asks the model again and may
+        # get different arguments, so record what the person is asked to
+        # approve. On resume the step returns the recorded proposal.
+        proposal = json.dumps(
+            {"tool": self.name, "arguments": arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        ordinal = getattr(workflow_ctx, "_confirmation_count", 0)
+        workflow_ctx._confirmation_count = ordinal + 1
+        approved_proposal = await workflow_ctx.step(
+            f"confirm:{self.name}:{ordinal}", lambda: proposal
+        )
         decision = await workflow_ctx.wait_for_user(
             question,
             input_type="approval",
             options=[{"id": "approve", "label": "Approve"}, {"id": "reject", "label": "Reject"}],
         )
         # Older Studio versions answer approval pauses with "approved".
-        return isinstance(decision, str) and decision.strip().lower() in ("approve", "approved")
-
-    def _rejected_result(self) -> str:
-        """What the caller, usually an agent, gets when the call is rejected."""
-        return f"The user rejected the call to '{self.name}', so it did not run."
+        if not (
+            isinstance(decision, str) and decision.strip().lower() in ("approve", "approved")
+        ):
+            return f"The user rejected the call to '{self.name}', so it did not run."
+        if approved_proposal != proposal:
+            return (
+                f"The arguments for '{self.name}' changed after the user approved the call, "
+                "so it did not run."
+            )
+        return None
 
     def _activation_enabled(self, ctx: Any) -> bool:
         """Whether an invocation on this context runs through a TOOL activation.
