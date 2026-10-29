@@ -575,3 +575,21 @@ class TestParseEventsResponse:
 
         # Count should be inferred from items length
         assert response.count == 2
+
+
+@pytest.mark.parametrize("status", ["paused", "awaiting_input", "awaiting_user_input"])
+def test_paused_run_is_pending_not_failed(status):
+    """A run waiting for a person continues once answered, so it isn't an error."""
+    response = parse_run_response({"run_id": "run-1", "status": status})
+
+    assert response.status_code == 202
+    assert response.is_pending
+    assert response.is_paused
+    assert not response.is_error
+
+
+def test_status_response_reports_paused():
+    status = parse_status_response({"run_id": "run-1", "status": "paused"})
+
+    assert status.is_paused
+    assert not status.is_complete

@@ -126,6 +126,30 @@ def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
     return None
 
 
+def _find_workflow_context(ctx: Any) -> Any:
+    """The workflow context a tool call can pause in, if there is one.
+
+    An agent's context links to the workflow that runs it through
+    ``parent_context``; a tool called straight from a workflow gets it directly.
+    """
+    from .context import get_current_context
+
+    seen = set()
+    candidate = ctx
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        if getattr(candidate, "_workflow_entity", None) is not None and hasattr(
+            candidate, "wait_for_user"
+        ):
+            return candidate
+        candidate = getattr(candidate, "parent_context", None)
+
+    current = get_current_context()
+    if getattr(current, "_workflow_entity", None) is not None and hasattr(current, "wait_for_user"):
+        return current
+    return None
+
+
 def _nonnegative_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
@@ -262,6 +286,13 @@ class Tool:
     a structured interface for agent invocation.
     """
 
+    # A tool that asks a person (wait_for_user) must run its handler on every
+    # replay. Its answer is already recorded on the workflow, and calling
+    # wait_for_user again is what moves the workflow's pause counter on.
+    # Returning a cached tool result instead leaves the counter behind, so
+    # every later pause would read the answer meant for the one before it.
+    waits_for_user: bool = False
+
     def __init__(
         self,
         name: str,
@@ -325,6 +356,8 @@ class Tool:
             )
 
     async def invoke(self, ctx: Context, **kwargs) -> Any:
+        if self.confirmation and not await self._confirm(ctx, kwargs):
+            return self._rejected_result()
         return await self._invoke(ctx, kwargs, stable_key=None)
 
     async def invoke_with_stable_key(
@@ -338,6 +371,8 @@ class Tool:
     ) -> Any:
         """Invoke using a provider/tool-call identity when one is available."""
 
+        if self.confirmation and not await self._confirm(ctx, arguments):
+            return self._rejected_result()
         return await self._invoke(
             ctx,
             arguments,
@@ -345,6 +380,36 @@ class Tool:
             tool_call_id=tool_call_id,
             iteration=iteration,
         )
+
+    async def _confirm(self, ctx: Any, arguments: Dict[str, Any]) -> bool:
+        """Ask a person to approve this call before it runs.
+
+        The question is asked before any cached or durable result is used, so
+        on replay it reads its recorded answer and the workflow's later pauses
+        keep their own answers.
+        """
+        workflow_ctx = _find_workflow_context(ctx)
+        if workflow_ctx is None:
+            raise ConfigurationError(
+                f"Tool '{self.name}' requires confirmation, which pauses the run "
+                "for a person's approval. Call it from a workflow, or remove "
+                "confirmation=True."
+            )
+
+        question = f"Allow `{self.name}` to run?"
+        if arguments:
+            question += "\n\nArguments:\n" + json.dumps(arguments, indent=2, default=str)
+        decision = await workflow_ctx.wait_for_user(
+            question,
+            input_type="approval",
+            options=[{"id": "approve", "label": "Approve"}, {"id": "reject", "label": "Reject"}],
+        )
+        # Older Studio versions answer approval pauses with "approved".
+        return isinstance(decision, str) and decision.strip().lower() in ("approve", "approved")
+
+    def _rejected_result(self) -> str:
+        """What the caller, usually an agent, gets when the call is rejected."""
+        return f"The user rejected the call to '{self.name}', so it did not run."
 
     def _activation_enabled(self, ctx: Any) -> bool:
         """Whether an invocation on this context runs through a TOOL activation.
@@ -382,14 +447,15 @@ class Tool:
             Tool execution result
 
         Raises:
-            ConfigurationError: If tool requires confirmation (not yet implemented)
+            ConfigurationError: If the tool requires confirmation and there is no
+                workflow to pause in
 
         Note:
             If memoization is enabled on the context, this method will check
             the journal for cached results before executing and cache results
             after successful execution.
         """
-        if allow_activation and self._activation_enabled(ctx):
+        if allow_activation and not self.waits_for_user and self._activation_enabled(ctx):
             return await self._invoke_durable(
                 ctx,
                 kwargs,
@@ -408,7 +474,7 @@ class Tool:
         content_hash = None
         memo = None
 
-        if allow_memo and hasattr(ctx, "_memo") and ctx._memo:
+        if allow_memo and not self.waits_for_user and hasattr(ctx, "_memo") and ctx._memo:
             memo = ctx._memo
             step_key, content_hash = memo.tool_call_key(self.name, kwargs)
 
@@ -417,11 +483,6 @@ class Tool:
             if found:
                 logger.debug(f"Tool call {step_key} served from memoization cache")
                 return cached_result
-
-        if self.confirmation:
-            logger.warning(
-                f"Tool '{self.name}' requires confirmation; no approval handler is configured"
-            )
 
         # Set context in task-local storage for automatic propagation to nested calls
         token = set_current_context(ctx)
@@ -789,6 +850,7 @@ class AskUserTool(Tool):
             auto_schema=True,
             durable=False,
         )
+        self.waits_for_user = True
         self.context = context
 
     async def _handler(self, ctx: Context, question: str) -> str:
@@ -881,6 +943,7 @@ class RequestApprovalTool(Tool):
             auto_schema=True,
             durable=False,
         )
+        self.waits_for_user = True
         self.context = context
 
     async def _handler(self, ctx: Context, action: str, details: str = "") -> str:

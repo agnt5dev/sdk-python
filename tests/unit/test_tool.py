@@ -736,3 +736,95 @@ def test_activation_enabled_requires_durable_tool_and_negotiated_context():
     assert Tool("durable", "", handler)._activation_enabled(durable_ctx) is True
     assert Tool("durable", "", handler)._activation_enabled(plain_ctx) is False
     assert Tool("legacy", "", handler, durable=False)._activation_enabled(durable_ctx) is False
+
+
+# Confirmation
+
+
+def _confirmation_probe():
+    calls = []
+
+    @tool(confirmation=True)
+    async def delete_record(ctx: Context, record_id: str) -> str:
+        """Delete a record."""
+        calls.append(record_id)
+        return f"deleted {record_id}"
+
+    return ToolRegistry.get("delete_record"), calls
+
+
+def _workflow_ctx(answers):
+    from agnt5.workflow import WorkflowContext, WorkflowEntity
+
+    entity = WorkflowEntity(run_id="confirm-run")
+    for index, answer in enumerate(answers):
+        entity._completed_steps[f"user_response:confirm-run:{index}"] = answer
+    ctx = WorkflowContext(workflow_entity=entity, run_id="confirm-run")
+    ctx._is_replay = bool(answers)
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_pauses_before_running():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx([])
+
+    with pytest.raises(WaitingForUserInputException):
+        await probe.invoke(ctx, record_id="r1")
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["approve", "approved"])
+async def test_confirmation_tool_runs_once_approved(answer):
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx([answer, "next answer"])
+
+    result = await probe.invoke(ctx, record_id="r1")
+
+    assert result == "deleted r1"
+    assert calls == ["r1"]
+    # The approval used pause 0, so the workflow's next question reads pause 1.
+    assert await ctx.wait_for_user("Next?") == "next answer"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_does_not_run_when_rejected():
+    probe, calls = _confirmation_probe()
+    ctx = _workflow_ctx(["reject"])
+
+    result = await probe.invoke(ctx, record_id="r1")
+
+    assert calls == []
+    assert "rejected" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_without_a_workflow_refuses_to_run():
+    probe, calls = _confirmation_probe()
+
+    with pytest.raises(ConfigurationError, match="requires confirmation"):
+        await probe.invoke(
+            Context(run_id="plain-run", correlation_id="c", parent_correlation_id="p"),
+            record_id="r1",
+        )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_from_an_agent_pauses_its_workflow():
+    """An agent's context reaches the workflow through parent_context."""
+    from types import SimpleNamespace
+
+    probe, calls = _confirmation_probe()
+    workflow_ctx = _workflow_ctx(["approve"])
+    agent_ctx = SimpleNamespace(parent_context=workflow_ctx)
+
+    approved = await probe._confirm(agent_ctx, {"record_id": "r1"})
+
+    assert approved is True
+    assert calls == []

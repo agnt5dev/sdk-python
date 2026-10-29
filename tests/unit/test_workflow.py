@@ -1144,3 +1144,63 @@ async def test_workflow_nested_state():
         assert result["version"] == "1.0"
 
     await run_test()
+
+
+@pytest.mark.asyncio
+async def test_replayed_ask_user_tool_keeps_later_pauses_on_their_own_answers():
+    """A cached ask_user result must not skip the pause it answered.
+
+    If the tool's saved result were returned, wait_for_user would not run, the
+    pause counter would stay behind, and the next pause would read this answer.
+    """
+    from unittest.mock import AsyncMock
+
+    from agnt5.tool import AskUserTool
+
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = "solar"
+    workflow_entity._completed_steps["user_response:hitl-run:1"] = "approve"
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+    ctx._memo = Mock()
+    ctx._memo.tool_call_key = Mock(return_value=("tool.ask_user.0", "hash"))
+    ctx._memo.get_cached_tool_result = AsyncMock(return_value=(True, "solar"))
+
+    focus = await AskUserTool(ctx).invoke(ctx, question="Which focus?")
+    decision = await ctx.wait_for_user("Publish?", input_type="approval")
+
+    assert focus == "solar"
+    assert decision == "approve"
+    ctx._memo.get_cached_tool_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_replayed_earlier_pause_does_not_take_the_resumed_pause_ids():
+    """Only the pause this resume answered reuses its saved step name and ID."""
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = "intake"
+    workflow_entity._completed_steps["user_response:hitl-run:1"] = "approve"
+    workflow_entity._resumed_pause_index = 1
+    workflow_entity._resumed_step_name = "wait_for_user_1"
+    workflow_entity._resumed_step_correlation_id = "cid-pause-1"
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+    emitted = []
+
+    async def capture(event):
+        emitted.append(event)
+
+    ctx.emit_async = capture
+
+    await ctx.wait_for_user("Intake?")
+    await ctx.wait_for_user("Publish?")
+
+    completed = [
+        (e.name, e.correlation_id, e.output_data["result"])
+        for e in emitted
+        if getattr(e, "output_data", None) and "result" in e.output_data
+    ]
+    assert completed[0][0] == "wait_for_user_0"
+    assert completed[0][1] != "cid-pause-1"
+    assert completed[0][2] == "intake"
+    assert completed[1] == ("wait_for_user_1", "cid-pause-1", "approve")
