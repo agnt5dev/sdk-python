@@ -357,9 +357,10 @@ class Tool:
             )
 
     async def invoke(self, ctx: Context, **kwargs) -> Any:
-        refusal = await self._confirm(ctx, kwargs) if self.confirmation else None
-        if refusal is not None:
-            return refusal
+        if self.confirmation:
+            return await self._run_confirmed(
+                ctx, kwargs, lambda: self._invoke(ctx, kwargs, stable_key=None)
+            )
         return await self._invoke(ctx, kwargs, stable_key=None)
 
     async def invoke_with_stable_key(
@@ -373,26 +374,33 @@ class Tool:
     ) -> Any:
         """Invoke using a provider/tool-call identity when one is available."""
 
-        refusal = await self._confirm(ctx, arguments) if self.confirmation else None
-        if refusal is not None:
-            return refusal
-        return await self._invoke(
-            ctx,
-            arguments,
-            stable_key=stable_key,
-            tool_call_id=tool_call_id,
-            iteration=iteration,
-        )
+        def execute() -> Awaitable[Any]:
+            return self._invoke(
+                ctx,
+                arguments,
+                stable_key=stable_key,
+                tool_call_id=tool_call_id,
+                iteration=iteration,
+            )
 
-    async def _confirm(self, ctx: Any, arguments: Dict[str, Any]) -> Optional[str]:
-        """Ask a person to approve this call before it runs.
+        if self.confirmation:
+            return await self._run_confirmed(ctx, arguments, execute)
+        return await execute()
+
+    async def _run_confirmed(
+        self,
+        ctx: Any,
+        arguments: Dict[str, Any],
+        execute: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Ask a person to approve this call, and run ``execute`` only once approved.
 
         The question is asked before any cached or durable result is used, so
         on replay it reads its recorded answer and the workflow's later pauses
         keep their own answers.
 
-        Returns what the caller, usually an agent, gets instead of the result
-        when the call must not run, or None when it was approved.
+        Returns ``execute``'s result, or what the caller, usually an agent,
+        gets instead when the call must not run.
         """
         workflow_ctx = _find_workflow_context(ctx)
         if workflow_ctx is None:
@@ -419,8 +427,10 @@ class Tool:
             question += "\n\nArguments:\n" + json.dumps(arguments, indent=2, default=str)
         # Answers are matched to pauses by position only. Without durable model
         # replay, an agent resumed after the pause asks the model again and may
-        # get different arguments, so record what the person is asked to
-        # approve. On resume the step returns the recorded proposal.
+        # propose another tool or other arguments, so record what the person
+        # is asked to approve. The step is keyed by the confirmation's position,
+        # not the tool, so on resume it returns the recorded proposal whichever
+        # tool the model picks now.
         proposal = json.dumps(
             {"tool": self.name, "arguments": arguments},
             sort_keys=True,
@@ -429,9 +439,7 @@ class Tool:
         )
         ordinal = getattr(workflow_ctx, "_confirmation_count", 0)
         workflow_ctx._confirmation_count = ordinal + 1
-        approved_proposal = await workflow_ctx.step(
-            f"confirm:{self.name}:{ordinal}", lambda: proposal
-        )
+        approved_proposal = await workflow_ctx.step(f"confirm:{ordinal}", lambda: proposal)
         decision = await workflow_ctx.wait_for_user(
             question,
             input_type="approval",
@@ -443,11 +451,13 @@ class Tool:
         ):
             return f"The user rejected the call to '{self.name}', so it did not run."
         if approved_proposal != proposal:
-            return (
-                f"The arguments for '{self.name}' changed after the user approved the call, "
-                "so it did not run."
-            )
-        return None
+            return f"The call to '{self.name}' differs from the one the user approved, so it did not run."
+        # A durable activation records the result itself. Otherwise checkpoint
+        # it, so a replay for a later pause returns it instead of running the
+        # approved effect again.
+        if self._activation_enabled(ctx):
+            return await execute()
+        return await workflow_ctx.step(f"confirmed:{ordinal}", execute)
 
     def _activation_enabled(self, ctx: Any) -> bool:
         """Whether an invocation on this context runs through a TOOL activation.

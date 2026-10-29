@@ -824,9 +824,12 @@ async def test_confirmation_from_an_agent_pauses_its_workflow():
     workflow_ctx = _workflow_ctx(["approve"])
     agent_ctx = SimpleNamespace(parent_context=workflow_ctx)
 
-    refusal = await probe._confirm(agent_ctx, {"record_id": "r1"})
+    async def execute():
+        return "ran"
 
-    assert refusal is None
+    result = await probe._run_confirmed(agent_ctx, {"record_id": "r1"}, execute)
+
+    assert result == "ran"
     assert calls == []
 
 
@@ -881,7 +884,63 @@ async def test_confirmation_does_not_run_when_arguments_changed_after_approval()
     result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r2")
 
     assert calls == []
-    assert "changed after the user approved" in result
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_confirmation_does_not_run_another_tool_the_model_picks_after_approval():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+
+    @tool(confirmation=True)
+    async def archive_record(ctx: Context, record_id: str) -> str:
+        """Archive a record."""
+        return f"archived {record_id}"
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await ToolRegistry.get("archive_record").invoke(first, record_id="r1")
+
+    result = await probe.invoke(_resumed_ctx(first, ["approve"]), record_id="r1")
+
+    assert calls == []
+    assert "differs from the one the user approved" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_tool_does_not_run_again_when_a_later_approval_resumes():
+    from agnt5.exceptions import WaitingForUserInputException
+
+    probe, calls = _confirmation_probe()
+    charges = []
+
+    @tool(confirmation=True)
+    async def charge(ctx: Context, amount: str) -> str:
+        """Charge a card."""
+        charges.append(amount)
+        return f"charged {amount}"
+
+    charge_tool = ToolRegistry.get("charge")
+
+    async def workflow(ctx):
+        await charge_tool.invoke(ctx, amount="10")
+        return await probe.invoke(ctx, record_id="r1")
+
+    first = _workflow_ctx([])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(first)
+
+    second = _resumed_ctx(first, ["approve"])
+    with pytest.raises(WaitingForUserInputException):
+        await workflow(second)
+    assert charges == ["10"]
+
+    third = _resumed_ctx(second, ["approve", "approve"])
+    assert await workflow(third) == "deleted r1"
+
+    assert charges == ["10"]
+    assert calls == ["r1"]
 
 
 @pytest.mark.asyncio
