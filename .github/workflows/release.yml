@@ -189,8 +189,11 @@ jobs:
 
       - name: Build ARM64 wheel
         working-directory: .
+        # The wheel is abi3, so any supported interpreter builds it. Pin one so
+        # uv doesn't pick the runner's newest Python, which the project's
+        # dependencies may not ship wheels for yet.
         run: |
-          uv run --with maturin \
+          uv run --python 3.13 --with maturin \
             maturin build \
             --release \
             --locked \
