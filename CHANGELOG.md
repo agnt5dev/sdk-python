@@ -5,7 +5,11 @@ All notable changes to the AGNT5 Python SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.6] - 2026-10-30
+
+### Changed
+
+- Build on sdk-core 0.3.10, which lowers the default pull lease from 5 minutes to 60 seconds. A live worker renews at half the lease, so only a crashed worker's runs see the difference: another worker takes them after about a minute instead of five. Set `AGNT5_CLAIM_TIMEOUT_MS`, or `claim_timeout_ms` on the worker, to keep the old value.
 
 ### Fixed
 
@@ -13,6 +17,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Keep each pause on its own answer after an agent asks a question. When `AskUserTool` or `RequestApprovalTool` was replayed from a saved tool result, `wait_for_user` didn't run, so every later pause read the answer meant for the one before it. These tools now always run on replay and read their recorded answer. Inside a `ctx.step`, or a delegated agent under durable activation, they now raise `ConfigurationError` instead of pausing: a replayed step skips its pause and shifts later answers the same way, and a delegated agent can't resume from a pause yet.
 - Report a paused run as in progress. `run()` and `get_result()` returned `status_code` 500 and `is_error` for a run waiting for a person; it now returns 202 with `is_pending`. `RunResponse` and `StatusResponse` gain `is_paused`.
 - On resume, emit each earlier pause's completion under its own step name. The pause just answered no longer lends its name and correlation ID to the first pause replayed.
+- Fail a pull run with `RESULT_REFUSED` when the runtime refuses its result, for example a pause record over the 1 MB journal record limit. Previously the worker resent the refused completion, gave up, and left the run `assigned`, so Studio kept showing an approval nobody could answer.
 
 ## [0.14.5] - 2026-10-09
 

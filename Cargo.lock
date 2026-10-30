@@ -39,9 +39,9 @@ dependencies = [
 
 [[package]]
 name = "agnt5-sdk-core"
-version = "0.3.9"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "723e9745bcc1e7e3f0bce32b16929dee76dc0c91776d310207e55b017e438c0d"
+checksum = "89bfd9089ee37b6971263361cbf7370f2729e8eed45487f397c3657351a7993b"
 dependencies = [
  "agnt5-eval-scorers",
  "anyhow",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "agnt5-sdk-python"
-version = "0.14.5"
+version = "0.14.6"
 dependencies = [
  "agnt5-sdk-core",
  "anyhow",
