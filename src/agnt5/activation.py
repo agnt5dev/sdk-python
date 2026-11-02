@@ -29,11 +29,40 @@ MAX_ACTIVATION_INPUT_BYTES = 64 * 1024
 
 T = TypeVar("T")
 
-# How many `ActivationClient.run` frames the current task is running inside.
-# Those frames cannot settle until the current code returns, so a wait for
-# other steps to finish must not count them.
-_enclosing_activations: ContextVar[int] = ContextVar("agnt5_enclosing_activations", default=0)
 _SUSPEND_QUIET_SECONDS = 0.2
+
+
+class _ActivationFrame:
+    """One activation counted as in flight, and enclosing the code it runs."""
+
+    def __init__(self, client: ActivationClient, run_id: str) -> None:
+        self.client = client
+        self.run_id = run_id
+        self.closed = False
+        self._token: Any = None
+
+    def enter(self) -> None:
+        self._token = _enclosing_activations.set((*_enclosing_activations.get(), self))
+
+    def close(self) -> None:
+        """End the count. Safe to call twice: a stream closes before its last yield."""
+
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            _enclosing_activations.reset(self._token)
+        except ValueError:
+            # A stream finalized from another task has a different context.
+            pass
+        self.client._frame_closed(self)
+
+
+# The frames the current task is running inside. They cannot settle until the
+# current code returns, so a wait for other steps to finish must not count them.
+_enclosing_activations: ContextVar[tuple[_ActivationFrame, ...]] = ContextVar(
+    "agnt5_enclosing_activations", default=()
+)
 
 
 class UInt64(int):
@@ -456,9 +485,9 @@ class ActivationClient:
         self._transport = transport
         self._in_flight: dict[str, int] = {}
         self._settled_waiters: dict[str, set[asyncio.Future[None]]] = {}
+        self._pausing: dict[str, list[_ActivationFrame]] = {}
 
-    @contextmanager
-    def track(self, run_id: str) -> Iterator[None]:
+    def open_frame(self, run_id: str) -> _ActivationFrame:
         """Count one activation a suspension of this run must not strand.
 
         Suspending releases the run lease, and a step running under a released
@@ -466,38 +495,86 @@ class ActivationClient:
         give up the lease.
         """
 
+        frame = _ActivationFrame(self, run_id)
         self._in_flight[run_id] = self._in_flight.get(run_id, 0) + 1
+        frame.enter()
+        return frame
+
+    @contextmanager
+    def track(self, run_id: str) -> Iterator[None]:
+        frame = self.open_frame(run_id)
         try:
             yield
         finally:
-            remaining = self._in_flight[run_id] - 1
-            if remaining:
-                self._in_flight[run_id] = remaining
-            else:
-                del self._in_flight[run_id]
-            for waiter in self._settled_waiters.pop(run_id, ()):
-                if not waiter.done():
-                    waiter.set_result(None)
+            frame.close()
+
+    def _frame_closed(self, frame: _ActivationFrame) -> None:
+        run_id = frame.run_id
+        remaining = self._in_flight[run_id] - 1
+        if remaining:
+            self._in_flight[run_id] = remaining
+        else:
+            del self._in_flight[run_id]
+        self._wake(run_id)
+
+    def _wake(self, run_id: str) -> None:
+        for waiter in self._settled_waiters.pop(run_id, ()):
+            if not waiter.done():
+                waiter.set_result(None)
 
     def in_flight(self, run_id: str) -> int:
         """Activations of this run currently tracked on this worker."""
 
         return self._in_flight.get(run_id, 0)
 
-    async def drain(self, run_id: str) -> None:
-        """Wait until nothing but the calling code's own frames is in flight."""
+    def others_in_flight(self, run_id: str) -> int:
+        """Activations that can still finish while the calling code waits.
 
+        Excludes the frames the caller runs inside, and frames blocked on a pause
+        in another branch: neither settles until a wait returns.
+        """
+
+        blocked = {
+            frame
+            for frame in _enclosing_activations.get()
+            if frame.client is self and frame.run_id == run_id and not frame.closed
+        }
+        blocked.update(frame for frame in self._pausing.get(run_id, ()) if not frame.closed)
+        return self.in_flight(run_id) - len(blocked)
+
+    async def drain(self, run_id: str) -> None:
+        """Wait until nothing that can still finish is in flight.
+
+        The caller's frames count as blocked for every other branch too, so two
+        branches pausing together wait for running work and not for each other.
+        """
+
+        frames = [
+            frame
+            for frame in _enclosing_activations.get()
+            if frame.client is self and frame.run_id == run_id
+        ]
+        pausing = self._pausing.setdefault(run_id, [])
+        pausing.extend(frames)
+        self._wake(run_id)
         quiet = False
-        while True:
-            if self.in_flight(run_id) > _enclosing_activations.get():
-                quiet = False
-                await self.wait_for_settled(run_id)
-            elif quiet:
-                return
-            else:
-                # A branch moving from one step to its next is briefly at zero.
-                quiet = True
-                await asyncio.sleep(_SUSPEND_QUIET_SECONDS)
+        try:
+            while True:
+                if self.others_in_flight(run_id) > 0:
+                    quiet = False
+                    await self.wait_for_settled(run_id)
+                elif quiet:
+                    return
+                else:
+                    # A branch moving from one step to its next is briefly at zero.
+                    quiet = True
+                    await asyncio.sleep(_SUSPEND_QUIET_SECONDS)
+        finally:
+            for frame in frames:
+                pausing.remove(frame)
+            if not pausing and self._pausing.get(run_id) is pausing:
+                del self._pausing[run_id]
+            self._wake(run_id)
 
     async def wait_for_settled(self, run_id: str, timeout: float | None = None) -> None:
         """Return when a tracked activation of this run ends, or at the timeout."""
@@ -663,12 +740,8 @@ class ActivationClient:
                 from ._core_metrics import business_timing
 
                 try:
-                    enclosing = _enclosing_activations.set(_enclosing_activations.get() + 1)
-                    try:
-                        with business_timing(request.run_id):
-                            result = await execute()
-                    finally:
-                        _enclosing_activations.reset(enclosing)
+                    with business_timing(request.run_id):
+                        result = await execute()
                 except Exception as user_error:
                     if type(user_error).__name__ in {
                         "ActivationError",

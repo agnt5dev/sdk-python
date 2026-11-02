@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import time
-from contextlib import nullcontext
 from contextvars import ContextVar
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -480,10 +479,8 @@ class LMClient(LanguageModel):
             )
             == "true"
         ):
-            activation_client = getattr(current_ctx, "_activation_client", None)
-            with activation_client.track(current_ctx.run_id) if activation_client else nullcontext():
-                async for event in self._stream_durable(request, current_ctx):
-                    yield event
+            async for event in self._stream_durable(request, current_ctx):
+                yield event
             return
 
         prompt = self._build_prompt_messages(request)
@@ -613,7 +610,16 @@ class LMClient(LanguageModel):
             display_name=request.model,
             input_data=self._model_activation_display_input(request),
         )
-        decision = await activation_client.begin(activation_request)
+        # The stream counts as in flight only until its outcome is recorded: its
+        # last event waits on the consumer, which may pause while handling it.
+        frame = activation_client.open_frame(context.run_id)
+        try:
+            decision = await activation_client.begin(activation_request)
+        except BaseException:
+            frame.close()
+            raise
+        if decision.kind is not ActivationDecisionKind.EXECUTE:
+            frame.close()
         if decision.kind is ActivationDecisionKind.REPLAY:
             if decision.replay_output is None:
                 from ..exceptions import ActivationError, ActivationErrorCode
@@ -764,6 +770,7 @@ class LMClient(LanguageModel):
                     ),
                     latency_ms=int((time.monotonic() - started) * 1000),
                 )
+                frame.close()
                 if failure_event is not None:
                     yield failure_event
                 raise error
@@ -783,8 +790,10 @@ class LMClient(LanguageModel):
                 ),
                 evidence=_model_terminal_evidence(terminal_response),
             )
+            frame.close()
             yield terminal
         finally:
+            frame.close()
             _model_stream_activation_execute.reset(execute_token)
             _reset_current_activation(activation_token)
 

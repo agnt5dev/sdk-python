@@ -77,7 +77,7 @@ async def _wait_while_steps_in_flight(context: WorkflowContext, delay_ms: int) -
     held = False
     while True:
         remaining = deadline - time.monotonic()
-        if client.in_flight(run_id) > 1:
+        if client.others_in_flight(run_id) > 0:
             if remaining <= 0:
                 return 0
             held = True
@@ -90,7 +90,7 @@ async def _wait_while_steps_in_flight(context: WorkflowContext, delay_ms: int) -
         # A branch moving from one step to its next is briefly at zero.
         held = False
         await asyncio.sleep(min(_SUSPEND_QUIET_SECONDS, remaining))
-        if client.in_flight(run_id) > 1:
+        if client.others_in_flight(run_id) > 0:
             held = True
             continue
         return max(0, math.ceil((deadline - time.monotonic()) * 1000))
