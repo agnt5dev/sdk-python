@@ -5,6 +5,13 @@ All notable changes to the AGNT5 Python SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.7] - 2026-11-02
+
+### Fixed
+
+- Let in-flight steps finish before a workflow suspends. A workflow that started steps concurrently and then reached a durable `ctx.sleep` suspended straight away, which released the run lease those steps were running under. They failed with `CONTENDED` or ran again after the resume. The timer now runs inside the worker while other steps are in flight, and only the time left once they finish goes back to the runtime. `wait_for_user` waits for them the same way before it pauses, so a step that never finishes holds the pause back.
+- Treat a timer that the runtime replays as finished, instead of failing the run. A timer that completed inside the worker before a restart replays this way.
+
 ## [0.14.6] - 2026-10-30
 
 ### Changed
