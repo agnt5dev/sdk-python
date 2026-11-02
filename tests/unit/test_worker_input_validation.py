@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from agnt5._serialization import deserialize, serialize
-from agnt5.activation import ActivationDecision, ActivationDecisionKind, activation_id
+from agnt5.activation import (
+    ActivationClient,
+    ActivationDecision,
+    ActivationDecisionKind,
+    activation_id,
+)
 from agnt5.worker._executors import ExecutorMixin, _agent_missing_message_error
 
 
@@ -21,8 +26,12 @@ class _DummyExecutor(ExecutorMixin):
 
 
 class _DurableExecutor(_DummyExecutor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._client = ActivationClient(self)
+
     def _activation_client_for_metadata(self, _metadata):
-        return self
+        return self._client
 
     async def begin(self, request):
         return ActivationDecision(
@@ -303,7 +312,7 @@ async def test_direct_tool_inherits_activation_client_and_worker_authority():
         name = "durable_tool"
 
         async def invoke(self, ctx):
-            assert ctx._activation_client is executor
+            assert ctx._activation_client is executor._client
             assert ctx.metadata == authority
             return {"ok": True}
 

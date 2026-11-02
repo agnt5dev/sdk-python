@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
+import math
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
@@ -11,11 +13,13 @@ from ._ids import generate_cid
 from ._serialization import deserialize, serialize
 from ._telemetry import truncate_span_attribute_value
 from .activation import (
+    _SUSPEND_QUIET_SECONDS,
     ActivationDecision,
     ActivationDecisionKind,
     ActivationDefinition,
     ActivationKind,
     ActivationRecoveryPolicy,
+    ActivationUsage,
     BeginActivationRequest,
     _reset_current_activation,
     _set_current_activation,
@@ -59,13 +63,46 @@ def _activation_definition(
     return metadata, project_id, definition
 
 
+async def _wait_while_steps_in_flight(context: WorkflowContext, delay_ms: int) -> int:
+    """Hold the run lease while other steps run; return the delay left to suspend for.
+
+    Suspending releases the lease those steps run under, so they could never
+    finish and the resumed run would wait on them forever. The timer runs here
+    instead, and only the part left once they finish goes back to the runtime.
+    """
+
+    client = context._activation_client
+    run_id = context.run_id
+    deadline = time.monotonic() + delay_ms / 1000
+    held = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if client.others_in_flight(run_id) > 0:
+            if remaining <= 0:
+                return 0
+            held = True
+            await client.wait_for_settled(run_id, timeout=remaining)
+            continue
+        if not held:
+            return delay_ms
+        if remaining <= 0:
+            return 0
+        # A branch moving from one step to its next is briefly at zero.
+        held = False
+        await asyncio.sleep(min(_SUSPEND_QUIET_SECONDS, remaining))
+        if client.others_in_flight(run_id) > 0:
+            held = True
+            continue
+        return max(0, math.ceil((deadline - time.monotonic()) * 1000))
+
+
 async def run_durable_sleep(
     context: WorkflowContext,
     *,
     timer_key: str,
     delay_ms: int,
 ) -> None:
-    """Admit a timer activation and return control to the runtime as suspension."""
+    """Admit a timer activation, then suspend, or wait here while steps are in flight."""
 
     if context._workflow_entity.has_completed_step(timer_key):
         return
@@ -116,11 +153,27 @@ async def run_durable_sleep(
         context._workflow_entity.record_step_completion(timer_key, "sleep", input_value, None)
         return
 
-    decision = await context._activation_client.begin(request)
-    if decision.kind is not ActivationDecisionKind.EXECUTE:
-        from .activation import _decision_error
+    client = context._activation_client
+    with client.track(context.run_id):
+        decision = await client.begin(request)
+        if decision.kind is ActivationDecisionKind.REPLAY:
+            context._workflow_entity.record_step_completion(timer_key, "sleep", input_value, None)
+            return
+        if decision.kind is not ActivationDecisionKind.EXECUTE:
+            from .activation import _decision_error
 
-        raise _decision_error(decision)
+            raise _decision_error(decision)
+
+        remaining_ms = await _wait_while_steps_in_flight(context, delay_ms)
+        if remaining_ms <= 0:
+            await client.complete(
+                request,
+                decision,
+                output=encode_activation_input(None),
+                usage=ActivationUsage(latency_ms=delay_ms),
+            )
+            context._workflow_entity.record_step_completion(timer_key, "sleep", input_value, None)
+            return
 
     continuation: dict[str, Any] = {
         "completed_steps": context._workflow_entity._completed_steps,
@@ -139,7 +192,7 @@ async def run_durable_sleep(
         input_digest=input_digest,
         definition_digest=definition.digest,
         continuation=serialize(continuation),
-        delay_ms=delay_ms,
+        delay_ms=remaining_ms,
     )
 
 
