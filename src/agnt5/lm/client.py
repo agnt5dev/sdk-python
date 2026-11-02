@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from contextlib import nullcontext
 from contextvars import ContextVar
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -479,8 +480,10 @@ class LMClient(LanguageModel):
             )
             == "true"
         ):
-            async for event in self._stream_durable(request, current_ctx):
-                yield event
+            activation_client = getattr(current_ctx, "_activation_client", None)
+            with activation_client.track(current_ctx.run_id) if activation_client else nullcontext():
+                async for event in self._stream_durable(request, current_ctx):
+                    yield event
             return
 
         prompt = self._build_prompt_messages(request)

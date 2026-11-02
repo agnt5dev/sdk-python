@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -27,6 +28,12 @@ _NATIVE_ACTIVATION_ERROR_PREFIX = "AGNT5_ACTIVATION_ERROR:"
 MAX_ACTIVATION_INPUT_BYTES = 64 * 1024
 
 T = TypeVar("T")
+
+# How many `ActivationClient.run` frames the current task is running inside.
+# Those frames cannot settle until the current code returns, so a wait for
+# other steps to finish must not count them.
+_enclosing_activations: ContextVar[int] = ContextVar("agnt5_enclosing_activations", default=0)
+_SUSPEND_QUIET_SECONDS = 0.2
 
 
 class UInt64(int):
@@ -447,6 +454,65 @@ class ActivationClient:
 
     def __init__(self, transport: ActivationTransport) -> None:
         self._transport = transport
+        self._in_flight: dict[str, int] = {}
+        self._settled_waiters: dict[str, set[asyncio.Future[None]]] = {}
+
+    @contextmanager
+    def track(self, run_id: str) -> Iterator[None]:
+        """Count one activation a suspension of this run must not strand.
+
+        Suspending releases the run lease, and a step running under a released
+        lease can never finish, so durable waits read this count before they
+        give up the lease.
+        """
+
+        self._in_flight[run_id] = self._in_flight.get(run_id, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._in_flight[run_id] - 1
+            if remaining:
+                self._in_flight[run_id] = remaining
+            else:
+                del self._in_flight[run_id]
+            for waiter in self._settled_waiters.pop(run_id, ()):
+                if not waiter.done():
+                    waiter.set_result(None)
+
+    def in_flight(self, run_id: str) -> int:
+        """Activations of this run currently tracked on this worker."""
+
+        return self._in_flight.get(run_id, 0)
+
+    async def drain(self, run_id: str) -> None:
+        """Wait until nothing but the calling code's own frames is in flight."""
+
+        quiet = False
+        while True:
+            if self.in_flight(run_id) > _enclosing_activations.get():
+                quiet = False
+                await self.wait_for_settled(run_id)
+            elif quiet:
+                return
+            else:
+                # A branch moving from one step to its next is briefly at zero.
+                quiet = True
+                await asyncio.sleep(_SUSPEND_QUIET_SECONDS)
+
+    async def wait_for_settled(self, run_id: str, timeout: float | None = None) -> None:
+        """Return when a tracked activation of this run ends, or at the timeout."""
+
+        waiter = asyncio.get_running_loop().create_future()
+        waiters = self._settled_waiters.setdefault(run_id, set())
+        waiters.add(waiter)
+        try:
+            await asyncio.wait_for(waiter, timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            waiters.discard(waiter)
+            if not waiters and self._settled_waiters.get(run_id) is waiters:
+                del self._settled_waiters[run_id]
 
     async def begin(self, request: BeginActivationRequest) -> ActivationDecision:
         """Admit one activation and validate the runtime-owned identity."""
@@ -572,83 +638,88 @@ class ActivationClient:
 
         if max_attempts is not None and max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        while True:
-            decision = await self.begin(request)
-            if decision.kind is ActivationDecisionKind.REPLAY:
-                if decision.replay_output is None:
-                    raise ActivationError(
-                        ActivationErrorCode.UNKNOWN_OUTCOME,
-                        "REPLAY receipt is missing its canonical output",
-                        activation_id=decision.activation_id,
-                        attempt=decision.attempt,
-                    )
+        with self.track(request.run_id):
+            while True:
+                decision = await self.begin(request)
+                if decision.kind is ActivationDecisionKind.REPLAY:
+                    if decision.replay_output is None:
+                        raise ActivationError(
+                            ActivationErrorCode.UNKNOWN_OUTCOME,
+                            "REPLAY receipt is missing its canonical output",
+                            activation_id=decision.activation_id,
+                            attempt=decision.attempt,
+                        )
+                    if on_admitted is not None:
+                        on_admitted(decision)
+                    result = decode_output(decision.replay_output)
+                    if on_completed is not None:
+                        on_completed(decision, decision)
+                    return result, decision
+                if decision.kind is not ActivationDecisionKind.EXECUTE:
+                    raise _decision_error(decision)
                 if on_admitted is not None:
                     on_admitted(decision)
-                result = decode_output(decision.replay_output)
-                if on_completed is not None:
-                    on_completed(decision, decision)
-                return result, decision
-            if decision.kind is not ActivationDecisionKind.EXECUTE:
-                raise _decision_error(decision)
-            if on_admitted is not None:
-                on_admitted(decision)
 
-            from ._core_metrics import business_timing
+                from ._core_metrics import business_timing
 
-            try:
-                with business_timing(request.run_id):
-                    result = await execute()
-            except Exception as user_error:
-                if type(user_error).__name__ in {
-                    "ActivationError",
-                    "WaitingForUserInputException",
-                    "DurableSleepSuspension",
-                    "SuspensionRequestedException",
-                }:
+                try:
+                    enclosing = _enclosing_activations.set(_enclosing_activations.get() + 1)
+                    try:
+                        with business_timing(request.run_id):
+                            result = await execute()
+                    finally:
+                        _enclosing_activations.reset(enclosing)
+                except Exception as user_error:
+                    if type(user_error).__name__ in {
+                        "ActivationError",
+                        "WaitingForUserInputException",
+                        "DurableSleepSuspension",
+                        "SuspensionRequestedException",
+                    }:
+                        raise
+                    retryable = failure_retryable and (
+                        max_attempts is None or decision.attempt < max_attempts
+                    )
+                    error_data = json.dumps(
+                        {"message": str(user_error), "type": type(user_error).__name__},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    receipt = await self.fail(
+                        request,
+                        decision,
+                        error_code=failure_error_code,
+                        error_data=error_data,
+                        retryable=retryable,
+                        external_outcome_certainty=failure_external_outcome_certainty,
+                        evidence=failure_evidence(user_error) if failure_evidence is not None else (),
+                        latency_ms=latency_ms(),
+                    )
+                    if on_failed is not None:
+                        on_failed(decision, receipt, user_error)
+                    if (
+                        max_attempts is not None
+                        and retryable
+                        and receipt.status.upper() == "RETRY_READY"
+                    ):
+                        if retry_delay is not None:
+                            await retry_delay(decision.attempt)
+                        continue
                     raise
-                retryable = failure_retryable and (
-                    max_attempts is None or decision.attempt < max_attempts
-                )
-                error_data = json.dumps(
-                    {"message": str(user_error), "type": type(user_error).__name__},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                receipt = await self.fail(
+
+                output = encode_output(result)
+                usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
+                usage = replace(usage, latency_ms=latency_ms())
+                receipt = await self.complete(
                     request,
                     decision,
-                    error_code=failure_error_code,
-                    error_data=error_data,
-                    retryable=retryable,
-                    external_outcome_certainty=failure_external_outcome_certainty,
-                    evidence=failure_evidence(user_error) if failure_evidence is not None else (),
-                    latency_ms=latency_ms(),
+                    output=output,
+                    usage=usage,
+                    evidence=completion_evidence(result) if completion_evidence is not None else (),
                 )
-                if on_failed is not None:
-                    on_failed(decision, receipt, user_error)
-                if (
-                    max_attempts is not None
-                    and retryable
-                    and receipt.status.upper() == "RETRY_READY"
-                ):
-                    if retry_delay is not None:
-                        await retry_delay(decision.attempt)
-                    continue
-                raise
-
-            output = encode_output(result)
-            usage = completion_usage(result) if completion_usage is not None else ActivationUsage()
-            usage = replace(usage, latency_ms=latency_ms())
-            receipt = await self.complete(
-                request,
-                decision,
-                output=output,
-                usage=usage,
-                evidence=completion_evidence(result) if completion_evidence is not None else (),
-            )
-            if on_completed is not None:
-                on_completed(decision, receipt)
-            return result, receipt
+                if on_completed is not None:
+                    on_completed(decision, receipt)
+                return result, receipt
 
 
 def activation_request_from_context(

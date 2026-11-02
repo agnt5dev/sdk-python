@@ -12,6 +12,7 @@ from agnt5.activation import (
     ActivationDecisionKind,
     ActivationFailureReceipt,
     ActivationKind,
+    ActivationRecoveryPolicy,
     activation_id,
 )
 from agnt5.events import Completed, Started
@@ -631,3 +632,132 @@ async def test_retry_exhaustion_preserves_exception_and_marks_final_attempt_nonr
     assert caught.value is error
     assert [request["retryable"] for request in transport.fail_requests] == [True, False]
     assert not transport.complete_requests
+
+
+def _step_request(context, key):
+    from agnt5.activation import activation_request_from_context
+
+    return activation_request_from_context(
+        context,
+        kind=ActivationKind.STEP,
+        stable_key=key,
+        input_value={},
+        recovery_policy=ActivationRecoveryPolicy.DURABLE_STEPS,
+        display_name=key,
+    )
+
+
+def _run_step(context, key, release):
+    async def body():
+        await release.wait()
+        return key
+
+    return context._activation_client.run(
+        _step_request(context, key),
+        body,
+        encode_output=lambda value: json.dumps(value).encode(),
+        decode_output=json.loads,
+        latency_ms=lambda: 0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_holds_the_lease_while_a_step_is_in_flight():
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    release = asyncio.Event()
+    step = asyncio.create_task(_run_step(context, "step:slow", release))
+    await asyncio.sleep(0)
+
+    await context.sleep(0.01, name="backoff")
+
+    assert entity.has_completed_step("sleep:backoff")
+    assert not step.done(), "the step must keep running under the lease"
+    timer_request = next(r for r in transport.begin_requests if r.stable_key == "sleep:backoff")
+    assert [request["activation_id"] for request in transport.complete_requests] == [
+        activation_id(
+            timer_request.project_id, "run-1", "", ActivationKind.TIMER, "sleep:backoff"
+        )
+    ]
+    release.set()
+    assert (await step)[0] == "step:slow"
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_suspends_for_the_remainder_once_steps_finish():
+    transport = WorkflowActivationTransport()
+    context, entity, _events = durable_sleep_context(transport)
+    release = asyncio.Event()
+    step = asyncio.create_task(_run_step(context, "step:quick", release))
+    await asyncio.sleep(0)
+    asyncio.get_running_loop().call_later(0.01, release.set)
+
+    with pytest.raises(DurableSleepSuspension) as caught:
+        await context.sleep(5, name="backoff")
+
+    assert (await step)[0] == "step:quick"
+    assert 0 < caught.value.delay_ms < 5000
+    assert not entity.has_completed_step("sleep:backoff")
+
+
+@pytest.mark.asyncio
+async def test_durable_sleep_replays_a_timer_that_completed_in_process():
+    transport = WorkflowActivationTransport()
+    transport.replay_output = b"null"
+    context, entity, _events = durable_sleep_context(transport)
+
+    await context.sleep(5, name="backoff")
+
+    assert entity.has_completed_step("sleep:backoff")
+    assert transport.complete_requests == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sleeps_with_no_steps_do_not_strand_each_other():
+    class YieldingTransport(WorkflowActivationTransport):
+        async def begin(self, request):
+            await asyncio.sleep(0)
+            return await super().begin(request)
+
+    transport = YieldingTransport()
+    context, entity, _events = durable_sleep_context(transport)
+
+    results = await asyncio.gather(
+        context.sleep(0.01, name="first"),
+        context.sleep(5, name="second"),
+        return_exceptions=True,
+    )
+
+    assert results[0] is None, "the shorter sleep ran while the other was open"
+    assert isinstance(results[1], DurableSleepSuspension)
+    assert entity.has_completed_step("sleep:first")
+
+
+@pytest.mark.asyncio
+async def test_in_flight_counts_are_per_run():
+    client = ActivationClient(WorkflowActivationTransport())
+    with client.track("run-1"):
+        with client.track("run-2"):
+            assert client.in_flight("run-1") == 1
+        assert client.in_flight("run-2") == 0
+    assert client.in_flight("run-1") == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_ignores_the_step_it_is_called_from():
+    transport = WorkflowActivationTransport()
+    context, _entity, _events = durable_sleep_context(transport)
+    client = context._activation_client
+
+    async def body():
+        await asyncio.wait_for(client.drain("run-1"), timeout=2)
+        return "drained"
+
+    result, _receipt = await client.run(
+        _step_request(context, "step:outer"),
+        body,
+        encode_output=lambda value: json.dumps(value).encode(),
+        decode_output=json.loads,
+        latency_ms=lambda: 0,
+    )
+    assert result == "drained"

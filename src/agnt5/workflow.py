@@ -1902,6 +1902,11 @@ class WorkflowContext(Context):
                 state_snapshot = self._workflow_entity._state.get_state_snapshot()
                 checkpoint_metadata["workflow_state"] = _json.dumps(state_snapshot)
 
+        # Pausing releases the run lease and a person may take days to answer,
+        # so let other steps finish first: under a released lease they never can.
+        if self._activation_client is not None:
+            await self._activation_client.drain(self.run_id)
+
         workflow_paused = Paused(
             name=self._workflow_name or "workflow",
             correlation_id=self._correlation_id,
