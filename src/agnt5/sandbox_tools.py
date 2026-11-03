@@ -166,7 +166,7 @@ def _make_execute_code_handler(state: _SandboxToolState):
         sandbox = state.get_sandbox(ctx)
         cid = f"sandbox-{secrets.token_hex(5)}"
 
-        ctx.emit(SandboxExecuteStarted(
+        await ctx._emit_checkpoint_async(SandboxExecuteStarted(
             name="sandbox_execute_code",
             correlation_id=cid,
             parent_correlation_id=ctx.correlation_id,
@@ -177,7 +177,7 @@ def _make_execute_code_handler(state: _SandboxToolState):
 
         try:
             result = await sandbox.execute_code(code, language=language)
-            ctx.emit(SandboxExecuteCompleted(
+            await ctx._emit_checkpoint_async(SandboxExecuteCompleted(
                 name="sandbox_execute_code",
                 correlation_id=cid,
                 parent_correlation_id=ctx.correlation_id,
@@ -197,7 +197,7 @@ def _make_execute_code_handler(state: _SandboxToolState):
                 "execution_time_ms": result.execution_time_ms,
             }
         except Exception as e:
-            ctx.emit(SandboxExecuteFailed(
+            await ctx._emit_checkpoint_async(SandboxExecuteFailed(
                 name="sandbox_execute_code",
                 correlation_id=cid,
                 parent_correlation_id=ctx.correlation_id,
@@ -220,7 +220,7 @@ def _make_write_file_handler(state: _SandboxToolState):
         """
         sandbox = state.get_sandbox(ctx)
         result = await sandbox.write_file(path, content.encode("utf-8"))
-        ctx.emit(SandboxFileWritten(
+        await ctx._emit_checkpoint_async(SandboxFileWritten(
             name="sandbox_write_file",
             correlation_id=f"sandbox-{secrets.token_hex(5)}",
             parent_correlation_id=ctx.correlation_id,
@@ -246,7 +246,7 @@ def _make_read_file_handler(state: _SandboxToolState):
         """
         sandbox = state.get_sandbox(ctx)
         result = await sandbox.read_file(path)
-        ctx.emit(SandboxFileRead(
+        await ctx._emit_checkpoint_async(SandboxFileRead(
             name="sandbox_read_file",
             correlation_id=f"sandbox-{secrets.token_hex(5)}",
             parent_correlation_id=ctx.correlation_id,

@@ -1,5 +1,7 @@
 """Hosted Agent streaming executor tests."""
 
+import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +41,25 @@ class _DummyExecutor(ExecutorMixin):
         self._checkpoint_client = None
         self._rust_worker = worker
         self.service_name = "test"
+
+
+class _BlockingFlushWorker(_RecordingWorker):
+    def __init__(self, *, error=False):
+        super().__init__()
+        self.loop = asyncio.get_running_loop()
+        self.loop_thread = threading.get_ident()
+        self.entered = asyncio.Event()
+        self.release = threading.Event()
+        self.finished = False
+        self.error = error
+
+    def flush_workflow_checkpoints(self):
+        assert threading.get_ident() != self.loop_thread, "native flush blocked the event loop"
+        self.loop.call_soon_threadsafe(self.entered.set)
+        assert self.release.wait(timeout=2), "test did not release the flush"
+        self.finished = True
+        if self.error:
+            raise RuntimeError("flush failed")
 
 
 class _StreamingAgent:
@@ -195,6 +216,74 @@ async def test_execute_agent_forwards_stream_events_and_terminal_lifecycle():
         "run.completed",
         "session.created",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_hosted_stream_flush_yields_and_settles_before_completion_or_cancellation(cancel):
+    worker = _BlockingFlushWorker()
+    task = asyncio.create_task(_DummyExecutor(worker)._execute_agent(_StreamingAgent(), b"", _request()))
+    entered = asyncio.create_task(worker.entered.wait())
+    try:
+        done, _ = await asyncio.wait({task, entered}, timeout=2,
+                                     return_when=asyncio.FIRST_COMPLETED)
+        assert entered in done, "executor did not reach an off-thread flush"
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert "run.completed" not in worker.event_types
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done(), "repeated cancellation overtook the pending flush"
+        worker.release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert "run.completed" not in worker.event_types
+        else:
+            await task
+            assert "run.completed" in worker.event_types
+        assert worker.finished
+    finally:
+        worker.release.set()
+        entered.cancel()
+        await asyncio.gather(entered, task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_hosted_stream_flush_failure_fails_run():
+    worker = _BlockingFlushWorker(error=True)
+    worker.release.set()
+
+    await _DummyExecutor(worker)._execute_agent(_StreamingAgent(), b"", _request())
+
+    assert worker.finished
+    assert "run.failed" in worker.event_types
+    assert "run.completed" not in worker.event_types
+
+
+@pytest.mark.asyncio
+async def test_cancelled_hosted_stream_observes_flush_failure_before_unwinding():
+    worker = _BlockingFlushWorker(error=True)
+    task = asyncio.create_task(_DummyExecutor(worker)._execute_agent(_StreamingAgent(), b"", _request()))
+    try:
+        await asyncio.wait_for(worker.entered.wait(), timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        worker.release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        assert worker.finished
+        assert isinstance(caught.value.__cause__, RuntimeError)
+        assert str(caught.value.__cause__) == "flush failed"
+        assert "run.completed" not in worker.event_types
+    finally:
+        worker.release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

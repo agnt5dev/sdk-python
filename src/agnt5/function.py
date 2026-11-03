@@ -214,14 +214,13 @@ def function(
                     )
                     func_args = args
 
-            token = set_current_context(ctx)
             start_time_ns = time.time_ns()
             # Use context's correlation_id (set above for local, or from parent context)
             correlation_id = ctx.correlation_id
 
             # Emit function.started
             bound = sig.bind_partial(*func_args, **kwargs)
-            ctx.emit(
+            await ctx._emit_checkpoint_async(
                 Started(
                     name=func_name,
                     correlation_id=correlation_id,
@@ -232,6 +231,7 @@ def function(
                 )
             )
 
+            token = set_current_context(ctx)
             try:
                 # Execute function once - platform handles all retry logic
                 # ctx.attempt is populated from the platform's DispatchComponentRequest
@@ -254,7 +254,7 @@ def function(
                 # Emit function.completed
                 end_time_ns = time.time_ns()
                 duration_ms = (end_time_ns - start_time_ns) // 1_000_000
-                ctx.emit(
+                await ctx._emit_checkpoint_async(
                     Completed(
                         name=func_name,
                         correlation_id=correlation_id,
@@ -271,7 +271,7 @@ def function(
                 # Emit function.failed
                 end_time_ns = time.time_ns()
                 duration_ms = (end_time_ns - start_time_ns) // 1_000_000
-                ctx.emit(
+                await ctx._emit_checkpoint_async(
                     Failed(
                         name=func_name,
                         correlation_id=correlation_id,

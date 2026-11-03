@@ -235,6 +235,7 @@ async def test_durable_tool_activation_points_at_its_iteration():
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     [event async for event in agent.stream("bill me", context=ctx)]
 
@@ -271,6 +272,7 @@ async def test_later_iterations_point_at_themselves():
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     [event async for event in agent.stream("find", context=ctx)]
 
@@ -309,6 +311,7 @@ async def test_handoff_child_activation_points_at_the_calling_iteration():
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     [event async for event in source.stream("start", context=ctx)]
 
@@ -338,6 +341,7 @@ async def test_durable_model_activation_points_at_its_iteration():
     ctx._activation_client = ActivationClient(transport)
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
     response = _rust_response("done")
 
     token = set_current_context(ctx)

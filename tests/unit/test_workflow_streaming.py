@@ -1,6 +1,6 @@
 """Nested Workflow streaming tests."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,7 +12,7 @@ from agnt5.workflow import WorkflowContext
 @pytest.mark.asyncio
 async def test_nested_agent_stream_forwards_content_without_duplicate_lifecycle():
     context = object.__new__(WorkflowContext)
-    context.emit = MagicMock()
+    context._emit_checkpoint_async = AsyncMock()
 
     async def agent_events():
         yield AgentStarted(
@@ -45,5 +45,5 @@ async def test_nested_agent_stream_forwards_content_without_duplicate_lifecycle(
     result = await context._consume_streaming_result(agent_events(), "research")
 
     assert result == "streamed answer"
-    forwarded = [call.args[0] for call in context.emit.call_args_list]
+    forwarded = [call.args[0] for call in context._emit_checkpoint_async.await_args_list]
     assert [event.event_type for event in forwarded] == ["lm.content_block.delta"]
