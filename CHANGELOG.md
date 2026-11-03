@@ -5,6 +5,13 @@ All notable changes to the AGNT5 Python SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.9] - 2026-11-03
+
+### Fixed
+
+- Build native workers on sdk-core 0.3.11, which batches compatible checkpoint writes within each run. Concurrent workflow functions wait for fewer persistence round trips while required pull-mode acknowledgments, event ordering, and flush, activation, and completion barriers remain enforced.
+- Preserve checkpoint failure details and stop push lease renewal after an uncertain checkpoint failure so the run can recover.
+
 ## [0.14.8] - 2026-11-03
 
 ### Fixed
