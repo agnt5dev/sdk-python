@@ -301,7 +301,7 @@ class LMClient(LanguageModel):
         correlation_id = generate_cid()
 
         if emit_lifecycle:
-            self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
+            await self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
 
         try:
             rust_response = await self._rust_lm.generate(prompt=prompt, **kwargs)
@@ -311,7 +311,7 @@ class LMClient(LanguageModel):
             latency_ms = (end_time_ns - start_time_ns) // 1_000_000
 
             if emit_lifecycle:
-                self._emit_completed(
+                await self._emit_completed(
                     current_ctx, model, response, latency_ms, end_time_ns, correlation_id
                 )
 
@@ -331,7 +331,7 @@ class LMClient(LanguageModel):
             end_time_ns = time.time_ns()
             latency_ms = (end_time_ns - start_time_ns) // 1_000_000
             if emit_lifecycle:
-                self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
+                await self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
             raise
 
     async def _generate_durable(self, request: GenerateRequest, context: Any) -> GenerateResponse:
@@ -501,7 +501,7 @@ class LMClient(LanguageModel):
         parent_correlation_id = current_ctx.correlation_id if current_ctx else ""
 
         if emit_lifecycle:
-            self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
+            await self._emit_started(current_ctx, model, request, start_time_ns, correlation_id)
 
         try:
             async for chunk in self._rust_lm.stream_iter(prompt=prompt, **kwargs):
@@ -544,6 +544,10 @@ class LMClient(LanguageModel):
                     latency_ms = (end_time_ns - start_time_ns) // 1_000_000
                     usage = chunk.usage
                     tool_calls = getattr(chunk, "tool_calls", None)
+                    if emit_lifecycle:
+                        await self._emit_completed(
+                            current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id
+                        )
                     yield LMCompleted(
                         name=model,
                         correlation_id=correlation_id,
@@ -564,16 +568,11 @@ class LMClient(LanguageModel):
                         duration_ms=latency_ms,
                     )
 
-                    if emit_lifecycle:
-                        self._emit_completed(
-                            current_ctx, model, chunk, latency_ms, end_time_ns, correlation_id
-                        )
-
         except Exception as e:
             if emit_lifecycle:
                 end_time_ns = time.time_ns()
                 latency_ms = (end_time_ns - start_time_ns) // 1_000_000
-                self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
+                await self._emit_failed(current_ctx, model, e, latency_ms, end_time_ns, correlation_id)
 
             yield LMFailed(
                 name=model,
@@ -948,7 +947,7 @@ class LMClient(LanguageModel):
             _rust_response=rust_response,
         )
 
-    def _emit_started(
+    async def _emit_started(
         self,
         ctx: Any,
         model: str,
@@ -965,9 +964,9 @@ class LMClient(LanguageModel):
             input_data=_model_started_input(request),
             metadata={"name": model},
         )
-        ctx.emit(started_event)
+        await ctx._emit_checkpoint_async(started_event)
 
-    def _emit_completed(
+    async def _emit_completed(
         self,
         ctx: Any,
         model: str,
@@ -1010,9 +1009,9 @@ class LMClient(LanguageModel):
                 "cached_tokens": str(getattr(usage, "cached_tokens", 0) if usage else 0),
             },
         )
-        ctx.emit(completed_event)
+        await ctx._emit_checkpoint_async(completed_event)
 
-    def _emit_failed(
+    async def _emit_failed(
         self,
         ctx: Any,
         model: str,
@@ -1032,4 +1031,4 @@ class LMClient(LanguageModel):
             duration_ms=latency_ms,
             metadata={"name": model},
         )
-        ctx.emit(failed_event)
+        await ctx._emit_checkpoint_async(failed_event)

@@ -5,6 +5,16 @@ All notable changes to the AGNT5 Python SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.8] - 2026-11-03
+
+### Fixed
+
+- Keep the asyncio event loop available while functions, agents, model calls, sandbox tools, and workflow streams wait for checkpoint persistence. Independent work can progress, and required start and completion acknowledgments still gate execution and success in pull mode.
+- Wait for a model completion checkpoint before yielding its streamed success event. Propagate checkpoint persistence failures through agent tool-error recovery with their original exception type and identity.
+- Run hosted streaming flush waits outside the event loop. Cancellation waits for an in-flight flush to settle before the invocation unwinds.
+- Restore agent display parents when an acknowledgment wait is cancelled, and avoid leaving a function context installed when its start acknowledgment fails or is cancelled.
+- Close an agent's sandbox when its initial start acknowledgment fails or is cancelled, including the legacy execution path.
+
 ## [0.14.7] - 2026-11-02
 
 ### Fixed

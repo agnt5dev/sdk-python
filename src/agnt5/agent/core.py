@@ -1008,48 +1008,49 @@ class Agent:
         if self.sandbox is not None:
             setattr(context, "sandbox", self.sandbox)
 
-        # Emit agent.started checkpoint for journal persistence
-        # Skip if executor already emitted (to avoid duplicate events)
-        # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not self._lifecycle_managed(context):
-            context.emit(AgentStarted(
-                name=self.name,
-                correlation_id=agent_correlation_id,
-                parent_correlation_id=context._parent_correlation_id,
-                agent_model=self.model_name,
-                tool_names=list(self.tools.keys()),
-                max_iterations=self.max_iterations,
-                input_data={"task": user_message},
-                metadata={"name": self.name},
-            ))
-
-        # Set agent as parent for iteration events (using Context-based tracking)
-        original_agent_parent = context.set_as_parent(agent_correlation_id)
-
-        # Check for HITL resume
-        if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
-            resume_info = workflow_ctx._agent_resume_info
-            if resume_info["agent_name"] == self.name:
-                self.logger.info("Detected HITL resume, calling resume_from_hitl()")
-                delattr(workflow_ctx, "_agent_resume_info")
-                result = await self.resume_from_hitl(
-                    context=workflow_ctx,
-                    agent_context=resume_info["agent_context"],
-                    user_response=resume_info["user_response"],
-                )
-                result = await self._run_after_agent_callback(
-                    result.context or context,
-                    user_message,
-                    history,
-                    prompt_context,
-                    result,
-                )
-                yield result
-                return
-
-        # Set context in task-local storage
-        token = set_current_context(context)
+        original_agent_parent = context.parent_correlation_id
+        token = None
         try:
+            # Cleanup must also cover cancellation or failure of the first ACK.
+            # Skip the event if the executor already owns this lifecycle.
+            if context and not self._lifecycle_managed(context):
+                await context._emit_checkpoint_async(AgentStarted(
+                    name=self.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=context._parent_correlation_id,
+                    agent_model=self.model_name,
+                    tool_names=list(self.tools.keys()),
+                    max_iterations=self.max_iterations,
+                    input_data={"task": user_message},
+                    metadata={"name": self.name},
+                ))
+
+            # Set agent as parent for iteration events (using Context-based tracking)
+            context.set_as_parent(agent_correlation_id)
+
+            # Check for HITL resume
+            if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
+                resume_info = workflow_ctx._agent_resume_info
+                if resume_info["agent_name"] == self.name:
+                    self.logger.info("Detected HITL resume, calling resume_from_hitl()")
+                    delattr(workflow_ctx, "_agent_resume_info")
+                    result = await self.resume_from_hitl(
+                        context=workflow_ctx,
+                        agent_context=resume_info["agent_context"],
+                        user_response=resume_info["user_response"],
+                    )
+                    result = await self._run_after_agent_callback(
+                        result.context or context,
+                        user_message,
+                        history,
+                        prompt_context,
+                        result,
+                    )
+                    yield result
+                    return
+
+            # Set context in task-local storage after the start ACK succeeds.
+            token = set_current_context(context)
             before_agent_result = await self._run_before_agent_callback(
                 context,
                 user_message,
@@ -1059,7 +1060,7 @@ class Agent:
             if before_agent_result is not None:
                 context.restore_parent(original_agent_parent)
                 if context and not self._lifecycle_managed(context):
-                    context.emit(AgentCompleted(
+                    await context._emit_checkpoint_async(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
                         parent_correlation_id=context._parent_correlation_id,
@@ -1133,7 +1134,7 @@ class Agent:
                     iteration_correlation_id = generate_cid()
 
                     if context:
-                        context.emit(AgentIterationStarted(
+                        await context._emit_checkpoint_async(AgentIterationStarted(
                             name=self.name,
                             correlation_id=iteration_correlation_id,
                             parent_correlation_id=agent_correlation_id,
@@ -1242,7 +1243,7 @@ class Agent:
                                 index=built_in_idx,
                             )
                             if context:
-                                context.emit(started_event)
+                                await context._emit_checkpoint_async(started_event)
                             yield started_event
                             sequence += 1
 
@@ -1257,7 +1258,7 @@ class Agent:
                                 index=built_in_idx,
                             )
                             if context:
-                                context.emit(completed_event)
+                                await context._emit_checkpoint_async(completed_event)
                             yield completed_event
                             sequence += 1
 
@@ -1314,7 +1315,7 @@ class Agent:
                             self.logger.debug(f"Emitting ToolCallStarted: tool={tool_name}")
                             if context and emit_tool_lifecycle:
                                 self.logger.debug(f"context.emit(ToolCallStarted) for {tool_name}")
-                                context.emit(tool_started_event)
+                                await context._emit_checkpoint_async(tool_started_event)
                             yield tool_started_event
                             sequence += 1
 
@@ -1358,7 +1359,7 @@ class Agent:
                                         )
                                         # Emit to platform for persistence
                                         if context and emit_tool_lifecycle:
-                                            context.emit(tool_completed_event)
+                                            await context._emit_checkpoint_async(tool_completed_event)
                                         yield tool_completed_event
                                         sequence += 1
 
@@ -1389,7 +1390,7 @@ class Agent:
                                             (_time.time() - iteration_start_time) * 1000
                                         )
                                         if context:
-                                            context.emit(AgentIterationCompleted(
+                                            await context._emit_checkpoint_async(AgentIterationCompleted(
                                                 name=self.name,
                                                 correlation_id=iteration_correlation_id,
                                                 parent_correlation_id=agent_correlation_id,
@@ -1402,7 +1403,7 @@ class Agent:
 
                                         context.restore_parent(original_agent_parent)
                                         if context and not self._lifecycle_managed(context):
-                                            context.emit(AgentCompleted(
+                                            await context._emit_checkpoint_async(AgentCompleted(
                                                 name=self.name,
                                                 correlation_id=agent_correlation_id,
                                                 parent_correlation_id=context._parent_correlation_id,
@@ -1438,7 +1439,7 @@ class Agent:
                                 )
                                 # Emit to platform for persistence
                                 if context and emit_tool_lifecycle:
-                                    context.emit(tool_completed_event)
+                                    await context._emit_checkpoint_async(tool_completed_event)
                                 yield tool_completed_event
                                 sequence += 1
 
@@ -1475,6 +1476,8 @@ class Agent:
                                 ) from e
 
                             except Exception as e:
+                                if getattr(e, "_agnt5_checkpoint_failure", False):
+                                    raise
                                 self.logger.error(f"Tool execution error: {e}")
                                 tool_results.append({
                                     "tool": tool_name,
@@ -1493,7 +1496,7 @@ class Agent:
                                 )
                                 # Emit to platform for persistence
                                 if context and emit_tool_lifecycle:
-                                    context.emit(tool_failed_event)
+                                    await context._emit_checkpoint_async(tool_failed_event)
                                 yield tool_failed_event
                                 sequence += 1
 
@@ -1517,7 +1520,7 @@ class Agent:
 
                         iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
                         if context:
-                            context.emit(AgentIterationCompleted(
+                            await context._emit_checkpoint_async(AgentIterationCompleted(
                                 name=self.name,
                                 correlation_id=iteration_correlation_id,
                                 parent_correlation_id=agent_correlation_id,
@@ -1537,7 +1540,7 @@ class Agent:
 
                         iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
                         if context:
-                            context.emit(AgentIterationCompleted(
+                            await context._emit_checkpoint_async(AgentIterationCompleted(
                                 name=self.name,
                                 correlation_id=iteration_correlation_id,
                                 parent_correlation_id=agent_correlation_id,
@@ -1556,7 +1559,7 @@ class Agent:
                         # Emit agent.completed checkpoint for journal persistence
                         # Skip if executor already manages lifecycle (to avoid duplicate events)
                         if context and not self._lifecycle_managed(context):
-                            context.emit(AgentCompleted(
+                            await context._emit_checkpoint_async(AgentCompleted(
                                 name=self.name,
                                 correlation_id=agent_correlation_id,
                                 parent_correlation_id=context._parent_correlation_id,
@@ -1596,7 +1599,7 @@ class Agent:
                 # Emit agent.completed checkpoint for journal persistence (with max_iterations flag)
                 # Skip if executor already manages lifecycle (to avoid duplicate events)
                 if context and not self._lifecycle_managed(context):
-                    context.emit(AgentCompleted(
+                    await context._emit_checkpoint_async(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
                         parent_correlation_id=context._parent_correlation_id,
@@ -1627,8 +1630,8 @@ class Agent:
             context.restore_parent(original_agent_parent)
 
             # Skip if executor already manages lifecycle (to avoid duplicate events)
-            if context and not self._lifecycle_managed(context):
-                context.emit(AgentFailed(
+            if token is not None and context and not self._lifecycle_managed(context):
+                await context._emit_checkpoint_async(AgentFailed(
                     name=self.name,
                     correlation_id=agent_correlation_id,
                     parent_correlation_id=context._parent_correlation_id,
@@ -1639,12 +1642,14 @@ class Agent:
                 ))
             raise
         finally:
+            context.restore_parent(original_agent_parent)
             if self.sandbox is not None:
                 close = getattr(self.sandbox, "close", None)
                 if close is not None:
                     await close()
             from ..context import _current_context
-            _current_context.reset(token)
+            if token is not None:
+                _current_context.reset(token)
 
     async def _stream_lm_call(
         self,
@@ -2035,43 +2040,44 @@ class Agent:
         if self.sandbox is not None:
             setattr(context, "sandbox", self.sandbox)
 
-        # Emit agent.started checkpoint for journal persistence
-        # Skip if executor already emitted (to avoid duplicate events)
-        # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not self._lifecycle_managed(context):
-            context.emit(AgentStarted(
-                name=self.name,
-                correlation_id=agent_correlation_id,
-                parent_correlation_id=context._parent_correlation_id,
-                agent_model=self.model_name,
-                tool_names=list(self.tools.keys()),
-                max_iterations=self.max_iterations,
-                input_data={"task": user_message},
-                metadata={"name": self.name},
-            ))
-
-        # Set agent as parent for iteration events (using Context-based tracking)
-        original_agent_parent = context.set_as_parent(agent_correlation_id)
-
-        # NEW: Check if this is a resume from HITL
-        if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
-            resume_info = workflow_ctx._agent_resume_info
-            if resume_info["agent_name"] == self.name:
-                self.logger.info("Detected HITL resume, calling resume_from_hitl()")
-
-                # Clear resume info to avoid re-entry
-                delattr(workflow_ctx, "_agent_resume_info")
-
-                # Resume from checkpoint (context setup happens inside resume_from_hitl)
-                return await self.resume_from_hitl(
-                    context=workflow_ctx,
-                    agent_context=resume_info["agent_context"],
-                    user_response=resume_info["user_response"],
-                )
-
-        # Set context in task-local storage for automatic propagation to tools and LM calls
-        token = set_current_context(context)
+        original_agent_parent = context.parent_correlation_id
+        token = None
         try:
+            # Cleanup must also cover cancellation or failure of the first ACK.
+            # Skip the event if the executor already owns this lifecycle.
+            if context and not self._lifecycle_managed(context):
+                await context._emit_checkpoint_async(AgentStarted(
+                    name=self.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=context._parent_correlation_id,
+                    agent_model=self.model_name,
+                    tool_names=list(self.tools.keys()),
+                    max_iterations=self.max_iterations,
+                    input_data={"task": user_message},
+                    metadata={"name": self.name},
+                ))
+
+            # Set agent as parent for iteration events (using Context-based tracking)
+            context.set_as_parent(agent_correlation_id)
+
+            # Check if this is a resume from HITL
+            if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
+                resume_info = workflow_ctx._agent_resume_info
+                if resume_info["agent_name"] == self.name:
+                    self.logger.info("Detected HITL resume, calling resume_from_hitl()")
+
+                    # Clear resume info to avoid re-entry
+                    delattr(workflow_ctx, "_agent_resume_info")
+
+                    # Resume from checkpoint (context setup happens inside resume_from_hitl)
+                    return await self.resume_from_hitl(
+                        context=workflow_ctx,
+                        agent_context=resume_info["agent_context"],
+                        user_response=resume_info["user_response"],
+                    )
+
+            # Set context after the start ACK for propagation to tools and LM calls.
+            token = set_current_context(context)
             try:
                 # Build conversation messages
                 messages: List[Message] = []
@@ -2128,7 +2134,7 @@ class Agent:
 
                         # Emit iteration started checkpoint
                         if context:
-                            context.emit(AgentIterationStarted(
+                            await context._emit_checkpoint_async(AgentIterationStarted(
                                 name=self.name,
                                 correlation_id=iteration_correlation_id,
                                 parent_correlation_id=agent_correlation_id,
@@ -2243,7 +2249,7 @@ class Agent:
                                         index=tool_idx,
                                     )
                                     self.logger.debug(f" Emitting ToolCallStarted event: {event.event_type}")
-                                    context.emit(event)
+                                    await context._emit_checkpoint_async(event)
 
                                 # Execute tool
                                 try:
@@ -2279,7 +2285,7 @@ class Agent:
                                             # Emit tool call completed event for handoff
                                             if context and emit_tool_lifecycle:
                                                 tool_duration_ms = int((_time.time() - tool_start_time) * 1000)
-                                                context.emit(ToolCallCompleted(
+                                                await context._emit_checkpoint_async(ToolCallCompleted(
                                                     name=tool_name,
                                                     correlation_id=tool_correlation_id,
                                                     parent_correlation_id=iteration_correlation_id,
@@ -2319,7 +2325,7 @@ class Agent:
                                             index=tool_idx,
                                         )
                                         self.logger.debug(f" Emitting ToolCallCompleted event: {event.event_type}, duration_ms={tool_duration_ms}")
-                                        context.emit(event)
+                                        await context._emit_checkpoint_async(event)
 
                                 except WaitingForUserInputException as e:
                                     # HITL PAUSE: Capture agent state and propagate exception
@@ -2359,6 +2365,8 @@ class Agent:
                                     ) from e
 
                                 except Exception as e:
+                                    if getattr(e, "_agnt5_checkpoint_failure", False):
+                                        raise
                                     # Regular tool errors - log and continue
                                     self.logger.error(f"Tool execution error: {e}")
                                     tool_results.append(
@@ -2378,7 +2386,7 @@ class Agent:
                                             error_message=str(e),
                                         )
                                         self.logger.debug(f" Emitting ToolCallFailed event: {event.event_type}")
-                                        context.emit(event)
+                                        await context._emit_checkpoint_async(event)
 
                             # Add tool results to conversation
                             results_text = "\n".join(
@@ -2397,7 +2405,7 @@ class Agent:
                             # Emit iteration completed checkpoint (with tool calls)
                             iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
                             if context:
-                                context.emit(AgentIterationCompleted(
+                                await context._emit_checkpoint_async(AgentIterationCompleted(
                                     name=self.name,
                                     correlation_id=iteration_correlation_id,
                                     parent_correlation_id=agent_correlation_id,
@@ -2420,7 +2428,7 @@ class Agent:
                             # Emit iteration completed checkpoint
                             iteration_duration_ms = int((_time.time() - iteration_start_time) * 1000)
                             if context:
-                                context.emit(AgentIterationCompleted(
+                                await context._emit_checkpoint_async(AgentIterationCompleted(
                                     name=self.name,
                                     correlation_id=iteration_correlation_id,
                                     parent_correlation_id=agent_correlation_id,
@@ -2441,7 +2449,7 @@ class Agent:
                             # Emit completion checkpoint
                             # Skip if executor already manages lifecycle (to avoid duplicate events)
                             if context and not self._lifecycle_managed(context):
-                                context.emit(AgentCompleted(
+                                await context._emit_checkpoint_async(AgentCompleted(
                                     name=self.name,
                                     correlation_id=agent_correlation_id,
                                     parent_correlation_id=context._parent_correlation_id,
@@ -2474,7 +2482,7 @@ class Agent:
                     # Emit completion checkpoint (iterations == max_iterations indicates max iterations reached)
                     # Skip if executor already manages lifecycle (to avoid duplicate events)
                     if context and not self._lifecycle_managed(context):
-                        context.emit(AgentCompleted(
+                        await context._emit_checkpoint_async(AgentCompleted(
                             name=self.name,
                             correlation_id=agent_correlation_id,
                             parent_correlation_id=context._parent_correlation_id,
@@ -2499,7 +2507,7 @@ class Agent:
                 # Emit error checkpoint for observability
                 # Skip if executor already manages lifecycle (to avoid duplicate events)
                 if context and not self._lifecycle_managed(context):
-                    context.emit(AgentFailed(
+                    await context._emit_checkpoint_async(AgentFailed(
                         name=self.name,
                         correlation_id=agent_correlation_id,
                         parent_correlation_id=context._parent_correlation_id,
@@ -2511,12 +2519,14 @@ class Agent:
                 raise
         finally:
             # Always reset context to prevent leakage between agent executions
+            context.restore_parent(original_agent_parent)
             if self.sandbox is not None:
                 close = getattr(self.sandbox, "close", None)
                 if close is not None:
                     await close()
             from ..context import _current_context
-            _current_context.reset(token)
+            if token is not None:
+                _current_context.reset(token)
 
     async def resume_from_hitl(
         self,
@@ -2753,6 +2763,8 @@ class Agent:
                         ) from e
 
                     except Exception as e:
+                        if getattr(e, "_agnt5_checkpoint_failure", False):
+                            raise
                         # Regular tool errors - log and continue
                         self.logger.error(f"Tool execution error: {e}")
                         tool_results.append(
@@ -2786,7 +2798,7 @@ class Agent:
                 # Emit completion checkpoint
                 # Skip if executor already manages lifecycle (to avoid duplicate events)
                 if context and not getattr(context, '_executor_managed_lifecycle', False):
-                    context.emit(AgentCompleted(
+                    await context._emit_checkpoint_async(AgentCompleted(
                         name=self.name,
                         correlation_id=agent_correlation_id,
                         parent_correlation_id=context._parent_correlation_id,
@@ -2817,7 +2829,7 @@ class Agent:
         # Emit completion checkpoint (iterations == max_iterations indicates max iterations reached)
         # Skip if executor already manages lifecycle (to avoid duplicate events)
         if context and not getattr(context, '_executor_managed_lifecycle', False):
-            context.emit(AgentCompleted(
+            await context._emit_checkpoint_async(AgentCompleted(
                 name=self.name,
                 correlation_id=agent_correlation_id,
                 parent_correlation_id=context._parent_correlation_id,

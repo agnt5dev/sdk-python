@@ -229,6 +229,31 @@ class ExecutorMixin:
     _checkpoint_client: Any
     service_name: str
 
+    async def _flush_stream_events(self) -> None:
+        """Wait for the native delivery boundary without blocking the Python loop."""
+        flush = getattr(self._rust_worker, "flush_workflow_checkpoints", None)
+        if flush is None:
+            return
+        pending = asyncio.get_running_loop().run_in_executor(None, flush)
+        cancelled = None
+        # A synchronous flush cannot be cancelled once running. Settle it before
+        # invocation cleanup, including when cancellation is requested repeatedly.
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception:
+                break
+        try:
+            pending.result()
+        except Exception as error:
+            if cancelled is not None:
+                raise cancelled from error
+            raise
+        if cancelled is not None:
+            raise cancelled
+
     async def _execute_with_context(
         self,
         request: Any,
@@ -1109,13 +1134,7 @@ class ExecutorMixin:
                                 # Give the native transient queue a delivery
                                 # boundary before the next durable lifecycle
                                 # checkpoint can become visible.
-                                flush = getattr(
-                                    self._rust_worker,
-                                    "flush_workflow_checkpoints",
-                                    None,
-                                )
-                                if flush is not None:
-                                    flush()
+                                await self._flush_stream_events()
                             sequence += 1
 
                             # Check for completion event to extract final results

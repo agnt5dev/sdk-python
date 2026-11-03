@@ -84,11 +84,12 @@ class WorkflowActivationTransport:
         )
 
 
-def activation_context(transport):
-    entity = WorkflowEntity(run_id="run-1", component_name="workflow")
+def activation_context(transport, *, worker=None, run_id="run-1", trace_metadata=None):
+    entity = WorkflowEntity(run_id=run_id, component_name="workflow")
     context = WorkflowContext(
         workflow_entity=entity,
-        run_id="run-1",
+        run_id=run_id,
+        worker=worker,
         activation_client=ActivationClient(transport),
         trace_metadata={
             "project_id": "project-1",
@@ -98,10 +99,17 @@ def activation_context(transport):
             "activation_definition_version": "v1",
             "activation_definition_config": '["object",[]]',
             "component_name": "workflow",
+            **(trace_metadata or {}),
         },
     )
     events = []
-    context.emit = events.append
+    if worker is None:
+        context.emit = events.append
+
+        async def capture_checkpoint(event):
+            events.append(event)
+
+        context._emit_checkpoint_async = capture_checkpoint
     return context, entity, events
 
 
@@ -886,3 +894,210 @@ async def test_a_pause_while_handling_a_model_stream_does_not_wait_for_it():
     assert isinstance(terminal, LMCompleted)
     assert activations.in_flight("run-1") == 0, "its outcome is recorded before the last yield"
     await events.aclose()
+
+
+class GatedCheckpointWorker:
+    def __init__(self, *, pending=None, error=None):
+        self.pending = pending
+        self.error = error
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.events = []
+        self.acks = []
+
+    def emit_event_sync(self, **event):
+        raise AssertionError("workflow checkpoint must not block the event-loop thread")
+
+    def queue_event(self, **event):
+        raise AssertionError("required function checkpoints must await persistence")
+
+    async def emit_event_async(self, **event):
+        self.events.append(event)
+        payload = json.loads(event["event_data"])
+        if payload["name"] == "blocked":
+            if event["event_type"] == self.pending:
+                self.entered.set()
+                await self.release.wait()
+            if event["event_type"] == self.error:
+                raise RuntimeError("checkpoint unavailable: " + self.error)
+        self.acks.append(event)
+
+    def acknowledged(self, name, event_type):
+        return any(
+            event["event_type"] == event_type and json.loads(event["event_data"])["name"] == name
+            for event in self.acks
+        )
+
+
+@pytest.fixture(params=["ordinary", "pull", "fire_and_forget"])
+def checkpoint_mode(request, monkeypatch):
+    import agnt5.events as events_module
+
+    monkeypatch.setattr(
+        events_module, "_FIRE_AND_FORGET_NONTERMINAL", request.param == "fire_and_forget"
+    )
+    if request.param == "pull":
+        return {"dispatch_mode": "pull", "pull_completion_lifecycle_v1": "true"}
+    return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["started", "completed", "failed"])
+@pytest.mark.parametrize("separate_run", [False, True], ids=["sibling-step", "other-run"])
+async def test_function_checkpoint_wait_allows_independent_work(
+    checkpoint_mode, boundary, separate_run,
+):
+    worker = GatedCheckpointWorker(pending="function." + boundary)
+    transport = WorkflowActivationTransport()
+    context, entity, _ = activation_context(
+        transport, worker=worker, trace_metadata=checkpoint_mode,
+    )
+    sibling_context = context
+    if separate_run:
+        sibling_context, _, _ = activation_context(
+            WorkflowActivationTransport(), worker=worker, run_id="run-2",
+            trace_metadata=checkpoint_mode,
+        )
+    executed = []
+
+    @function
+    async def blocked(ctx: FunctionContext):
+        assert worker.acknowledged("blocked", "function.started")
+        executed.append(True)
+        if boundary == "failed":
+            raise ValueError("handler failed")
+        return {"value": 42}
+
+    @function
+    async def sibling(ctx: FunctionContext):
+        assert worker.acknowledged("sibling", "function.started")
+        return "independent"
+
+    task = asyncio.create_task(context.step(blocked, key="blocked"))
+    try:
+        await asyncio.wait_for(worker.entered.wait(), timeout=1)
+        result = await asyncio.wait_for(sibling_context.step(sibling, key="sibling"), timeout=1)
+        assert result == "independent"
+        assert not task.done()
+        assert not entity.has_completed_step("step:blocked:blocked")
+        assert bool(executed) == (boundary != "started")
+        # Only the independent step may have a completion receipt at this point.
+        assert len(transport.complete_requests) == (0 if separate_run else 1)
+        worker.release.set()
+        if boundary == "failed":
+            with pytest.raises(ValueError, match="handler failed"):
+                await task
+            assert not entity.has_completed_step("step:blocked:blocked")
+            assert len(transport.fail_requests) == 1
+        else:
+            assert await task == {"value": 42}
+            assert entity.get_completed_step("step:blocked:blocked") == {"value": 42}
+        assert worker.acknowledged("blocked", "function." + boundary)
+        by_correlation = {}
+        by_run = {}
+        for event in worker.events:
+            payload = json.loads(event["event_data"])
+            by_correlation.setdefault(payload["correlation_id"], []).append(event)
+            by_run.setdefault(event["run_id"], []).append(event["sequence_number"])
+            assert event["metadata"]["correlation_id"] == payload["correlation_id"]
+            assert event["metadata"]["parent_correlation_id"] == payload["parent_correlation_id"]
+        assert len(by_correlation) == 2
+        for pair in by_correlation.values():
+            assert pair[0]["event_type"] == "function.started"
+            assert pair[1]["event_type"] in ("function.completed", "function.failed")
+            assert pair[0]["metadata"]["parent_correlation_id"] == pair[1]["metadata"]["parent_correlation_id"]
+        for sequences in by_run.values():
+            assert sequences == list(range(1, len(sequences) + 1))
+    finally:
+        worker.release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["started", "completed", "failed"])
+async def test_function_checkpoint_errors_fail_activation(checkpoint_mode, boundary):
+    worker = GatedCheckpointWorker(error="function." + boundary)
+    transport = WorkflowActivationTransport()
+    context, entity, _ = activation_context(
+        transport, worker=worker, trace_metadata=checkpoint_mode,
+    )
+    executed = []
+
+    @function
+    async def blocked(ctx: FunctionContext):
+        executed.append(True)
+        if boundary == "failed":
+            raise ValueError("handler failed")
+        return {"value": 42}
+
+    with pytest.raises(RuntimeError, match="checkpoint unavailable: function." + boundary):
+        await context.step(blocked, key="blocked")
+
+    assert bool(executed) == (boundary != "started")
+    assert transport.complete_requests == []
+    assert len(transport.fail_requests) == 1
+    assert not entity.has_completed_step("step:blocked:blocked")
+    assert context._activation_client.in_flight(context.run_id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["started", "completed", "failed"])
+async def test_cancelled_function_checkpoint_does_not_complete(checkpoint_mode, boundary):
+    worker = GatedCheckpointWorker(pending="function." + boundary)
+    transport = WorkflowActivationTransport()
+    context, entity, _ = activation_context(
+        transport, worker=worker, trace_metadata=checkpoint_mode,
+    )
+    executed = []
+
+    @function
+    async def blocked(ctx: FunctionContext):
+        executed.append(True)
+        if boundary == "failed":
+            raise ValueError("handler failed")
+        return {"value": 42}
+
+    task = asyncio.create_task(context.step(blocked, key="blocked"))
+    try:
+        await asyncio.wait_for(worker.entered.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert bool(executed) == (boundary != "started")
+        assert transport.complete_requests == []
+        assert not entity.has_completed_step("step:blocked:blocked")
+        assert context._activation_client.in_flight(context.run_id) == 0
+        assert context._step_event_stack == []
+        assert context.activation is None
+        assert not worker.acknowledged("blocked", "function." + boundary)
+    finally:
+        worker.release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_function_replay_does_not_repeat_lifecycle_checkpoints(checkpoint_mode):
+    worker = GatedCheckpointWorker()
+    transport = WorkflowActivationTransport()
+    executed = []
+
+    @function
+    async def blocked(ctx: FunctionContext):
+        executed.append(True)
+        return {"value": 42}
+
+    context, _, _ = activation_context(transport, worker=worker, trace_metadata=checkpoint_mode)
+    assert await context.step(blocked, key="blocked") == {"value": 42}
+    assert worker.acknowledged("blocked", "function.completed")
+    assert len(worker.events) == 2
+
+    transport.replay_output = b'{"value":42}'
+    replay_context, entity, _ = activation_context(
+        transport, worker=worker, trace_metadata=checkpoint_mode,
+    )
+    assert await replay_context.step(blocked, key="blocked") == {"value": 42}
+    assert executed == [True]
+    assert len(worker.events) == 2
+    assert entity.get_completed_step("step:blocked:blocked") == {"value": 42}

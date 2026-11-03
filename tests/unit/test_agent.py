@@ -767,6 +767,7 @@ async def test_agent_handoff(fake_native_core):
     ctx = AgentContext(run_id="run-handoff", agent_name="source")
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     result = await source_agent.run("Need specialized help", context=ctx)
 
@@ -846,6 +847,7 @@ async def test_durable_handoff_is_nested_under_one_child_activation():
 
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     result = await source.tools["transfer_to_target"].invoke_with_stable_key(
         ctx,
@@ -1334,6 +1336,7 @@ async def test_durable_tool_calls_are_journaled_by_the_activation_not_the_loop()
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     yielded = [event async for event in agent.stream("bill me", context=ctx)]
 
@@ -1383,6 +1386,7 @@ async def test_legacy_tool_calls_still_emit_lifecycle_under_durable_context():
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
 
     async for _ in agent.stream("find a", context=ctx):
         pass
@@ -1411,6 +1415,7 @@ async def test_delegated_child_lifecycle_is_the_child_activation():
     ctx._activation_client = client
     emitted = []
     ctx.emit = emitted.append
+    ctx._emit_checkpoint_async = AsyncMock(side_effect=emitted.append)
     original_parent = ctx._parent_correlation_id
 
     result = await target._run_delegated_child(

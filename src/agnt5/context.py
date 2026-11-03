@@ -516,6 +516,11 @@ class Context:
         emitter = self._get_emitter()
         return await emitter.emit_async(event)
 
+    async def _emit_checkpoint_async(self, event: Event) -> EventEnvelope:
+        """Await a required checkpoint without blocking the event-loop thread."""
+        await self._end_progress(event)
+        return await self._get_emitter()._emit_checkpoint_async(event)
+
     async def emit_observed_async(self, event: Event) -> EventEnvelope:
         """Async-callable best-effort observational emission."""
         emitter = self._get_emitter()

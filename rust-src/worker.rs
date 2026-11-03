@@ -446,9 +446,9 @@ impl PyWorker {
     /// the platform acknowledges the checkpoint. It uses std::sync primitives internally
     /// and does NOT require a Python event loop.
     ///
-    /// IMPORTANT: This function releases the Python GIL during the blocking wait
-    /// using `py.allow_threads()`. This allows other Python coroutines to run
-    /// concurrently while waiting for the checkpoint acknowledgement.
+    /// This function releases the Python GIL with `py.detach()`, allowing other
+    /// Python threads to run. The calling thread remains blocked, including any
+    /// asyncio event loop running on that thread. Async callers use emit_event_async.
     #[pyo3(signature = (run_id, event_type, event_data, sequence_number, metadata, source_timestamp_ns, timeout_ms=5000))]
     fn emit_event_sync(
         &self,
@@ -484,8 +484,7 @@ impl PyWorker {
         };
 
         // Release the GIL during the blocking wait for checkpoint acknowledgement.
-        // This allows other Python coroutines to run concurrently, enabling true
-        // parallel execution of batch items instead of serializing on the GIL.
+        // Other Python threads can run, but this thread's asyncio loop cannot.
         let result = py.detach(|| {
             worker.emit_checkpoint_sync_blocking(
                 run_id,

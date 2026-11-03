@@ -755,12 +755,8 @@ class EventEmitter:
                 merged[key] = self._base_metadata[key]
         return merged
 
-    def emit(self, event: Event) -> EventEnvelope:
-        """Emit a typed event to the platform.
-
-        All event metadata (correlation_id, parent_correlation_id, timestamp, etc.)
-        is extracted from the Event object.
-        """
+    def _event_envelope(self, event: Event) -> EventEnvelope:
+        """Preserve typed event fields for acknowledged emission."""
         event_data = event.to_dict()
         envelope_metadata = dict(event.metadata) if event.metadata else {}
         envelope_metadata.update(
@@ -770,7 +766,7 @@ class EventEmitter:
         # Extract content_index from event if available (e.g., Delta.index)
         content_index = getattr(event, "index", 0)
 
-        envelope = EventEnvelope(
+        return EventEnvelope(
             event_type=event.event_type,
             data=event_data,
             source_timestamp_ns=event.timestamp_ns,
@@ -778,7 +774,22 @@ class EventEmitter:
             metadata=envelope_metadata or None,
         )
 
+    def emit(self, event: Event) -> EventEnvelope:
+        """Emit a typed event and wait for checkpoint acceptance."""
+        envelope = self._event_envelope(event)
         self._queue_event(envelope, event.correlation_id, event.parent_correlation_id)
+        return envelope
+
+    async def _emit_checkpoint_async(self, event: Event) -> EventEnvelope:
+        """Await required acceptance even when pull lifecycle deferral is enabled."""
+        envelope = self._event_envelope(event)
+        try:
+            await self._queue_event_async(envelope, event.correlation_id, event.parent_correlation_id)
+        except Exception as error:
+            # Tool error recovery must not treat failed persistence as a user
+            # tool failure. Preserve the original exception type and identity.
+            setattr(error, "_agnt5_checkpoint_failure", True)
+            raise
         return envelope
 
     def emit_observed(self, event: Event) -> EventEnvelope:
@@ -1068,8 +1079,8 @@ class EventEmitter:
     ) -> None:
         """Queue event to the platform via Rust worker (async version).
 
-        For checkpoint events, this method blocks until the platform acknowledges
-        that the event has been persisted. This ensures correct event ordering.
+        For checkpoint events, this method yields until the platform acknowledges
+        persistence, including when ordinary lifecycle events may be deferred.
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

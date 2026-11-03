@@ -185,7 +185,7 @@ class WorkflowContext(Context):
 
     # === State Management ===
 
-    def _forward_delta(
+    async def _forward_delta(
         self,
         event_type: str,
         output_data: str,
@@ -226,7 +226,7 @@ class WorkflowContext(Context):
         )
         # Preserve original event_type from nested component
         object.__setattr__(delta_event, "event_type", event_type)
-        self.emit(delta_event)
+        await self._emit_checkpoint_async(delta_event)
         self._delta_sequence += 1
 
     async def _consume_streaming_result(self, async_gen: Any, step_name: str) -> Any:
@@ -289,7 +289,7 @@ class WorkflowContext(Context):
                 ):
                     continue
 
-                self.emit(item)
+                await self._emit_checkpoint_async(item)
 
             else:
                 # Raw value (non-Event) - streaming function output
@@ -299,7 +299,7 @@ class WorkflowContext(Context):
                 except (TypeError, ValueError):
                     chunk_json = str(item)
 
-                self._forward_delta(
+                await self._forward_delta(
                     event_type="output.delta",
                     output_data=chunk_json,
                     source_timestamp_ns=time.time_ns(),

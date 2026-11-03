@@ -278,7 +278,7 @@ async def execute_function_callable(
             function_input = dict(kwargs)
         else:
             function_input = {"args": list(args)} if args else {}
-        context.emit(
+        await context._emit_checkpoint_async(
             Started(
                 name=handler_name,
                 correlation_id=func_correlation_id,
@@ -308,7 +308,7 @@ async def execute_function_callable(
                 )
             except (TypeError, ValueError):
                 span.set_attribute("output.data", truncate_span_attribute_value(repr(result)))
-            context.emit(
+            await context._emit_checkpoint_async(
                 Completed(
                     name=handler_name,
                     correlation_id=func_correlation_id,
@@ -320,7 +320,7 @@ async def execute_function_callable(
             )
             return result
         except Exception as error:
-            context.emit(
+            await context._emit_checkpoint_async(
                 Failed(
                     name=handler_name,
                     correlation_id=func_correlation_id,

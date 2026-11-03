@@ -123,6 +123,45 @@ async def test_async_checkpoint_failure_propagates() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("defer_lifecycle", [False, True])
+@pytest.mark.parametrize("fire_and_forget", [False, True])
+async def test_required_checkpoint_awaits_ack_even_when_lifecycle_is_deferred(
+    monkeypatch, defer_lifecycle, fire_and_forget,
+) -> None:
+    monkeypatch.setattr(events_module, "_FIRE_AND_FORGET_NONTERMINAL", fire_and_forget)
+    worker = MagicMock()
+    worker.emit_event_async = AsyncMock()
+    emitter = EventEmitter(run_id="run-1", defer_lifecycle=defer_lifecycle)
+    emitter.set_worker(worker)
+    event = checkpoint_started()
+
+    envelope = await emitter._emit_checkpoint_async(event)
+
+    worker.emit_event_async.assert_awaited_once()
+    request = worker.emit_event_async.await_args.kwargs
+    assert request["event_type"] == event.event_type
+    assert request["metadata"]["correlation_id"] == event.correlation_id
+    assert request["metadata"]["parent_correlation_id"] == event.parent_correlation_id
+    assert request["source_timestamp_ns"] == event.timestamp_ns
+    assert envelope.data == event.to_dict()
+    worker.queue_event.assert_not_called()
+    worker.emit_event_sync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_required_checkpoint_failure_propagates_without_queue_fallback() -> None:
+    worker = MagicMock()
+    worker.emit_event_async = AsyncMock(side_effect=RuntimeError("journal unavailable"))
+    emitter = EventEmitter(run_id="run-1", defer_lifecycle=True)
+    emitter.set_worker(worker)
+
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        await emitter._emit_checkpoint_async(checkpoint_started())
+
+    worker.queue_event.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_async_nonterminal_checkpoint_enqueue_failure_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
