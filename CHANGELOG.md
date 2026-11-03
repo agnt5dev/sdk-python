@@ -13,6 +13,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Wait for a model completion checkpoint before yielding its streamed success event. Propagate checkpoint persistence failures through agent tool-error recovery with their original exception type and identity.
 - Run hosted streaming flush waits outside the event loop. Cancellation waits for an in-flight flush to settle before the invocation unwinds.
 - Restore agent display parents when an acknowledgment wait is cancelled, and avoid leaving a function context installed when its start acknowledgment fails or is cancelled.
+- Close an agent's sandbox when its initial start acknowledgment fails or is cancelled, including the legacy execution path.
 
 ## [0.14.7] - 2026-11-02
 

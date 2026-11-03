@@ -109,7 +109,7 @@ class PendingCheckpointWorker:
         self.acks.append(event)
 
 
-def operation_for(path, worker, metadata):
+def operation_for(path, worker, metadata, *, sandbox=None):
     state = {"executed": False, "tool_executed": False, "sandbox_executed": False,
              "success_observed": False}
     fail = worker.target.endswith(".failed")
@@ -169,7 +169,8 @@ def operation_for(path, worker, metadata):
 
         tools = ([Tool(name="dependency", description="test", handler=handler)]
                  if path in ("agent_tool", "agent_legacy_tool", "agent_sandbox") else [])
-        agent = Agent(name="probe", model=Model(), instructions="Answer briefly", tools=tools)
+        agent = Agent(name="probe", model=Model(), instructions="Answer briefly", tools=tools,
+                      sandbox=sandbox)
         context = AgentContext(run_id=options["run_id"], agent_name=agent.name,
                                worker=worker, trace_metadata=metadata)
         context._get_initial_conversation_history = AsyncMock(return_value=[])
@@ -345,6 +346,47 @@ async def test_async_checkpoint_cancellation_does_not_report_success(path, bound
         context = state["context"]
         assert context.parent_correlation_id == state["original_parent"]
         assert all(event["event_type"] != boundary for event in worker.acks)
+    finally:
+        worker.release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["agent", "agent_legacy"])
+@pytest.mark.parametrize("outcome", ["cancel", "reject", "success"])
+async def test_agent_start_checkpoint_always_closes_sandbox(checkpoint_metadata, path, outcome):
+    worker = PendingCheckpointWorker("agent.started")
+    sandbox = SimpleNamespace(close=AsyncMock(), execute_code=AsyncMock(),
+                              write_file=AsyncMock(), read_file=AsyncMock(), list_files=AsyncMock())
+    operation, state = operation_for(path, worker, checkpoint_metadata, sandbox=sandbox)
+    task = asyncio.create_task(operation)
+    try:
+        await wait_for_checkpoint(task, worker)
+        assert not state["executed"]
+        assert not task.done()
+        sandbox.close.assert_not_awaited()
+        if outcome == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "reject":
+            worker.reject = True
+            worker.release.set()
+            with pytest.raises(RuntimeError, match="checkpoint rejected") as caught:
+                await task
+            assert caught.value is worker.failure
+        else:
+            worker.release.set()
+            await task
+
+        sandbox.close.assert_awaited_once()
+        assert state["executed"] == (outcome == "success")
+        assert state["context_after"] is state["expected_context"]
+        assert state["context"].parent_correlation_id == state["original_parent"]
+        if outcome != "success":
+            assert not any(event["event_type"] in ("agent.completed", "agent.failed")
+                           for event in worker.events)
     finally:
         worker.release.set()
         task.cancel()

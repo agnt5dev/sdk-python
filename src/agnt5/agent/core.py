@@ -1008,48 +1008,49 @@ class Agent:
         if self.sandbox is not None:
             setattr(context, "sandbox", self.sandbox)
 
-        # Emit agent.started checkpoint for journal persistence
-        # Skip if executor already emitted (to avoid duplicate events)
-        # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not self._lifecycle_managed(context):
-            await context._emit_checkpoint_async(AgentStarted(
-                name=self.name,
-                correlation_id=agent_correlation_id,
-                parent_correlation_id=context._parent_correlation_id,
-                agent_model=self.model_name,
-                tool_names=list(self.tools.keys()),
-                max_iterations=self.max_iterations,
-                input_data={"task": user_message},
-                metadata={"name": self.name},
-            ))
-
-        # Set agent as parent for iteration events (using Context-based tracking)
-        original_agent_parent = context.set_as_parent(agent_correlation_id)
-
-        # Check for HITL resume
-        if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
-            resume_info = workflow_ctx._agent_resume_info
-            if resume_info["agent_name"] == self.name:
-                self.logger.info("Detected HITL resume, calling resume_from_hitl()")
-                delattr(workflow_ctx, "_agent_resume_info")
-                result = await self.resume_from_hitl(
-                    context=workflow_ctx,
-                    agent_context=resume_info["agent_context"],
-                    user_response=resume_info["user_response"],
-                )
-                result = await self._run_after_agent_callback(
-                    result.context or context,
-                    user_message,
-                    history,
-                    prompt_context,
-                    result,
-                )
-                yield result
-                return
-
-        # Set context in task-local storage
-        token = set_current_context(context)
+        original_agent_parent = context.parent_correlation_id
+        token = None
         try:
+            # Cleanup must also cover cancellation or failure of the first ACK.
+            # Skip the event if the executor already owns this lifecycle.
+            if context and not self._lifecycle_managed(context):
+                await context._emit_checkpoint_async(AgentStarted(
+                    name=self.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=context._parent_correlation_id,
+                    agent_model=self.model_name,
+                    tool_names=list(self.tools.keys()),
+                    max_iterations=self.max_iterations,
+                    input_data={"task": user_message},
+                    metadata={"name": self.name},
+                ))
+
+            # Set agent as parent for iteration events (using Context-based tracking)
+            context.set_as_parent(agent_correlation_id)
+
+            # Check for HITL resume
+            if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
+                resume_info = workflow_ctx._agent_resume_info
+                if resume_info["agent_name"] == self.name:
+                    self.logger.info("Detected HITL resume, calling resume_from_hitl()")
+                    delattr(workflow_ctx, "_agent_resume_info")
+                    result = await self.resume_from_hitl(
+                        context=workflow_ctx,
+                        agent_context=resume_info["agent_context"],
+                        user_response=resume_info["user_response"],
+                    )
+                    result = await self._run_after_agent_callback(
+                        result.context or context,
+                        user_message,
+                        history,
+                        prompt_context,
+                        result,
+                    )
+                    yield result
+                    return
+
+            # Set context in task-local storage after the start ACK succeeds.
+            token = set_current_context(context)
             before_agent_result = await self._run_before_agent_callback(
                 context,
                 user_message,
@@ -1629,7 +1630,7 @@ class Agent:
             context.restore_parent(original_agent_parent)
 
             # Skip if executor already manages lifecycle (to avoid duplicate events)
-            if context and not self._lifecycle_managed(context):
+            if token is not None and context and not self._lifecycle_managed(context):
                 await context._emit_checkpoint_async(AgentFailed(
                     name=self.name,
                     correlation_id=agent_correlation_id,
@@ -1647,7 +1648,8 @@ class Agent:
                 if close is not None:
                     await close()
             from ..context import _current_context
-            _current_context.reset(token)
+            if token is not None:
+                _current_context.reset(token)
 
     async def _stream_lm_call(
         self,
@@ -2038,43 +2040,44 @@ class Agent:
         if self.sandbox is not None:
             setattr(context, "sandbox", self.sandbox)
 
-        # Emit agent.started checkpoint for journal persistence
-        # Skip if executor already emitted (to avoid duplicate events)
-        # Use _parent_correlation_id to link agent to parent step in hierarchy
-        if context and not self._lifecycle_managed(context):
-            await context._emit_checkpoint_async(AgentStarted(
-                name=self.name,
-                correlation_id=agent_correlation_id,
-                parent_correlation_id=context._parent_correlation_id,
-                agent_model=self.model_name,
-                tool_names=list(self.tools.keys()),
-                max_iterations=self.max_iterations,
-                input_data={"task": user_message},
-                metadata={"name": self.name},
-            ))
-
-        # Set agent as parent for iteration events (using Context-based tracking)
-        original_agent_parent = context.set_as_parent(agent_correlation_id)
-
-        # NEW: Check if this is a resume from HITL
-        if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
-            resume_info = workflow_ctx._agent_resume_info
-            if resume_info["agent_name"] == self.name:
-                self.logger.info("Detected HITL resume, calling resume_from_hitl()")
-
-                # Clear resume info to avoid re-entry
-                delattr(workflow_ctx, "_agent_resume_info")
-
-                # Resume from checkpoint (context setup happens inside resume_from_hitl)
-                return await self.resume_from_hitl(
-                    context=workflow_ctx,
-                    agent_context=resume_info["agent_context"],
-                    user_response=resume_info["user_response"],
-                )
-
-        # Set context in task-local storage for automatic propagation to tools and LM calls
-        token = set_current_context(context)
+        original_agent_parent = context.parent_correlation_id
+        token = None
         try:
+            # Cleanup must also cover cancellation or failure of the first ACK.
+            # Skip the event if the executor already owns this lifecycle.
+            if context and not self._lifecycle_managed(context):
+                await context._emit_checkpoint_async(AgentStarted(
+                    name=self.name,
+                    correlation_id=agent_correlation_id,
+                    parent_correlation_id=context._parent_correlation_id,
+                    agent_model=self.model_name,
+                    tool_names=list(self.tools.keys()),
+                    max_iterations=self.max_iterations,
+                    input_data={"task": user_message},
+                    metadata={"name": self.name},
+                ))
+
+            # Set agent as parent for iteration events (using Context-based tracking)
+            context.set_as_parent(agent_correlation_id)
+
+            # Check if this is a resume from HITL
+            if workflow_ctx and hasattr(workflow_ctx, "_agent_resume_info"):
+                resume_info = workflow_ctx._agent_resume_info
+                if resume_info["agent_name"] == self.name:
+                    self.logger.info("Detected HITL resume, calling resume_from_hitl()")
+
+                    # Clear resume info to avoid re-entry
+                    delattr(workflow_ctx, "_agent_resume_info")
+
+                    # Resume from checkpoint (context setup happens inside resume_from_hitl)
+                    return await self.resume_from_hitl(
+                        context=workflow_ctx,
+                        agent_context=resume_info["agent_context"],
+                        user_response=resume_info["user_response"],
+                    )
+
+            # Set context after the start ACK for propagation to tools and LM calls.
+            token = set_current_context(context)
             try:
                 # Build conversation messages
                 messages: List[Message] = []
@@ -2522,7 +2525,8 @@ class Agent:
                 if close is not None:
                     await close()
             from ..context import _current_context
-            _current_context.reset(token)
+            if token is not None:
+                _current_context.reset(token)
 
     async def resume_from_hitl(
         self,
