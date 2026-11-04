@@ -1074,3 +1074,65 @@ async def test_late_sync_factory_never_starts_returned_coroutine(reason):
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_late_sync_factory_task_cleanup_finishes_before_failure_and_retry():
+    import threading
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    loop = asyncio.get_running_loop()
+    entered = threading.Event()
+    release_thread = threading.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    events = []
+    returned_tasks = []
+    calls = 0
+
+    async def operation():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append('cleanup-start')
+            cleanup_started.set()
+            await release_cleanup.wait()
+            events.append('cleanup-end')
+
+    @step(timeout_ms=10, retries={'max_attempts': 2, 'initial_interval_ms': 0})
+    def factory():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            events.append('retry')
+            return 7
+        ready = threading.Event()
+
+        def start():
+            returned_tasks.append(loop.create_task(operation()))
+            ready.set()
+
+        loop.call_soon_threadsafe(start)
+        assert ready.wait(1)
+        entered.set()
+        release_thread.wait(2)
+        return returned_tasks[0]
+
+    task = asyncio.create_task(context.step(factory))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.03)
+        release_thread.set()
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+        assert not task.done() and calls == 1
+        assert [phase for phase, _ in transport.calls] == ['begin']
+        release_cleanup.set()
+        assert await task == 7
+        assert events == ['cleanup-start', 'cleanup-end', 'retry']
+        assert returned_tasks[0].done()
+        assert [phase for phase, _ in transport.calls] == ['begin', 'fail', 'begin', 'complete']
+    finally:
+        release_thread.set()
+        release_cleanup.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*returned_tasks, return_exceptions=True)

@@ -182,9 +182,11 @@ async def run_declared_step(
                         raise asyncio.CancelledError
                     raise TimeoutError
             if inspect.isasyncgen(result):
-                return await context._consume_streaming_result(result, config.name)
-            if inspect.isawaitable(result):
-                return await result
+                result = await context._consume_streaming_result(result, config.name)
+            elif inspect.isawaitable(result):
+                result = await result
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError
             return result
 
         token = set_current_context(step_context)
@@ -210,10 +212,8 @@ async def run_declared_step(
             # A thread must exit before cancellation can reach an awaitable it
             # returned. Drain the executor first, then cancel/unwind the async
             # part; neither may turn the original failure into late success.
-            pending_tasks = ([executor_work] if executor_work is not None else []) + [execution]
-            for pending in pending_tasks:
-                if pending is execution:
-                    execution.cancel()
+            async def settle(pending: asyncio.Future[Any]) -> None:
+                nonlocal cancelled
                 while not pending.done():
                     try:
                         await asyncio.shield(pending)
@@ -224,6 +224,18 @@ async def run_declared_step(
                         break
                 if not pending.cancelled():
                     pending.exception()
+
+            if executor_work is not None:
+                await settle(executor_work)
+                if not executor_work.cancelled() and executor_work.exception() is None:
+                    returned = executor_work.result()
+                    if isinstance(returned, asyncio.Future):
+                        # The factory may have returned an already-running
+                        # task. Its cancellation cleanup still owns effects.
+                        returned.cancel()
+                        await settle(returned)
+            execution.cancel()
+            await settle(execution)
             if cancelled:
                 raise asyncio.CancelledError from None
             raise
