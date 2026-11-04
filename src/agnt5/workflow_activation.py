@@ -33,6 +33,7 @@ from .exceptions import ActivationError, ActivationErrorCode, DurableSleepSuspen
 from .function import FunctionContext, FunctionRegistry
 
 if TYPE_CHECKING:
+    from .step import StepConfig
     from .workflow import WorkflowContext
 
 T = TypeVar("T")
@@ -345,6 +346,7 @@ async def run_durable_step(
     handler_name: str,
     input_value: Any,
     execute: Callable[[str], Awaitable[T]],
+    step_config: StepConfig | None = None,
 ) -> T:
     """Run one step through the journal-authoritative activation protocol."""
 
@@ -382,7 +384,11 @@ async def run_durable_step(
     request = BeginActivationRequest(
         project_id=project_id,
         run_id=context.run_id,
-        parent_activation_id=metadata.get("parent_activation_id", ""),
+        parent_activation_id=(
+            context.activation.activation_id
+            if step_config is not None and context.activation is not None
+            else metadata.get("parent_activation_id", "")
+        ),
         kind=ActivationKind.STEP,
         stable_key=step_key,
         input_digest=hashlib.sha256(canonical_activation_value(input_value)).digest(),
@@ -396,7 +402,9 @@ async def run_durable_step(
             {"step_name": name, "handler_name": handler_name, "input": input_value}
         ),
     )
-    function_config = FunctionRegistry.get(handler_name)
+    function_config = (
+        step_config if step_config is not None else FunctionRegistry.get(handler_name)
+    )
     retry_policy = function_config.retries if function_config is not None else None
     max_attempts = retry_policy.max_attempts if retry_policy is not None else 1
 

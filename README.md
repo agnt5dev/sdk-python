@@ -80,11 +80,48 @@ streaming events, batches, cancellation, workflow resume, chat, and evaluation.
 Configuration can be supplied explicitly or through `AGNT5_GATEWAY_URL`,
 `AGNT5_API_KEY`, and `AGNT5_DEPLOYMENT_ID`.
 
+## Durable steps
+
+Use `@step` for an operation inside a durable workflow. Its handler starts
+after the runtime acknowledges admission, and its result becomes available
+after the runtime acknowledges completion. Those two activation calls also
+record the step's lifecycle; the SDK adds no separate function checkpoints.
+
+```python
+from agnt5 import StepContext, WorkflowContext, step, workflow
+
+
+@step(retries=3, backoff="exponential", timeout_ms=5000)
+async def prepare_search(ctx: StepContext, topic: str) -> dict[str, str]:
+    return {"query": topic.strip()}
+
+
+@workflow
+async def research(ctx: WorkflowContext, topic: str) -> dict[str, str]:
+    return await ctx.step(prepare_search, topic, key="search-query")
+```
+
+Register the workflow with a worker; `@step` handlers are workflow-local and
+are not standalone components. Invoke them through `ctx.step(...)`.
+Direct calls and execution without durable activation
+support raise an error rather than running without durability. A first
+parameter named `ctx` receives a `StepContext`; it can be omitted when unused.
+Sync handlers run in an executor thread.
+
+Use explicit keys for parallel or repeated work. Completed steps replay their
+committed result without executing the handler again. Retries reuse the same
+activation identity with runtime-owned attempts. External side effects still
+need idempotency: `ctx.activation.idempotency_key` is available to handlers.
+Existing `@function` handlers remain supported with their function checkpoints.
+`ctx.run(...)` is deprecated; replace it with `ctx.step(...)` using the same
+arguments and keys. It remains functional and emits a `DeprecationWarning`.
+
 ## Core APIs
 
 | API | Purpose |
 | --- | --- |
 | `@function` | Typed, retryable units of work |
+| `@step` | Workflow-local durable operations with acknowledged admission and completion |
 | `@workflow` | Durable multi-step orchestration and checkpointing |
 | `Agent` and `@agent` | Model and tool orchestration |
 | `@tool` | Typed tools with generated schemas |

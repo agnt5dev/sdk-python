@@ -260,6 +260,7 @@ from .scorer import (
     scorer,
 )
 from .state import SessionContext, StateManager, UserContext
+from .step import StepContext, step
 from .tool import Tool, ToolRegistry, tool
 from .types import (
     BackoffPolicy,
@@ -324,6 +325,8 @@ __all__ = [
     "Worker",
     "function",
     "FunctionRegistry",
+    "StepContext",
+    "step",
     "get_logger",
     "set_log_level",
     # Entity API was removed in v0.4.0 - use State/Memory APIs

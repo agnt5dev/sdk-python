@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 logger = setup_module_logger(__name__)
 
 T = TypeVar("T")
+_STEP_ARGUMENT_UNSET = object()
 
 
 class _TaskLocalStepEventStack:
@@ -471,7 +472,7 @@ class WorkflowContext(Context):
     async def step(
         self,
         name_or_handler: Union[str, Callable, Awaitable[T]],
-        func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T], Any] = None,
+        func_or_awaitable: Union[Callable[..., Awaitable[T]], Awaitable[T], Any] = _STEP_ARGUMENT_UNSET,
         *args: Any,
         key: Optional[str] = None,
         **kwargs: Any,
@@ -483,11 +484,14 @@ class WorkflowContext(Context):
         automatically persisted, so if the workflow crashes and restarts, completed
         steps return their cached result without re-executing.
 
+        Pass an ``@step`` handler for one activation with acknowledged admission
+        and completion, without additional function lifecycle checkpoints.
+        ``@step`` requires runtime durable activation support. Existing
+        ``@function`` handlers retain their function checkpoints.
+
         **Recommended Pattern** - Pass @function directly for clean, type-safe syntax:
         ```python
         result = await ctx.step(process_data, arg1, arg2, kwarg=value)
-        # Or use ctx.run() alias:
-        result = await ctx.run(process_data, arg1, arg2)
         ```
 
         Supports multiple calling patterns:
@@ -546,6 +550,19 @@ class WorkflowContext(Context):
             ```
         """
         import inspect
+
+        from .step import StepConfig, run_declared_step
+
+        declared = getattr(name_or_handler, "_agnt5_step_config", None)
+        if isinstance(declared, StepConfig):
+            step_args = (
+                args if func_or_awaitable is _STEP_ARGUMENT_UNSET else (func_or_awaitable, *args)
+            )
+            return await run_declared_step(self, declared, step_args, kwargs, key)
+
+        # Preserve the legacy calling forms, including their optional first arg.
+        if func_or_awaitable is _STEP_ARGUMENT_UNSET:
+            func_or_awaitable = None
 
         # Determine which calling pattern is being used
         if callable(name_or_handler) and hasattr(name_or_handler, "_agnt5_config"):
@@ -1206,49 +1223,21 @@ class WorkflowContext(Context):
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        """Deprecated compatibility alias for :meth:`step`.
+
+        .. deprecated::
+            Use ``ctx.step(handler, *args, **kwargs)`` instead. Arguments,
+            stable keys, retries, replay, and durability acknowledgments are
+            unchanged. ``run()`` will be removed in a future version.
         """
-        Simplified alias for ctx.step() that auto-generates step names.
+        import warnings
 
-        Matches Inngest/Restate API conventions for cleaner workflow code.
-        This is the recommended method for calling @function decorated functions
-        from workflows when you don't need custom step names.
-
-        Args:
-            handler: @function reference or string name
-            *args: Positional arguments to pass to the function
-            **kwargs: Keyword arguments to pass to the function
-
-        Returns:
-            Function result
-
-        Example (@function call with auto-naming):
-            ```python
-            @function
-            async def process_data(ctx: FunctionContext, data: list) -> dict:
-                return {"processed": [x * 2 for x in data]}
-
-            @workflow
-            async def my_workflow(ctx: WorkflowContext, data: list):
-                # Clean syntax, auto-named steps
-                result = await ctx.run(process_data, data)
-                return result
-            ```
-
-        Example (multiple steps):
-            ```python
-            @workflow
-            async def etl_workflow(ctx: WorkflowContext, dataset: str):
-                extracted = await ctx.run(extract_data, dataset)
-                transformed = await ctx.run(transform_data, extracted)
-                loaded = await ctx.run(load_data, transformed, "warehouse")
-                return loaded
-            ```
-
-        Note:
-            This is an alias for ``ctx.step(handler, *args, **kwargs)`` which
-            auto-generates step names from function names. Use ``ctx.step("custom_name", ...)``
-            when you need explicit control over step naming.
-        """
+        warnings.warn(
+            "ctx.run() is deprecated, use ctx.step() instead. "
+            "run() will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.step(handler, *args, **kwargs)
 
     async def _step_checkpoint(
