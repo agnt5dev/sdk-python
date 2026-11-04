@@ -1006,3 +1006,21 @@ async def test_sync_factory_returned_awaitable_can_unwind_after_thread_exit(reas
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_legacy_parents_keep_unnamed_sleep_keys_workflow_wide():
+    transport = JournalTransport()
+    context, entity, probe = workflow_context(transport)
+    probe.queue_event = lambda **event: probe.checkpoints.append(event)
+
+    @function(name='legacy_unnamed_sleep_compat')
+    async def parent(ctx):
+        await context.sleep(0.001)
+        return True
+
+    assert await context.step(parent, key='one')
+    assert await context.step(parent, key='two')
+    assert entity.has_completed_step('sleep:sleep_1')
+    assert entity.has_completed_step('sleep:sleep_3')
+    assert context._step_counter == 4
