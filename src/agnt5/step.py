@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 _declared_step_scope: ContextVar[bool] = ContextVar("agnt5_declared_step_scope", default=False)
 
 
+def in_declared_step() -> bool:
+    return _declared_step_scope.get()
+
+
 def assert_workflow_wait_boundary() -> None:
     if _declared_step_scope.get():
         from .exceptions import ConfigurationError
@@ -119,7 +123,7 @@ async def run_declared_step(
             ActivationErrorCode.DURABILITY_UNAVAILABLE,
             "@step requires runtime durable activation support",
         )
-    step_key = stable_step_key(config.name, context._next_step_ordinal(), key)
+    step_key = stable_step_key(config.name, context._next_step_ordinal(parent_scoped=True), key)
     saved_args, saved_kwargs = deepcopy((args, kwargs))
     memo_namespace = context.allocate_memo_child_scope("step", step_key)
     parent_cid = (
@@ -164,33 +168,37 @@ async def run_declared_step(
 
         token = set_current_context(step_context)
         scope_token = _declared_step_scope.set(True)
+        caller = asyncio.current_task()
+        cancelling = caller.cancelling() if caller is not None else 0
+        execution = asyncio.create_task(call())
         try:
-            if not inspect.iscoroutinefunction(config.handler) and not inspect.isasyncgenfunction(
+            if config.timeout_ms is not None:
+                return await asyncio.wait_for(
+                    asyncio.shield(execution), config.timeout_ms / 1000
+                )
+            return await asyncio.shield(execution)
+        except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
+            # Async handlers can unwind cancellation and run cleanup. Executor
+            # threads cannot be interrupted: keep both kinds tracked until exit.
+            # Neither may turn a timeout or cancellation into a late success.
+            if inspect.iscoroutinefunction(config.handler) or inspect.isasyncgenfunction(
                 config.handler
             ):
-                # Cancelling an await cannot stop an executor thread. Keep its
-                # activation in flight until it settles before failing/retrying.
-                execution = asyncio.create_task(call())
+                execution.cancel()
+            while not execution.done():
                 try:
-                    if config.timeout_ms is not None:
-                        return await asyncio.wait_for(
-                            asyncio.shield(execution), config.timeout_ms / 1000
-                        )
-                    return await asyncio.shield(execution)
-                except BaseException:
-                    while not execution.done():
-                        try:
-                            await asyncio.shield(execution)
-                        except asyncio.CancelledError:
-                            continue
-                        except Exception:
-                            break
-                    if not execution.cancelled():
-                        execution.exception()
-                    raise
-            if config.timeout_ms is not None:
-                return await asyncio.wait_for(call(), config.timeout_ms / 1000)
-            return await call()
+                    await asyncio.shield(execution)
+                except asyncio.CancelledError:
+                    if caller is not None and caller.cancelling() > cancelling:
+                        cancelled = True
+                except Exception:
+                    break
+            if not execution.cancelled():
+                execution.exception()
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
         finally:
             from .context import _current_context
 

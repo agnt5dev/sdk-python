@@ -865,3 +865,77 @@ async def test_sync_handler_timeout_waits_for_thread_before_failure_and_retry():
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['timeout', 'cancel'])
+async def test_async_cleanup_cannot_turn_timeout_or_cancellation_into_success(reason):
+    transport = JournalTransport()
+    context, entity, _ = workflow_context(transport)
+    entered = asyncio.Event()
+
+    @step(timeout_ms=10 if reason == 'timeout' else None)
+    async def suppress_cancel():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return 'late'
+
+    task = asyncio.create_task(context.step(suppress_cancel, key='guard'))
+    await entered.wait()
+    if reason == 'cancel':
+        task.cancel()
+    with pytest.raises(TimeoutError if reason == 'timeout' else asyncio.CancelledError):
+        await task
+    assert not entity.has_completed_step('step:suppress_cancel:guard')
+    assert [phase for phase, _ in transport.calls] == (['begin', 'fail'] if reason == 'timeout' else ['begin'])
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_sync_timeout_drain_prevents_retry():
+    import threading
+    transport = JournalTransport()
+    context, entity, _ = workflow_context(transport)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    @step(timeout_ms=5, retries={'max_attempts': 2, 'initial_interval_ms': 0})
+    def blocked():
+        calls.append(True)
+        entered.set()
+        release.wait(2)
+        return 7
+
+    task = asyncio.create_task(context.step(blocked, key='guard'))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.02)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert calls == [True]
+        assert [phase for phase, _ in transport.calls] == ['begin']
+        assert not entity.has_completed_step('step:blocked:guard')
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_legacy_only_nested_steps_preserve_their_existing_wire_identity():
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+
+    @function(name='legacy_ordinal_parent_compat')
+    async def parent(ctx):
+        return await context.step('legacy_child', lambda: 'child')
+
+    assert await context.step(parent) == 'child'
+    begins = [r for phase, r in transport.calls if phase == 'begin']
+    assert [(r.parent_activation_id, r.stable_key) for r in begins] == [
+        ('', 'step:legacy_ordinal_parent_compat:0'), ('', 'step:legacy_child:1')]

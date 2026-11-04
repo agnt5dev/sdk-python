@@ -381,12 +381,14 @@ async def run_durable_step(
         definition_version=definition_version,
         canonical_config=canonical_config,
     )
+    from .step import in_declared_step
+
     request = BeginActivationRequest(
         project_id=project_id,
         run_id=context.run_id,
         parent_activation_id=(
             context.activation.activation_id
-            if context.activation is not None
+            if context.activation is not None and (step_config is not None or in_declared_step())
             else metadata.get("parent_activation_id", "")
         ),
         kind=ActivationKind.STEP,

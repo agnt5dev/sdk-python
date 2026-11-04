@@ -168,10 +168,11 @@ class WorkflowContext(Context):
         self._workflow_name: Optional[str] = None
         self._is_replay: bool = False
 
-    def _next_step_ordinal(self) -> int:
+    def _next_step_ordinal(self, *, parent_scoped: bool = False) -> int:
         from .activation import next_activation_ordinal
+        from .step import in_declared_step
 
-        nested = next_activation_ordinal("workflow.step")
+        nested = next_activation_ordinal("workflow.step") if parent_scoped or in_declared_step() else None
         if nested is not None:
             return nested
         ordinal = self._step_counter
