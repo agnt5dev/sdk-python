@@ -149,7 +149,10 @@ async def run_declared_step(
         step_context._component_name = config.name
         step_context._activation_client = context._activation_client
 
+        executor_work: asyncio.Task[Any] | None = None
+
         async def call() -> Any:
+            nonlocal executor_work
             # Every retry must execute the input that admission hashed, even
             # when an earlier attempt mutated its arguments before failing.
             attempt_args, attempt_kwargs = deepcopy((saved_args, saved_kwargs))
@@ -159,7 +162,10 @@ async def run_declared_step(
             ):
                 result = config.handler(*call_args, **attempt_kwargs)
             else:
-                result = await asyncio.to_thread(config.handler, *call_args, **attempt_kwargs)
+                executor_work = asyncio.create_task(
+                    asyncio.to_thread(config.handler, *call_args, **attempt_kwargs)
+                )
+                result = await asyncio.shield(executor_work)
             if inspect.isasyncgen(result):
                 return await context._consume_streaming_result(result, config.name)
             if inspect.isawaitable(result):
@@ -179,23 +185,23 @@ async def run_declared_step(
             return await asyncio.shield(execution)
         except BaseException as error:
             cancelled = isinstance(error, asyncio.CancelledError)
-            # Async handlers can unwind cancellation and run cleanup. Executor
-            # threads cannot be interrupted: keep both kinds tracked until exit.
-            # Neither may turn a timeout or cancellation into a late success.
-            if inspect.iscoroutinefunction(config.handler) or inspect.isasyncgenfunction(
-                config.handler
-            ):
-                execution.cancel()
-            while not execution.done():
-                try:
-                    await asyncio.shield(execution)
-                except asyncio.CancelledError:
-                    if caller is not None and caller.cancelling() > cancelling:
-                        cancelled = True
-                except Exception:
-                    break
-            if not execution.cancelled():
-                execution.exception()
+            # A thread must exit before cancellation can reach an awaitable it
+            # returned. Drain the executor first, then cancel/unwind the async
+            # part; neither may turn the original failure into late success.
+            pending_tasks = ([executor_work] if executor_work is not None else []) + [execution]
+            for pending in pending_tasks:
+                if pending is execution:
+                    execution.cancel()
+                while not pending.done():
+                    try:
+                        await asyncio.shield(pending)
+                    except asyncio.CancelledError:
+                        if caller is not None and caller.cancelling() > cancelling:
+                            cancelled = True
+                    except Exception:
+                        break
+                if not pending.cancelled():
+                    pending.exception()
             if cancelled:
                 raise asyncio.CancelledError from None
             raise

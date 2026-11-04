@@ -972,3 +972,37 @@ async def test_declared_child_of_legacy_parent_does_not_shift_following_root_ide
     context, _, _ = workflow_context(transport)
     assert await run() == 8
     assert effects == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['timeout', 'cancel'])
+async def test_sync_factory_returned_awaitable_can_unwind_after_thread_exit(reason):
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    entered = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def pending():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    @step(timeout_ms=10 if reason == 'timeout' else None)
+    def factory():
+        return pending()
+
+    task = asyncio.create_task(context.step(factory))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        if reason == 'cancel':
+            task.cancel()
+        with pytest.raises(TimeoutError if reason == 'timeout' else asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), 1)
+        assert cleaned.is_set()
+        assert [phase for phase, _ in transport.calls] == (['begin', 'fail'] if reason == 'timeout' else ['begin'])
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
