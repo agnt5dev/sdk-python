@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -17,6 +18,20 @@ from .types import BackoffPolicy, RetryPolicy
 if TYPE_CHECKING:
     from .activation import ActivationClient
     from .workflow import WorkflowContext
+
+
+_declared_step_scope: ContextVar[bool] = ContextVar("agnt5_declared_step_scope", default=False)
+
+
+def in_declared_step() -> bool:
+    return _declared_step_scope.get()
+
+
+def assert_workflow_wait_boundary() -> None:
+    if _declared_step_scope.get():
+        from .exceptions import ConfigurationError
+
+        raise ConfigurationError("Managed waits must be called between workflow steps")
 
 
 class StepContext(Context):
@@ -108,8 +123,7 @@ async def run_declared_step(
             ActivationErrorCode.DURABILITY_UNAVAILABLE,
             "@step requires runtime durable activation support",
         )
-    step_key = stable_step_key(config.name, context._step_counter, key)
-    context._step_counter += 1
+    step_key = stable_step_key(config.name, context._next_step_ordinal(parent_scoped=True), key)
     saved_args, saved_kwargs = deepcopy((args, kwargs))
     memo_namespace = context.allocate_memo_child_scope("step", step_key)
     parent_cid = (
@@ -135,7 +149,11 @@ async def run_declared_step(
         step_context._component_name = config.name
         step_context._activation_client = context._activation_client
 
+        executor_work: asyncio.Task[Any] | None = None
+        aborted = False
+
         async def call() -> Any:
+            nonlocal executor_work
             # Every retry must execute the input that admission hashed, even
             # when an earlier attempt mutated its arguments before failing.
             attempt_args, attempt_kwargs = deepcopy((saved_args, saved_kwargs))
@@ -145,21 +163,86 @@ async def run_declared_step(
             ):
                 result = config.handler(*call_args, **attempt_kwargs)
             else:
-                result = await asyncio.to_thread(config.handler, *call_args, **attempt_kwargs)
+                executor_work = asyncio.create_task(
+                    asyncio.to_thread(config.handler, *call_args, **attempt_kwargs)
+                )
+                result = await asyncio.shield(executor_work)
+                expired = deadline is not None and asyncio.get_running_loop().time() >= deadline
+                cancelled = caller is not None and caller.cancelling() > cancelling
+                if aborted or expired or cancelled:
+                    # Do not start an async continuation returned after its
+                    # deadline or cancellation, even before its first await.
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    elif inspect.isasyncgen(result):
+                        await result.aclose()
+                    elif isinstance(result, asyncio.Future):
+                        result.cancel()
+                    if cancelled or aborted:
+                        raise asyncio.CancelledError
+                    raise TimeoutError
             if inspect.isasyncgen(result):
-                return await context._consume_streaming_result(result, config.name)
-            if inspect.isawaitable(result):
-                return await result
+                result = await context._consume_streaming_result(result, config.name)
+            elif inspect.isawaitable(result):
+                result = await result
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError
             return result
 
         token = set_current_context(step_context)
+        scope_token = _declared_step_scope.set(True)
+        caller = asyncio.current_task()
+        cancelling = caller.cancelling() if caller is not None else 0
+        deadline = (
+            asyncio.get_running_loop().time() + config.timeout_ms / 1000
+            if config.timeout_ms is not None else None
+        )
+        execution = asyncio.create_task(call())
         try:
             if config.timeout_ms is not None:
-                return await asyncio.wait_for(call(), config.timeout_ms / 1000)
-            return await call()
+                return await asyncio.wait_for(
+                    asyncio.shield(execution), config.timeout_ms / 1000
+                )
+            return await asyncio.shield(execution)
+        except BaseException as error:
+            aborted = True
+            cancelled = isinstance(error, asyncio.CancelledError) or (
+                caller is not None and caller.cancelling() > cancelling
+            )
+            # A thread must exit before cancellation can reach an awaitable it
+            # returned. Drain the executor first, then cancel/unwind the async
+            # part; neither may turn the original failure into late success.
+            async def settle(pending: asyncio.Future[Any]) -> None:
+                nonlocal cancelled
+                while not pending.done():
+                    try:
+                        await asyncio.shield(pending)
+                    except asyncio.CancelledError:
+                        if caller is not None and caller.cancelling() > cancelling:
+                            cancelled = True
+                    except Exception:
+                        break
+                if not pending.cancelled():
+                    pending.exception()
+
+            if executor_work is not None:
+                await settle(executor_work)
+                if not executor_work.cancelled() and executor_work.exception() is None:
+                    returned = executor_work.result()
+                    if isinstance(returned, asyncio.Future):
+                        # The factory may have returned an already-running
+                        # task. Its cancellation cleanup still owns effects.
+                        returned.cancel()
+                        await settle(returned)
+            execution.cancel()
+            await settle(execution)
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
         finally:
             from .context import _current_context
 
+            _declared_step_scope.reset(scope_token)
             _current_context.reset(token)
 
     return await run_durable_step(

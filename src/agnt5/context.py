@@ -368,7 +368,13 @@ class Context:
     def allocate_activation_key(self, kind: str, name: str) -> str:
         """Allocate a deterministic sequential key for compatibility call paths."""
 
+        from .activation import next_activation_ordinal
+        from .step import in_declared_step
+
         namespace = f"{kind}:{name}"
+        scoped_ordinal = next_activation_ordinal(namespace) if in_declared_step() else None
+        if scoped_ordinal is not None:
+            return f"{namespace}:{scoped_ordinal}"
         active = self.activation
         parent_id = (
             active.activation_id
