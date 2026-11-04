@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "agnt5"
-version = "0.14.9"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "docstring-parser" },

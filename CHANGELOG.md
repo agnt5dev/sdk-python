@@ -5,6 +5,18 @@ All notable changes to the AGNT5 Python SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.15.0] - 2026-11-04
+
+### Added
+
+- Add `@step` and `StepContext` for workflow-local durable operations. `ctx.step()` executes declared steps through acknowledged activation admission and completion, without extra function lifecycle checkpoints. Support retry/backoff policies, handler timeouts, and sync handlers. Direct invocation or execution without durable activation support fails explicitly. Existing `@function` execution remains compatible.
+
+### Deprecated
+
+- Deprecate `WorkflowContext.run()` in favor of `ctx.step()` with a caller-attributed `DeprecationWarning`. The alias continues to forward the same arguments and stable keys and preserves results, errors, replay, and durability acknowledgments. `Client.run()` is unchanged.
+
 ## [0.14.9] - 2026-11-03
 
 ### Fixed

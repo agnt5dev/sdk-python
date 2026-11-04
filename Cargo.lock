@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "agnt5-sdk-python"
-version = "0.14.9"
+version = "0.15.0"
 dependencies = [
  "agnt5-sdk-core",
  "anyhow",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.14.9"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "091e7a8e7d86e6feb87a27ce8e2cba29d49eff9507afeebefab7eeb2ca667fb4"
 dependencies = [
