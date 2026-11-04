@@ -7,7 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-11-04
+## [0.15.1] - 2026-11-04
+
+### Fixed
+
+- Preserve nested step identities across parent replay and retries, including captured outer contexts and mixed function/callback steps. Reject managed waits inside declared steps before allocating workflow wait positions.
+- Keep synchronous handlers in flight after timeout or cancellation until their executor thread settles, before recording failure or retrying. Late results do not become successful completions.
+
+## [0.15.0] - 2026-11-04 (unpublished)
 
 ### Added
 

@@ -217,6 +217,19 @@ _current_activation: ContextVar[ActivationExecution | None] = ContextVar(
     "agnt5_current_activation",
     default=None,
 )
+_activation_ordinals: ContextVar[dict[str, int] | None] = ContextVar(
+    "agnt5_activation_ordinals", default=None
+)
+
+
+def next_activation_ordinal(namespace: str) -> int | None:
+    """Allocate inside this parent attempt, even through a captured outer context."""
+    sequences = _activation_ordinals.get()
+    if sequences is None:
+        return None
+    ordinal = sequences.get(namespace, 0)
+    sequences[namespace] = ordinal + 1
+    return ordinal
 
 
 def current_activation() -> ActivationExecution | None:
@@ -253,7 +266,7 @@ def display_parent_scope(correlation_id: str) -> Iterator[None]:
         _display_parent_correlation_id.reset(token)
 
 
-def _set_current_activation(decision: ActivationDecision) -> tuple[Token, Token]:
+def _set_current_activation(decision: ActivationDecision) -> tuple[Token, Token, Token]:
     activation_token = _current_activation.set(
         ActivationExecution(
             activation_id=decision.activation_id,
@@ -264,11 +277,12 @@ def _set_current_activation(decision: ActivationDecision) -> tuple[Token, Token]
     # The admitted activation now owns the work nested inside it, so a tool's
     # own model call hangs off the tool rather than the iteration that
     # described this activation.
-    return activation_token, _display_parent_correlation_id.set("")
+    return activation_token, _display_parent_correlation_id.set(""), _activation_ordinals.set({})
 
 
-def _reset_current_activation(token: tuple[Token, Token]) -> None:
-    activation_token, display_parent_token = token
+def _reset_current_activation(token: tuple[Token, Token, Token]) -> None:
+    activation_token, display_parent_token, ordinals_token = token
+    _activation_ordinals.reset(ordinals_token)
     _display_parent_correlation_id.reset(display_parent_token)
     _current_activation.reset(activation_token)
 

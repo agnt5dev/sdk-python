@@ -386,7 +386,7 @@ async def run_durable_step(
         run_id=context.run_id,
         parent_activation_id=(
             context.activation.activation_id
-            if step_config is not None and context.activation is not None
+            if context.activation is not None
             else metadata.get("parent_activation_id", "")
         ),
         kind=ActivationKind.STEP,

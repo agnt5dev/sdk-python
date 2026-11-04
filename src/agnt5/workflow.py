@@ -168,6 +168,16 @@ class WorkflowContext(Context):
         self._workflow_name: Optional[str] = None
         self._is_replay: bool = False
 
+    def _next_step_ordinal(self) -> int:
+        from .activation import next_activation_ordinal
+
+        nested = next_activation_ordinal("workflow.step")
+        if nested is not None:
+            return nested
+        ordinal = self._step_counter
+        self._step_counter += 1
+        return ordinal
+
     def get_event_metadata(self) -> Dict[str, str]:
         """Get workflow-specific metadata for events.
 
@@ -642,9 +652,9 @@ class WorkflowContext(Context):
         # Generate unique step name for lifecycle display and a stable activation key.
         from .activation import stable_step_key
 
-        step_name = f"{handler_name}_{self._step_counter}"
-        step_key = stable_step_key(handler_name, self._step_counter, activation_key)
-        self._step_counter += 1
+        ordinal = self._next_step_ordinal()
+        step_name = f"{handler_name}_{ordinal}"
+        step_key = stable_step_key(handler_name, ordinal, activation_key)
 
         if self._activation_client is not None:
             from .workflow_activation import execute_function_callable, run_durable_step
@@ -1274,8 +1284,7 @@ class WorkflowContext(Context):
         from .activation import stable_step_key
 
         # Generate step key for platform memoization
-        step_key = stable_step_key(name, self._step_counter, activation_key)
-        self._step_counter += 1
+        step_key = stable_step_key(name, self._next_step_ordinal(), activation_key)
 
         if self._activation_client is not None:
             from .workflow_activation import execute_checkpoint_callable, run_durable_step
@@ -1514,9 +1523,13 @@ class WorkflowContext(Context):
         if seconds == 0:
             return
 
+        from .step import assert_workflow_wait_boundary
+
+        assert_workflow_wait_boundary()
+
         # Generate unique step name for this sleep
-        sleep_name = name or f"sleep_{self._step_counter}"
-        self._step_counter += 1
+        ordinal = self._next_step_ordinal()
+        sleep_name = name or f"sleep_{ordinal}"
         step_key = f"sleep:{sleep_name}"
 
         if (self._trace_metadata or {}).get("durable_suspension_v1") == "true":
@@ -1695,6 +1708,10 @@ class WorkflowContext(Context):
             ```
         """
         import warnings
+
+        from .step import assert_workflow_wait_boundary
+
+        assert_workflow_wait_boundary()
 
         # Normalize legacy type aliases
         if input_type == "choice":

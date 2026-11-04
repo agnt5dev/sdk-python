@@ -242,3 +242,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues according to
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+Declared steps keep managed waits such as `ctx.sleep()` and `ctx.wait_for_user()` at workflow boundaries. Call them between steps. For a timed-out synchronous handler, failure and retries wait until its executor thread exits; a timeout cannot stop a Python thread.

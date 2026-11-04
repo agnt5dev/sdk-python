@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -17,6 +18,16 @@ from .types import BackoffPolicy, RetryPolicy
 if TYPE_CHECKING:
     from .activation import ActivationClient
     from .workflow import WorkflowContext
+
+
+_declared_step_scope: ContextVar[bool] = ContextVar("agnt5_declared_step_scope", default=False)
+
+
+def assert_workflow_wait_boundary() -> None:
+    if _declared_step_scope.get():
+        from .exceptions import ConfigurationError
+
+        raise ConfigurationError("Managed waits must be called between workflow steps")
 
 
 class StepContext(Context):
@@ -108,8 +119,7 @@ async def run_declared_step(
             ActivationErrorCode.DURABILITY_UNAVAILABLE,
             "@step requires runtime durable activation support",
         )
-    step_key = stable_step_key(config.name, context._step_counter, key)
-    context._step_counter += 1
+    step_key = stable_step_key(config.name, context._next_step_ordinal(), key)
     saved_args, saved_kwargs = deepcopy((args, kwargs))
     memo_namespace = context.allocate_memo_child_scope("step", step_key)
     parent_cid = (
@@ -153,13 +163,38 @@ async def run_declared_step(
             return result
 
         token = set_current_context(step_context)
+        scope_token = _declared_step_scope.set(True)
         try:
+            if not inspect.iscoroutinefunction(config.handler) and not inspect.isasyncgenfunction(
+                config.handler
+            ):
+                # Cancelling an await cannot stop an executor thread. Keep its
+                # activation in flight until it settles before failing/retrying.
+                execution = asyncio.create_task(call())
+                try:
+                    if config.timeout_ms is not None:
+                        return await asyncio.wait_for(
+                            asyncio.shield(execution), config.timeout_ms / 1000
+                        )
+                    return await asyncio.shield(execution)
+                except BaseException:
+                    while not execution.done():
+                        try:
+                            await asyncio.shield(execution)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    if not execution.cancelled():
+                        execution.exception()
+                    raise
             if config.timeout_ms is not None:
                 return await asyncio.wait_for(call(), config.timeout_ms / 1000)
             return await call()
         finally:
             from .context import _current_context
 
+            _declared_step_scope.reset(scope_token)
             _current_context.reset(token)
 
     return await run_durable_step(

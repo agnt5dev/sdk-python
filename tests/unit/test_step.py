@@ -718,3 +718,150 @@ async def test_step_does_not_emit_run_deprecation():
         warnings.simplefilter("always", DeprecationWarning)
         assert await context.step(work) == 1
     assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('child_key', [None, 'explicit'])
+@pytest.mark.parametrize('finish_kind', ['declared', 'callback', 'function'])
+async def test_nested_replay_preserves_following_root_step_identity(child_key, finish_kind):
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    effects = []
+
+    @step
+    async def child():
+        return 'child'
+
+    @step
+    async def parent():
+        return await context.step(child, key=child_key)
+
+    async def finish_body():
+        effects.append('finish')
+        return 'done'
+
+    declared_finish = step(finish_body)
+    async def legacy_body(ctx):
+        return await finish_body()
+
+    legacy_finish = function(name=f'nested_replay_finish_{finish_kind}_{child_key}')(legacy_body)
+
+    async def run():
+        assert await context.step(parent) == 'child'
+        if finish_kind == 'declared':
+            return await context.step(declared_finish)
+        if finish_kind == 'callback':
+            return await context.step('finish', finish_body)
+        return await context.step(legacy_finish)
+
+    assert await run() == 'done'
+    original = [r.stable_key for phase, r in transport.calls if phase == 'begin' and not r.parent_activation_id]
+    context, _, _ = workflow_context(transport)
+    transport.calls.clear()
+    assert await run() == 'done'
+    replay = [r.stable_key for phase, r in transport.calls if phase == 'begin']
+    assert replay == original
+    assert effects == ['finish']
+
+
+@pytest.mark.asyncio
+async def test_parent_retry_replays_child_and_resets_captured_context_allocations():
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    child_effects = []
+    allocations = []
+
+    @step
+    async def child():
+        child_effects.append(True)
+        return 7
+
+    @step(retries={'max_attempts': 2, 'initial_interval_ms': 0})
+    async def parent(ctx):
+        allocations.append(context.allocate_activation_key('model', 'research'))
+        result = await context.step(child)
+        if ctx.attempt == 0:
+            raise ValueError('retry parent after child committed')
+        return result
+
+    assert await context.step(parent) == 7
+    assert child_effects == [True]
+    assert allocations == ['model:research:0', 'model:research:0']
+    children = [r for phase, r in transport.calls if phase == 'begin' and r.parent_activation_id]
+    assert children[0].stable_key == children[1].stable_key
+    assert children[0].parent_activation_id == children[1].parent_activation_id
+
+
+@pytest.mark.asyncio
+async def test_parallel_parents_keep_legacy_children_under_their_own_activation():
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+
+    @step
+    async def parent(value):
+        await asyncio.sleep(0)
+        return await context.step('child', lambda: value)
+
+    assert await asyncio.gather(context.step(parent, 1), context.step(parent, 2)) == [1, 2]
+    children = [r for phase, r in transport.calls if phase == 'begin' and r.parent_activation_id]
+    assert len(children) == 2
+    assert children[0].stable_key == children[1].stable_key == 'step:child:0'
+    assert children[0].parent_activation_id != children[1].parent_activation_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('wait', ['sleep', 'user'])
+async def test_declared_steps_reject_workflow_waits_before_mutating_positions(wait):
+    from agnt5.exceptions import ConfigurationError
+    transport = JournalTransport()
+    context, entity, _ = workflow_context(transport)
+
+    @step
+    async def parent():
+        if wait == 'sleep':
+            return await context.sleep(1)
+        return await context.wait_for_user('Approve?')
+
+    with pytest.raises(ConfigurationError, match='between workflow steps'):
+        await context.step(parent, key='parent')
+    assert entity._pause_index == 0
+    assert context._step_counter == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_timeout_waits_for_thread_before_failure_and_retry():
+    import threading
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    entered = threading.Event()
+    release = threading.Event()
+    active = 0
+    peak = 0
+    calls = 0
+
+    @step(timeout_ms=10, retries={'max_attempts': 2, 'initial_interval_ms': 0})
+    def slow():
+        nonlocal active, peak, calls
+        active += 1
+        calls += 1
+        peak = max(peak, active)
+        entered.set()
+        release.wait(2)
+        active -= 1
+        return 'late'
+
+    task = asyncio.create_task(context.step(slow))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.03)
+        assert not task.done()
+        assert calls == 1
+        assert [phase for phase, _ in transport.calls] == ['begin']
+        release.set()
+        # The second attempt can now succeed; the timed-out first result is discarded.
+        assert await task == 'late'
+        assert calls == 2 and peak == 1 and active == 0
+        assert [phase for phase, _ in transport.calls] == ['begin', 'fail', 'begin', 'complete']
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
