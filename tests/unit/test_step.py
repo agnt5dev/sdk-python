@@ -939,3 +939,36 @@ async def test_legacy_only_nested_steps_preserve_their_existing_wire_identity():
     begins = [r for phase, r in transport.calls if phase == 'begin']
     assert [(r.parent_activation_id, r.stable_key) for r in begins] == [
         ('', 'step:legacy_ordinal_parent_compat:0'), ('', 'step:legacy_child:1')]
+
+
+@pytest.mark.asyncio
+async def test_declared_child_of_legacy_parent_does_not_shift_following_root_identity():
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    effects = []
+
+    @step
+    async def child():
+        return 7
+
+    @function(name='legacy_parent_declared_child_compat')
+    async def parent(ctx):
+        return await context.step(child)
+
+    @step
+    async def finish():
+        effects.append(True)
+        return 8
+
+    async def run():
+        assert await context.step(parent) == 7
+        return await context.step(finish)
+
+    assert await run() == 8
+    begins = [r for phase, r in transport.calls if phase == 'begin']
+    assert begins[1].parent_activation_id == activation_id(
+        begins[0].project_id, begins[0].run_id, '', ActivationKind.STEP, begins[0].stable_key)
+    assert begins[2].stable_key == 'step:finish:1'
+    context, _, _ = workflow_context(transport)
+    assert await run() == 8
+    assert effects == [True]
