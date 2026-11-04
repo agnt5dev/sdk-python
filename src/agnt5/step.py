@@ -150,6 +150,7 @@ async def run_declared_step(
         step_context._activation_client = context._activation_client
 
         executor_work: asyncio.Task[Any] | None = None
+        aborted = False
 
         async def call() -> Any:
             nonlocal executor_work
@@ -166,6 +167,20 @@ async def run_declared_step(
                     asyncio.to_thread(config.handler, *call_args, **attempt_kwargs)
                 )
                 result = await asyncio.shield(executor_work)
+                expired = deadline is not None and asyncio.get_running_loop().time() >= deadline
+                cancelled = caller is not None and caller.cancelling() > cancelling
+                if aborted or expired or cancelled:
+                    # Do not start an async continuation returned after its
+                    # deadline or cancellation, even before its first await.
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    elif inspect.isasyncgen(result):
+                        await result.aclose()
+                    elif isinstance(result, asyncio.Future):
+                        result.cancel()
+                    if cancelled or aborted:
+                        raise asyncio.CancelledError
+                    raise TimeoutError
             if inspect.isasyncgen(result):
                 return await context._consume_streaming_result(result, config.name)
             if inspect.isawaitable(result):
@@ -176,6 +191,10 @@ async def run_declared_step(
         scope_token = _declared_step_scope.set(True)
         caller = asyncio.current_task()
         cancelling = caller.cancelling() if caller is not None else 0
+        deadline = (
+            asyncio.get_running_loop().time() + config.timeout_ms / 1000
+            if config.timeout_ms is not None else None
+        )
         execution = asyncio.create_task(call())
         try:
             if config.timeout_ms is not None:
@@ -184,7 +203,10 @@ async def run_declared_step(
                 )
             return await asyncio.shield(execution)
         except BaseException as error:
-            cancelled = isinstance(error, asyncio.CancelledError)
+            aborted = True
+            cancelled = isinstance(error, asyncio.CancelledError) or (
+                caller is not None and caller.cancelling() > cancelling
+            )
             # A thread must exit before cancellation can reach an awaitable it
             # returned. Drain the executor first, then cancel/unwind the async
             # part; neither may turn the original failure into late success.

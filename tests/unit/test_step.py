@@ -1024,3 +1024,53 @@ async def test_legacy_parents_keep_unnamed_sleep_keys_workflow_wide():
     assert entity.has_completed_step('sleep:sleep_1')
     assert entity.has_completed_step('sleep:sleep_3')
     assert context._step_counter == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['timeout', 'cancel'])
+async def test_late_sync_factory_never_starts_returned_coroutine(reason):
+    import threading
+    transport = JournalTransport()
+    context, _, _ = workflow_context(transport)
+    entered = threading.Event()
+    release = threading.Event()
+    effects = []
+    coroutines = []
+    calls = 0
+
+    @step(timeout_ms=10, retries={'max_attempts': 2, 'initial_interval_ms': 0})
+    def factory():
+        nonlocal calls
+        calls += 1
+        attempt = calls
+        entered.set()
+        release.wait(2)
+
+        async def continuation():
+            effects.append(attempt)
+            await asyncio.sleep(0)
+            return attempt
+
+        result = continuation()
+        coroutines.append(result)
+        return result
+
+    task = asyncio.create_task(context.step(factory))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.03)
+        if reason == 'cancel':
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        if reason == 'cancel':
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert effects == [] and calls == 1
+        else:
+            assert await task == 2
+            assert effects == [2] and calls == 2
+        assert coroutines[0].cr_frame is None
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
