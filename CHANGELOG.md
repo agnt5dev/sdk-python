@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Report each pause once. On every resume, `wait_for_user` emitted `workflow.resumed` and `workflow.step.completed` again for every earlier pause, so after four answers the first pause had four completion events and run timelines showed duplicates. Only the pause the resume answered emits them now; earlier pauses replay their answers silently.
+
 ## [0.15.1] - 2026-11-04
 
 ### Fixed
