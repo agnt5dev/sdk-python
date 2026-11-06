@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-05
+
+### Fixed
+
+- Filter internal SDK DEBUG diagnostics before creating telemetry, reducing per-step logging work. Explicit debug configuration remains supported, and application log forwarding keeps its existing behavior.
+- Build native workers on sdk-core 0.3.12 so ordinary SSE-only log delivery cannot delay activation or checkpoint persistence. Explicit streaming requests retain their ordered event prefix, and durable writes still require their acknowledgments.
+
 ## [0.15.1] - 2026-11-04
 
 ### Fixed
