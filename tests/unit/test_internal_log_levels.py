@@ -20,7 +20,7 @@ def forwarded(monkeypatch):
     monkeypatch.setattr(telemetry, "_default_log_level", None)
     monkeypatch.setattr(telemetry.OpenTelemetryHandler, "emit", lambda _self, record: calls.append(record))
     yield calls
-    for name in ("agnt5.test.internal", "agnt5.test.execution"):
+    for name in ("agnt5.test.internal", "agnt5.test.execution", "customer.application"):
         logger = logging.getLogger(name)
         logger.handlers.clear()
         logger.setLevel(logging.NOTSET)
@@ -53,6 +53,17 @@ def test_application_context_logging_keeps_existing_telemetry_behavior(forwarded
     telemetry.setup_context_logger(logger, logging.INFO)
     logger.debug("application diagnostic")
     assert [record.getMessage() for record in forwarded] == ["application diagnostic"]
+
+
+def test_public_application_logger_keeps_debug_telemetry(forwarded):
+    logger = telemetry.get_logger("customer.application")
+    logger.debug("application diagnostic")
+    telemetry.set_log_level("WARNING")
+    logger.debug("application diagnostic after SDK configuration")
+    assert [record.getMessage() for record in forwarded] == [
+        "application diagnostic",
+        "application diagnostic after SDK configuration",
+    ]
 
 
 def test_log_configuration_updates_previously_imported_modules(forwarded):

@@ -444,4 +444,9 @@ def get_logger(name: str) -> logging.Logger:
         logger = get_logger(__name__)
         logger.info("Starting worker...")
     """
-    return setup_module_logger(name)
+    logger = logging.getLogger(name)
+    # Application DEBUG telemetry stays enabled even when the console hides it.
+    # Source-level diagnostic filtering is reserved for internal module loggers.
+    console_level = logging.DEBUG if _is_debug_enabled() else logging.INFO
+    setup_context_logger(logger, console_level)
+    return logger
