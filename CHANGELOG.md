@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `wait_for_user` decodes typed text inside a multiselect answer: an entry `"__custom__:<text>"` in the JSON array becomes its text, so ticked options and typed text arrive together (`'["ai","__custom__:Rust"]'` returns `'["ai","Rust"]'`). Answers without such an entry are returned unchanged.
+
 ## [0.15.2] - 2026-11-05
 
 ### Fixed
