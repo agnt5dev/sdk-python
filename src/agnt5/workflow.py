@@ -2124,7 +2124,7 @@ class WorkflowEntity:
             }
         )
         self._completed_steps[step_name] = result
-        logger.debug(f"Recorded step completion: {step_name}")
+        logger.debug("Recorded step completion: %s", step_name)
 
     def get_completed_step(self, step_name: str) -> Optional[Any]:
         """

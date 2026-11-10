@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterator, MutableMapping, Optional, Union
 
 # Module-level default log level (set via set_log_level())
 _default_log_level: Optional[int] = None
+_module_loggers: weakref.WeakKeyDictionary[logging.Logger, Optional[int]] = weakref.WeakKeyDictionary()
 _telemetry_initialized = False
 _EXECUTION_LOGGER_NAME = "agnt5.execution"
 
@@ -306,6 +307,13 @@ def set_log_level(level: Union[int, str]) -> None:
         _default_log_level = level_map[level_upper]
     else:
         _default_log_level = level
+    # SDK modules are commonly imported before the application configures logging.
+    for logger, override in list(_module_loggers.items()):
+        effective_level = _effective_context_log_level(override)
+        logger.setLevel(effective_level)
+        for handler in logger.handlers:
+            if not isinstance(handler, OpenTelemetryHandler):
+                handler.setLevel(effective_level)
 
 
 def _span_attribute_value_max_chars() -> int:
@@ -407,10 +415,12 @@ def get_execution_logger(log_level: Optional[int] = None) -> logging.Logger:
 def setup_module_logger(module_name: str, log_level: Optional[int] = None) -> logging.Logger:
     """Create and configure a logger for a module."""
     logger = logging.getLogger(module_name)
-    # Default to INFO for module loggers, but respect AGNT5_DEBUG
-    debug_enabled = _is_debug_enabled()
-    default_level = logging.DEBUG if debug_enabled else logging.INFO
-    setup_context_logger(logger, log_level or default_level)
+    effective_level = _effective_context_log_level(log_level)
+    setup_context_logger(logger, effective_level)
+    # Internal diagnostics must be filtered before the telemetry handler creates
+    # and queues a record, rather than only hiding it from the console.
+    logger.setLevel(effective_level)
+    _module_loggers[logger] = log_level
     return logger
 
 
@@ -434,4 +444,9 @@ def get_logger(name: str) -> logging.Logger:
         logger = get_logger(__name__)
         logger.info("Starting worker...")
     """
-    return setup_module_logger(name)
+    logger = logging.getLogger(name)
+    # Application DEBUG telemetry stays enabled even when the console hides it.
+    # Source-level diagnostic filtering is reserved for internal module loggers.
+    console_level = logging.DEBUG if _is_debug_enabled() else logging.INFO
+    setup_context_logger(logger, console_level)
+    return logger
