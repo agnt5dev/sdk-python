@@ -1200,7 +1200,52 @@ async def test_replayed_earlier_pause_does_not_take_the_resumed_pause_ids():
         for e in emitted
         if getattr(e, "output_data", None) and "result" in e.output_data
     ]
-    assert completed[0][0] == "wait_for_user_0"
-    assert completed[0][1] != "cid-pause-1"
-    assert completed[0][2] == "intake"
-    assert completed[1] == ("wait_for_user_1", "cid-pause-1", "approve")
+    assert completed == [("wait_for_user_1", "cid-pause-1", "approve")]
+
+
+@pytest.mark.asyncio
+async def test_resume_reports_only_the_pause_it_answered():
+    """Earlier pauses replay their answers without emitting events again."""
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    for index, answer in enumerate(["intake", "__skipped__", "approve", "2"]):
+        workflow_entity._completed_steps[f"user_response:hitl-run:{index}"] = answer
+    workflow_entity._resumed_pause_index = 3
+    workflow_entity._resumed_step_name = "wait_for_user_3"
+    workflow_entity._resumed_step_correlation_id = "cid-pause-3"
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+    emitted = []
+
+    async def capture(event):
+        emitted.append(event)
+
+    ctx.emit_async = capture
+
+    answers = [await ctx.wait_for_user(f"Question {i}?") for i in range(4)]
+
+    assert answers == ["intake", None, "approve", "2"]
+    resumed = [e for e in emitted if type(e).__name__ == "Resumed"]
+    completed = [e for e in emitted if getattr(e, "output_data", None)]
+    assert len(resumed) == 1
+    assert resumed[0].resume_data == {"response": "2", "pause_index": 3}
+    assert [(e.name, e.correlation_id) for e in completed] == [("wait_for_user_3", "cid-pause-3")]
+
+
+@pytest.mark.asyncio
+async def test_replay_without_an_answer_emits_no_pause_events():
+    """A resume that answered no pause, such as a timer firing, replays silently."""
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = "intake"
+    workflow_entity._completed_steps["user_response:hitl-run:1"] = "approve"
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+    emitted = []
+
+    async def capture(event):
+        emitted.append(event)
+
+    ctx.emit_async = capture
+
+    assert await ctx.wait_for_user("Intake?") == "intake"
+    assert await ctx.wait_for_user("Publish?") == "approve"
+    assert emitted == []
