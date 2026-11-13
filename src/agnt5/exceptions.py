@@ -16,6 +16,22 @@ class ConfigurationError(AGNT5Error):
     pass
 
 
+class ToolCannotPauseError(ConfigurationError):
+    """A tool that pauses the run for a person was called where the run can't pause.
+
+    Raised when a ``confirmation=True`` tool, ``AskUserTool`` or
+    ``RequestApprovalTool`` is called inside a workflow step, a delegated
+    agent, or outside any workflow. It has its own type so an agent can tell
+    it from a tool's ordinary errors: those go back to the model, but this one
+    fails the run, because the model would otherwise carry on as if the person
+    had been asked.
+    """
+
+    def __init__(self, message: str, *, tool_name: str = "") -> None:
+        super().__init__(message)
+        self.tool_name = tool_name
+
+
 class AutoDiscoveryError(ConfigurationError):
     """Auto-registration could not import every module under the source paths.
 

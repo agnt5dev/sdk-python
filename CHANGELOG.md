@@ -11,8 +11,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Breaking:** remove `WorkflowContext.task()` and `WorkflowContext.run()`. Both were aliases for `ctx.step()`; replace either with `ctx.step(...)` using the same arguments and stable keys. Calling them now raises `AttributeError`. `Client.run()` is unchanged.
 
+### Changed
+
+- Running a `confirmation=True` tool directly, for example with `agnt5 run <tool> --type tool`, now pauses the run for approval and runs the tool once approved, as the TypeScript SDK does. It used to fail with `ConfigurationError`. A rejected call completes without running the tool.
+
 ### Fixed
 
+- Fail the run when an agent calls a tool that has to pause for a person where the run cannot pause. A `confirmation=True` tool, `AskUserTool` or `RequestApprovalTool` called by an agent inside `ctx.step(...)`, a delegated agent or a plain function used to hand its configuration error to the model as an ordinary tool result, so the model carried on and the run completed with the approval or question silently skipped. The agent now raises `ToolCannotPauseError`, a `ConfigurationError` that names the tool and says to run the agent from the workflow body. A tool's own errors still go back to the model as before.
 - Report each pause once. On every resume, `wait_for_user` emitted `workflow.resumed` and `workflow.step.completed` again for every earlier pause, so after four answers the first pause had four completion events and run timelines showed duplicates. Only the pause the resume answered emits them now; earlier pauses replay their answers silently.
 
 ## [0.15.2] - 2026-11-05

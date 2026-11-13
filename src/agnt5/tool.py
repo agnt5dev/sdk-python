@@ -36,7 +36,7 @@ from .activation import (
     current_activation,
 )
 from .context import Context, set_current_context
-from .exceptions import ConfigurationError
+from .exceptions import ConfigurationError, ToolCannotPauseError
 
 if TYPE_CHECKING:
     from .workflow import WorkflowContext
@@ -127,7 +127,7 @@ def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
     return None
 
 
-def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
+def _require_pause_boundary(workflow_ctx: Any, what: str, tool_name: str) -> None:
     """Refuse a tool's pause where a resumed run can't replay it correctly.
 
     Inside a durable activation, such as a delegated agent, a pause would
@@ -136,11 +136,15 @@ def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
     asking again, so the pause count falls behind and later pauses read
     earlier answers.
     """
-    if current_activation() is not None or workflow_ctx._step_event_stack:
-        raise ConfigurationError(
+    from .step import in_declared_step
+
+    if current_activation() is not None or workflow_ctx._step_event_stack or in_declared_step():
+        raise ToolCannotPauseError(
             f"{what} pauses the run for a person, but it was called inside a "
-            "delegated agent or a step, which cannot pause yet. Give the tool to "
-            "the top-level agent, or call it between workflow steps."
+            "delegated agent or a step, which cannot pause yet. Run the agent "
+            "that uses this tool, or call the tool, from the workflow body "
+            "between steps, and give the tool to the top-level agent.",
+            tool_name=tool_name,
         )
 
 
@@ -421,13 +425,18 @@ class Tool:
         """
         workflow_ctx = _find_workflow_context(ctx)
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 f"Tool '{self.name}' requires confirmation, which pauses the run "
                 "for a person's approval. Call it from a workflow, or remove "
-                "confirmation=True."
+                "confirmation=True.",
+                tool_name=self.name,
             )
         # Refuse rather than run the tool without approval.
-        _require_pause_boundary(workflow_ctx, f"Tool '{self.name}' requires confirmation, which")
+        _require_pause_boundary(
+            workflow_ctx,
+            f"Tool '{self.name}' requires confirmation, which",
+            self.name,
+        )
 
         question = f"Allow `{self.name}` to run?"
         if arguments:
@@ -950,11 +959,12 @@ class AskUserTool(Tool):
                 workflow_ctx = current  # type: ignore
 
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 "AskUserTool requires WorkflowContext. "
-                "Either pass context to __init__ or ensure tool is used within a workflow."
+                "Either pass context to __init__ or ensure tool is used within a workflow.",
+                tool_name=self.name,
             )
-        _require_pause_boundary(workflow_ctx, "AskUserTool")
+        _require_pause_boundary(workflow_ctx, "AskUserTool", self.name)
 
         return await workflow_ctx.wait_for_user(question, input_type="text")
 
@@ -1045,11 +1055,12 @@ class RequestApprovalTool(Tool):
                 workflow_ctx = current  # type: ignore
 
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 "RequestApprovalTool requires WorkflowContext. "
-                "Either pass context to __init__ or ensure tool is used within a workflow."
+                "Either pass context to __init__ or ensure tool is used within a workflow.",
+                tool_name=self.name,
             )
-        _require_pause_boundary(workflow_ctx, "RequestApprovalTool")
+        _require_pause_boundary(workflow_ctx, "RequestApprovalTool", self.name)
 
         question = f"Action: {action}"
         if details:

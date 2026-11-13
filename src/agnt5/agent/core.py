@@ -38,7 +38,7 @@ from ..callbacks import (
 )
 from ..context import Context, get_current_context, set_current_context
 from ..events import Event
-from ..exceptions import WaitingForUserInputException
+from ..exceptions import ToolCannotPauseError, WaitingForUserInputException
 from ..lm import (
     BuiltInTool,
     GenerateRequest,
@@ -1475,6 +1475,12 @@ class Agent:
                                     },
                                 ) from e
 
+                            except ToolCannotPauseError:
+                                # The tool had to pause for a person and could not. Fail the
+                                # run: handed to the model as a tool error, the model carries
+                                # on as if the person had been asked.
+                                raise
+
                             except Exception as e:
                                 if getattr(e, "_agnt5_checkpoint_failure", False):
                                     raise
@@ -2364,6 +2370,12 @@ class Agent:
                                         },
                                     ) from e
 
+                                except ToolCannotPauseError:
+                                    # The tool had to pause for a person and could not. Fail the
+                                    # run: handed to the model as a tool error, the model carries
+                                    # on as if the person had been asked.
+                                    raise
+
                                 except Exception as e:
                                     if getattr(e, "_agnt5_checkpoint_failure", False):
                                         raise
@@ -2761,6 +2773,12 @@ class Agent:
                                 "model_config": self._model_config_snapshot(),
                             },
                         ) from e
+
+                    except ToolCannotPauseError:
+                        # The tool had to pause for a person and could not. Fail the
+                        # run: handed to the model as a tool error, the model carries
+                        # on as if the person had been asked.
+                        raise
 
                     except Exception as e:
                         if getattr(e, "_agnt5_checkpoint_failure", False):
