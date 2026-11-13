@@ -56,7 +56,7 @@ from ..lm.events import (
     LMContentBlockStarted,
 )
 from ..lm.model_caps import rejects_sampling_params
-from ..tool import Tool, ToolRegistry
+from ..tool import Tool, ToolRegistry, require_agent_can_pause
 from .agents_md import AgentsMdSource, load_agents_md, render_guidance
 from .context import AgentContext
 from .events import (
@@ -967,6 +967,10 @@ class Agent:
         # Create or adapt context
         if context is None:
             context = get_current_context()
+
+        # Before the first model call, so a tool that can never pause here
+        # fails every run the same way, with nothing spent and nothing done.
+        require_agent_can_pause(self.name, self.tools.values(), context)
 
         # Capture workflow context for checkpoints
         from ..workflow import WorkflowContext
@@ -1996,6 +2000,10 @@ class Agent:
         if context is None:
             # Try to get context from task-local storage (set by workflow/function decorator)
             context = get_current_context()
+
+        # Before the first model call, so a tool that can never pause here
+        # fails every run the same way, with nothing spent and nothing done.
+        require_agent_can_pause(self.name, self.tools.values(), context)
 
         # IMPORTANT: Capture workflow context NOW before we replace it with AgentContext
         # This allows LM calls inside the agent to emit workflow checkpoints

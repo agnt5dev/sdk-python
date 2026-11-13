@@ -45,6 +45,8 @@ async def call_workflow_function(
                 "WaitingForUserInputException",
                 "DurableSleepSuspension",
                 "SuspensionRequestedException",
+                # Fails the same way on every attempt.
+                "ToolCannotPauseError",
             }:
                 raise
             await asyncio.sleep(

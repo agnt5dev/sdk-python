@@ -1,8 +1,10 @@
-"""A tool that must pause for a person, called where the run cannot pause.
+"""A tool that must pause for a person, held by an agent where the run cannot pause.
 
 An agent hands a tool's ordinary errors back to the model. A tool that could
 not pause is different: if the model saw that as a tool result it would carry
-on as if the person had been asked, so the agent fails the run instead.
+on as if the person had been asked, so the agent fails the run instead. It
+fails before the first model call, because where the agent runs decides
+whether it can pause, not which tool the model happens to pick.
 """
 
 from types import SimpleNamespace
@@ -96,8 +98,8 @@ async def test_agent_in_a_step_fails_when_its_confirmation_tool_cannot_pause():
     assert raised.value.tool_name == "record_publication"
     assert "from the workflow body" in str(raised.value)
     assert published == []
-    # The model was asked once and never shown the failure as a tool result.
-    assert len(model.requests) == 1
+    # Refused before the model was asked anything.
+    assert model.requests == []
 
 
 @pytest.mark.asyncio
@@ -114,7 +116,47 @@ async def test_streaming_agent_in_a_step_fails_when_its_confirmation_tool_cannot
         await ctx.step("publish", publish)
 
     assert published == []
-    assert len(model.requests) == 1
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_agent_in_a_step_fails_even_when_the_model_would_not_call_the_tool():
+    """Otherwise the mistake passes every run in which the model skips the tool."""
+    probe, _published = _record_publication()
+
+    @tool
+    async def lookup(ctx: Context) -> str:
+        """Look something up."""
+        return "found"
+
+    model = ToolCallingModel("lookup")
+    agent = _publisher(model, [lookup, probe])
+    ctx = _workflow_ctx()
+
+    async def research():
+        return (await agent.run("Look it up", context=ctx)).output
+
+    with pytest.raises(ToolCannotPauseError, match="record_publication"):
+        await ctx.step("research", research)
+
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_agent_without_a_pause_tool_still_runs_in_a_step():
+    @tool
+    async def lookup(ctx: Context) -> str:
+        """Look something up."""
+        return "found"
+
+    model = ToolCallingModel("lookup")
+    agent = _publisher(model, [lookup])
+    ctx = _workflow_ctx()
+
+    async def research():
+        return (await agent.run("Look it up", context=ctx)).output
+
+    assert await ctx.step("research", research) == "done"
 
 
 @pytest.mark.asyncio
@@ -135,12 +177,12 @@ async def test_agent_in_a_step_fails_when_a_built_in_pause_tool_cannot_pause(
     async def intake():
         return (await agent.run("Start", context=ctx)).output
 
-    with pytest.raises(ToolCannotPauseError, match=tool_class.__name__) as raised:
+    with pytest.raises(ToolCannotPauseError, match=tool_name) as raised:
         await ctx.step("intake", intake)
 
     assert raised.value.tool_name == tool_name
     assert "from the workflow body" in str(raised.value)
-    assert len(model.requests) == 1
+    assert model.requests == []
 
 
 @pytest.mark.asyncio
@@ -150,10 +192,33 @@ async def test_agent_outside_a_workflow_fails_when_its_confirmation_tool_cannot_
     agent = _publisher(model, [probe])
     plain_ctx = Context(run_id="plain-run", correlation_id="c", parent_correlation_id="p")
 
-    with pytest.raises(ToolCannotPauseError, match="Call it from a workflow"):
+    with pytest.raises(ToolCannotPauseError, match="outside a workflow"):
         await agent.run("Publish it", context=plain_ctx)
 
     assert published == []
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_agent_fails_when_a_tool_finds_it_cannot_pause_only_once_called(streaming):
+    """The check at the start can't see every case, so the loop still refuses."""
+
+    @tool
+    async def escalate(ctx: Context) -> str:
+        """Escalate to a person."""
+        raise ToolCannotPauseError("escalate cannot pause here", tool_name="escalate")
+
+    model = ToolCallingModel("escalate")
+    agent = _publisher(model, [escalate])
+
+    with pytest.raises(ToolCannotPauseError, match="escalate cannot pause here"):
+        if streaming:
+            [event async for event in agent.stream("Escalate", context=_workflow_ctx())]
+        else:
+            await agent.run("Escalate", context=_workflow_ctx())
+
+    # The model was asked once and never shown the failure as a tool result.
     assert len(model.requests) == 1
 
 
@@ -225,6 +290,27 @@ async def test_agent_in_the_workflow_body_still_pauses_for_ask_user():
         await agent.run("Start", context=ctx)
 
     assert raised.value.question == "Which focus?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_class,tool_name,arguments,input_type",
+    [
+        (AskUserTool, "ask_user", '{"question": "Which focus?"}', "text"),
+        (RequestApprovalTool, "request_approval", '{"action": "Close the ticket"}', "approval"),
+    ],
+)
+async def test_built_in_pause_tool_made_without_a_context_pauses_in_the_workflow_body(
+    tool_class, tool_name, arguments, input_type
+):
+    """It finds the workflow running the agent, as a confirmation tool does."""
+    model = ToolCallingModel(tool_name, arguments)
+    agent = _publisher(model, [tool_class()])
+
+    with pytest.raises(WaitingForUserInputException) as raised:
+        await agent.run("Start", context=_workflow_ctx())
+
+    assert raised.value.input_type == input_type
 
 
 # A confirmation tool run directly
