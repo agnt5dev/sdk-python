@@ -13,15 +13,24 @@ The **Context** (`ctx`) is the execution environment provided to all AGNT5 compo
 
 ## Core Orchestration APIs
 
-### `ctx.task()` - Execute a Function
+### `ctx.step()` - Run a Step
 
-Call a function and wait for the result (workflows only):
+`ctx.step()` is the one way to run durable work from a workflow. Pass it a function to call it and wait for the result:
 
 ```python
-result = await ctx.task(
-    service_name="analytics",
-    handler_name="process_data",
+result = await ctx.step(
+    process_data,
     input={"dataset": "users"}
+)
+```
+
+Or give it a name and any operation to checkpoint that operation:
+
+```python
+# If function crashes, won't re-execute this step
+data = await ctx.step(
+    "load_data",
+    lambda: expensive_database_query()
 )
 ```
 
@@ -32,9 +41,9 @@ Run multiple tasks in parallel (workflows only):
 ```python
 # Returns list of results in order
 results = await ctx.parallel(
-    ctx.task("service1", "handler1"),
-    ctx.task("service2", "handler2"),
-    ctx.task("service3", "handler3")
+    ctx.step(handler1),
+    ctx.step(handler2),
+    ctx.step(handler3)
 )
 ```
 
@@ -44,8 +53,8 @@ Like `parallel()` but with dict keys (workflows only):
 
 ```python
 results = await ctx.gather(
-    db=ctx.task("analytics", "analyze_db"),
-    api=ctx.task("analytics", "analyze_api")
+    db=ctx.step(analyze_db),
+    api=ctx.step(analyze_api)
 )
 # Access: results["db"], results["api"]
 ```
@@ -58,18 +67,6 @@ Spawn a child function without waiting:
 handle = ctx.spawn(my_function, arg1, arg2, key="unique-id")
 # Continue doing other work...
 result = await handle.result()
-```
-
-### `ctx.step()` - Checkpointing
-
-Checkpoint expensive operations (functions only):
-
-```python
-# If function crashes, won't re-execute this step
-data = await ctx.step(
-    "load_data",
-    lambda: expensive_database_query()
-)
 ```
 
 ## State Management (Entities)
@@ -415,8 +412,8 @@ the workflow's caller.
 
 ```python
 results = await ctx.gather(
-    task1=ctx.task("svc", "task1"),
-    task2=ctx.task("svc", "task2")
+    task1=ctx.step(task1),
+    task2=ctx.step(task2)
 )
 
 if results["task1"] and results["task2"]:

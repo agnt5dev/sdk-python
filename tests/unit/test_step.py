@@ -158,8 +158,7 @@ async def test_step_has_only_begin_and_complete_acks(mode):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["begin", "complete"])
-@pytest.mark.parametrize("entrypoint", ["step", "run"])
-async def test_step_obeys_ack_and_dependency_boundaries(boundary, entrypoint):
+async def test_step_obeys_ack_and_dependency_boundaries(boundary):
     transport = JournalTransport()
     transport.block = (boundary, "run-1")
     context, entity, probe = workflow_context(transport)
@@ -177,9 +176,6 @@ async def test_step_obeys_ack_and_dependency_boundaries(boundary, entrypoint):
 
     async def workflow_body():
         async def invoke(handler, *args, key):
-            if entrypoint == "run":
-                with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)"):
-                    return await context.run(handler, *args, key=key)
             return await context.step(handler, *args, key=key)
 
         value = await invoke(first, key="first")
@@ -416,11 +412,10 @@ async def test_step_arguments_sync_context_and_run_alias():
         assert ctx.activation is not None
         return {"value": value, "suffix": suffix}
 
-    with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)"):
-        assert await context.run(work, None, suffix="ok", key="sync") == {
-            "value": None,
-            "suffix": "ok",
-        }
+    assert await context.step(work, None, suffix="ok", key="sync") == {
+        "value": None,
+        "suffix": "ok",
+    }
 
 
 @pytest.mark.asyncio
@@ -458,8 +453,7 @@ async def test_step_requires_explicit_durable_execution():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["step", "run"])
-async def test_legacy_function_retains_its_function_checkpoints(entrypoint):
+async def test_legacy_function_retains_its_function_checkpoints():
     transport = JournalTransport()
     context, _, probe = workflow_context(transport)
 
@@ -469,11 +463,7 @@ async def test_legacy_function_retains_its_function_checkpoints(entrypoint):
         return value
 
     try:
-        if entrypoint == "run":
-            with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)"):
-                result = await context.run(work, 7, key="legacy")
-        else:
-            result = await context.step(work, 7, key="legacy")
+        result = await context.step(work, 7, key="legacy")
         assert result == 7
         assert [phase for phase, _ in transport.calls] == ["begin", "complete"]
         assert [e["event_type"] for e in probe.checkpoints] == [
@@ -658,54 +648,14 @@ async def test_step_propagates_activation_to_nested_model_calls():
     assert not probe.checkpoints
 
 
-@pytest.mark.asyncio
-async def test_run_deprecation_points_to_the_caller_and_preserves_replay():
-    import inspect
-
-    transport = JournalTransport()
-    context, _, _ = workflow_context(transport)
-    executed = []
-
-    @step
-    async def work(value):
-        executed.append(value)
-        return {"value": value}
-
-    with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)") as caught:
-        call_line = inspect.currentframe().f_lineno + 1
-        result = await context.run(work, value=7, key="same")
-    assert result == {"value": 7}
-    assert len(caught) == 1
-    assert caught[0].filename == __file__
-    assert caught[0].lineno == call_line
-    recovered, _, _ = workflow_context(transport)
-    with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)"):
-        assert await recovered.run(work, value=7, key="same") == {"value": 7}
-    assert executed == [7]
-    assert [phase for phase, _ in transport.calls] == ["begin", "complete", "begin"]
-    assert {r.stable_key for phase, r in transport.calls if phase == "begin"} == {"step:work:same"}
+def test_workflow_context_has_no_task_or_run_alias():
+    # ctx.step is the only way to run a step; the old aliases must not come back.
+    assert not hasattr(WorkflowContext, "task")
+    assert not hasattr(WorkflowContext, "run")
 
 
 @pytest.mark.asyncio
-async def test_run_deprecation_preserves_the_original_handler_error():
-    transport = JournalTransport()
-    context, entity, _ = workflow_context(transport)
-    error = ValueError("handler failed")
-
-    @step
-    async def broken():
-        raise error
-
-    with pytest.warns(DeprecationWarning, match=r"ctx\.run\(\).*ctx\.step\(\)"):
-        with pytest.raises(ValueError) as caught:
-            await context.run(broken, key="broken")
-    assert caught.value is error
-    assert [phase for phase, _ in transport.calls] == ["begin", "fail"]
-    assert not entity.has_completed_step("step:broken:broken")
-
-
-@pytest.mark.asyncio
-async def test_step_does_not_emit_run_deprecation():
+async def test_step_emits_no_deprecation_warning():
     import warnings
 
     context, _, _ = workflow_context(JournalTransport())

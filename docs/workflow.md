@@ -55,20 +55,20 @@ from agnt5 import workflow
 @workflow
 async def process_order(ctx, order_id: str):
     # Validate order
-    order = await ctx.task("orders", "validate", input={"order_id": order_id})
+    order = await ctx.step(validate, input={"order_id": order_id})
 
     # Process payment
-    payment = await ctx.task("payments", "charge", input={"amount": order["total"]})
+    payment = await ctx.step(charge, input={"amount": order["total"]})
 
     # Fulfill order
-    await ctx.task("fulfillment", "ship", input={"order_id": order_id})
+    await ctx.step(ship, input={"order_id": order_id})
 
     return {"status": "completed"}
 ```
 
 **Key Components:**
 - `@workflow`: Decorator to register workflow
-- `ctx.task()`: Execute a function (see [Context API](context.md#ctxtask---execute-a-function))
+- `ctx.step()`: Run a function as a durable step (see [Context API](context.md#ctxstep---run-a-step))
 - `await`: Sequential execution (waits for completion)
 - Regular Python: Use if/else, loops, variables
 
@@ -76,7 +76,7 @@ async def process_order(ctx, order_id: str):
 
 Workflows use Context APIs for orchestration. For complete API documentation, see [Context API](context.md).
 
-- `ctx.task()` - Execute a function
+- `ctx.step()` - Run a function as a durable step
 - `ctx.parallel()` - Run tasks concurrently
 - `ctx.gather()` - Parallel with named results
 - `ctx.signal()` - Wait for external events
@@ -88,17 +88,16 @@ Workflows use Context APIs for orchestration. For complete API documentation, se
 @workflow
 async def ai_research(ctx, topic: str):
     # Initialize research
-    await ctx.task("research", "start_research", input={"topic": topic})
+    await ctx.step(start_research, input={"topic": topic})
 
     # Search in parallel
     papers, web = await ctx.parallel(
-        ctx.task("research", "search_academic"),
-        ctx.task("research", "search_web")
+        ctx.step(search_academic),
+        ctx.step(search_web)
     )
 
     # Synthesize results
-    summary = await ctx.task(
-        "research", "synthesize",
+    summary = await ctx.step(synthesize,
         input={"papers": papers, "web": web}
     )
 
@@ -110,7 +109,7 @@ async def ai_research(ctx, topic: str):
 
     if approved.get("approved"):
         # Publish results
-        result = await ctx.task("research", "publish", input={"summary": summary})
+        result = await ctx.step(publish, input={"summary": summary})
         return {"status": "published", "result": result}
     else:
         return {"status": "cancelled"}
@@ -124,9 +123,9 @@ async def ai_research(ctx, topic: str):
 @workflow
 async def data_pipeline(ctx, dataset: str):
     # Each step runs after the previous completes
-    data = await ctx.task("etl", "extract", input={"dataset": dataset})
-    transformed = await ctx.task("etl", "transform", input={"data": data})
-    result = await ctx.task("etl", "load", input={"data": transformed})
+    data = await ctx.step(extract, input={"dataset": dataset})
+    transformed = await ctx.step(transform, input={"data": data})
+    result = await ctx.step(load, input={"data": transformed})
     return result
 ```
 
@@ -136,17 +135,17 @@ async def data_pipeline(ctx, dataset: str):
 @workflow
 async def multi_source_analysis(ctx, query: str):
     # Initialize
-    await ctx.task("analytics", "setup", input={"query": query})
+    await ctx.step(setup, input={"query": query})
 
     # Analyze multiple sources in parallel
     results = await ctx.gather(
-        db=ctx.task("analytics", "analyze_db"),
-        logs=ctx.task("analytics", "analyze_logs"),
-        api=ctx.task("analytics", "analyze_api")
+        db=ctx.step(analyze_db),
+        logs=ctx.step(analyze_logs),
+        api=ctx.step(analyze_api)
     )
 
     # Aggregate results
-    final = await ctx.task("analytics", "combine", input=results)
+    final = await ctx.step(combine, input=results)
     return final
 ```
 
@@ -156,16 +155,16 @@ async def multi_source_analysis(ctx, query: str):
 @workflow
 async def conditional_deployment(ctx, version: str):
     # Build and test
-    build = await ctx.task("ci", "build", input={"version": version})
-    tests = await ctx.task("ci", "test", input={"build_id": build["id"]})
+    build_result = await ctx.step(build, input={"version": version})
+    tests = await ctx.step(test, input={"build_id": build_result["id"]})
 
     if tests["passed"]:
         # Deploy to production
-        result = await ctx.task("ci", "deploy", input={"build_id": build["id"]})
+        result = await ctx.step(deploy, input={"build_id": build_result["id"]})
         return {"status": "deployed", "result": result}
     else:
         # Rollback
-        await ctx.task("ci", "rollback", input={"build_id": build["id"]})
+        await ctx.step(rollback, input={"build_id": build_result["id"]})
         return {"status": "failed", "reason": "tests failed"}
 ```
 
@@ -178,7 +177,7 @@ async def process_with_retry(ctx, job_id: str):
 
     for attempt in range(max_retries):
         try:
-            result = await ctx.task("jobs", "process", input={"job_id": job_id})
+            result = await ctx.step(process, input={"job_id": job_id})
             return result
         except Exception as e:
             if attempt < max_retries - 1:
@@ -195,8 +194,8 @@ async def process_with_retry(ctx, job_id: str):
 @workflow
 async def deploy_with_approval(ctx, version: str):
     # Build and test
-    build = await ctx.task("ci", "build", input={"version": version})
-    tests = await ctx.task("ci", "test", input={"build_id": build["id"]})
+    build_result = await ctx.step(build, input={"version": version})
+    tests = await ctx.step(test, input={"build_id": build_result["id"]})
 
     if not tests["passed"]:
         return {"status": "failed", "reason": "tests failed"}
@@ -209,7 +208,7 @@ async def deploy_with_approval(ctx, version: str):
     )
 
     if approval["approved"]:
-        result = await ctx.task("ci", "deploy", input={"build_id": build["id"]})
+        result = await ctx.step(deploy, input={"build_id": build_result["id"]})
         return {"status": "deployed", "result": result}
     else:
         return {"status": "cancelled", "reason": "no approval"}
@@ -225,14 +224,14 @@ Workflows orchestrate - complex logic belongs in functions:
 #  Good - workflow orchestrates
 @workflow
 async def process_data(ctx, data_id: str):
-    data = await ctx.task("etl", "extract", input={"id": data_id})
-    result = await ctx.task("etl", "transform", input={"data": data})
+    data = await ctx.step(extract, input={"id": data_id})
+    result = await ctx.step(transform, input={"data": data})
     return result
 
 # L Avoid - complex logic in workflow
 @workflow
 async def process_data(ctx, data_id: str):
-    data = await ctx.task("etl", "extract", input={"id": data_id})
+    data = await ctx.step(extract, input={"id": data_id})
     # Don't do heavy computation here
     transformed = [complex_calculation(x) for x in data]
     return transformed
@@ -245,9 +244,9 @@ Run independent tasks concurrently:
 ```python
 # These tasks don't depend on each other - run in parallel
 results = await ctx.parallel(
-    ctx.task("service1", "analyze_data"),
-    ctx.task("service2", "fetch_metadata"),
-    ctx.task("service3", "validate_schema")
+    ctx.step(analyze_data),
+    ctx.step(fetch_metadata),
+    ctx.step(validate_schema)
 )
 ```
 
@@ -259,11 +258,11 @@ Use try/except for error handling:
 @workflow
 async def safe_processing(ctx, job_id: str):
     try:
-        result = await ctx.task("jobs", "process", input={"job_id": job_id})
+        result = await ctx.step(process, input={"job_id": job_id})
         return {"status": "success", "result": result}
     except Exception as e:
         # Log error and return gracefully
-        await ctx.task("logs", "log_error", input={"error": str(e)})
+        await ctx.step(log_error, input={"error": str(e)})
         return {"status": "error", "message": str(e)}
 ```
 
@@ -275,13 +274,13 @@ Use return values to pass data:
 @workflow
 async def data_flow(ctx, input_data: dict):
     # Step 1 produces data
-    step1_result = await ctx.task("svc", "step1", input=input_data)
+    step1_result = await ctx.step(step1, input=input_data)
 
     # Step 2 uses step1's output
-    step2_result = await ctx.task("svc", "step2", input=step1_result)
+    step2_result = await ctx.step(step2, input=step1_result)
 
     # Step 3 uses step2's output
-    final = await ctx.task("svc", "step3", input=step2_result)
+    final = await ctx.step(step3, input=step2_result)
 
     return final
 ```

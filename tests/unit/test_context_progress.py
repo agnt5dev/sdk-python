@@ -319,7 +319,7 @@ async def test_a_reporter_without_a_loop_keeps_the_latest_for_later():
 
 
 async def test_a_run_shares_one_reporter_across_its_contexts():
-    # A workflow and its ctx.task children report for the same run: one
+    # A workflow and its ctx.step children report for the same run: one
     # interval and one never-backwards rule between them.
     worker = FakeWorker()
     parent = WorkflowContext(WorkflowEntity("run_1"), run_id="run_1", worker=worker)
