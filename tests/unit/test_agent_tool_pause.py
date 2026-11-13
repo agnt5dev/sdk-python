@@ -143,6 +143,30 @@ async def test_agent_in_a_step_fails_even_when_the_model_would_not_call_the_tool
 
 
 @pytest.mark.asyncio
+async def test_agent_that_refuses_to_start_still_closes_its_sandbox():
+    closed = []
+
+    class Sandbox:
+        async def close(self):
+            closed.append(True)
+
+    probe, _published = _record_publication()
+    model = ToolCallingModel("record_publication", '{"title": "Q3 report"}')
+    agent = _publisher(model, [probe])
+    agent.sandbox = Sandbox()
+    ctx = _workflow_ctx()
+
+    async def publish():
+        return (await agent.run("Publish it", context=ctx)).output
+
+    with pytest.raises(ToolCannotPauseError):
+        await ctx.step("publish", publish)
+
+    assert closed == [True]
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
 async def test_agent_without_a_pause_tool_still_runs_in_a_step():
     @tool
     async def lookup(ctx: Context) -> str:

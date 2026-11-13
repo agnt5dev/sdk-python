@@ -968,10 +968,6 @@ class Agent:
         if context is None:
             context = get_current_context()
 
-        # Before the first model call, so a tool that can never pause here
-        # fails every run the same way, with nothing spent and nothing done.
-        require_agent_can_pause(self.name, self.tools.values(), context)
-
         # Capture workflow context for checkpoints
         from ..workflow import WorkflowContext
         workflow_ctx = context if isinstance(context, WorkflowContext) else None
@@ -1015,6 +1011,11 @@ class Agent:
         original_agent_parent = context.parent_correlation_id
         token = None
         try:
+            # Before the first model call, so a tool that can never pause here
+            # fails every run the same way, with nothing spent and nothing
+            # done. Inside the try so the agent's sandbox is still closed.
+            require_agent_can_pause(self.name, self.tools.values(), context)
+
             # Cleanup must also cover cancellation or failure of the first ACK.
             # Skip the event if the executor already owns this lifecycle.
             if context and not self._lifecycle_managed(context):
@@ -2001,10 +2002,6 @@ class Agent:
             # Try to get context from task-local storage (set by workflow/function decorator)
             context = get_current_context()
 
-        # Before the first model call, so a tool that can never pause here
-        # fails every run the same way, with nothing spent and nothing done.
-        require_agent_can_pause(self.name, self.tools.values(), context)
-
         # IMPORTANT: Capture workflow context NOW before we replace it with AgentContext
         # This allows LM calls inside the agent to emit workflow checkpoints
         from ..workflow import WorkflowContext
@@ -2057,6 +2054,11 @@ class Agent:
         original_agent_parent = context.parent_correlation_id
         token = None
         try:
+            # Before the first model call, so a tool that can never pause here
+            # fails every run the same way, with nothing spent and nothing
+            # done. Inside the try so the agent's sandbox is still closed.
+            require_agent_can_pause(self.name, self.tools.values(), context)
+
             # Cleanup must also cover cancellation or failure of the first ACK.
             # Skip the event if the executor already owns this lifecycle.
             if context and not self._lifecycle_managed(context):
