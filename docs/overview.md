@@ -206,12 +206,12 @@ from agnt5 import workflow, Context
 @workflow
 async def order_fulfillment(ctx: Context, order_id: str) -> dict:
     # Sequential steps
-    payment = await ctx.task(process_payment, order_id)
+    payment = await ctx.step(process_payment, order_id)
 
     # Parallel execution
     shipping, notification = await ctx.parallel(
-        ctx.task(schedule_shipping, order_id),
-        ctx.task(send_confirmation, order_id)
+        ctx.step(schedule_shipping, order_id),
+        ctx.step(send_confirmation, order_id)
     )
 
     # Wait for external signal

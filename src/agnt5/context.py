@@ -321,7 +321,7 @@ class Context:
 
         Call it as often as you like: it never blocks, and each run writes
         at most one report a second, always the latest, however many
-        contexts (workflow, ``ctx.task`` children, agents) report for it.
+        contexts (workflow, ``ctx.step`` children, agents) report for it.
         When the run completes or fails, the latest report is written before
         the record that ends it; a cancelled execution writes nothing more. Progress never goes backwards, as
         MCP requires: a report below the last one is dropped, and one with
