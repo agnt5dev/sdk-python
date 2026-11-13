@@ -155,16 +155,16 @@ async def multi_source_analysis(ctx, query: str):
 @workflow
 async def conditional_deployment(ctx, version: str):
     # Build and test
-    build = await ctx.step(build, input={"version": version})
-    tests = await ctx.step(test, input={"build_id": build["id"]})
+    build_result = await ctx.step(build, input={"version": version})
+    tests = await ctx.step(test, input={"build_id": build_result["id"]})
 
     if tests["passed"]:
         # Deploy to production
-        result = await ctx.step(deploy, input={"build_id": build["id"]})
+        result = await ctx.step(deploy, input={"build_id": build_result["id"]})
         return {"status": "deployed", "result": result}
     else:
         # Rollback
-        await ctx.step(rollback, input={"build_id": build["id"]})
+        await ctx.step(rollback, input={"build_id": build_result["id"]})
         return {"status": "failed", "reason": "tests failed"}
 ```
 
@@ -194,8 +194,8 @@ async def process_with_retry(ctx, job_id: str):
 @workflow
 async def deploy_with_approval(ctx, version: str):
     # Build and test
-    build = await ctx.step(build, input={"version": version})
-    tests = await ctx.step(test, input={"build_id": build["id"]})
+    build_result = await ctx.step(build, input={"version": version})
+    tests = await ctx.step(test, input={"build_id": build_result["id"]})
 
     if not tests["passed"]:
         return {"status": "failed", "reason": "tests failed"}
@@ -208,7 +208,7 @@ async def deploy_with_approval(ctx, version: str):
     )
 
     if approval["approved"]:
-        result = await ctx.step(deploy, input={"build_id": build["id"]})
+        result = await ctx.step(deploy, input={"build_id": build_result["id"]})
         return {"status": "deployed", "result": result}
     else:
         return {"status": "cancelled", "reason": "no approval"}
