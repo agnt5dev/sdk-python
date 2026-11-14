@@ -53,3 +53,6 @@ durable-activation-v1 = []
 
 [build-dependencies]
 pyo3-build-config = "0.27"
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.30", features = ["testing"] }

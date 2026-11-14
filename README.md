@@ -223,6 +223,39 @@ when a secret is configured. Missing static secrets warn at startup; an empty
 request-time resolver warns on its first failed invoke. AGNT5 activation and
 dispatch still require a signing secret, regardless of this SDK option.
 
+## Span payload privacy
+
+Worker dispatch spans and workflow function spans omit `input.data` and
+`output.data` by default. Identity, status, timing, and native payload-size
+attributes remain available. To opt in, set
+`AGNT5_CAPTURE_CONTENT_MODE=redacted` (or `full`). Both modes always redact known
+credential fields, including nested `bot_token` and `Authorization`, before
+serialization and truncation. Embedded JSON strings are decoded for redaction.
+Malformed JSON-like strings are omitted; arbitrary objects have no `repr` fallback.
+
+For application-specific fields, pass `Worker(span_payload_redactor=redact)`,
+where `redact(value)` is a synchronous function. It receives a detached,
+JSON-safe copy of each opted-in input and output, after credential redaction.
+Return the replacement value or `None` to omit that payload. The SDK applies
+credential redaction again after the hook. A hook or serialization error omits
+the payload without logging its contents. Nested workflows inherit this policy.
+Hooks must be fast and must not log sensitive values.
+
+`AGNT5_CAPTURE=off` disables these span payloads even with an explicit mode.
+`AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES` caps each UTF-8 attribute, including its
+truncation marker (default 8192). Zero, negative, or invalid limits omit capture.
+Invalid content modes also omit capture. The legacy
+`AGNT5_LLM_CAPTURE_CONTENT=true/on/1/yes` still opts in when no explicit mode is
+set; `false/off/0/no` disables it. Python third-party integrations now also
+default to metadata-only through the same mode parser. Deployments that relied
+on their former default must opt in explicitly.
+
+This policy does not change handler arguments, results, durable checkpoints,
+replay bytes, chat reply credentials, user-authored logs, or exception attributes.
+It does not govern the native LM client's content recording or other SDKs.
+Removing credentials from gateway-produced run input needs a separate producer
+and secret-resolution contract; redacting spans does not remove stored run input.
+
 ## Development
 
 ```bash

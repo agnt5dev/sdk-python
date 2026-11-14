@@ -10,6 +10,7 @@ use anyhow;
 use opentelemetry::global;
 use opentelemetry::trace::{Span, TraceContextExt};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3_async_runtimes::tokio::future_into_py;
 use pyo3_async_runtimes::{into_future_with_locals, TaskLocals};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,28 +24,177 @@ use std::collections::HashMap;
 // Global unified journal event queue for cross-thread access
 // This replaces the separate span and log export queues
 static JOURNAL_QUEUE: OnceLock<JournalEventQueue> = OnceLock::new();
-static SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES: OnceLock<usize> = OnceLock::new();
 
 const DEFAULT_SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES: usize = 8192;
 
-fn span_payload_attribute_max_bytes() -> usize {
-    *SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES.get_or_init(|| {
-        std::env::var("AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES)
-    })
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+    use opentelemetry::trace::{Tracer, TracerProvider};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use pyo3::ffi::c_str;
+    use pyo3::types::PyModule;
+    use std::ffi::CString;
+
+    #[test]
+    fn capture_policy_reaches_native_span_exporter() {
+        Python::initialize();
+        Python::attach(|py| {
+            let source = CString::new(include_str!("../src/agnt5/_capture.py")).unwrap();
+            let module =
+                PyModule::from_code(py, &source, c_str!("_capture.py"), c_str!("capture_policy"))
+                    .unwrap();
+            let globals = module.dict();
+            py.run(
+                c_str!(
+                    r#"
+for key in ("AGNT5_CAPTURE_CONTENT_MODE", "AGNT5_LLM_CAPTURE_CONTENT", "AGNT5_CAPTURE",
+            "AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES"):
+    os.environ.pop(key, None)
+calls = []
+def redact(value):
+    calls.append(value)
+    value["message"] = "application redacted"
+    return value
+def broken(value):
+    raise RuntimeError("synthetic-hook-secret")
+policy = SpanPayloadPolicy(redact)
+"#
+                ),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let capture = Mutex::new(Some(
+                module
+                    .getattr("policy")
+                    .unwrap()
+                    .getattr("capture")
+                    .unwrap()
+                    .unbind(),
+            ));
+            let exporter = InMemorySpanExporter::default();
+            let provider = SdkTracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build();
+            let tracer = provider.tracer("payload-regression");
+            let data = br#"{"message":"private message","nested":{"bot_token":"synthetic-bot-secret","Authorization":"synthetic-auth-secret"}}"#;
+            for scenario in [
+                "unconfigured",
+                "default",
+                "opt-in",
+                "disabled",
+                "hook-error",
+                "bridge-error",
+                "zero-cap",
+            ] {
+                let setup = match scenario {
+                    "opt-in" => "os.environ['AGNT5_CAPTURE_CONTENT_MODE'] = 'full'",
+                    "disabled" => "os.environ['AGNT5_CAPTURE'] = 'off'",
+                    "hook-error" => "os.environ.pop('AGNT5_CAPTURE'); policy._redactor = broken",
+                    "zero-cap" => "os.environ['AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES'] = '0'",
+                    _ => "pass",
+                };
+                py.run(&CString::new(setup).unwrap(), Some(&globals), None)
+                    .unwrap();
+                if scenario == "bridge-error" {
+                    *capture.lock().unwrap() = Some(module.getattr("broken").unwrap().unbind());
+                }
+                let mut span = tracer.start(scenario);
+                for direction in ["input", "output"] {
+                    let attributes = if scenario == "unconfigured" {
+                        span_payload_attributes(&Mutex::new(None), direction, data)
+                    } else {
+                        span_payload_attributes(&capture, direction, data)
+                    };
+                    span.set_attributes(attributes);
+                }
+                span.end();
+            }
+            provider.force_flush().unwrap();
+            let spans = exporter.get_finished_spans().unwrap();
+            assert_eq!(spans.len(), 7);
+            for span in spans {
+                let attributes: HashMap<_, _> = span
+                    .attributes
+                    .iter()
+                    .map(|attribute| (attribute.key.as_str(), attribute.value.to_string()))
+                    .collect();
+                for direction in ["input", "output"] {
+                    let key = format!("{}.data", direction);
+                    assert!(attributes.contains_key(format!("{}.size_bytes", direction).as_str()));
+                    if span.name == "opt-in" {
+                        let value = &attributes[key.as_str()];
+                        assert!(value.contains("application redacted"));
+                        assert!(!value.contains("synthetic-"));
+                        assert!(!value.contains("private message"));
+                    } else {
+                        assert!(!attributes.contains_key(key.as_str()));
+                    }
+                }
+            }
+            assert_eq!(module.getattr("calls").unwrap().len().unwrap(), 2);
+            assert!(String::from_utf8_lossy(data).contains("synthetic-bot-secret"));
+            py.run(
+                c_str!(
+                    "os.environ.pop('AGNT5_CAPTURE_CONTENT_MODE', None); \
+                     os.environ.pop('AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES', None)"
+                ),
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+        });
+    }
 }
 
-fn span_payload_preview(data: &[u8]) -> (String, bool) {
-    let max_bytes = span_payload_attribute_max_bytes();
-    if data.len() <= max_bytes {
-        return (String::from_utf8_lossy(data).to_string(), false);
+fn span_payload_attribute_max_bytes() -> usize {
+    match std::env::var("AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES") {
+        Ok(value) => value.parse::<usize>().unwrap_or(0),
+        Err(_) => DEFAULT_SPAN_PAYLOAD_ATTRIBUTE_MAX_BYTES,
     }
+}
 
-    let mut preview = String::from_utf8_lossy(&data[..max_bytes]).to_string();
-    preview.push_str(&format!("...[truncated, original_bytes={}]", data.len()));
-    (preview, true)
+fn span_payload_attributes(
+    capture: &Mutex<Option<Py<PyAny>>>,
+    direction: &str,
+    data: &[u8],
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attributes = vec![opentelemetry::KeyValue::new(
+        format!("{}.size_bytes", direction),
+        data.len() as i64,
+    )];
+    let max_bytes = span_payload_attribute_max_bytes();
+    if max_bytes == 0 {
+        return attributes;
+    }
+    let preview = Python::attach(|py| -> Option<(String, bool)> {
+        let callback = capture.lock().ok()?.as_ref()?.clone_ref(py);
+        callback
+            .call1(py, (PyBytes::new(py, data),))
+            .ok()?
+            .extract(py)
+            .ok()?
+    });
+    if let Some((mut preview, mut truncated)) = preview {
+        if preview.len() > max_bytes {
+            let mut end = max_bytes;
+            while !preview.is_char_boundary(end) {
+                end -= 1;
+            }
+            preview.truncate(end);
+            truncated = true;
+        }
+        attributes.push(opentelemetry::KeyValue::new(
+            format!("{}.data", direction),
+            preview,
+        ));
+        attributes.push(opentelemetry::KeyValue::new(
+            format!("{}.truncated", direction),
+            truncated,
+        ));
+    }
+    attributes
 }
 
 fn sdk_core_builtin_scorer_response(
@@ -142,6 +292,7 @@ pub struct PyWorker {
     config: PyWorkerConfig,
     pub(crate) worker: Arc<Mutex<Option<Worker>>>,
     message_handler: Arc<Mutex<Option<Py<PyAny>>>>,
+    span_payload_capture: Arc<Mutex<Option<Py<PyAny>>>>,
     /// Python callback invoked with a run_id when a CancelExecution arrives,
     /// so the Python layer can cancel the matching asyncio.Task.
     cancel_handler: Arc<Mutex<Option<Py<PyAny>>>>,
@@ -164,12 +315,20 @@ impl PyWorker {
             config,
             worker: Arc::new(Mutex::new(None)),
             message_handler: Arc::new(Mutex::new(None)),
+            span_payload_capture: Arc::new(Mutex::new(None)),
             cancel_handler: Arc::new(Mutex::new(None)),
             components: Arc::new(Mutex::new(Vec::new())),
             service_metadata: Arc::new(Mutex::new(HashMap::new())),
             event_loop_locals: Arc::new(Mutex::new(None)),
             entity_state_manager: Arc::new(AsyncMutex::new(None)),
         })
+    }
+
+    fn set_span_payload_capture(&self, capture: Py<PyAny>) -> PyResult<()> {
+        *self.span_payload_capture.lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err("Payload capture lock unavailable")
+        })? = Some(capture);
+        Ok(())
     }
 
     /// Set entity state manager for database persistence
@@ -704,6 +863,7 @@ impl PyWorker {
 
         let worker_arc = self.worker.clone();
         let handler_arc = self.message_handler.clone();
+        let span_payload_capture = self.span_payload_capture.clone();
         let cancel_handler_arc = self.cancel_handler.clone();
         let event_loop_locals_arc = self.event_loop_locals.clone();
         let entity_state_manager_arc = self.entity_state_manager.clone();
@@ -749,16 +909,19 @@ impl PyWorker {
             // Now uses `Fn + Clone` to support concurrent execution
             let message_handler = {
                 let handler_arc_clone = handler_arc.clone();
+                let span_payload_capture_clone = span_payload_capture.clone();
                 let event_loop_locals_clone = event_loop_locals_arc.clone();
                 let entity_state_manager_clone = entity_state_manager_arc.clone();
                 move |runtime_message: RuntimeMessage,
                       tx: agnt5_sdk_core::flume::Sender<ServiceMessage>| {
                     let handler_arc_inner = handler_arc_clone.clone();
+                    let span_payload_capture_inner = span_payload_capture_clone.clone();
                     let event_loop_locals_inner = event_loop_locals_clone.clone();
                     let entity_state_manager_inner = entity_state_manager_clone.clone();
                     async move {
                         Self::handle_runtime_message(
                             handler_arc_inner,
+                            span_payload_capture_inner,
                             event_loop_locals_inner,
                             entity_state_manager_inner,
                             runtime_message,
@@ -793,6 +956,7 @@ impl PyWorker {
     /// Handle runtime message by calling Python callback
     async fn handle_runtime_message(
         handler_arc: Arc<Mutex<Option<Py<PyAny>>>>,
+        span_payload_capture: Arc<Mutex<Option<Py<PyAny>>>>,
         event_loop_locals_arc: Arc<Mutex<Option<TaskLocals>>>,
         entity_state_manager_arc: Arc<AsyncMutex<Option<Arc<EntityStateManager>>>>,
         runtime_message: RuntimeMessage,
@@ -827,6 +991,7 @@ impl PyWorker {
 
         let result = Self::handle_runtime_message_inner(
             handler_arc,
+            span_payload_capture,
             event_loop_locals_arc,
             entity_state_manager_arc,
             runtime_message,
@@ -843,6 +1008,7 @@ impl PyWorker {
 
     async fn handle_runtime_message_inner(
         handler_arc: Arc<Mutex<Option<Py<PyAny>>>>,
+        span_payload_capture: Arc<Mutex<Option<Py<PyAny>>>>,
         event_loop_locals_arc: Arc<Mutex<Option<TaskLocals>>>,
         entity_state_manager_arc: Arc<AsyncMutex<Option<Arc<EntityStateManager>>>>,
         runtime_message: RuntimeMessage,
@@ -962,18 +1128,13 @@ impl PyWorker {
                     component_type_str,
                 );
 
-                // Add bounded input preview before moving span into context.
-                let (input_preview, input_truncated) =
-                    span_payload_preview(&invoke_request.input_data);
-                otel_span.set_attribute(opentelemetry::KeyValue::new("input.data", input_preview));
-                otel_span.set_attribute(opentelemetry::KeyValue::new(
-                    "input.size_bytes",
-                    invoke_request.input_data.len() as i64,
-                ));
-                otel_span.set_attribute(opentelemetry::KeyValue::new(
-                    "input.truncated",
-                    input_truncated,
-                ));
+                for attribute in span_payload_attributes(
+                    &span_payload_capture,
+                    "input",
+                    &invoke_request.input_data,
+                ) {
+                    otel_span.set_attribute(attribute);
+                }
 
                 // Add is_streaming attribute for journal exporter filtering
                 // Only spans with this attribute set to true will be exported to the journal
@@ -1283,25 +1444,17 @@ impl PyWorker {
                                 // Record span result based on success/error
                                 let span = cx.span();
 
-                                // Always add execution duration and output data
                                 span.set_attribute(opentelemetry::KeyValue::new(
                                     "component.execution_ms",
                                     execution_duration_ms,
                                 ));
-                                let (output_preview, output_truncated) =
-                                    span_payload_preview(&py_response.output_data);
-                                span.set_attribute(opentelemetry::KeyValue::new(
-                                    "output.data",
-                                    output_preview,
-                                ));
-                                span.set_attribute(opentelemetry::KeyValue::new(
-                                    "output.size_bytes",
-                                    py_response.output_data.len() as i64,
-                                ));
-                                span.set_attribute(opentelemetry::KeyValue::new(
-                                    "output.truncated",
-                                    output_truncated,
-                                ));
+                                for attribute in span_payload_attributes(
+                                    &span_payload_capture,
+                                    "output",
+                                    &py_response.output_data,
+                                ) {
+                                    span.set_attribute(attribute);
+                                }
 
                                 if py_response.success {
                                     span.set_attribute(opentelemetry::KeyValue::new(

@@ -119,6 +119,42 @@ def durable_sleep_context(transport):
     return context, entity, events
 
 
+async def test_payload_capture_does_not_change_durable_completion_or_replay(monkeypatch):
+    from agnt5._capture import SpanPayloadPolicy
+    from agnt5._serialization import serialize
+
+    monkeypatch.setenv("AGNT5_CAPTURE_CONTENT_MODE", "full")
+    payload = {"message": "private message", "bot_token": "synthetic-bot-secret"}
+    transport = WorkflowActivationTransport()
+    context, entity, _events = activation_context(transport)
+    calls = []
+
+    def redact(value):
+        calls.append(value)
+        value.clear()
+        return {"message": "application redacted"}
+
+    context._span_payload_policy = SpanPayloadPolicy(redact)
+
+    @function
+    async def echo(ctx, payload: dict) -> dict:
+        return payload
+
+    assert await context.step(echo, payload=payload) == payload
+    assert len(calls) == 2
+    committed = transport.complete_requests[0]["output"]
+    assert committed == serialize(payload)
+    assert payload["message"] == "private message"
+    assert list(entity._completed_steps.values()) == [payload]
+
+    transport.replay_output = committed
+    replay, _entity, _events = activation_context(transport)
+    replay._span_payload_policy = SpanPayloadPolicy(redact)
+    assert await replay.step(echo, payload=payload) == payload
+    assert len(calls) == 2
+    assert len(transport.complete_requests) == 1
+
+
 @pytest.mark.asyncio
 async def test_durable_sleep_yields_typed_timer_authority_without_local_wait():
     transport = WorkflowActivationTransport()

@@ -36,7 +36,8 @@ class RecordingEmitter:
 
 
 @pytest.fixture(autouse=True)
-def _capture_enabled():
+def _capture_enabled(monkeypatch):
+    monkeypatch.setenv("AGNT5_LLM_CAPTURE_CONTENT", "true")
     previous_processor = openai_agents._processor
     openai_agents._enabled = True
     yield

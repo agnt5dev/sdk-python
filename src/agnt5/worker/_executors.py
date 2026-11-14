@@ -208,6 +208,7 @@ def _pausable_tool_context(executor: Any, tool: Any, input_dict: dict, request: 
 
     ctx = WorkflowContext(
         workflow_entity=entity,
+        span_payload_policy=getattr(executor, "_span_payload_policy", None),
         run_id=request.invocation_id,
         session_id=session_id,
         user_id=user_id,
@@ -353,6 +354,8 @@ class ExecutorMixin:
             )
             state_route_token = _state_request_route_ctx.set(request.invocation_id)
             ctx = context_factory(input_dict, request)
+            if getattr(self, "_span_payload_policy", None) is not None:
+                ctx._span_payload_policy = self._span_payload_policy
             if getattr(ctx, "_activation_client", None) is None:
                 ctx._activation_client = _resolve_activation_client(
                     self, getattr(request, "metadata", None)
@@ -1830,6 +1833,7 @@ class ExecutorMixin:
             # Create WorkflowContext
             ctx = WorkflowContext(
                 workflow_entity=workflow_entity,
+                span_payload_policy=getattr(self, "_span_payload_policy", None),
                 run_id=request.invocation_id,
                 session_id=session_id,
                 user_id=user_id,

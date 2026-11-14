@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
 from ._ids import generate_cid
 from ._serialization import deserialize, serialize
-from ._telemetry import truncate_span_attribute_value
 from .activation import (
     _SUSPEND_QUIET_SECONDS,
     ActivationDecision,
@@ -235,18 +234,12 @@ async def execute_function_callable(
 ) -> Any:
     """Execute the language-local @function body and its nested lifecycle events."""
 
-    from ._serialization import serialize_to_str
     from .context import _current_context, set_current_context
     from .tracing import create_span
 
     func_config = FunctionRegistry.get(handler_name)
     if func_config is None:
         raise ValueError(f"Function '{handler_name}' not found in registry")
-    input_repr = (
-        truncate_span_attribute_value(serialize_to_str({"args": args, "kwargs": kwargs}))
-        if args or kwargs
-        else "{}"
-    )
     with create_span(
         f"workflow.task.{handler_name}",
         "function",
@@ -255,7 +248,7 @@ async def execute_function_callable(
             "step_name": step_name,
             "handler_name": handler_name,
             "run_id": context.run_id,
-            "input.data": input_repr,
+            **context._span_payload_policy.attributes("input", {"args": args, "kwargs": kwargs}),
         },
     ) as span:
         func_correlation_id = generate_cid()
@@ -269,6 +262,7 @@ async def execute_function_callable(
             memo_namespace=context.allocate_memo_child_scope("step", step_key),
             activation_client=context._activation_client,
         )
+        func_context._span_payload_policy = context._span_payload_policy
         # Named like its function.started event (ctx.progress reports too).
         func_context._component_name = handler_name
         if len(args) == 1 and isinstance(args[0], dict):
@@ -302,13 +296,8 @@ async def execute_function_callable(
             finally:
                 _current_context.reset(context_token)
 
-            try:
-                span.set_attribute(
-                    "output.data",
-                    truncate_span_attribute_value(serialize_to_str(result)),
-                )
-            except (TypeError, ValueError):
-                span.set_attribute("output.data", truncate_span_attribute_value(repr(result)))
+            for key, value in context._span_payload_policy.attributes("output", result).items():
+                span.set_attribute(key, value)
             await context._emit_checkpoint_async(
                 Completed(
                     name=handler_name,
