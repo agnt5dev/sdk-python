@@ -36,7 +36,7 @@ from .activation import (
     current_activation,
 )
 from .context import Context, set_current_context
-from .exceptions import ConfigurationError
+from .exceptions import ConfigurationError, ToolCannotPauseError
 
 if TYPE_CHECKING:
     from .workflow import WorkflowContext
@@ -127,8 +127,8 @@ def _consume_eval_tool_fault(ctx: Context, tool_name: str) -> Optional[str]:
     return None
 
 
-def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
-    """Refuse a tool's pause where a resumed run can't replay it correctly.
+def _cannot_pause_here(workflow_ctx: Any) -> bool:
+    """Whether a pause here could not be replayed correctly by a resumed run.
 
     Inside a durable activation, such as a delegated agent, a pause would
     leave that activation open and the resumed run would wait on it forever.
@@ -136,12 +136,71 @@ def _require_pause_boundary(workflow_ctx: Any, what: str) -> None:
     asking again, so the pause count falls behind and later pauses read
     earlier answers.
     """
-    if current_activation() is not None or workflow_ctx._step_event_stack:
-        raise ConfigurationError(
+    from .step import in_declared_step
+
+    return bool(
+        current_activation() is not None
+        or getattr(workflow_ctx, "_step_event_stack", None)
+        or in_declared_step()
+    )
+
+
+def _require_pause_boundary(workflow_ctx: Any, what: str, tool_name: str) -> None:
+    """Refuse a tool's pause where a resumed run can't replay it correctly."""
+    if _cannot_pause_here(workflow_ctx):
+        raise ToolCannotPauseError(
             f"{what} pauses the run for a person, but it was called inside a "
-            "delegated agent or a step, which cannot pause yet. Give the tool to "
-            "the top-level agent, or call it between workflow steps."
+            "delegated agent or a step, which cannot pause yet. Run the agent "
+            "that uses this tool, or call the tool, from the workflow body "
+            "between steps, and give the tool to the top-level agent.",
+            tool_name=tool_name,
         )
+
+
+def _pause_context_for(tool: Any, ctx: Any) -> Any:
+    """The workflow context ``tool`` would pause in, if there is one."""
+    # Only the built-in tools take a workflow context of their own.
+    if getattr(tool, "waits_for_user", False):
+        explicit = getattr(tool, "context", None)
+        if explicit is not None:
+            return explicit
+    return _find_workflow_context(ctx)
+
+
+def require_agent_can_pause(agent_name: str, tools: Any, ctx: Any) -> None:
+    """Fail an agent before it starts if a tool it holds could never pause here.
+
+    Whether a run can pause depends on where the agent runs, not on which tool
+    the model picks. Checking only when the tool is called would let the same
+    mistake pass every run in which the model happens not to call it, and
+    fail the others part-way, after earlier tools have already had their
+    effects.
+    """
+    for candidate in tools:
+        if not (
+            getattr(candidate, "confirmation", False)
+            or getattr(candidate, "waits_for_user", False)
+        ):
+            continue
+        tool_name = getattr(candidate, "name", "")
+        workflow_ctx = _pause_context_for(candidate, ctx)
+        if workflow_ctx is None:
+            raise ToolCannotPauseError(
+                f"Agent '{agent_name}' has the tool '{tool_name}', which pauses "
+                "the run for a person, but the agent is running outside a "
+                "workflow, where a run cannot pause. Run the agent from a "
+                "workflow, or take the tool away from this agent.",
+                tool_name=tool_name,
+            )
+        if _cannot_pause_here(workflow_ctx):
+            raise ToolCannotPauseError(
+                f"Agent '{agent_name}' has the tool '{tool_name}', which pauses "
+                "the run for a person, but the agent is running inside a "
+                "delegated agent or a step, which cannot pause yet. Run the "
+                "agent from the workflow body between steps, or take the tool "
+                "away from this agent.",
+                tool_name=tool_name,
+            )
 
 
 def _find_workflow_context(ctx: Any) -> Any:
@@ -421,13 +480,18 @@ class Tool:
         """
         workflow_ctx = _find_workflow_context(ctx)
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 f"Tool '{self.name}' requires confirmation, which pauses the run "
                 "for a person's approval. Call it from a workflow, or remove "
-                "confirmation=True."
+                "confirmation=True.",
+                tool_name=self.name,
             )
         # Refuse rather than run the tool without approval.
-        _require_pause_boundary(workflow_ctx, f"Tool '{self.name}' requires confirmation, which")
+        _require_pause_boundary(
+            workflow_ctx,
+            f"Tool '{self.name}' requires confirmation, which",
+            self.name,
+        )
 
         question = f"Allow `{self.name}` to run?"
         if arguments:
@@ -933,28 +997,17 @@ class AskUserTool(Tool):
         Returns:
             User's text response
         """
-        # Import here to avoid circular dependency
-        from .context import get_current_context
-        from .workflow import WorkflowContext
-
-        # Use explicit context if provided during __init__
-        workflow_ctx = self.context
-
-        # If not provided, try to get from task-local contextvar
-        if workflow_ctx is None:
-            current = get_current_context()
-            if isinstance(current, WorkflowContext):
-                workflow_ctx = current
-            elif hasattr(current, "_workflow_entity"):
-                # Current context has workflow entity (is WorkflowContext)
-                workflow_ctx = current  # type: ignore
+        # The context given to __init__, or the workflow running the agent
+        # that called this tool.
+        workflow_ctx = _pause_context_for(self, ctx)
 
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 "AskUserTool requires WorkflowContext. "
-                "Either pass context to __init__ or ensure tool is used within a workflow."
+                "Either pass context to __init__ or ensure tool is used within a workflow.",
+                tool_name=self.name,
             )
-        _require_pause_boundary(workflow_ctx, "AskUserTool")
+        _require_pause_boundary(workflow_ctx, "AskUserTool", self.name)
 
         return await workflow_ctx.wait_for_user(question, input_type="text")
 
@@ -1028,28 +1081,17 @@ class RequestApprovalTool(Tool):
         Returns:
             "approve" or "reject" based on user's decision
         """
-        # Import here to avoid circular dependency
-        from .context import get_current_context
-        from .workflow import WorkflowContext
-
-        # Use explicit context if provided during __init__
-        workflow_ctx = self.context
-
-        # If not provided, try to get from task-local contextvar
-        if workflow_ctx is None:
-            current = get_current_context()
-            if isinstance(current, WorkflowContext):
-                workflow_ctx = current
-            elif hasattr(current, "_workflow_entity"):
-                # Current context has workflow entity (is WorkflowContext)
-                workflow_ctx = current  # type: ignore
+        # The context given to __init__, or the workflow running the agent
+        # that called this tool.
+        workflow_ctx = _pause_context_for(self, ctx)
 
         if workflow_ctx is None:
-            raise ConfigurationError(
+            raise ToolCannotPauseError(
                 "RequestApprovalTool requires WorkflowContext. "
-                "Either pass context to __init__ or ensure tool is used within a workflow."
+                "Either pass context to __init__ or ensure tool is used within a workflow.",
+                tool_name=self.name,
             )
-        _require_pause_boundary(workflow_ctx, "RequestApprovalTool")
+        _require_pause_boundary(workflow_ctx, "RequestApprovalTool", self.name)
 
         question = f"Action: {action}"
         if details:

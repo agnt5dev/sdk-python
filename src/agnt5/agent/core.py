@@ -38,7 +38,7 @@ from ..callbacks import (
 )
 from ..context import Context, get_current_context, set_current_context
 from ..events import Event
-from ..exceptions import WaitingForUserInputException
+from ..exceptions import ToolCannotPauseError, WaitingForUserInputException
 from ..lm import (
     BuiltInTool,
     GenerateRequest,
@@ -56,7 +56,7 @@ from ..lm.events import (
     LMContentBlockStarted,
 )
 from ..lm.model_caps import rejects_sampling_params
-from ..tool import Tool, ToolRegistry
+from ..tool import Tool, ToolRegistry, require_agent_can_pause
 from .agents_md import AgentsMdSource, load_agents_md, render_guidance
 from .context import AgentContext
 from .events import (
@@ -1011,6 +1011,11 @@ class Agent:
         original_agent_parent = context.parent_correlation_id
         token = None
         try:
+            # Before the first model call, so a tool that can never pause here
+            # fails every run the same way, with nothing spent and nothing
+            # done. Inside the try so the agent's sandbox is still closed.
+            require_agent_can_pause(self.name, self.tools.values(), context)
+
             # Cleanup must also cover cancellation or failure of the first ACK.
             # Skip the event if the executor already owns this lifecycle.
             if context and not self._lifecycle_managed(context):
@@ -1474,6 +1479,12 @@ class Agent:
                                         "model_config": self._model_config_snapshot(),
                                     },
                                 ) from e
+
+                            except ToolCannotPauseError:
+                                # The tool had to pause for a person and could not. Fail the
+                                # run: handed to the model as a tool error, the model carries
+                                # on as if the person had been asked.
+                                raise
 
                             except Exception as e:
                                 if getattr(e, "_agnt5_checkpoint_failure", False):
@@ -2043,6 +2054,11 @@ class Agent:
         original_agent_parent = context.parent_correlation_id
         token = None
         try:
+            # Before the first model call, so a tool that can never pause here
+            # fails every run the same way, with nothing spent and nothing
+            # done. Inside the try so the agent's sandbox is still closed.
+            require_agent_can_pause(self.name, self.tools.values(), context)
+
             # Cleanup must also cover cancellation or failure of the first ACK.
             # Skip the event if the executor already owns this lifecycle.
             if context and not self._lifecycle_managed(context):
@@ -2363,6 +2379,12 @@ class Agent:
                                             "model_config": self._model_config_snapshot(),
                                         },
                                     ) from e
+
+                                except ToolCannotPauseError:
+                                    # The tool had to pause for a person and could not. Fail the
+                                    # run: handed to the model as a tool error, the model carries
+                                    # on as if the person had been asked.
+                                    raise
 
                                 except Exception as e:
                                     if getattr(e, "_agnt5_checkpoint_failure", False):
@@ -2761,6 +2783,12 @@ class Agent:
                                 "model_config": self._model_config_snapshot(),
                             },
                         ) from e
+
+                    except ToolCannotPauseError:
+                        # The tool had to pause for a person and could not. Fail the
+                        # run: handed to the model as a tool error, the model carries
+                        # on as if the person had been asked.
+                        raise
 
                     except Exception as e:
                         if getattr(e, "_agnt5_checkpoint_failure", False):
