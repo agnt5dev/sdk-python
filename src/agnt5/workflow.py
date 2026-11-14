@@ -839,7 +839,7 @@ class WorkflowContext(Context):
                     popped_id = self._step_event_stack.pop()
                     if popped_id != step_event_id:
                         self._logger.warning(
-                            f"Step event stack mismatch in task(): expected {step_event_id}, got {popped_id}"
+                            f"Step event stack mismatch in step(): expected {step_event_id}, got {popped_id}"
                         )
 
                 # Emit workflow.step.completed checkpoint
@@ -883,7 +883,7 @@ class WorkflowContext(Context):
                     popped_id = self._step_event_stack.pop()
                     if popped_id != step_event_id:
                         self._logger.warning(
-                            f"Step event stack mismatch in task() error path: expected {step_event_id}, got {popped_id}"
+                            f"Step event stack mismatch in step() error path: expected {step_event_id}, got {popped_id}"
                         )
 
                 # Emit workflow.step.failed checkpoint
@@ -1195,62 +1195,6 @@ class WorkflowContext(Context):
             raise BatchError(msg, result)
 
         return result.outputs
-
-    async def task(
-        self,
-        handler: Union[str, Callable],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """
-        Execute a function and wait for result.
-
-        .. deprecated::
-            Use :meth:`step` instead. ``task()`` will be removed in a future version.
-
-        This method is an alias for :meth:`step` for backward compatibility.
-        New code should use ``ctx.step()`` directly.
-
-        Args:
-            handler: Either a @function reference or string name
-            *args: Positional arguments to pass to the function
-            **kwargs: Keyword arguments to pass to the function
-
-        Returns:
-            Function result
-        """
-        import warnings
-
-        warnings.warn(
-            "ctx.task() is deprecated, use ctx.step() instead. "
-            "task() will be removed in a future version.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.step(handler, *args, **kwargs)
-
-    async def run(
-        self,
-        handler: Union[str, Callable],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Deprecated compatibility alias for :meth:`step`.
-
-        .. deprecated::
-            Use ``ctx.step(handler, *args, **kwargs)`` instead. Arguments,
-            stable keys, retries, replay, and durability acknowledgments are
-            unchanged. ``run()`` will be removed in a future version.
-        """
-        import warnings
-
-        warnings.warn(
-            "ctx.run() is deprecated, use ctx.step() instead. "
-            "run() will be removed in a future version.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.step(handler, *args, **kwargs)
 
     async def _step_checkpoint(
         self,
@@ -1758,55 +1702,44 @@ class WorkflowContext(Context):
             # This ensures step.started and step.completed have matching correlation IDs.
             # Only the pause this resume answered has them; earlier pauses replay
             # first and would otherwise report their answers under its name.
+            # Only the pause this resume answered reports its answer. Earlier
+            # pauses reported theirs on the resume that answered them, so
+            # emitting again would repeat the same events on every resume.
             is_resumed_pause = pause_index == self._workflow_entity._resumed_pause_index
-            original_step_correlation_id = (
-                self._workflow_entity._resumed_step_correlation_id if is_resumed_pause else None
-            )
-            original_step_name = (
-                self._workflow_entity._resumed_step_name if is_resumed_pause else None
-            ) or step_name
-
-            if original_step_correlation_id:
-                self._logger.debug(
-                    f"Using restored step correlation ID: {original_step_correlation_id}"
-                )
-            else:
-                # Normal during multi-step HITL replay — only the latest paused step
-                # has a correlation ID from the platform; earlier replayed steps generate new ones.
-                original_step_correlation_id = generate_cid()
-                self._logger.debug(
-                    f"No restored step correlation ID, using new: {original_step_correlation_id}"
-                )
-
-            # Emit workflow.resumed FIRST - workflow is continuing after pause
-            workflow_resumed = Resumed(
-                name=self._workflow_name or "workflow",
-                correlation_id=self._correlation_id,
-                parent_correlation_id=self.run_id[:8],
-                component_type=ComponentType.WORKFLOW,
-                resume_data={"response": response, "pause_index": pause_index},
-            )
-            await self.emit_async(workflow_resumed)
-
-            # Emit workflow.step.completed - complete the SAME step that was paused
-            # Use the ORIGINAL correlation ID so started/completed events pair correctly
-            step_completed = Completed(
-                name=original_step_name,
-                correlation_id=original_step_correlation_id,
-                parent_correlation_id=parent_correlation_id,
-                component_type=ComponentType.WORKFLOW,
-                operation=OperationType.STEP,
-                output_data={
-                    "step_name": original_step_name,
-                    "handler_name": "wait_for_user",
-                    "result": response,
-                },
-                metadata={"name": original_step_name},
-            )
-            await self.emit_async(step_completed)
-
-            # Clear the resumed step info after use
             if is_resumed_pause:
+                # Use the ORIGINAL step correlation ID from the pause, so the
+                # step's started and completed events pair up.
+                original_step_correlation_id = (
+                    self._workflow_entity._resumed_step_correlation_id or generate_cid()
+                )
+                original_step_name = self._workflow_entity._resumed_step_name or step_name
+
+                # workflow.resumed first: the workflow continues after the pause.
+                workflow_resumed = Resumed(
+                    name=self._workflow_name or "workflow",
+                    correlation_id=self._correlation_id,
+                    parent_correlation_id=self.run_id[:8],
+                    component_type=ComponentType.WORKFLOW,
+                    resume_data={"response": response, "pause_index": pause_index},
+                )
+                await self.emit_async(workflow_resumed)
+
+                # Then complete the same step that paused.
+                step_completed = Completed(
+                    name=original_step_name,
+                    correlation_id=original_step_correlation_id,
+                    parent_correlation_id=parent_correlation_id,
+                    component_type=ComponentType.WORKFLOW,
+                    operation=OperationType.STEP,
+                    output_data={
+                        "step_name": original_step_name,
+                        "handler_name": "wait_for_user",
+                        "result": response,
+                    },
+                    metadata={"name": original_step_name},
+                )
+                await self.emit_async(step_completed)
+
                 self._workflow_entity._resumed_step_correlation_id = None
                 self._workflow_entity._resumed_step_name = None
 
@@ -2618,13 +2551,13 @@ def workflow(
             ctx.state.set("order_id", order_id)
 
             # Validate order
-            order = await ctx.task(validate_order, input={"order_id": order_id})
+            order = await ctx.step(validate_order, input={"order_id": order_id})
 
             # Process payment (checkpointed - won't re-execute on crash)
             payment = await ctx.step("payment", process_payment(order["total"]))
 
             # Fulfill order
-            await ctx.task(ship_order, input={"order_id": order_id})
+            await ctx.step(ship_order, input={"order_id": order_id})
 
             ctx.state.set("status", "completed")
             return {"status": ctx.state.get("status")}
@@ -2642,7 +2575,7 @@ def workflow(
             ctx.state.set("messages", messages)
 
             # Generate AI response
-            response = await ctx.task(generate_response, messages=messages)
+            response = await ctx.step(generate_response, messages=messages)
 
             # Add assistant response
             messages.append({"role": "assistant", "content": response})
@@ -2654,9 +2587,9 @@ def workflow(
         @workflow(name="daily_report", cron="0 9 * * *")
         async def daily_report(ctx: WorkflowContext) -> dict:
             # Runs automatically every day at 9am
-            sales = await ctx.task(get_sales_data, report_type="sales")
-            report = await ctx.task(generate_pdf, input=sales)
-            await ctx.task(send_email, to="team@company.com", attachment=report)
+            sales = await ctx.step(get_sales_data, report_type="sales")
+            report = await ctx.step(generate_pdf, input=sales)
+            await ctx.step(send_email, to="team@company.com", attachment=report)
             return {"status": "sent", "report_id": report["id"]}
 
     Example (webhook workflow):
@@ -2667,8 +2600,8 @@ def workflow(
             payment = webhook_data["payload"]
 
             if payment.get("status") == "succeeded":
-                await ctx.task(fulfill_order, order_id=payment["order_id"])
-                await ctx.task(send_receipt, customer_email=payment["email"])
+                await ctx.step(fulfill_order, order_id=payment["order_id"])
+                await ctx.step(send_receipt, customer_email=payment["email"])
                 return {"status": "processed", "order_id": payment["order_id"]}
 
             return {"status": "skipped", "reason": "payment not successful"}

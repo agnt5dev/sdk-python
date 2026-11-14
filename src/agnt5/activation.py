@@ -15,7 +15,7 @@ from enum import Enum, IntEnum
 from typing import Any, Awaitable, Callable, Iterator, Protocol, TypeVar
 
 from ._serialization import serialize
-from .exceptions import ActivationError, ActivationErrorCode
+from .exceptions import ActivationError, ActivationErrorCode, ToolCannotPauseError
 
 DURABLE_ACTIVATION_V1 = "durable_activation_v1"
 _IDENTITY_DOMAIN = b"agnt5.activation.identity.v1\0"
@@ -764,8 +764,13 @@ class ActivationClient:
                         "SuspensionRequestedException",
                     }:
                         raise
-                    retryable = failure_retryable and (
-                        max_attempts is None or decision.attempt < max_attempts
+                    # A tool that can't pause where it was called fails the same
+                    # way on every attempt, and a retry would run the model and
+                    # the earlier tools again to get there.
+                    retryable = (
+                        failure_retryable
+                        and not isinstance(user_error, ToolCannotPauseError)
+                        and (max_attempts is None or decision.attempt < max_attempts)
                     )
                     error_data = json.dumps(
                         {"message": str(user_error), "type": type(user_error).__name__},

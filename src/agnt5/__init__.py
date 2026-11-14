@@ -117,6 +117,7 @@ from .exceptions import (
     ConfigurationError,
     ExecutionError,
     RetryError,
+    ToolCannotPauseError,
     WaitingForUserInputException,
 )
 from .function import FunctionContext, FunctionRegistry, function
@@ -481,6 +482,7 @@ __all__ = [
     "ConfigurationError",
     "ExecutionError",
     "RetryError",
+    "ToolCannotPauseError",
     "WaitingForUserInputException",
     # Sandbox components
     "InMemorySandbox",

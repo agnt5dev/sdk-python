@@ -113,8 +113,9 @@ committed result without executing the handler again. Retries reuse the same
 activation identity with runtime-owned attempts. External side effects still
 need idempotency: `ctx.activation.idempotency_key` is available to handlers.
 Existing `@function` handlers remain supported with their function checkpoints.
-`ctx.run(...)` is deprecated; replace it with `ctx.step(...)` using the same
-arguments and keys. It remains functional and emits a `DeprecationWarning`.
+`ctx.step(...)` is the only way to run a step. `ctx.task(...)` and `ctx.run(...)`
+were removed; replace either with `ctx.step(...)` using the same arguments and
+keys.
 
 ## Core APIs
 

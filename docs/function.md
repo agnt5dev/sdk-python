@@ -68,8 +68,7 @@ async def multiply(x: float, y: float) -> float:
 
 **When to use context:**
 - ✅ Need logging: `ctx.logger.info(...)`
-- ✅ Need checkpointing: `await ctx.step(...)`
-- ✅ Need to call other functions: `await ctx.task(...)`
+- ✅ Need checkpointing, or to call other functions: `await ctx.step(...)`
 - ✅ Need state management: `await ctx.get(...)` / `await ctx.set(...)`
 - ❌ Simple pure functions: Omit context for cleaner code
 
@@ -283,10 +282,10 @@ async def process_request(ctx: Context, user_id: str, action: str) -> dict:
     """Process request with type-safe function calls."""
 
     # ✅ Type-safe: Pass function reference directly
-    user = await ctx.task(fetch_user_data, input=user_id)
+    user = await ctx.step(fetch_user_data, input=user_id)
 
     # ✅ Type-safe: IDE autocomplete works
-    has_permission = await ctx.task(validate_permissions, input={
+    has_permission = await ctx.step(validate_permissions, input={
         "user": user,
         "action": action
     })
@@ -307,7 +306,7 @@ async def process_request(ctx: Context, user_id: str, action: str) -> dict:
 **String-based calls still work (backward compatible):**
 ```python
 # Still supported but not recommended
-user = await ctx.task("fetch_user_data", input=user_id)
+user = await ctx.step(fetch_user_data, input=user_id)
 ```
 
 ### Error Handling
@@ -520,8 +519,8 @@ When your worker starts, the `@function` decorator registers the function in the
 ### 2. Invocation
 Functions can be invoked through:
 - **Gateway HTTP/gRPC API**: External invocations
-- **Workflows**: Orchestrated execution via `ctx.task()`
-- **Other functions**: Function composition via `ctx.task()`
+- **Workflows**: Orchestrated execution via `ctx.step()`
+- **Other functions**: Function composition via `ctx.step()`
 - **Platform API**: Direct invocation via platform services
 
 ### 3. Execution
@@ -555,9 +554,9 @@ async def load_data(ctx: Context, data: dict) -> bool:
 async def etl_pipeline(ctx: Context, source: str) -> dict:
     """Compose functions into an ETL pipeline."""
     # Type-safe function calls
-    extracted = await ctx.task(extract_data, input=source)
-    transformed = await ctx.task(transform_data, input=extracted)
-    loaded = await ctx.task(load_data, input=transformed)
+    extracted = await ctx.step(extract_data, input=source)
+    transformed = await ctx.step(transform_data, input=extracted)
+    loaded = await ctx.step(load_data, input=transformed)
 
     return {"success": loaded, "records": len(transformed)}
 ```
@@ -660,10 +659,10 @@ Function calls are now type-safe:
 
 ```python
 # ❌ Old: String-based (no autocomplete, no type safety)
-result = await ctx.task("process_data", input=data)
+result = await ctx.step(process_data, input=data)
 
 # ✅ New: Type-safe function reference (recommended)
-result = await ctx.task(process_data, input=data)
+result = await ctx.step(process_data, input=data)
 ```
 
 ### From Old Retry Configuration

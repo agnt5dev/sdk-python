@@ -644,6 +644,42 @@ async def test_retry_exhaustion_preserves_exception_and_marks_final_attempt_nonr
     assert not transport.complete_requests
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_registered_step_does_not_retry_a_tool_that_cannot_pause(managed):
+    """It fails the same way every attempt, and a retry reruns the work before it."""
+    from dataclasses import replace
+
+    from agnt5.exceptions import ToolCannotPauseError
+
+    class RetryTransport(WorkflowActivationTransport):
+        async def begin(self, request):
+            return replace(await super().begin(request), attempt=len(self.fail_requests) + 1)
+
+        async def fail(self, **request):
+            return replace(
+                await super().fail(**request),
+                status="RETRY_READY" if request["retryable"] else "FAILED",
+            )
+
+    transport = RetryTransport()
+    context, _, _ = activation_context(transport)
+    if not managed:
+        context._activation_client = None
+    attempts = []
+
+    @function(name="asks_a_person", retries={"max_attempts": 3, "initial_interval_ms": 0})
+    async def asks_a_person(ctx):
+        attempts.append(ctx.attempt)
+        raise ToolCannotPauseError("cannot pause here", tool_name="request_approval")
+
+    with pytest.raises(ToolCannotPauseError):
+        await context.step(asks_a_person)
+    assert attempts == [0]
+    if managed:
+        assert [request["retryable"] for request in transport.fail_requests] == [False]
+
+
 def _step_request(context, key):
     from agnt5.activation import activation_request_from_context
 

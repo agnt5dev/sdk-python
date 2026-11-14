@@ -155,6 +155,79 @@ def _workflow_dispatch_metadata(request: Any) -> dict[str, str]:
     return metadata
 
 
+def _pausable_tool_context(executor: Any, tool: Any, input_dict: dict, request: Any) -> Any:
+    """A context a directly-run tool can pause in, with any earlier answer loaded.
+
+    A tool that needs a person's approval pauses the run and is dispatched
+    again once they answer, as a workflow is. The resumed dispatch carries the
+    answer and the steps recorded before the pause in its metadata; loading
+    them here lets the second run read the answer instead of asking again.
+    """
+    from ..workflow import WorkflowContext, WorkflowEntity
+
+    metadata = _workflow_dispatch_metadata(request)
+    session_id, user_id = _resolve_session_user_ids(request, input_dict)
+    entity = WorkflowEntity(
+        run_id=request.invocation_id,
+        session_id=session_id,
+        user_id=user_id,
+        component_name=tool.name,
+    )
+
+    completed_steps: dict = {}
+    step_events: list = []
+    try:
+        if metadata.get("completed_steps"):
+            completed_steps = json.loads(metadata["completed_steps"])
+        elif metadata.get("step_events"):
+            step_events = json.loads(metadata["step_events"])
+            completed_steps = {
+                event["step_name"]: event["result"]
+                for event in step_events
+                if "step_name" in event and "result" in event
+            }
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Failed to parse recorded steps from tool resume metadata")
+        completed_steps, step_events = {}, []
+    if completed_steps:
+        entity._completed_steps = completed_steps
+    if step_events:
+        entity._step_events = step_events
+
+    if "user_response" in metadata:
+        try:
+            entity._pause_index = int(metadata.get("pause_index", "0"))
+        except ValueError:
+            entity._pause_index = 0
+        entity.inject_user_response(metadata["user_response"])
+        entity._resumed_pause_index = entity._pause_index
+        # Replay counts pauses from the start again.
+        entity._pause_index = 0
+        entity._resumed_step_correlation_id = metadata.get("step_correlation_id")
+        entity._resumed_step_name = metadata.get("step_name")
+
+    ctx = WorkflowContext(
+        workflow_entity=entity,
+        run_id=request.invocation_id,
+        session_id=session_id,
+        user_id=user_id,
+        attempt=getattr(request, "attempt", 0),
+        runtime_context=request.runtime_context,
+        worker=executor._rust_worker,
+        trace_metadata=metadata,
+        activation_client=_resolve_activation_client(executor, metadata),
+        # The pause records this ID, so the resumed run reports under the
+        # same tool event as the first one.
+        correlation_id=metadata.get("workflow_correlation_id")
+        or f"tool-{secrets.token_hex(5)}",
+        parent_correlation_id=generate_cid(),
+    )
+    ctx._component_name = tool.name
+    ctx._workflow_name = tool.name
+    ctx._is_replay = bool(completed_steps) or "user_response" in metadata
+    return ctx
+
+
 def _normalize_hosted_agent_stream_event(event: Any) -> Any:
     """Translate Python content blocks to the shared hosted LM stream contract."""
     event_type = getattr(event, "event_type", "")
@@ -644,15 +717,23 @@ class ExecutorMixin:
         self, tool: Any, input_data: bytes, request: Any
     ) -> "PyExecuteComponentResponse | None":
         """Execute a tool handler."""
+        from .._core import PyExecuteComponentResponse
         from ..context import Context
         from ..events import Completed, ComponentType, Failed, Started
+        from ..exceptions import WaitingForUserInputException
 
         logger.debug(
             f"[_execute_tool] Starting execution for tool={tool.name}, "
             f"invocation_id={getattr(request, 'invocation_id', 'unknown')}"
         )
 
+        # A tool that asks for approval pauses the run, so it needs a context
+        # that can pause and resume. Other tools keep the plain context.
+        pausable = getattr(tool, "confirmation", False) is True
+
         def create_context(input_dict: dict, req: Any) -> Context:
+            if pausable:
+                return _pausable_tool_context(self, tool, input_dict, req)
             correlation_id = f"tool-{secrets.token_hex(5)}"
             return Context(
                 run_id=req.invocation_id,
@@ -668,11 +749,14 @@ class ExecutorMixin:
             # Create short run correlation id (matches pattern of other events)
             run_correlation_id = ctx.run_id[:8]
 
+            run_parent_correlation_id = ctx.parent_correlation_id
+            resumed = pausable and ctx._is_replay
+
             # Emit run.started before executing handler
             run_started_event = Started(
                 name=tool.name,
                 correlation_id=run_correlation_id,
-                parent_correlation_id=ctx.parent_correlation_id,
+                parent_correlation_id=run_parent_correlation_id,
                 component_type=ComponentType.RUN,
                 input_data=input_dict,
                 attempt=ctx.attempt,
@@ -686,7 +770,13 @@ class ExecutorMixin:
 
             # Emit tool.started (child of run)
             start_time_ns = time.time_ns()
-            tool_correlation_id = f"tool-{secrets.token_hex(5)}"
+            if pausable:
+                # The approval's events and the pause itself are reported
+                # under the context's ID, so the tool event uses it too.
+                tool_correlation_id = ctx.correlation_id
+                ctx.parent_correlation_id = run_correlation_id
+            else:
+                tool_correlation_id = f"tool-{secrets.token_hex(5)}"
             tool_started_event = Started(
                 name=tool.name,
                 correlation_id=tool_correlation_id,
@@ -700,7 +790,10 @@ class ExecutorMixin:
                 f"tool={tool.name}, correlation_id={tool_correlation_id}"
             )
             # run.started and tool.started travel as one acknowledged batch.
-            await ctx.emit_batch_async([run_started_event, tool_started_event])
+            # A run resumed after its approval already reported both, and the
+            # platform records the resume itself.
+            if not resumed:
+                await ctx.emit_batch_async([run_started_event, tool_started_event])
 
             # Execute tool with error handling for proper event emission
             try:
@@ -708,6 +801,39 @@ class ExecutorMixin:
                     await tool.invoke(ctx, **input_dict)
                     if isinstance(input_dict, dict) and input_dict
                     else await tool.invoke(ctx)
+                )
+
+            except WaitingForUserInputException as pause:
+                # The tool is waiting for a person's approval. The pause is
+                # already journaled; answer the dispatch as paused, not failed,
+                # so the run is dispatched again once they answer.
+                logger.info(f"Tool '{tool.name}' paused waiting for approval")
+                pause_metadata = dict(pause.checkpoint_metadata)
+                pause_metadata.update(
+                    {
+                        "component_name": tool.name,
+                        "component_type": "tool",
+                        "pause_index": str(pause.pause_index),
+                    }
+                )
+                is_pull = (getattr(req, "metadata", None) or {}).get("dispatch_mode") == "pull"
+                return PyExecuteComponentResponse(
+                    invocation_id=req.invocation_id,
+                    success=True,
+                    output_data=json.dumps(
+                        {
+                            "_paused": True,
+                            "question": pause.question,
+                            "pause_index": pause.pause_index,
+                        }
+                    ).encode("utf-8"),
+                    state_update=None,
+                    error_message=None,
+                    metadata=pause_metadata,
+                    event_type="workflow.paused" if is_pull else "run.paused",
+                    content_index=0,
+                    sequence=0,
+                    attempt=getattr(req, "attempt", 0),
                 )
 
             except Exception as e:
@@ -736,7 +862,7 @@ class ExecutorMixin:
                 run_failed_event = Failed(
                     name=tool.name,
                     correlation_id=run_correlation_id,
-                    parent_correlation_id=ctx.parent_correlation_id,
+                    parent_correlation_id=run_parent_correlation_id,
                     component_type=ComponentType.RUN,
                     error_code=type(e).__name__,
                     error_message=error_msg,
@@ -784,7 +910,7 @@ class ExecutorMixin:
             run_completed_event = Completed(
                 name=tool.name,
                 correlation_id=run_correlation_id,
-                parent_correlation_id=ctx.parent_correlation_id,
+                parent_correlation_id=run_parent_correlation_id,
                 component_type=ComponentType.RUN,
                 output_data=result,
             )
