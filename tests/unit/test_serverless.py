@@ -791,3 +791,22 @@ def test_serverless_wsgi_rejects_missing_signing_secret() -> None:
     assert status == 503
     assert body["error"]["code"] == "WORKERLESS_SIGNING_SECRET_REQUIRED"
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("approve", "approve"),
+        ("__skipped__", None),
+        ("__skip__", None),
+        ("__custom__:Rust", "Rust"),
+        ('["ai","__custom__:Rust"]', '["ai","Rust"]'),
+        ('["ai","web"]', '["ai","web"]'),
+    ],
+)
+def test_serverless_resume_decodes_the_answer_like_a_worker_does(raw, expected):
+    from agnt5.serverless import _user_responses_from_metadata
+
+    responses = _user_responses_from_metadata({"user_response": raw, "pause_index": "2"})
+
+    assert responses == {2: expected}
