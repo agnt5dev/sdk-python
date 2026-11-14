@@ -48,6 +48,7 @@ mod payload_tests {
             py.run(
                 c_str!(
                     r#"
+import asyncio
 for key in ("AGNT5_CAPTURE_CONTENT_MODE", "AGNT5_LLM_CAPTURE_CONTENT", "AGNT5_CAPTURE",
             "AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES"):
     os.environ.pop(key, None)
@@ -58,6 +59,10 @@ def redact(value):
     return value
 def broken(value):
     raise RuntimeError("synthetic-hook-secret")
+def cancelled(value):
+    raise asyncio.CancelledError("synthetic-hook-secret")
+def bom_result(value):
+    return '\ufeff{"message":"application redacted","bot_token":"synthetic-hook-secret"}'
 policy = SpanPayloadPolicy(redact)
 "#
                 ),
@@ -78,20 +83,27 @@ policy = SpanPayloadPolicy(redact)
                 .with_simple_exporter(exporter.clone())
                 .build();
             let tracer = provider.tracer("payload-regression");
-            let data = br#"{"message":"private message","nested":{"bot_token":"synthetic-bot-secret","Authorization":"synthetic-auth-secret"}}"#;
+            let data = br#"{"message":"private message","nested":{"bot_token":"synthetic-bot-secret","Authorization":"synthetic-auth-secret"},"body":"\ufeff{\"bot_token\":\"synthetic-embedded-secret\"}"}"#;
+            let mut bom_data = b"\xef\xbb\xbf".to_vec();
+            bom_data.extend_from_slice(data);
             for scenario in [
                 "unconfigured",
                 "default",
                 "opt-in",
+                "bom-bytes",
+                "hook-bom",
                 "disabled",
                 "hook-error",
+                "hook-cancelled",
                 "bridge-error",
                 "zero-cap",
             ] {
                 let setup = match scenario {
                     "opt-in" => "os.environ['AGNT5_CAPTURE_CONTENT_MODE'] = 'full'",
                     "disabled" => "os.environ['AGNT5_CAPTURE'] = 'off'",
+                    "hook-bom" => "policy._redactor = bom_result",
                     "hook-error" => "os.environ.pop('AGNT5_CAPTURE'); policy._redactor = broken",
+                    "hook-cancelled" => "policy._redactor = cancelled",
                     "zero-cap" => "os.environ['AGNT5_SPAN_ATTRIBUTE_VALUE_MAX_BYTES'] = '0'",
                     _ => "pass",
                 };
@@ -101,11 +113,16 @@ policy = SpanPayloadPolicy(redact)
                     *capture.lock().unwrap() = Some(module.getattr("broken").unwrap().unbind());
                 }
                 let mut span = tracer.start(scenario);
+                let payload = if scenario == "bom-bytes" {
+                    bom_data.as_slice()
+                } else {
+                    data
+                };
                 for direction in ["input", "output"] {
                     let attributes = if scenario == "unconfigured" {
-                        span_payload_attributes(&Mutex::new(None), direction, data)
+                        span_payload_attributes(&Mutex::new(None), direction, payload)
                     } else {
-                        span_payload_attributes(&capture, direction, data)
+                        span_payload_attributes(&capture, direction, payload)
                     };
                     span.set_attributes(attributes);
                 }
@@ -113,7 +130,7 @@ policy = SpanPayloadPolicy(redact)
             }
             provider.force_flush().unwrap();
             let spans = exporter.get_finished_spans().unwrap();
-            assert_eq!(spans.len(), 7);
+            assert_eq!(spans.len(), 10);
             for span in spans {
                 let attributes: HashMap<_, _> = span
                     .attributes
@@ -123,7 +140,7 @@ policy = SpanPayloadPolicy(redact)
                 for direction in ["input", "output"] {
                     let key = format!("{}.data", direction);
                     assert!(attributes.contains_key(format!("{}.size_bytes", direction).as_str()));
-                    if span.name == "opt-in" {
+                    if matches!(span.name.as_ref(), "opt-in" | "bom-bytes" | "hook-bom") {
                         let value = &attributes[key.as_str()];
                         assert!(value.contains("application redacted"));
                         assert!(!value.contains("synthetic-"));
@@ -133,7 +150,7 @@ policy = SpanPayloadPolicy(redact)
                     }
                 }
             }
-            assert_eq!(module.getattr("calls").unwrap().len().unwrap(), 2);
+            assert_eq!(module.getattr("calls").unwrap().len().unwrap(), 4);
             assert!(String::from_utf8_lossy(data).contains("synthetic-bot-secret"));
             py.run(
                 c_str!(

@@ -72,9 +72,10 @@ def _copy_payload(value: Any, *, depth: int = 0) -> Any:
         if value in {"[REDACTED]", "[max-depth]", "[additional items omitted]"}:
             return value
         # Decode embedded JSON before key redaction, never after truncation.
-        if value.lstrip().startswith(("{", "[", '"')):
+        normalized = re.sub(r"^[\s\ufeff]+", "", value)
+        if normalized.startswith(("{", "[", '"')):
             try:
-                value = json.loads(value)
+                value = json.loads(normalized)
             except ValueError:
                 return "[unparseable payload omitted]"
             return _copy_payload(value, depth=depth + 1)
@@ -129,7 +130,11 @@ class SpanPayloadPolicy:
         try:
             copied = _copy_payload(value)
             if self._redactor is not None:
-                copied = self._redactor(copied)
+                try:
+                    copied = self._redactor(copied)
+                except BaseException:
+                    # Telemetry callbacks must not cancel or terminate execution.
+                    return None
                 if copied is None:
                     return None
                 copied = _copy_payload(copied)

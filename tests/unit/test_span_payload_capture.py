@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock
@@ -7,7 +8,7 @@ import pytest
 from agnt5._capture import SpanPayloadPolicy, content_capture_mode
 from agnt5.context import _current_context, set_current_context
 from agnt5.function import FunctionRegistry, function
-from agnt5.workflow import WorkflowContext, WorkflowEntity
+from agnt5.workflow import WorkflowContext, WorkflowEntity, WorkflowRegistry, workflow
 from agnt5.workflow_activation import execute_function_callable
 
 
@@ -150,7 +151,7 @@ async def test_workflow_opt_in_redacts_copies_without_changing_checkpoints(
 
 
 @pytest.mark.parametrize("path", ["legacy", "activation"])
-@pytest.mark.parametrize("failure", ["raise", "omit", "unsupported"])
+@pytest.mark.parametrize("failure", ["raise", "omit", "unsupported", "cancelled", "base-exception"])
 async def test_redactor_failure_never_falls_back_to_raw_payload(
     path, failure, span_sink, monkeypatch, caplog
 ):
@@ -163,6 +164,10 @@ async def test_redactor_failure_never_falls_back_to_raw_payload(
     def redact(_value):
         if failure == "raise":
             raise RuntimeError("synthetic-hook-secret")
+        if failure == "cancelled":
+            raise asyncio.CancelledError("synthetic-hook-secret")
+        if failure == "base-exception":
+            raise BaseException("synthetic-hook-secret")
         return Unsupported() if failure == "unsupported" else None
 
     context = WorkflowContext(
@@ -209,14 +214,110 @@ def test_native_byte_policy_handles_non_json_and_invalid_payloads(monkeypatch, p
     assert (captured[0] if captured is not None else None) == expected
 
 
-def test_nested_workflow_inherits_parent_policy():
-    parent = WorkflowContext(WorkflowEntity("parent"), "parent")
+async def test_nested_workflow_uses_parent_redactor_without_changing_checkpoints(
+    monkeypatch, span_sink
+):
+    monkeypatch.setenv("AGNT5_CAPTURE_CONTENT_MODE", "full")
+    events = []
+    calls = []
+
+    def redact(value):
+        calls.append(value)
+        target = value["kwargs"]["payload"] if "kwargs" in value else value
+        target["message"] = "parent hook applied"
+        return value
+
+    parent = WorkflowContext(
+        WorkflowEntity("parent"), "parent", span_payload_policy=SpanPayloadPolicy(redact)
+    )
+
+    @workflow(name="nested_capture")
+    async def child(ctx, payload: dict):
+        ctx.emit_async = AsyncMock(side_effect=events.append)
+        return await run_function_path("legacy", ctx, payload)
+
+    payload = {"message": "private nested message", "bot_token": "synthetic-bot-secret"}
+    before = json.dumps(payload)
     token = set_current_context(parent)
     try:
-        child = WorkflowContext(WorkflowEntity("child"), "child")
-        assert child._span_payload_policy is parent._span_payload_policy
+        assert await child(payload=payload) is payload
     finally:
         _current_context.reset(token)
+        WorkflowRegistry.clear()
+    assert len(calls) == 2
+    assert len(span_sink) == 1
+    assert (
+        json.loads(span_sink[0]["input.data"])["kwargs"]["payload"]["message"]
+        == "parent hook applied"
+    )
+    assert json.loads(span_sink[0]["output.data"])["message"] == "parent hook applied"
+    assert "private nested message" not in json.dumps(span_sink)
+    assert "synthetic-bot-secret" not in json.dumps(span_sink)
+    assert json.dumps(payload) == before
+    assert events[-1].output_data["result"] == payload
+
+
+@pytest.mark.parametrize("mode", ["full", "redacted"])
+@pytest.mark.parametrize("source", ["utf8-bytes", "embedded-string", "hook-string"])
+@pytest.mark.parametrize("prefix", ["\ufeff", "\u2003\ufeff \t\ufeff"])
+def test_bom_prefixed_json_is_redacted_before_capture(monkeypatch, mode, source, prefix):
+    monkeypatch.setenv("AGNT5_CAPTURE_CONTENT_MODE", mode)
+    encoded = (
+        prefix + '{"bot_token":"synthetic-bot-secret","Authorization":"synthetic-auth-secret"}'
+    )
+    redactor = (lambda _value: encoded) if source == "hook-string" else None
+    original = encoded.encode("utf-8") if source == "utf8-bytes" else {"body": encoded}
+    before = original if isinstance(original, bytes) else json.dumps(original)
+
+    captured = SpanPayloadPolicy(redactor).capture(original)
+
+    assert captured is not None
+    exported = captured[0]
+    assert "synthetic-bot-secret" not in exported
+    assert "synthetic-auth-secret" not in exported
+    assert "[REDACTED]" in exported
+    assert (original if isinstance(original, bytes) else json.dumps(original)) == before
+
+
+@pytest.mark.parametrize("path", ["legacy", "activation"])
+async def test_workflow_bom_prefixed_body_is_never_exported(path, monkeypatch, span_sink):
+    monkeypatch.setenv("AGNT5_CAPTURE_CONTENT_MODE", "redacted")
+    context = WorkflowContext(WorkflowEntity("run-1"), "run-1")
+    context.emit_async = AsyncMock()
+    context._emit_checkpoint_async = AsyncMock()
+    payload = {"body": '\ufeff{"bot_token":"synthetic-bot-secret"}'}
+    before = json.dumps(payload)
+
+    assert await run_function_path(path, context, payload) is payload
+
+    for direction in ("input", "output"):
+        assert "synthetic-bot-secret" not in span_sink[0][f"{direction}.data"]
+        assert "[REDACTED]" in span_sink[0][f"{direction}.data"]
+    assert json.dumps(payload) == before
+
+
+@pytest.mark.parametrize("path", ["legacy", "activation"])
+async def test_handler_cancellation_still_propagates(path, monkeypatch, span_sink):
+    monkeypatch.setenv("AGNT5_CAPTURE_CONTENT_MODE", "full")
+    context = WorkflowContext(WorkflowEntity("run-1"), "run-1")
+    context.emit_async = AsyncMock()
+    context._emit_checkpoint_async = AsyncMock()
+
+    @function(name="cancelled_handler")
+    async def cancel(ctx):
+        raise asyncio.CancelledError("handler cancelled")
+
+    try:
+        with pytest.raises(asyncio.CancelledError, match="handler cancelled"):
+            if path == "legacy":
+                await context.step(cancel)
+            else:
+                await execute_function_callable(
+                    context, "cancelled_handler", "cancel", "cancel", "step-cid", (), {}
+                )
+    finally:
+        FunctionRegistry.clear()
+    assert "output.data" not in span_sink[0]
 
 
 def test_explicit_content_mode_wins_over_legacy_boolean(monkeypatch):

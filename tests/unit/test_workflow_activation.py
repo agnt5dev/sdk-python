@@ -119,7 +119,8 @@ def durable_sleep_context(transport):
     return context, entity, events
 
 
-async def test_payload_capture_does_not_change_durable_completion_or_replay(monkeypatch):
+@pytest.mark.parametrize("hook_error", [None, asyncio.CancelledError, BaseException])
+async def test_payload_capture_does_not_change_durable_completion_or_replay(monkeypatch, hook_error):
     from agnt5._capture import SpanPayloadPolicy
     from agnt5._serialization import serialize
 
@@ -132,6 +133,8 @@ async def test_payload_capture_does_not_change_durable_completion_or_replay(monk
     def redact(value):
         calls.append(value)
         value.clear()
+        if hook_error is not None:
+            raise hook_error("synthetic-hook-secret")
         return {"message": "application redacted"}
 
     context._span_payload_policy = SpanPayloadPolicy(redact)
