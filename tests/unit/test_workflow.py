@@ -242,6 +242,39 @@ async def test_wait_for_user_replay_decodes_skip_sentinels(sentinel):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # A typed answer on its own.
+        ("__custom__:Rust", "Rust"),
+        # Ticked options plus typed text, in one multiselect answer.
+        ('["ai","__custom__:Rust"]', '["ai","Rust"]'),
+        ('["__custom__:only typed text"]', '["only typed text"]'),
+        ('["web","__custom__:café, \\"quoted\\""]', '["web","café, \\"quoted\\""]'),
+        # Arrays without a typed entry come back exactly as sent.
+        ('["ai","web"]', '["ai","web"]'),
+        ('["ai", "web"]', '["ai", "web"]'),
+        ('["ai","mentions __custom__: inside"]', '["ai","mentions __custom__: inside"]'),
+        ("[not json __custom__:x", "[not json __custom__:x"),
+    ],
+)
+async def test_wait_for_user_replay_decodes_custom_answers(raw, expected):
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = raw
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+
+    response = await ctx.wait_for_user(
+        "Which topics?",
+        input_type="multiselect",
+        options=[{"id": "ai", "label": "AI"}, {"id": "web", "label": "Web"}],
+        allow_custom=True,
+    )
+
+    assert response == expected
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_management():
     """Test workflow can use context state."""
 

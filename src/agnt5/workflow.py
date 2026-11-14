@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import json
 import time
 import uuid
 from contextvars import ContextVar
@@ -1742,12 +1743,7 @@ class WorkflowContext(Context):
                 self._workflow_entity._resumed_step_correlation_id = None
                 self._workflow_entity._resumed_step_name = None
 
-            # Decode wire format
-            if response in {"__skipped__", "__skip__"}:
-                return None
-            if isinstance(response, str) and response.startswith("__custom__:"):
-                return response[len("__custom__:") :]
-            return response
+            return _decode_user_response(response)
 
         # Pausing releases the run lease and a person may take days to answer,
         # so let other steps finish first: under a released lease they never can.
@@ -1888,6 +1884,46 @@ class WorkflowContext(Context):
 # ============================================================================
 # Helper functions for workflow execution
 # ============================================================================
+
+
+_CUSTOM_ANSWER_PREFIX = "__custom__:"
+
+
+def _decode_user_response(response: Any) -> Any:
+    """Decode the format a paused workflow is answered in.
+
+    ``"__skipped__"`` (or ``"__skip__"``) means the person skipped it, so it
+    returns ``None``. A typed answer, ``"__custom__:<text>"``, returns its text.
+    A multiselect answer is a JSON-array string; text typed beside the ticked
+    options is an entry of its own, ``"__custom__:<text>"``, and becomes that
+    text, so ``'["ai","__custom__:Rust"]'`` returns ``'["ai","Rust"]'``.
+    Anything else, an array without such an entry included, returns unchanged.
+    """
+    if not isinstance(response, str):
+        return response
+    if response in {"__skipped__", "__skip__"}:
+        return None
+    if response.startswith(_CUSTOM_ANSWER_PREFIX):
+        return response[len(_CUSTOM_ANSWER_PREFIX) :]
+    if response.startswith("[") and _CUSTOM_ANSWER_PREFIX in response:
+        try:
+            entries = json.loads(response)
+        except ValueError:
+            return response
+        if isinstance(entries, list) and any(
+            isinstance(entry, str) and entry.startswith(_CUSTOM_ANSWER_PREFIX) for entry in entries
+        ):
+            return json.dumps(
+                [
+                    entry[len(_CUSTOM_ANSWER_PREFIX) :]
+                    if isinstance(entry, str) and entry.startswith(_CUSTOM_ANSWER_PREFIX)
+                    else entry
+                    for entry in entries
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    return response
 
 
 def _sanitize_for_json(obj: Any) -> Any:

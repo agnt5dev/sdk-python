@@ -22,7 +22,7 @@ from .agent import AgentContext, AgentRegistry
 from .context import runtime_context_from_metadata, set_current_context
 from .function import FunctionContext, FunctionRegistry
 from .tool import ToolRegistry
-from .workflow import WorkflowRegistry
+from .workflow import WorkflowRegistry, _decode_user_response
 
 logger = logging.getLogger(__name__)
 
@@ -1547,7 +1547,10 @@ def _user_responses_from_metadata(metadata: dict[str, str]) -> dict[int, str | N
     if "user_response" not in metadata:
         return {}
     pause_index = _safe_int(metadata.get("pause_index"), 0)
-    return {pause_index: metadata.get("user_response")}
+    # The answer arrives in the format Studio and the CLI send it in, the same
+    # one a worker-backed workflow decodes: a skip becomes None and typed text
+    # loses its marker.
+    return {pause_index: _decode_user_response(metadata.get("user_response"))}
 
 
 def _signal_responses_from_metadata(metadata: dict[str, str]) -> dict[str, Any]:

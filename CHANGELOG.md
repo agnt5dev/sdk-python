@@ -22,6 +22,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Do not retry `ToolCannotPauseError`. A step with a retry policy, and a delegated agent, used to report it as retryable, so each attempt ran the model and the earlier tools again before failing the same way.
 - `AskUserTool()` and `RequestApprovalTool()` made without a workflow context now pause when an agent in the workflow body calls them. They used to fail with an `AttributeError` that went to the model as a tool result.
 - Report each pause once. On every resume, `wait_for_user` emitted `workflow.resumed` and `workflow.step.completed` again for every earlier pause, so after four answers the first pause had four completion events and run timelines showed duplicates. Only the pause the resume answered emits them now; earlier pauses replay their answers silently.
+- `wait_for_user` decodes typed text inside a multiselect answer: an entry `"__custom__:<text>"` in the JSON array becomes its text, so ticked options and typed text arrive together (`'["ai","__custom__:Rust"]'` returns `'["ai","Rust"]'`). Answers without such an entry are returned unchanged.
+- A serverless workflow's `wait_for_user` now decodes its answer as a worker-backed workflow does: a skipped question returns `None` and a typed answer returns its text. It used to return the raw `"__skipped__"` and `"__custom__:<text>"` strings.
 
 ## [0.15.2] - 2026-11-05
 
