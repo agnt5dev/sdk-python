@@ -17,6 +17,9 @@ env:
   # debug info. Both settings make the dev build smaller and cacheable.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # The runtime the tests in tests/runtime run against. Pinned to one build so
+  # a runtime change reaches this repository only when this line moves.
+  AGNT5_RUNTIME_IMAGE: ghcr.io/agnt5dev/agnt5-runtime:sha-24cd218b52d4b4a0208e07db9489824171956a90
 
 jobs:
   validate-pr:
@@ -99,6 +102,24 @@ jobs:
         run: >-
           uv run --no-sync pytest tests/unit -q
           --ignore=tests/unit/test_eval_goldens.py
+
+      - name: Fetch the pinned agnt5-runtime
+        run: |
+          dir="$RUNNER_TEMP/agnt5-runtime"
+          mkdir -p "$dir"
+          container=$(docker create "$AGNT5_RUNTIME_IMAGE")
+          docker cp "$container:/usr/local/bin/agnt5-oss-runtime" "$dir/"
+          docker cp "$container:/usr/local/share/agnt5/agnt5-oss-runtime.sha256" "$dir/"
+          docker rm "$container" >/dev/null
+          (cd "$dir" && sha256sum -c agnt5-oss-runtime.sha256)
+          echo "AGNT5_RUNTIME_BIN=$dir/agnt5-oss-runtime" >> "$GITHUB_ENV"
+
+      - name: Run tests against the real runtime
+        # Fail rather than skip if the runtime binary is missing, so this step
+        # can't pass without running anything.
+        env:
+          AGNT5_REQUIRE_RUNTIME: "1"
+        run: uv run --no-sync pytest tests/runtime -q -rxX
 
       - name: Show sccache stats
         if: always()
