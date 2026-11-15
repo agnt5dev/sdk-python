@@ -17,9 +17,9 @@ env:
   # debug info. Both settings make the dev build smaller and cacheable.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
-  # The runtime the tests in tests/runtime run against. Pinned to one build so
-  # a runtime change reaches this repository only when this line moves.
-  AGNT5_RUNTIME_IMAGE: ghcr.io/agnt5dev/agnt5-runtime:sha-bfa7ea574b9fe97d202dc5b6fd844ac286e3c925
+  # The runtime the tests in tests/runtime run against. Pinned to one release
+  # so a runtime change reaches this repository only when this line moves.
+  AGNT5_RUNTIME_IMAGE: ghcr.io/agnt5dev/agnt5-runtime:0.1.0
 
 jobs:
   validate-pr:
