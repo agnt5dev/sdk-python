@@ -19,7 +19,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   # The runtime the tests in tests/runtime run against. Pinned to one build so
   # a runtime change reaches this repository only when this line moves.
-  AGNT5_RUNTIME_IMAGE: ghcr.io/agnt5dev/agnt5-runtime:sha-24cd218b52d4b4a0208e07db9489824171956a90
+  AGNT5_RUNTIME_IMAGE: ghcr.io/agnt5dev/agnt5-runtime:sha-bfa7ea574b9fe97d202dc5b6fd844ac286e3c925
 
 jobs:
   validate-pr:
@@ -108,11 +108,11 @@ jobs:
           dir="$RUNNER_TEMP/agnt5-runtime"
           mkdir -p "$dir"
           container=$(docker create "$AGNT5_RUNTIME_IMAGE")
-          docker cp "$container:/usr/local/bin/agnt5-oss-runtime" "$dir/"
-          docker cp "$container:/usr/local/share/agnt5/agnt5-oss-runtime.sha256" "$dir/"
+          docker cp "$container:/usr/local/bin/agnt5-runtime" "$dir/"
+          docker cp "$container:/usr/local/share/agnt5/agnt5-runtime.sha256" "$dir/"
           docker rm "$container" >/dev/null
-          (cd "$dir" && sha256sum -c agnt5-oss-runtime.sha256)
-          echo "AGNT5_RUNTIME_BIN=$dir/agnt5-oss-runtime" >> "$GITHUB_ENV"
+          (cd "$dir" && sha256sum -c agnt5-runtime.sha256)
+          echo "AGNT5_RUNTIME_BIN=$dir/agnt5-runtime" >> "$GITHUB_ENV"
 
       - name: Run tests against the real runtime
         # Fail rather than skip if the runtime binary is missing, so this step

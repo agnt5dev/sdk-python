@@ -1,15 +1,17 @@
 """Fixtures that run tests against a real agnt5-runtime.
 
-The runtime is the single-process `agnt5-oss-runtime` binary, started once per
+The runtime is the single-process `agnt5-runtime` binary, started once per
 test session on a temporary SQLite file and free loopback ports. Workers run as
 separate processes so a test can kill one and start another, the way a crash
 happens in production.
 
 Point `AGNT5_RUNTIME_BIN` at the binary. It ships in the
 `ghcr.io/agnt5dev/agnt5-runtime` image, pinned by commit; copy it out with
-`docker create` and `docker cp` from `/usr/local/bin/agnt5-oss-runtime`. Without it these tests are skipped,
-unless `AGNT5_REQUIRE_RUNTIME=1` is set, which turns the skip into a
-failure so CI can't pass by quietly skipping them.
+`docker create` and `docker cp` from `/usr/local/bin/agnt5-runtime`.
+
+Without the binary these tests are skipped, unless `AGNT5_REQUIRE_RUNTIME=1`
+is set, which turns the skip into a failure so CI can't pass by quietly
+skipping them.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ def _runtime_binary() -> str | None:
     configured = os.environ.get("AGNT5_RUNTIME_BIN")
     if configured:
         return configured
-    return shutil.which("agnt5-oss-runtime")
+    return shutil.which("agnt5-runtime")
 
 
 def _base_env() -> dict[str, str]:
@@ -95,7 +97,7 @@ class Agnt5Runtime:
 def agnt5_runtime(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Agnt5Runtime]:
     binary = _runtime_binary()
     if not binary:
-        message = "set AGNT5_RUNTIME_BIN to an agnt5-oss-runtime binary to run these tests"
+        message = "set AGNT5_RUNTIME_BIN to an agnt5-runtime binary to run these tests"
         if os.environ.get("AGNT5_REQUIRE_RUNTIME") == "1":
             pytest.fail(message)
         pytest.skip(message)
