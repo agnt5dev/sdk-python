@@ -6,7 +6,7 @@ separate processes so a test can kill one and start another, the way a crash
 happens in production.
 
 Point `AGNT5_RUNTIME_BIN` at the binary. It ships in the
-`ghcr.io/agnt5dev/agnt5-runtime` image, pinned by commit; copy it out with
+`ghcr.io/agnt5dev/agnt5-runtime` image, pinned to a release; copy it out with
 `docker create` and `docker cp` from `/usr/local/bin/agnt5-runtime`.
 
 Without the binary these tests are skipped, unless `AGNT5_REQUIRE_RUNTIME=1`
