@@ -8,45 +8,14 @@ import uuid
 import httpx
 import pytest
 
-from agnt5 import Client
-
 pytestmark = pytest.mark.runtime
-
-
-def _client(agnt5_runtime) -> Client:
-    return Client(gateway_url=agnt5_runtime.http_url)
-
-
-def _event_types(agnt5_runtime, run_id: str) -> list[str]:
-    response = httpx.get(f"{agnt5_runtime.http_url}/v1/runs/{run_id}/events", timeout=5)
-    if response.status_code != 200:
-        return []
-    body = response.json()
-    return [event.get("event_type") for event in body.get("events") or body.get("items") or []]
-
-
-def _status(agnt5_runtime, run_id: str) -> str | None:
-    """The run's status, or None while the runtime doesn't show the run yet."""
-    response = httpx.get(f"{agnt5_runtime.http_url}/v1/status/{run_id}", timeout=5)
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    return response.json().get("status")
-
-
-def _wait_until(predicate, timeout: float, what: str, on_timeout=lambda: "") -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() > deadline:
-            pytest.fail(f"timed out after {timeout}s waiting for {what}\n{on_timeout()}")
-        time.sleep(0.2)
 
 
 def test_each_step_runs_once_and_the_run_returns_its_result(agnt5_runtime, workers):
     workers.start()
     order_id = uuid.uuid4().hex[:8]
 
-    result = _client(agnt5_runtime).run(
+    result = agnt5_runtime.client().run(
         "refund_order", {"order_id": order_id}, component_type="workflow"
     )
 
@@ -61,7 +30,7 @@ def _sleep_through_a_worker_crash(agnt5_runtime, workers, sleep_s: float):
     """Start a run that sleeps, kill its worker once the runtime holds the
     sleep's timer, start a fresh worker, and wait for the result."""
     first = workers.start()
-    client = _client(agnt5_runtime)
+    client = agnt5_runtime.client()
     run_key = uuid.uuid4().hex[:8]
 
     started = time.monotonic()
@@ -71,8 +40,8 @@ def _sleep_through_a_worker_crash(agnt5_runtime, workers, sleep_s: float):
     # Kill the worker only once the runtime holds the sleep's timer. Killing it
     # earlier, before the suspension reaches the runtime, is a different case:
     # the run then waits for the worker's lease to expire.
-    _wait_until(
-        lambda: "timer.scheduled" in _event_types(agnt5_runtime, submitted.run_id),
+    agnt5_runtime.wait_until(
+        lambda: "timer.scheduled" in agnt5_runtime.event_types(submitted.run_id),
         timeout=30,
         what="the runtime to schedule the sleep's timer",
         on_timeout=first.log_tail,
@@ -102,7 +71,7 @@ def test_durable_sleep_survives_a_worker_crash(agnt5_runtime, workers):
 
     assert workers.effects().count(f"before:{run_key}") == 1
     assert workers.effects().count(f"after:{run_key}") == 1
-    assert _event_types(agnt5_runtime, run_id).count("timer.scheduled") == 1
+    assert agnt5_runtime.event_types(run_id).count("timer.scheduled") == 1
     assert elapsed >= 6.0
 
 
@@ -123,12 +92,12 @@ def test_a_run_resumed_after_a_worker_crash_moves_to_a_healthy_worker_promptly(
 
 def test_a_paused_run_continues_with_the_answer(agnt5_runtime, workers):
     worker = workers.start()
-    client = _client(agnt5_runtime)
+    client = agnt5_runtime.client()
     run_key = uuid.uuid4().hex[:8]
 
     submitted = client.submit("ask_for_approval", {"run_key": run_key}, component_type="workflow")
-    _wait_until(
-        lambda: _status(agnt5_runtime, submitted.run_id) == "paused",
+    agnt5_runtime.wait_until(
+        lambda: agnt5_runtime.status(submitted.run_id) == "paused",
         timeout=30,
         what="the run to pause",
         on_timeout=worker.log_tail,
@@ -140,7 +109,7 @@ def test_a_paused_run_continues_with_the_answer(agnt5_runtime, workers):
         timeout=10,
     )
     assert resumed.status_code == 200, (
-        f"{resumed.text}\nevents: {_event_types(agnt5_runtime, submitted.run_id)}"
+        f"{resumed.text}\nevents: {agnt5_runtime.event_types(submitted.run_id)}"
     )
 
     result = client.wait_for_result(submitted.run_id, timeout=60)

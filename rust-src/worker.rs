@@ -1,3 +1,4 @@
+use crate::blocking::block_on_sync;
 use crate::entity_state::EntityStateManager;
 use crate::types::{PyComponentInfo, PyExecuteComponentRequest, PyExecuteComponentResponse};
 use agnt5_sdk_core::journal_queue::JournalEventQueue;
@@ -276,60 +277,49 @@ impl PyWorker {
         Ok(())
     }
 
-    /// Flush all buffered journal events by waiting for background task
+    /// Waits until this run's queued stream events have left the journal queue,
+    /// so the run's next durable checkpoint cannot overtake them.
     ///
-    /// This method waits 200ms for the background flush task (100ms interval)
-    /// to send all queued events. This ensures events arrive at the
-    /// platform BEFORE the workflow completion response is sent.
-    ///
-    /// Returns the number of events that were initially queued.
-    fn flush_workflow_checkpoints(&self, py: Python) -> PyResult<usize> {
-        let worker_guard = self.worker.lock().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to lock worker: {}",
-                e
-            ))
-        })?;
+    /// Returns an awaitable that resolves to whether they left in time. It
+    /// gives up after `STREAM_DELIVERY_CEILING`, so a stalled sender cannot
+    /// hold the stream. Waiting runs on the Tokio runtime and holds neither the
+    /// event loop nor a thread-pool thread.
+    fn wait_for_stream_delivery<'py>(
+        &self,
+        py: Python<'py>,
+        run_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let queue = {
+            let worker_guard = self.worker.lock().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to lock worker: {}",
+                    e
+                ))
+            })?;
+            worker_guard
+                .as_ref()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Worker not initialized")
+                })?
+                .journal_queue()
+        };
 
-        let worker = worker_guard.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Worker not initialized")
-        })?;
-
-        // Get initial queue size
-        let (initial_queued, _, _, _) = worker.journal_metrics();
-
-        if initial_queued == 0 {
-            return Ok(0); // No events to flush
-        }
-
-        log::debug!(
-            "Waiting 200ms to flush {} queued events before response",
-            initial_queued
-        );
-
-        // Release the lock while waiting
-        drop(worker_guard);
-
-        // Simple approach: Wait 200ms (2x flush interval) to ensure events are sent
-        // The background flush task runs every 50ms, so 200ms guarantees at least 4 flushes
-        py.detach(|| {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        });
-
-        // Log final metrics
-        let worker_guard = self.worker.lock().ok();
-        if let Some(worker_guard) = worker_guard {
-            if let Some(ref worker) = *worker_guard {
-                let (queued, sent, _, _) = worker.journal_metrics();
+        future_into_py(py, async move {
+            let delivered = crate::stream_delivery::wait_for_stream_delivery(
+                &queue,
+                &run_id,
+                crate::stream_delivery::STREAM_DELIVERY_CEILING,
+            )
+            .await;
+            if !delivered {
                 log::debug!(
-                    "Journal flush complete: {} still queued, {} sent total",
-                    queued,
-                    sent
+                    "Stream events for run_id={} still queued after {:?}",
+                    run_id,
+                    crate::stream_delivery::STREAM_DELIVERY_CEILING
                 );
             }
-        }
-
-        Ok(initial_queued as usize)
+            Ok(delivered)
+        })
     }
 
     /// Queue a journal event through the unified event emission API
@@ -483,19 +473,22 @@ impl PyWorker {
                 .clone()
         };
 
-        // Release the GIL during the blocking wait for checkpoint acknowledgement.
-        // Other Python threads can run, but this thread's asyncio loop cannot.
-        let result = py.detach(|| {
-            worker.emit_checkpoint_sync_blocking(
-                run_id,
-                event_type,
-                data_bytes,
-                sequence_number,
-                metadata,
-                source_timestamp_ns,
-                timeout_ms,
-            )
-        });
+        // Wait for the checkpoint acknowledgement with the GIL released, using the
+        // same shared-runtime wait as every other synchronous binding. Other Python
+        // threads can run, but this thread's asyncio loop cannot.
+        let result = block_on_sync(py, async move {
+            worker
+                .emit_checkpoint_sync(
+                    run_id,
+                    event_type,
+                    data_bytes,
+                    sequence_number,
+                    metadata,
+                    source_timestamp_ns,
+                    timeout_ms,
+                )
+                .await
+        })?;
 
         result.map_err(|e| {
             let err_msg = format!("Failed to emit checkpoint sync: {}", e);
@@ -1101,124 +1094,59 @@ impl PyWorker {
 
                     // Call Python handler and execute on shared event loop
                     let rust_future = Python::attach(|py| -> Result<_, agnt5_sdk_core::error::SdkError> {
-                        struct ContextVarResetGuard<'py> {
-                            var: Option<Bound<'py, PyAny>>,
-                            token: Option<Bound<'py, PyAny>>,
-                        }
-
-                        impl<'py> Drop for ContextVarResetGuard<'py> {
-                            fn drop(&mut self) {
-                                if let (Some(var), Some(token)) =
-                                    (self.var.take(), self.token.take())
-                                {
-                                    if let Err(e) = var.call_method1("reset", (token,)) {
-                                        log::warn!("Failed to reset _trace_metadata contextvar: {}", e);
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut trace_metadata_guard = ContextVarResetGuard {
-                            var: None,
-                            token: None,
+                        let to_sdk_error = |what: &str, e: PyErr| {
+                            let err_msg = format!("{}: {}", what, e);
+                            log::error!("{}", err_msg);
+                            agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
                         };
 
-                        // CRITICAL: Update Python's _trace_metadata contextvar with the current span context
-                        // Inside this instrumented async block, the python_component_execution span is active.
-                        // We need to inject its traceparent into Python's context so LLM spans become children
-                        // of this execution span, not the original gateway span.
+                        // Inside this instrumented block the python_component_execution span
+                        // is current. Hand its trace headers to the run so LLM spans become
+                        // children of this execution span, not the original gateway span.
+                        let mut trace_metadata: HashMap<String, String> = HashMap::new();
                         {
                             use opentelemetry::propagation::Injector;
 
-                            // Get the current OpenTelemetry context (should have python_component_execution)
-                            let current_ctx = opentelemetry::Context::current();
-
-                            // Create a new metadata map for the current span context
-                            let mut updated_metadata: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-                            struct HashMapInjector<'a>(&'a mut std::collections::HashMap<String, String>);
+                            struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
                             impl<'a> Injector for HashMapInjector<'a> {
                                 fn set(&mut self, key: &str, value: String) {
                                     self.0.insert(key.to_string(), value);
                                 }
                             }
 
-                            let mut injector = HashMapInjector(&mut updated_metadata);
+                            // Entering a tracing span does not make it OpenTelemetry's current
+                            // context, so read the execution span's context from the span itself.
+                            let current_ctx = tracing::Span::current().context();
                             opentelemetry::global::get_text_map_propagator(|propagator| {
-                                propagator.inject_context(&current_ctx, &mut injector);
+                                propagator.inject_context(&current_ctx, &mut HashMapInjector(&mut trace_metadata));
                             });
-
-                            // Update Python's _trace_metadata contextvar with the execution span's traceparent
-                            if let Ok(worker_module) = py.import("agnt5.worker") {
-                                if let Ok(trace_metadata_var) = worker_module.getattr("_trace_metadata") {
-                                    match trace_metadata_var.call_method1("set", (updated_metadata,)) {
-                                        Ok(token) => {
-                                            trace_metadata_guard.var = Some(trace_metadata_var);
-                                            trace_metadata_guard.token = Some(token);
-                                        }
-                                        Err(e) => {
-                                            log::warn!("Failed to update _trace_metadata with execution span: {}", e);
-                                        }
-                                    }
-                                }
-                            }
                         }
 
-                        // Call the Python handler
-                        let py_result = handler.call1(py, (py_request,))
-                            .map_err(|e| {
-                                let err_msg = format!("Failed to call Python handler: {}", e);
-                                log::error!("{}", err_msg);
-                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                            })?;
+                        // The run gets its own context: the handler's synchronous part runs
+                        // in it, and the coroutine is scheduled with it, so nothing the run
+                        // sets leaks onto this Tokio thread or into the next run it dispatches.
+                        let run_context = crate::run_context::new_run_context(py, trace_metadata)
+                            .map_err(|e| to_sdk_error("Failed to create run context", e))?;
+                        let request = py_request
+                            .into_pyobject(py)
+                            .map_err(|e| to_sdk_error("Failed to convert request", e))?
+                            .into_any();
+                        let py_result = crate::run_context::run_in(&run_context, handler.bind(py), request)
+                            .map_err(|e| to_sdk_error("Failed to call Python handler", e))?;
 
-                        // Check if result is an awaitable (coroutine, Task, Future, or any __await__)
-                        let inspect = py.import("inspect")
-                            .map_err(|e| {
-                                let err_msg = format!("Failed to import inspect: {}", e);
-                                log::error!("{}", err_msg);
-                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                            })?;
+                        // Coroutine, Task, Future, or anything else with __await__.
+                        let is_awaitable = crate::run_context::is_awaitable(&py_result).unwrap_or(false);
+                        if !is_awaitable {
+                            // A plain value is already the result. There is nothing to
+                            // schedule on the event loop, so settle it on the Rust side.
+                            log::warn!("Handler returned a non-awaitable value; using it as the result");
+                            return Ok(futures::future::Either::Left(std::future::ready(Ok(py_result.unbind()))));
+                        }
 
-                        let is_awaitable = inspect.call_method1("isawaitable", (&py_result,))
-                            .and_then(|result| result.extract::<bool>())
-                            .unwrap_or(false);
-
-                        let awaitable: Bound<PyAny> = if is_awaitable {
-                            // It's an awaitable - use it directly
-                            py_result.bind(py).clone()
-                        } else {
-                            // It's a regular return value (not awaitable)
-                            // This shouldn't happen for async functions, but handle it gracefully
-                            log::warn!("🔥 RUST: Handler returned NON-awaitable value (unexpected for async functions)");
-
-                            // Wrap in a coroutine using asyncio.ensure_future with a coroutine wrapper
-                            let asyncio = py.import("asyncio")
-                                .map_err(|e| {
-                                    let err_msg = format!("Failed to import asyncio: {}", e);
-                                    log::error!("{}", err_msg);
-                                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                                })?;
-
-                            // Create a coroutine that returns the value
-                            let coroutine = asyncio.call_method1("coroutine", (py_result,))
-                                .map_err(|e| {
-                                    let err_msg = format!("Failed to wrap in coroutine: {}", e);
-                                    log::error!("{}", err_msg);
-                                    agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                                })?;
-
-                            coroutine
-                        };
-
-                        // Convert Python awaitable to Rust Future using shared event loop
-                        let future = into_future_with_locals(&task_locals, awaitable)
-                            .map_err(|e| {
-                                let err_msg = format!("Failed to convert Python awaitable to Rust Future: {}", e);
-                                log::error!("{}", err_msg);
-                                agnt5_sdk_core::error::SdkError::Other(anyhow::anyhow!(err_msg))
-                            })?;
-                        Ok(future)
+                        let locals = task_locals.clone().with_context(run_context);
+                        let future = into_future_with_locals(&locals, py_result)
+                            .map_err(|e| to_sdk_error("Failed to convert Python awaitable to Rust Future", e))?;
+                        Ok(futures::future::Either::Right(future))
                     })?;
 
                     rust_future
