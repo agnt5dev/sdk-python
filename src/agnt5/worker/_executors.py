@@ -101,10 +101,33 @@ def _agent_user_message(input_dict: dict) -> Any:
     message = input_dict.get("message")
     if message:
         return message
+    items = input_dict.get("inbox_items")
+    if isinstance(items, list) and items:
+        return _inbox_items_message(items)
     fallback = input_dict.get("input")
     if isinstance(fallback, str) and fallback:
         return fallback
     return message or ""
+
+
+def _inbox_items_message(items: list) -> str:
+    """The message of a per-user agent's turn: every item it takes, oldest first.
+
+    The platform starts a per-user agent's run with the items that waited in
+    the user's inbox for one conversation. Each item's content is the body its
+    caller sent: its ``message`` when it has one, the text itself when it is a
+    string, otherwise its JSON.
+    """
+    parts = []
+    for item in items:
+        content = item.get("content") if isinstance(item, dict) else item
+        if isinstance(content, dict) and isinstance(content.get("message"), str):
+            parts.append(content["message"])
+        elif isinstance(content, str):
+            parts.append(content)
+        elif content is not None:
+            parts.append(json.dumps(content, sort_keys=True))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _agent_missing_message_error(input_dict: dict) -> str:
