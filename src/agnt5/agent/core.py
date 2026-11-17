@@ -217,6 +217,7 @@ class Agent:
         skills: Optional[Sequence[Union[str, "Skill"]]] = None,
         skills_dir: Optional[Union[str, Path]] = None,
         agents_md: Optional[AgentsMdSource] = None,
+        per: Optional[str] = None,
     ):
         """Initialize agent.
 
@@ -265,7 +266,16 @@ class Agent:
             agents_md: Always-on project/area guidance (``AGENTS.md``). A file
                 path, a directory (uses its ``AGENTS.md``), or an ordered list
                 where later entries are more specific. Injected into every prompt.
+            per: ``"user"`` keeps one instance of this agent for each user of
+                your app. Each call names the user (the ``X-User-Id`` header,
+                or chat's ``user_id``) and goes into that user's inbox; the
+                platform runs one turn at a time per user, taking every message
+                that arrived meanwhile. A run's input is then
+                ``{"conversation_id": ..., "inbox_items": [...]}``.
         """
+        if per not in (None, "user"):
+            raise ValueError(f'per must be "user" or None, got {per!r}')
+        self.per = per
         self.name = name
         self.instructions = instructions
         self.max_iterations = max_iterations

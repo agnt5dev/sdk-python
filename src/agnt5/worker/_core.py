@@ -712,7 +712,9 @@ class Worker(ExecutorMixin):
                 self._create_component_info(
                     name=agent.name,
                     component_type="agent",
-                    metadata={},
+                    # The platform reads `per` to send calls to the agent into
+                    # per-user inboxes.
+                    metadata={"per": agent.per} if getattr(agent, "per", None) else {},
                     config={
                         "model": agent.model,
                         "max_iterations": str(agent.max_iterations),

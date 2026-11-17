@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add `Agent(per="user")` (preview) to keep one instance of an agent for each user of your app. The worker registers `per` in the agent's component metadata. Calls name the user (`X-User-Id`, or chat's `user_id`) and go into that user's inbox; the platform runs one turn at a time per user. A turn's input is `{"conversation_id": ..., "inbox_items": [...]}`, and the agent reads every item it takes, oldest first, as its message. Needs a runtime with agent instances enabled.
+
 ### Removed
 
 - **Breaking:** remove `WorkflowContext.task()` and `WorkflowContext.run()`. Both were aliases for `ctx.step()`; replace either with `ctx.step(...)` using the same arguments and stable keys. Calling them now raises `AttributeError`. `Client.run()` is unchanged.
