@@ -373,6 +373,14 @@ class Agent:
                         f"Expected Tool (from @tool decorator) or Agent."
                     )
 
+        # A per-user agent can wake itself again for its user. A tool of the
+        # agent's own with the same name wins.
+        if self.per == "user":
+            from .followups import schedule_followup_tool
+
+            followup_tool = schedule_followup_tool()
+            self.tools.setdefault(followup_tool.name, followup_tool)
+
         # Store handoffs for introspection
         self.handoffs: List[Handoff] = []
 
