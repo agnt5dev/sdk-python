@@ -1549,8 +1549,13 @@ def _user_responses_from_metadata(metadata: dict[str, str]) -> dict[int, str | N
     pause_index = _safe_int(metadata.get("pause_index"), 0)
     # The answer arrives in the format Studio and the CLI send it in, the same
     # one a worker-backed workflow decodes: a skip becomes None and typed text
-    # loses its marker.
-    return {pause_index: _decode_user_response(metadata.get("user_response"))}
+    # loses its marker. The pause recorded its question type, and the runtime
+    # hands it back with the answer.
+    return {
+        pause_index: _decode_user_response(
+            metadata.get("user_response"), metadata.get("input_type")
+        )
+    }
 
 
 def _signal_responses_from_metadata(metadata: dict[str, str]) -> dict[str, Any]:

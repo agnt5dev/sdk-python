@@ -807,6 +807,20 @@ def test_serverless_wsgi_rejects_missing_signing_secret() -> None:
 def test_serverless_resume_decodes_the_answer_like_a_worker_does(raw, expected):
     from agnt5.serverless import _user_responses_from_metadata
 
-    responses = _user_responses_from_metadata({"user_response": raw, "pause_index": "2"})
+    responses = _user_responses_from_metadata(
+        {"user_response": raw, "pause_index": "2", "input_type": "multiselect"}
+    )
 
     assert responses == {2: expected}
+
+
+@pytest.mark.parametrize("input_type", ["text", "approval", "select", "unknown", None])
+def test_serverless_resume_keeps_a_literal_array_for_other_question_types(input_type):
+    from agnt5.serverless import _user_responses_from_metadata
+
+    raw = '["ai","__custom__:Rust"]'
+    metadata = {"user_response": raw, "pause_index": "0"}
+    if input_type is not None:
+        metadata["input_type"] = input_type
+
+    assert _user_responses_from_metadata(metadata) == {0: raw}
