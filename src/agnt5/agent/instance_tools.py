@@ -1,9 +1,14 @@
-"""Follow-ups for agents declared ``per="user"``.
+"""The built-in tools of agents declared ``per="user"``.
 
-A follow-up wakes the agent again for the same user later. The tool asks the
-platform on the run's own journal; the platform schedules a timer on the
-user's instance and, when it is due, delivers the follow-up's message to the
-instance's inbox, which starts the agent's next turn.
+- ``schedule_followup`` wakes the agent again for the same user later. The
+  platform schedules a timer on the user's instance and, when it is due,
+  delivers the follow-up's note to the instance's inbox, which starts the
+  agent's next turn.
+- ``send`` messages the user. The platform delivers it to the app's webhook,
+  in the order the agent sent its messages, with an id a retry keeps.
+
+Both ask the platform on the run's own journal; the platform does the rest
+for the run's own instance only.
 """
 
 from __future__ import annotations
@@ -117,5 +122,70 @@ def schedule_followup_tool() -> Tool:
             "The note arrives as a new message in this conversation when it is due."
         ),
         handler=_schedule_followup,
+        auto_schema=True,
+    )
+
+
+@dataclass
+class MessageRequested(Event):
+    """Asks the platform to send this run's user a message."""
+
+    message_key: str = ""
+    conversation_id: str = ""
+    content: Any = None
+
+    event_type: str = field(default="instance.message_requested", init=False)
+
+
+def message_id(run_id: str, message_key: str) -> str:
+    """The message's id, as the platform names it and the app receives it."""
+    return f"msg-{run_id}-{message_key}"
+
+
+async def _send(ctx: Any, text: str, key: Optional[str] = None) -> dict:
+    """Send the user a message now, in this conversation.
+
+    Use it when something is worth telling the user without waiting for them
+    to ask: a review landed, a check failed. Your final answer to a message
+    from the user is sent anyway; you don't need this for it.
+
+    Args:
+        text: What to tell the user.
+        key: Optional name for this message; sending the same text with the
+            same key again sends nothing new.
+    """
+    turn = current_instance_turn.get()
+    if turn is None:
+        return {"error": "send is only available to agents declared per='user'"}
+    if not text:
+        return {"error": "text must not be empty"}
+    # The call's key plus a hash of what it sends: a replay sends nothing
+    # new, and a different message under the same key is a different one.
+    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+    message_key = f"{key or 'send'}.{digest}"
+    if not _KEY_PATTERN.match(message_key):
+        return {"error": "key must be letters, digits or -_.:#, and short"}
+    emitter = getattr(ctx, "_get_emitter", None)
+    if emitter is None:
+        return {"error": "send needs the run's context"}
+    await emitter().emit_now_async(
+        MessageRequested(
+            name="send",
+            correlation_id=message_key,
+            parent_correlation_id="",
+            message_key=message_key,
+            conversation_id=turn.conversation_id,
+            content={"text": text},
+        )
+    )
+    return {"message_id": message_id(turn.run_id, message_key)}
+
+
+def send_tool() -> Tool:
+    """The built-in ``send`` tool every per-user agent gets."""
+    return Tool(
+        name="send",
+        description="Send the user a message now, in this conversation.",
+        handler=_send,
         auto_schema=True,
     )

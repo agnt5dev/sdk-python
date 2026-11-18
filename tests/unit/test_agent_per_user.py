@@ -84,7 +84,7 @@ def test_a_per_user_agent_gets_schedule_followup():
 
 
 async def test_schedule_followup_asks_on_the_runs_own_journal():
-    from agnt5.agent.followups import (
+    from agnt5.agent.instance_tools import (
         enter_instance_turn,
         followup_timer_id,
         schedule_followup_tool,
@@ -106,7 +106,7 @@ async def test_schedule_followup_asks_on_the_runs_own_journal():
         bad = await tool.handler(ctx, delay_seconds=60, message="x", key="a/b")
         late = await tool.handler(ctx, delay_seconds=10**9, message="x")
     finally:
-        from agnt5.agent.followups import current_instance_turn
+        from agnt5.agent.instance_tools import current_instance_turn
 
         current_instance_turn.reset(token)
 
@@ -122,3 +122,38 @@ async def test_schedule_followup_asks_on_the_runs_own_journal():
     assert data["conversation_id"] == "pr-42"
     assert data["content"] == {"message": "check the PR"}
     assert data["fire_at_ns"] > 0
+
+
+async def test_send_messages_the_user_with_an_id_a_retry_keeps():
+    from agnt5.agent.instance_tools import (
+        current_instance_turn,
+        enter_instance_turn,
+        message_id,
+        send_tool,
+    )
+
+    assert "send" in agent("support", per="user").tools
+    assert "send" not in agent("digest").tools
+    tool = send_tool()
+    ctx = _Ctx()
+    assert "error" in await tool.handler(ctx, text="hi")
+    assert not ctx.recorder.events
+
+    run_id = "61676e35-0100-8000-8000-000000000002"
+    token = enter_instance_turn(run_id, "pr-42")
+    try:
+        first = await tool.handler(ctx, text="Your PR has a review")
+        replay = await tool.handler(ctx, text="Your PR has a review")
+        other = await tool.handler(ctx, text="Your PR was merged")
+        keyed = await tool.handler(ctx, text="Your PR has a review", key="review")
+    finally:
+        current_instance_turn.reset(token)
+
+    assert first["message_id"] == replay["message_id"], "a replay is the same message"
+    assert other["message_id"] != first["message_id"]
+    assert keyed["message_id"].startswith(message_id(run_id, "review."))
+    event = ctx.recorder.events[0].to_dict()
+    assert event["event_type"] == "instance.message_requested"
+    assert event["conversation_id"] == "pr-42"
+    assert event["content"] == {"text": "Your PR has a review"}
+    assert first["message_id"] == message_id(run_id, event["message_key"])

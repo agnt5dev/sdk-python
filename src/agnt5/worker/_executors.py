@@ -1184,7 +1184,7 @@ class ExecutorMixin:
         async def execute(ctx: AgentContext, input_dict: dict, req: Any):
             # A per-user agent's turn: its tools can schedule follow-ups in it.
             if isinstance(input_dict.get("inbox_items"), list):
-                from ..agent.followups import enter_instance_turn
+                from ..agent.instance_tools import enter_instance_turn
 
                 enter_instance_turn(ctx.run_id, str(input_dict.get("conversation_id") or ""))
             user_message = _agent_user_message(input_dict)
