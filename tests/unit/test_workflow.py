@@ -275,6 +275,45 @@ async def test_wait_for_user_replay_decodes_custom_answers(raw, expected):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_user_decodes_typed_text_for_the_deprecated_choice_type():
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = '["ai","__custom__:Rust"]'
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+
+    with pytest.warns(DeprecationWarning):
+        response = await ctx.wait_for_user(
+            "Which topics?",
+            input_type="choice",
+            options=[{"id": "ai", "label": "AI"}],
+            allow_custom=True,
+        )
+
+    assert response == '["ai","Rust"]'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_type", ["text", "approval", "select"])
+async def test_wait_for_user_keeps_a_literal_array_for_other_question_types(input_type):
+    # A JSON array typed as the answer to any other question is the person's
+    # own text, not ticked options: it comes back exactly as they sent it.
+    raw = '["ai","__custom__:Rust"]'
+    workflow_entity = WorkflowEntity(run_id="hitl-run")
+    workflow_entity._completed_steps["user_response:hitl-run:0"] = raw
+    ctx = WorkflowContext(workflow_entity=workflow_entity, run_id="hitl-run")
+    ctx._is_replay = True
+
+    response = await ctx.wait_for_user(
+        "Anything else?",
+        input_type=input_type,
+        options=None if input_type == "text" else [{"id": "ai", "label": "AI"}],
+        allow_custom=True,
+    )
+
+    assert response == raw
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_management():
     """Test workflow can use context state."""
 

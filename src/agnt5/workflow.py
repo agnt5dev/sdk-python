@@ -1735,7 +1735,7 @@ class WorkflowContext(Context):
                 self._workflow_entity._resumed_step_correlation_id = None
                 self._workflow_entity._resumed_step_name = None
 
-            return _decode_user_response(response)
+            return _decode_user_response(response, input_type)
 
         # Pausing releases the run lease and a person may take days to answer,
         # so let other steps finish first: under a released lease they never can.
@@ -1879,17 +1879,22 @@ class WorkflowContext(Context):
 
 
 _CUSTOM_ANSWER_PREFIX = "__custom__:"
+# Question types answered with a JSON array of ticked options. "choice" is the
+# deprecated alias of "multiselect"; "pick_many" is the name the playground uses.
+_MULTISELECT_INPUT_TYPES = frozenset({"multiselect", "choice", "pick_many"})
 
 
-def _decode_user_response(response: Any) -> Any:
+def _decode_user_response(response: Any, input_type: str | None = None) -> Any:
     """Decode the format a paused workflow is answered in.
 
     ``"__skipped__"`` (or ``"__skip__"``) means the person skipped it, so it
     returns ``None``. A typed answer, ``"__custom__:<text>"``, returns its text.
-    A multiselect answer is a JSON-array string; text typed beside the ticked
-    options is an entry of its own, ``"__custom__:<text>"``, and becomes that
-    text, so ``'["ai","__custom__:Rust"]'`` returns ``'["ai","Rust"]'``.
-    Anything else, an array without such an entry included, returns unchanged.
+    For a multiselect question the answer is a JSON-array string; text typed
+    beside the ticked options is an entry of its own, ``"__custom__:<text>"``,
+    and becomes that text, so ``'["ai","__custom__:Rust"]'`` returns
+    ``'["ai","Rust"]'``. Anything else returns unchanged: an array without
+    such an entry, and an array answering any other kind of question, or one
+    whose kind is unknown, which is literal text the person typed.
     """
     if not isinstance(response, str):
         return response
@@ -1897,7 +1902,11 @@ def _decode_user_response(response: Any) -> Any:
         return None
     if response.startswith(_CUSTOM_ANSWER_PREFIX):
         return response[len(_CUSTOM_ANSWER_PREFIX) :]
-    if response.startswith("[") and _CUSTOM_ANSWER_PREFIX in response:
+    if (
+        input_type in _MULTISELECT_INPUT_TYPES
+        and response.startswith("[")
+        and _CUSTOM_ANSWER_PREFIX in response
+    ):
         try:
             entries = json.loads(response)
         except ValueError:
