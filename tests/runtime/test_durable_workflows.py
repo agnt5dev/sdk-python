@@ -55,15 +55,6 @@ def _sleep_through_a_worker_crash(agnt5_runtime, workers, sleep_s: float):
     return run_key, submitted.run_id, elapsed
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "needs an agnt5-sdk-core release that derives the activation artifact "
-        "identity when none is configured (agnt5dev/sdk-core#48); until then a "
-        "self-hosted worker falls back to an in-process sleep. Remove this mark "
-        "when Cargo.lock moves to that release."
-    ),
-)
 def test_durable_sleep_survives_a_worker_crash(agnt5_runtime, workers):
     """The sleep's timer lives in the runtime, so killing the worker mid-sleep
     neither restarts the sleep nor repeats the step before it."""
