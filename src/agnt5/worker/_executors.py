@@ -326,30 +326,17 @@ class ExecutorMixin:
     _checkpoint_client: Any
     service_name: str
 
-    async def _flush_stream_events(self) -> None:
-        """Wait for the native delivery boundary without blocking the Python loop."""
-        flush = getattr(self._rust_worker, "flush_workflow_checkpoints", None)
-        if flush is None:
+    async def _flush_stream_events(self, run_id: str) -> None:
+        """Wait until this run's queued stream events are on their way.
+
+        The run's next durable checkpoint must not become visible before them.
+        The native wait is an awaitable, so it holds neither the event loop nor
+        a thread-pool thread, and cancelling it leaves nothing to settle.
+        """
+        wait = getattr(self._rust_worker, "wait_for_stream_delivery", None)
+        if wait is None:
             return
-        pending = asyncio.get_running_loop().run_in_executor(None, flush)
-        cancelled = None
-        # A synchronous flush cannot be cancelled once running. Settle it before
-        # invocation cleanup, including when cancellation is requested repeatedly.
-        while not pending.done():
-            try:
-                await asyncio.shield(pending)
-            except asyncio.CancelledError as error:
-                cancelled = error
-            except Exception:
-                break
-        try:
-            pending.result()
-        except Exception as error:
-            if cancelled is not None:
-                raise cancelled from error
-            raise
-        if cancelled is not None:
-            raise cancelled
+        await wait(run_id)
 
     async def _execute_with_context(
         self,
@@ -1286,7 +1273,7 @@ class ExecutorMixin:
                                 # Give the native transient queue a delivery
                                 # boundary before the next durable lifecycle
                                 # checkpoint can become visible.
-                                await self._flush_stream_events()
+                                await self._flush_stream_events(ctx.run_id)
                             sequence += 1
 
                             # Check for completion event to extract final results

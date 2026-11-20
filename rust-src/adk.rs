@@ -3,6 +3,8 @@ use agnt5_sdk_core::adk::{
     SignalControls, TaskControls, TimerControls, ToolDefinition, ToolRegistry,
 };
 use agnt5_sdk_core::error::SdkError;
+
+use crate::blocking::block_on_sync;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
@@ -47,6 +49,7 @@ impl PyContext {
     #[staticmethod]
     #[pyo3(signature = (tenant_id, session_id, run_id, step_id, attempt, invocation_id=None))]
     fn with_runtime(
+        py: Python<'_>,
         tenant_id: String,
         session_id: String,
         run_id: String,
@@ -54,7 +57,7 @@ impl PyContext {
         attempt: i32,
         invocation_id: Option<String>,
     ) -> PyResult<Self> {
-        if let Some(client) = runtime_client() {
+        if let Some(client) = runtime_client(py) {
             let mut config = ContextRuntimeConfig::new(
                 Arc::clone(client),
                 tenant_id,
@@ -296,12 +299,12 @@ impl PyDeterministicUtils {
 }
 static RUNTIME_CLIENT: OnceLock<Arc<RuntimeServiceClient>> = OnceLock::new();
 
-fn runtime_client() -> Option<&'static Arc<RuntimeServiceClient>> {
+fn runtime_client(py: Python<'_>) -> Option<&'static Arc<RuntimeServiceClient>> {
     if let Some(client) = RUNTIME_CLIENT.get() {
         return Some(client);
     }
 
-    match connect_runtime_client() {
+    match connect_runtime_client(py) {
         Ok(client) => {
             if RUNTIME_CLIENT.set(client).is_ok() {
                 RUNTIME_CLIENT.get()
@@ -316,16 +319,11 @@ fn runtime_client() -> Option<&'static Arc<RuntimeServiceClient>> {
     }
 }
 
-fn connect_runtime_client() -> Result<Arc<RuntimeServiceClient>, SdkError> {
-    let fut = RuntimeServiceClient::connect_from_env();
-    let client = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        // Use block_in_place to avoid "Cannot start a runtime from within a runtime" panic
-        tokio::task::block_in_place(|| handle.block_on(fut))
-    } else {
-        tokio::runtime::Runtime::new()
-            .map_err(|e| SdkError::Internal(format!("create runtime: {}", e)))?
-            .block_on(fut)
-    }?;
+fn connect_runtime_client(py: Python<'_>) -> Result<Arc<RuntimeServiceClient>, SdkError> {
+    // Connecting spawns the client's stream and response-listener tasks, so it
+    // must run on the shared runtime that outlives this call.
+    let client = block_on_sync(py, RuntimeServiceClient::connect_from_env())
+        .map_err(|e| SdkError::Internal(format!("connect runtime client: {}", e)))??;
 
     Ok(Arc::new(client))
 }
