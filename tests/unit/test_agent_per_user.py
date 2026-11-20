@@ -60,3 +60,100 @@ def test_a_turn_reads_every_item_it_takes_oldest_first():
     )
     # A plain call is read as before.
     assert _agent_user_message({"message": "hi", "inbox_items": []}) == "hi"
+
+
+class _Recorder:
+    def __init__(self):
+        self.events = []
+
+    async def emit_now_async(self, event):
+        self.events.append(event)
+
+
+class _Ctx:
+    def __init__(self):
+        self.recorder = _Recorder()
+
+    def _get_emitter(self):
+        return self.recorder
+
+
+def test_a_per_user_agent_gets_schedule_followup():
+    assert "schedule_followup" in agent("support", per="user").tools
+    assert "schedule_followup" not in agent("digest").tools
+
+
+async def test_schedule_followup_asks_on_the_runs_own_journal():
+    from agnt5.agent.instance_tools import (
+        enter_instance_turn,
+        followup_timer_id,
+        schedule_followup_tool,
+    )
+
+    tool = schedule_followup_tool()
+    ctx = _Ctx()
+    # Outside a per-user turn there is no instance to follow up in.
+    outside = await tool.handler(ctx, delay_seconds=60, message="check the PR")
+    assert "error" in outside and not ctx.recorder.events
+
+    token = enter_instance_turn("61676e35-0100-8000-8000-000000000001", "pr-42")
+    try:
+        result = await tool.handler(
+            ctx, delay_seconds=60, message="check the PR", key="pr-42-review"
+        )
+        again = await tool.handler(ctx, delay_seconds=60, message="check the PR")
+        same = await tool.handler(ctx, delay_seconds=60, message="check the PR")
+        bad = await tool.handler(ctx, delay_seconds=60, message="x", key="a/b")
+        late = await tool.handler(ctx, delay_seconds=10**9, message="x")
+    finally:
+        from agnt5.agent.instance_tools import current_instance_turn
+
+        current_instance_turn.reset(token)
+
+    assert result["timer_id"] == followup_timer_id(
+        "61676e35-0100-8000-8000-000000000001", "pr-42-review"
+    )
+    assert again["timer_id"] == same["timer_id"], "the same call gets the same follow-up"
+    assert "error" in bad and "error" in late
+    event = ctx.recorder.events[0]
+    assert event.event_type == "instance.followup_requested"
+    data = event.to_dict()
+    assert data["followup_key"] == "pr-42-review"
+    assert data["conversation_id"] == "pr-42"
+    assert data["content"] == {"message": "check the PR"}
+    assert data["fire_at_ns"] > 0
+
+
+async def test_send_messages_the_user_with_an_id_a_retry_keeps():
+    from agnt5.agent.instance_tools import (
+        current_instance_turn,
+        enter_instance_turn,
+        message_id,
+        send_tool,
+    )
+
+    assert "send" in agent("support", per="user").tools
+    assert "send" not in agent("digest").tools
+    tool = send_tool()
+    ctx = _Ctx()
+    assert "error" in await tool.handler(ctx, text="hi")
+    assert not ctx.recorder.events
+
+    run_id = "61676e35-0100-8000-8000-000000000002"
+    token = enter_instance_turn(run_id, "pr-42")
+    try:
+        first = await tool.handler(ctx, text="Your PR has a review")
+        replay = await tool.handler(ctx, text="Your PR has a review")
+        other = await tool.handler(ctx, text="Your PR was merged")
+        keyed = await tool.handler(ctx, text="Your PR has a review", key="review")
+    finally:
+        current_instance_turn.reset(token)
+
+    assert first["message_id"] == replay["message_id"], "a replay is the same message"
+    assert other["message_id"] != first["message_id"]
+    assert keyed["message_id"].startswith(message_id(run_id, "review."))
+    event = ctx.recorder.events[0].to_dict()
+    assert event["event_type"] == "instance.message_requested"
+    assert event["conversation_id"] == "pr-42"
+    assert event["content"] == {"text": "Your PR has a review"}
+    assert first["message_id"] == message_id(run_id, event["message_key"])

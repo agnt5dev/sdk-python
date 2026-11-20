@@ -9,6 +9,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Add the built-in `send(text, key=None)` tool to `Agent(per="user")` (preview). It asks the platform, on the run's own journal, to message the user now in the same conversation; the platform delivers it to the project's webhook subscriptions for `message` events, in the order the agent sent its messages. It returns the message id, which a replay of the call gets again, so the app can drop a duplicate.
+- Add the built-in `schedule_followup(delay_seconds, message, key=None)` tool to `Agent(per="user")` (preview). It asks the platform, on the run's own journal, to wake the agent again for the same user after the delay; the message arrives as a new item in the same conversation. It returns the follow-up's timer id, which a replay of the call, or a call with the same key, gets again. A tool of the agent's own with the same name wins.
+
 - Add `Agent(per="user")` (preview) to keep one instance of an agent for each user of your app. The worker registers `per` in the agent's component metadata. Calls name the user (`X-User-Id`, or chat's `user_id`) and go into that user's inbox; the platform runs one turn at a time per user. A turn's input is `{"conversation_id": ..., "inbox_items": [...]}`, and the agent reads every item it takes, oldest first, as its message. Needs a runtime with agent instances enabled.
 
 ### Removed
