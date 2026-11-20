@@ -30,7 +30,8 @@ class RecordingEmitter:
 
 
 @pytest.fixture(autouse=True)
-def _restore_adk():
+def _restore_adk(monkeypatch):
+    monkeypatch.setenv("AGNT5_LLM_CAPTURE_CONTENT", "true")
     google_adk.disable()
     yield
     google_adk.disable()

@@ -24,11 +24,12 @@ from typing import (
     cast,
 )
 
+from ._capture import SpanPayloadPolicy
 from ._ids import generate_cid
 from ._schema_utils import extract_function_metadata, extract_function_schemas
 from ._serialization import serialize_to_str
 from ._state_adapter import StateInterface, _get_state_adapter
-from ._telemetry import setup_module_logger, truncate_span_attribute_value
+from ._telemetry import setup_module_logger
 from .context import Context, set_current_context
 from .function import FunctionContext
 from .types import HandlerFunc, TriggerSpec, WorkflowConfig
@@ -118,6 +119,7 @@ class WorkflowContext(Context):
         correlation_id: Optional[str] = None,
         parent_correlation_id: Optional[str] = None,
         trace_metadata: Optional[dict[str, str]] = None,
+        span_payload_policy: Optional[SpanPayloadPolicy] = None,
     ) -> None:
         """
         Initialize workflow context.
@@ -148,6 +150,7 @@ class WorkflowContext(Context):
             trace_metadata=trace_metadata,
         )
         self._is_streaming = is_streaming
+        self._span_payload_policy = span_payload_policy or self._span_payload_policy
         self._workflow_entity = workflow_entity
         self._step_counter: int = 0  # Track step sequence
         self._sequence_number: int = 0  # Global sequence for checkpoints
@@ -737,13 +740,6 @@ class WorkflowContext(Context):
         # Import span creation utility (uses contextvar for async-safe parent-child linking)
         from .tracing import create_span
 
-        # Serialize input data for span attributes
-        input_repr = (
-            truncate_span_attribute_value(serialize_to_str({"args": args, "kwargs": kwargs}))
-            if args or kwargs
-            else "{}"
-        )
-
         # Create span for task execution (contextvar handles parent-child linking)
         with create_span(
             f"workflow.task.{handler_name}",
@@ -753,7 +749,7 @@ class WorkflowContext(Context):
                 "step_name": step_name,
                 "handler_name": handler_name,
                 "run_id": self.run_id,
-                "input.data": input_repr,
+                **self._span_payload_policy.attributes("input", {"args": args, "kwargs": kwargs}),
             },
         ) as span:
             # Create FunctionContext for the function execution
@@ -770,6 +766,7 @@ class WorkflowContext(Context):
                 trace_metadata=self._trace_metadata,
                 memo_namespace=step_memo_namespace,
             )
+            func_ctx._span_payload_policy = self._span_payload_policy
             # Named like its function.started event (ctx.progress reports too).
             func_ctx._component_name = handler_name
 
@@ -807,13 +804,8 @@ class WorkflowContext(Context):
 
                     _current_context.reset(context_token)
 
-                # Add output data to span
-                try:
-                    output_repr = truncate_span_attribute_value(serialize_to_str(result))
-                    span.set_attribute("output.data", output_repr)
-                except (TypeError, ValueError):
-                    # If result is not JSON serializable, use repr
-                    span.set_attribute("output.data", truncate_span_attribute_value(repr(result)))
+                for key, value in self._span_payload_policy.attributes("output", result).items():
+                    span.set_attribute(key, value)
 
                 # Record step completion in WorkflowEntity
                 self._workflow_entity.record_step_completion(

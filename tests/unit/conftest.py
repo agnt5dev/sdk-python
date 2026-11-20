@@ -27,6 +27,9 @@ class FakePyWorker:
     def __init__(self, config: FakePyWorkerConfig) -> None:
         self.config = config
 
+    def set_span_payload_capture(self, capture):
+        self.span_payload_capture = capture
+
 
 class FakePyActivationClient:
     def __init__(self, endpoint: str | None = None, worker: FakePyWorker | None = None) -> None:

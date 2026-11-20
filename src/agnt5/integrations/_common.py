@@ -18,6 +18,7 @@ from dataclasses import asdict, is_dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Optional
 
+from .._capture import content_capture_mode, is_sensitive_key
 from .._ids import generate_cid
 from ..context import Context, get_current_context
 from ..events import Event
@@ -33,7 +34,6 @@ CAPTURE_MODE_METADATA_KEY = "capture_mode"
 OBSERVED_CAPTURE_MODE = "observed"
 
 _OFF_VALUES = ("off", "0", "false", "no")
-_INVALID_CONTENT_MODES_LOGGED: set[str] = set()
 
 
 def master_capture_enabled() -> bool:
@@ -82,29 +82,6 @@ def content_capture_enabled() -> bool:
     return content_capture_mode() != "metadata-only"
 
 
-def content_capture_mode() -> str:
-    """Resolve ``full`` / ``redacted`` / ``metadata-only`` capture mode.
-
-    The explicit mode is preferred.  The legacy boolean remains supported so
-    existing deployments using ``AGNT5_LLM_CAPTURE_CONTENT=off`` tighten to
-    metadata-only rather than unexpectedly capturing content.
-    """
-    configured = os.getenv("AGNT5_CAPTURE_CONTENT_MODE", "").strip().lower()
-    if configured:
-        if configured in {"full", "redacted", "metadata-only"}:
-            return configured
-        if configured not in _INVALID_CONTENT_MODES_LOGGED:
-            _INVALID_CONTENT_MODES_LOGGED.add(configured)
-            logger.warning(
-                "invalid AGNT5_CAPTURE_CONTENT_MODE=%r; defaulting to metadata-only",
-                configured,
-            )
-        return "metadata-only"
-    if os.getenv("AGNT5_LLM_CAPTURE_CONTENT", "").lower() in _OFF_VALUES:
-        return "metadata-only"
-    return "full"
-
-
 def capture_text_limit() -> int:
     """Maximum retained characters per captured string (default 32 KiB)."""
     try:
@@ -125,38 +102,11 @@ def capture_payload(value: Any) -> Any:
         return f"<{type(value).__name__}>"
 
 
-_SENSITIVE_KEYS = frozenset(
-    {
-        "api_key",
-        "apikey",
-        "authorization",
-        "cookie",
-        "credentials",
-        "password",
-        "secret",
-        "set_cookie",
-        "token",
-    }
-)
-_SENSITIVE_KEY_SUFFIXES = (
-    "_api_key",
-    "_authorization",
-    "_credential",
-    "_credentials",
-    "_password",
-    "_secret",
-    "_token",
-)
 _BEARER_RE = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 _GOOGLE_KEY_RE = re.compile(r"\bAIza[A-Za-z0-9_-]{30,}\b")
 _GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
-
-
-def _is_sensitive_key(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
-    return normalized in _SENSITIVE_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES)
 
 
 def _bounded_string(value: str, *, redacted: bool) -> str:
@@ -198,7 +148,7 @@ def _sanitize_payload(value: Any, *, redacted: bool, depth: int) -> Any:
                 mapping_result["__truncated__"] = "additional entries omitted"
                 break
             key_text = str(key)
-            if redacted and _is_sensitive_key(key_text):
+            if is_sensitive_key(key_text):
                 mapping_result[key_text] = "[REDACTED]"
             else:
                 mapping_result[key_text] = _sanitize_payload(

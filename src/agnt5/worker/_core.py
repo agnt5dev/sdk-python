@@ -10,6 +10,7 @@ import os
 from typing import Any, Literal
 
 from .. import _sentry
+from .._capture import PayloadRedactor, SpanPayloadPolicy
 from .._serialization import serialize_to_str
 from .._telemetry import (
     ensure_root_otel_handler,
@@ -155,6 +156,7 @@ class Worker(ExecutorMixin):
         max_slots: int | None = None,
         claim_timeout_ms: int | None = None,
         activation_artifact_sha256: str | None = None,
+        span_payload_redactor: PayloadRedactor | None = None,
     ):
         """Initialize a new Worker with explicit or automatic component registration.
 
@@ -204,11 +206,15 @@ class Worker(ExecutorMixin):
             claim_timeout_ms: Lease duration for claimed jobs, in milliseconds.
             activation_artifact_sha256: Immutable deployed artifact SHA-256 used
                 in durable activation identity. Managed runtimes normally inject it.
+            span_payload_redactor: Synchronous hook for opted-in span input/output.
+                Receives a detached, credential-redacted JSON-safe value. Return
+                a replacement or None to omit it. Errors omit capture.
         """
         self.service_name = service_name
         self.service_version = service_version
         self.coordinator_endpoint = coordinator_endpoint
         self.runtime = runtime
+        self._span_payload_policy = SpanPayloadPolicy(span_payload_redactor)
 
         # Initialize telemetry before autodiscovery and user startup logs so
         # `agnt5 dev` and headless worker boot logs reach OTEL.
@@ -296,6 +302,7 @@ class Worker(ExecutorMixin):
             max_concurrency=max_concurrency,
         )
         self._rust_worker = self._PyWorker(self._rust_config)
+        self._rust_worker.set_span_payload_capture(self._span_payload_policy.capture)
         self._activation_client = None
         if self._PyActivationClient is not None:
             from ..activation import ActivationClient, NativeActivationTransport

@@ -112,6 +112,7 @@ dependencies = [
  "hex",
  "log",
  "opentelemetry",
+ "opentelemetry_sdk",
  "pyo3",
  "pyo3-async-runtimes",
  "pyo3-build-config",

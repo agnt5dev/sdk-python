@@ -16,6 +16,7 @@ from typing import (
     Optional,
 )
 
+from ._capture import SpanPayloadPolicy
 from ._telemetry import ContextLogger, get_execution_logger
 from .events import Event, EventEmitter, EventEnvelope, is_terminal_event
 from .progress import current_execution, drain, progress_payload, reporter_for
@@ -237,6 +238,10 @@ class Context:
         self._is_streaming = is_streaming
         self._worker = worker
         self._trace_metadata = trace_metadata
+        parent = _current_context.get()
+        self._span_payload_policy = (
+            getattr(parent, "_span_payload_policy", None) or SpanPayloadPolicy()
+        )
         self.runtime = runtime_context_from_metadata(trace_metadata)
 
         # Correlation tracking for event hierarchy (required, never null)

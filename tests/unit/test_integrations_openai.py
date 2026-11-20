@@ -30,7 +30,8 @@ class RecordingEmitter:
 
 
 @pytest.fixture(autouse=True)
-def _restore_openai():
+def _restore_openai(monkeypatch):
+    monkeypatch.setenv("AGNT5_LLM_CAPTURE_CONTENT", "true")
     from openai.resources.embeddings import AsyncEmbeddings, Embeddings
     from openai.resources.responses import AsyncResponses, Responses
 
@@ -621,6 +622,20 @@ def test_content_capture_disabled(monkeypatch, ctx):
     assert completed.output_data is None
     # Metrics still flow even with content capture off.
     assert completed.metadata["input_tokens"] == "12"
+
+
+def test_content_is_private_without_opt_in(monkeypatch, ctx):
+    monkeypatch.delenv("AGNT5_LLM_CAPTURE_CONTENT")
+    monkeypatch.delenv("AGNT5_CAPTURE_CONTENT_MODE", raising=False)
+    stub_sync([])
+    openai_integration.enable()
+
+    make_call()
+
+    started, completed = ctx._emitter.events
+    assert started.input_data is None
+    assert completed.output_data is None
+    assert completed.input_tokens == 12
 
 
 def test_generator_inputs_are_not_consumed_by_capture(ctx):
