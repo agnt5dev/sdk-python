@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-20
+
+### Security
+
+- Build native workers on sdk-core 0.3.13. Workers that AGNT5 runs now send a runtime workload token on every worker call, as self-hosted workers already do: when `AGNT5_WORKLOAD_BROKER_URL` and `AGNT5_WORKLOAD_TOKEN_FILE` are both set and `AGNT5_API_KEY_FILE` is not, the worker trades the pod's identity token at the broker for an `agnt5-runtime` token and refreshes it before it expires. Self-hosted workers and local development are unchanged.
+
 ### Added
 
 - Add the built-in `send(text, key=None)` tool to `Agent(per="user")` (preview). It asks the platform, on the run's own journal, to message the user now in the same conversation; the platform delivers it to the project's webhook subscriptions for `message` events, in the order the agent sent its messages. It returns the message id, which a replay of the call gets again, so the app can drop a duplicate.
@@ -24,6 +30,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Structured output and tools marked `strict` work with OpenAI, through sdk-core 0.3.13. Strict mode, the default for JSON schema formats, used to fail with a 400 for most schemas; the schema is now rewritten into the form OpenAI's strict mode accepts. Other OpenAI-compatible providers get the schema as given.
+- Self-hosted workers get durable steps and sleeps without `AGNT5_ACTIVATION_ARTIFACT_SHA256`, through sdk-core 0.3.13. The worker derives the identity from the deployment ID instead of falling back to legacy checkpoints, where a sleep restarts after a crash.
 - Hosted agent streams no longer stall for 200 ms at every message, thinking and tool-call boundary. The worker used to wait a fixed 200 ms at each one; it now waits only until the run's stream events have left its queue, about one 50 ms delivery interval, and the wait no longer holds a thread-pool thread.
 - Runs now hand their execution span's trace context to the handler, so LLM spans parent under the run's execution span. The worker read OpenTelemetry's current context, which entering the span never set, so the context was always empty.
 - The ADK runtime client keeps working after it connects. It was connected on a temporary Tokio runtime, which stopped the client's stream and response tasks as soon as the connection returned. Every synchronous wait in the native layer now runs on the one shared runtime with the GIL released.
