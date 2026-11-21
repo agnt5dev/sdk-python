@@ -7,11 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Changed
-
-- **Security:** a `ChatBot` on a hosted worker fetches its integration's bot token with the worker's workload identity when it replies, and keeps it only in memory. Chat runs no longer carry the token in their input, which is stored with the run's history. Outside a hosted worker the token configured on the `ChatBot` is used, as before. Upgrade before the platform stops sending the token: an older SDK replies with the token from the run's input and has none once it is gone.
-
 ## [0.16.1] - 2026-11-21
+
+### Security
+
+- A `ChatBot` on a hosted worker fetches its integration's bot token with the worker's workload identity when it replies, and keeps it only in memory. Chat runs no longer carry the token in their input, which is stored with the run's history. Outside a hosted worker the token configured on the `ChatBot` is used, as before. Upgrade before the platform stops sending the token: an older SDK replies with the token from the run's input and has none once it is gone.
 
 ### Fixed
 
