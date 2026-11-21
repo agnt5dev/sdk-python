@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-21
+
+### Fixed
+
+- Self-hosted workers accept their service key in `AGNT5_API_KEY`, through sdk-core 0.3.14, as Go workers already do. Hosts such as Railway and Render set variables from their dashboards but don't mount files, and a worker given only `AGNT5_API_KEY` used to skip discovery and connect without a token. The key turns on discovery only when `AGNT5_API_KEY_FILE` is unset, the worker has no AGNT5 workload identity, and none of `AGNT5_COORDINATOR_ENDPOINT`, `AGNT5_ENGINE_URL`, `AGNT5_PROJECT_ID` or `AGNT5_DEPLOYMENT_ID` is set, so `agnt5 dev` and workers that AGNT5 runs connect as before. `AGNT5_API_KEY_FILE` wins when both are set.
+- Stop dropping run spans when trace export falls behind, through sdk-core 0.3.14. Spans from the worker's own gRPC connections filled the batch span processor's queue, so run spans that ended behind them were dropped with the warning `BatchSpanProcessor dropped a Span due to queue full/internal errors`. Only the SDK's own spans are exported now, and component spans are unchanged. Set `AGNT5_OTEL_SPAN_FILTER` to an `EnvFilter` directive to choose the spans yourself.
+
 ### Added
 
 - Add `scopes=` to `MCPServer.add_function`, `add_workflow` and `add_agent`. A hosted server leaves a tool out of `tools/list` for a caller whose token lacks any of its scopes, and refuses their calls with `403 insufficient_scope`; service keys still reach every tool. `scopes` is sent only for tools that set it, and needs a control plane that knows per-tool scopes: an older one refuses the server's registration.
