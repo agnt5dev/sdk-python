@@ -1001,11 +1001,17 @@ class Worker(ExecutorMixin):
 
         The gateway delivers the unified envelope (ADR-009 D4):
         { "source": "slack", "event_type": "...", "headers": {...},
-          "body": "...", "bot_token": "xoxb-..." }
+          "body": "...", "integration_id": "..." }
         The gateway has already verified the signature (D5), so the SDK does
-        not re-verify; the bot_token is used to reply.
+        not re-verify. The envelope carries no bot token, since run input is
+        stored with the run's history: a hosted worker fetches it by
+        ``integration_id`` with its workload identity, and otherwise the
+        token configured on the ChatBot is used. An older gateway's
+        ``bot_token`` is still honored.
         """
         import json
+
+        from ..chat.credentials import default_source
 
         async def _run():
             from .._core import PyExecuteComponentResponse
@@ -1015,7 +1021,9 @@ class Worker(ExecutorMixin):
                 source = envelope["source"]
                 headers = envelope.get("headers", {})
                 body = envelope.get("body", "").encode("utf-8")
-                bot_token = envelope.get("bot_token")
+                bot_token = envelope.get("bot_token") or await default_source().get(
+                    envelope.get("integration_id") or ""
+                )
 
                 logger.info(f"Inbound chat event: source={source}, bot={chatbot.name}")
 
