@@ -23,6 +23,7 @@ from .publish import (
     MCPServerRegistry,
     MCPView,
     PublishedTool,
+    check_scopes,
     check_tool_options,
     first_line,
     load_view,
@@ -199,12 +200,18 @@ class MCPServer:
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
         view: ToolView = RUN_VIEW,
+        scopes: Optional[list[str]] = None,
     ) -> None:
         """Publish an ``@function`` as a tool. Functions wait for their result
         (``mode="sync"``) unless told otherwise; with ``mode="auto"`` or
         ``"background"`` they get the run card too (see ``add_workflow``).
         ``view=`` one of the server's own views (``add_view``) shows it for
-        every call, sync ones too."""
+        every call, sync ones too.
+
+        ``scopes=["cms:publish"]`` limits the tool to callers whose token holds
+        every listed scope: the hosted server leaves it out of their tool
+        list and refuses their calls with 403. Service keys reach every tool.
+        The same option is on ``add_workflow`` and ``add_agent``."""
         config = getattr(function, "_agnt5_config", None)
         if config is None or getattr(config, "handler", None) is None:
             raise TypeError(f"add_function({name!r}, ...) needs a function decorated with @function")
@@ -214,7 +221,7 @@ class MCPServer:
             output_schema=config.output_schema,
             default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
-            view=view,
+            view=view, scopes=scopes,
         )
 
     def add_workflow(
@@ -228,6 +235,7 @@ class MCPServer:
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
         view: ToolView = RUN_VIEW,
+        scopes: Optional[list[str]] = None,
     ) -> None:
         """Publish a ``@workflow`` as a tool. By default a call waits up to the
         server's call budget, then hands back a run handle (``mode="auto"``).
@@ -248,7 +256,7 @@ class MCPServer:
             output_schema=config.output_schema,
             default_description=(config.metadata or {}).get("description") or first_line(config.handler.__doc__),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
-            view=view,
+            view=view, scopes=scopes,
         )
 
     def add_agent(
@@ -262,6 +270,7 @@ class MCPServer:
         visibility: Optional[list[str]] = None,
         annotations: Optional[dict[str, Any]] = None,
         view: ToolView = RUN_VIEW,
+        scopes: Optional[list[str]] = None,
     ) -> None:
         """Publish an agent as a tool that takes a message (and optionally a
         session to continue). Like workflows, its calls show the run card
@@ -275,7 +284,7 @@ class MCPServer:
             default_description=first_line(getattr(agent, "description", None))
             or first_line(getattr(agent, "instructions", None)),
             title=title, description=description, mode=mode, visibility=visibility, annotations=annotations,
-            view=view,
+            view=view, scopes=scopes,
         )
 
     def _publish(
@@ -293,9 +302,11 @@ class MCPServer:
         visibility: Optional[list[str]],
         annotations: Optional[dict[str, Any]],
         view: ToolView,
+        scopes: Optional[list[str]],
     ) -> None:
         resolved = self._resolve_view(view)
         clean = check_tool_options(name, mode=mode, visibility=visibility, annotations=annotations)
+        required = check_scopes(name, scopes)
         if name in self._published:
             raise ValueError(f"MCP server {self.info.id!r} already has a tool named {name!r}")
         self._published[name] = PublishedTool(
@@ -310,6 +321,7 @@ class MCPServer:
             visibility=list(visibility) if visibility else None,
             annotations=clean,
             view=resolved,
+            scopes=required,
         )
 
     @property

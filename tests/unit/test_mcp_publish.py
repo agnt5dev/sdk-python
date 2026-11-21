@@ -314,3 +314,41 @@ def test_worker_registers_published_servers_as_mcp_components():
 def teardown_module():
     FunctionRegistry.discard("mcp_test_lookup_order")
     WorkflowRegistry.discard("mcp_test_triage")
+
+
+def test_scopes_are_published_only_when_set():
+    server = MCPServer("cms")
+    server.add_function("list_articles", lookup_order, scopes=["cms:read"])
+    server.add_workflow("publish_article", triage, scopes=("cms:publish", "cms:write"))
+    server.add_agent("editor", SimpleNamespace(name="mcp_test_agent", instructions="Edit."), scopes=["cms:write"])
+    server.add_function("lookup_order", lookup_order, scopes=[])
+    tools = {tool["name"]: tool for tool in server.definition()["tools"]}
+    assert tools["list_articles"]["scopes"] == ["cms:read"]
+    assert tools["publish_article"]["scopes"] == ["cms:publish", "cms:write"]
+    assert tools["editor"]["scopes"] == ["cms:write"]
+    # No scopes, or an empty list, sends nothing: control planes without
+    # per-tool scopes refuse unknown fields.
+    assert "scopes" not in tools["lookup_order"]
+    assert "scopes" not in json.dumps([t for t in server.definition()["tools"] if t["name"] == "lookup_order"])
+
+
+@pytest.mark.parametrize(
+    "scopes, message",
+    [
+        ("cms:read", "must be a list"),
+        (["cms read"], "printable ASCII"),
+        (['cms"read'], "printable ASCII"),
+        (["cms:lés"], "printable ASCII"),
+        ([""], "printable ASCII"),
+        (["x" * 129], "printable ASCII"),
+        ([7], "printable ASCII"),
+        (["mcp:call"], "every token for the server carries it"),
+        (["cms:read", "cms:read"], "twice"),
+        ([f"s{i}" for i in range(11)], "the limit is 10"),
+    ],
+)
+def test_scopes_are_checked_where_they_are_written(scopes, message):
+    server = MCPServer("cms")
+    with pytest.raises(ValueError, match=message):
+        server.add_function("list_articles", lookup_order, scopes=scopes)
+    assert not server.published

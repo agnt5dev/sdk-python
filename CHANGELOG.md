@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add `scopes=` to `MCPServer.add_function`, `add_workflow` and `add_agent`. A hosted server leaves a tool out of `tools/list` for a caller whose token lacks any of its scopes, and refuses their calls with `403 insufficient_scope`; service keys still reach every tool. `scopes` is sent only for tools that set it, and needs a control plane that knows per-tool scopes: an older one refuses the server's registration.
+
 ## [0.16.0] - 2026-11-20
 
 ### Security

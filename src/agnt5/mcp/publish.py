@@ -43,6 +43,14 @@ MAX_VIEWS_BYTES = 3 * 1024 * 1024
 _RESERVED_VIEW_NAMES = frozenset({RUN_VIEW, _NO_VIEW})
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+#: The most scopes one tool may require.
+MAX_TOOL_SCOPES = 10
+#: An OAuth scope token (RFC 6749 section 3.3): printable ASCII without
+#: spaces, '"' or a backslash.
+_SCOPE = re.compile(r'^[\x21\x23-\x5B\x5D-\x7E]{1,128}$')
+#: AGNT5's own scope, which every token for a server already carries.
+_CALL_SCOPE = "mcp:call"
 _SERVER_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 #: Input every published agent takes: the message, and an optional session to
@@ -71,6 +79,8 @@ class PublishedTool:
     mode: Optional[str] = None
     visibility: Optional[list[str]] = None
     annotations: dict[str, Any] = field(default_factory=dict)
+    #: Scopes a caller's token must all hold to see and call the tool.
+    scopes: Optional[list[str]] = None
     #: ``RUN_VIEW`` (the default, left out of the definition), None (off), or
     #: the name of one of the server's own views (``add_view``).
     view: Optional[str] = RUN_VIEW
@@ -90,6 +100,9 @@ class PublishedTool:
             ("mode", self.mode),
             ("visibility", self.visibility),
             ("output_schema", self.output_schema),
+            # Sent only when set: control planes without per-tool scopes
+            # refuse unknown fields.
+            ("scopes", self.scopes),
         ):
             if value:
                 tool[key] = value
@@ -240,6 +253,29 @@ def check_tool_options(
             raise ValueError(f"unknown annotation {key!r}; use {', '.join(ANNOTATION_HINTS)} or title")
         clean[key] = value
     return clean
+
+
+def check_scopes(name: str, scopes: Any) -> Optional[list[str]]:
+    """Validate a tool's ``scopes=`` where the developer wrote it. Returns
+    the list to publish, or None when the tool requires no scopes."""
+    if scopes is None:
+        return None
+    if isinstance(scopes, (str, bytes)) or not isinstance(scopes, (list, tuple)):
+        raise ValueError(f"scopes for MCP tool {name!r} must be a list of scope names, such as ['cms:publish']")
+    clean = list(scopes)
+    if len(clean) > MAX_TOOL_SCOPES:
+        raise ValueError(f"MCP tool {name!r} requires {len(clean)} scopes; the limit is {MAX_TOOL_SCOPES}")
+    for scope in clean:
+        if not isinstance(scope, str) or not _SCOPE.fullmatch(scope):
+            raise ValueError(
+                f"scope {scope!r} of MCP tool {name!r} must be 1 to 128 printable ASCII characters, "
+                "without spaces, '\"' or '\\'"
+            )
+        if scope == _CALL_SCOPE:
+            raise ValueError(f"MCP tool {name!r} needn't require {_CALL_SCOPE!r}: every token for the server carries it")
+    if len(set(clean)) != len(clean):
+        raise ValueError(f"MCP tool {name!r} lists a scope twice: {clean!r}")
+    return clean or None
 
 
 def object_schema(schema: Any) -> Optional[dict[str, Any]]:
